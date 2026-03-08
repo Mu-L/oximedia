@@ -1,0 +1,22 @@
+[package]
+name = "oximedia-scaling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Professional video scaling operations for OxiMedia"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core.workspace = true
+thiserror.workspace = true
+rayon.workspace = true
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

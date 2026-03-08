@@ -1,0 +1,90 @@
+[package]
+name = "oximedia-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "RESTful media server for OxiMedia"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+cdn-aws = ["aws-sdk-s3", "aws-config"]
+cdn-azure = ["azure_storage", "azure_storage_blobs"]
+cdn-gcs = ["google-cloud-storage"]
+cdn-all = ["cdn-aws", "cdn-azure", "cdn-gcs"]
+
+[dependencies]
+oximedia-core = { workspace = true }
+oximedia-io = { workspace = true }
+oximedia-codec = { workspace = true }
+oximedia-container = { workspace = true }
+oximedia-audio = { workspace = true }
+oximedia-cv = { workspace = true }
+oximedia-net = { workspace = true }
+oximedia-transcode = { workspace = true }
+oximedia-packager = { workspace = true }
+oximedia-storage = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["io"] }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+nom = { workspace = true }
+bitflags = { workspace = true }
+rayon = { workspace = true }
+
+# Web framework
+axum = { version = "0.8", features = ["multipart", "ws"] }
+tower = { version = "0.5", features = ["util", "timeout", "load-shed", "limit"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "cors", "compression-gzip"] }
+hyper = { workspace = true }
+
+# Database
+sqlx = { workspace = true, features = ["migrate", "macros", "chrono", "uuid"] }
+
+# Authentication
+jsonwebtoken = "9"
+argon2 = { version = "0.5", features = ["std"] }
+password-hash = { version = "0.5", features = ["getrandom"] }
+rand = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Utilities
+mime_guess = "2"
+base64 = { workspace = true }
+sha2 = { workspace = true }
+hex = "0.4"
+walkdir = "2"
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+futures = "0.3"
+pin-project = "1"
+
+# CDN/Cloud storage (optional - require newer Rust versions)
+aws-sdk-s3 = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
+azure_storage = { version = "0.21", optional = true }
+azure_storage_blobs = { version = "0.21", optional = true }
+google-cloud-storage = { version = "0.24", optional = true }
+
+# Monitoring and metrics
+prometheus = { workspace = true }
+tokio-metrics = "0.4"
+
+# HTTP client for webhooks
+reqwest = { workspace = true }
+
+# Additional utilities
+url = "2"
+tempfile = "3"

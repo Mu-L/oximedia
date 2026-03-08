@@ -1,0 +1,34 @@
+[package]
+name = "oximedia-forensics"
+version.workspace = true
+edition = "2021"
+authors = ["OxiMedia Contributors"]
+description = "Video and image forensics and tampering detection for OxiMedia"
+license = "Apache-2.0"
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-cv = { workspace = true, optional = true }
+ndarray = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+image = "0.25"
+num-traits = "0.2"
+rayon = { workspace = true }
+
+[features]
+default = []
+cv = ["oximedia-cv"]
+
+[dev-dependencies]
+approx = "0.5"
+
+[lib]
+name = "oximedia_forensics"
+path = "src/lib.rs"

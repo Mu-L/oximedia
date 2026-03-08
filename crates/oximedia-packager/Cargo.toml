@@ -1,0 +1,59 @@
+[package]
+name = "oximedia-packager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Adaptive streaming packaging (HLS/DASH) for OxiMedia"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[features]
+default = ["hls", "dash"]
+hls = []
+dash = []
+encryption = ["aes", "cbc", "block-padding"]
+s3 = ["aws-sdk-s3", "aws-config"]
+
+[dependencies]
+oximedia-core.workspace = true
+oximedia-io.workspace = true
+oximedia-codec.workspace = true
+oximedia-container.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+async-trait.workspace = true
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# XML for DASH MPD
+quick-xml = { version = "0.39", features = ["serialize"] }
+
+# Time handling
+chrono = { workspace = true }
+
+# Crypto for encryption
+aes = { version = "0.8", optional = true }
+cbc = { version = "0.1", optional = true }
+block-padding = { version = "0.3", optional = true }
+hex = "0.4"
+base64 = { workspace = true }
+
+# Cloud storage
+aws-sdk-s3 = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
+
+# Path handling
+camino = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+tempfile = "3"

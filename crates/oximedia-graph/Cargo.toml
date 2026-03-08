@@ -1,0 +1,20 @@
+[package]
+name = "oximedia-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Filter pipeline for OxiMedia"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core = { workspace = true }
+oximedia-codec = { workspace = true }
+oximedia-audio = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+fontdue = "0.9"

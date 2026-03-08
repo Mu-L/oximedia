@@ -1,0 +1,40 @@
+[package]
+name = "oximedia-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Command-line interface for OxiMedia"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "oximedia"
+path = "src/main.rs"
+
+[dependencies]
+oximedia-core.workspace = true
+oximedia-io.workspace = true
+oximedia-container.workspace = true
+oximedia-codec = { workspace = true, features = ["av1", "vp9", "vp8"] }
+oximedia-graph.workspace = true
+tokio.workspace = true
+clap.workspace = true
+indicatif = "0.18"
+anyhow = "1"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+colored = "2"
+rayon = "1.10"
+chrono = "0.4"
+humantime = "2"
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"

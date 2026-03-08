@@ -1,0 +1,35 @@
+[package]
+name = "oximedia-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Python bindings for OxiMedia using PyO3"
+publish = false
+
+[lib]
+name = "oximedia"
+crate-type = ["cdylib"]
+doc = false
+
+[lints]
+workspace = true
+
+[dependencies]
+pyo3 = { version = "0.27", features = ["extension-module"] }
+oximedia-core.workspace = true
+oximedia-io.workspace = true
+oximedia-codec = { workspace = true, features = ["av1", "vp9", "vp8", "opus"] }
+oximedia-audio = { workspace = true, features = ["opus", "vorbis", "flac"] }
+oximedia-container.workspace = true
+bytes.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync"] }
+
+[features]
+default = ["av1", "vp9", "vp8", "opus"]
+av1 = []
+vp9 = []
+vp8 = []
+opus = []

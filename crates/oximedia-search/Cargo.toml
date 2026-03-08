@@ -1,0 +1,35 @@
+[package]
+name = "oximedia-search"
+description = "Media search and content discovery with metadata indexing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace dependencies
+oximedia-core = { workspace = true }
+oximedia-cv = { workspace = true }
+oximedia-scene = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true }
+rayon = { workspace = true }
+ndarray = { workspace = true }
+
+# Search engine
+tantivy = "0.22"
+
+# Serialization
+serde_json = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]

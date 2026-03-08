@@ -1,0 +1,24 @@
+[package]
+name = "oximedia-metering"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors = ["OxiMedia Contributors"]
+description = "Professional broadcast audio metering: ITU-R BS.1770-4, EBU R128, ATSC A/85"
+readme = "README.md"
+keywords = ["audio", "metering", "loudness", "broadcast", "ebu-r128"]
+categories = ["multimedia::audio", "multimedia::encoding"]
+
+[dependencies]
+oximedia-core = { workspace = true }
+oximedia-audio = { workspace = true }
+thiserror = { workspace = true }
+rustfft = "6"
+rayon = { workspace = true }
+ndarray = { workspace = true }
+
+[lints]
+workspace = true

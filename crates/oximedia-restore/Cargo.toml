@@ -1,0 +1,23 @@
+[package]
+name = "oximedia-restore"
+description = "Media restoration tools for damaged or degraded content"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core = { workspace = true }
+oximedia-audio = { workspace = true }
+thiserror = { workspace = true }
+rustfft = "6"
+ndarray = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

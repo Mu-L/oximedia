@@ -1,0 +1,33 @@
+[package]
+name = "oximedia-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Professional image sequence I/O for OxiMedia (DPX, OpenEXR, TIFF)"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+rayon.workspace = true
+flate2.workspace = true
+
+# Image format dependencies
+byteorder = "1.5"
+half = "2.4"
+tiff = "0.11"
+serde = { workspace = true }
+
+# Compression support
+miniz_oxide = "0.9"
+weezl = "0.1"  # LZW compression
+
+[dev-dependencies]
+tempfile = "3"

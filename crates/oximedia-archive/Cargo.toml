@@ -1,0 +1,32 @@
+[package]
+name = "oximedia-archive"
+version.workspace = true
+edition = "2021"
+authors = ["OxiMedia Contributors"]
+description = "Media archive verification and long-term preservation system"
+readme = "README.md"
+license = "Apache-2.0"
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blake3 = "1.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true, features = ["chrono"] }
+chrono = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+anyhow = "1.0"
+tracing = { workspace = true }
+hex = "0.4"
+sha2 = { workspace = true }
+md-5 = "0.10"
+crc32fast = "1.5"
+rayon = { workspace = true }
+async-trait = { workspace = true }
+regex = "1.12"
+csv = "1.4"

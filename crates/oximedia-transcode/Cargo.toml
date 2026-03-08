@@ -1,0 +1,28 @@
+[package]
+name = "oximedia-transcode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "High-level transcoding pipeline for OxiMedia"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core = { workspace = true }
+oximedia-codec = { workspace = true }
+oximedia-container = { workspace = true }
+oximedia-graph = { workspace = true }
+oximedia-metering = { workspace = true }
+oximedia-subtitle = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+rayon = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

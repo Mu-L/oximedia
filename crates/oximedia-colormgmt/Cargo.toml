@@ -1,0 +1,32 @@
+[package]
+name = "oximedia-colormgmt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Professional color management system for OxiMedia - ICC profiles, ACES, HDR"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core.workspace = true
+oximedia-lut = { workspace = true, optional = true }
+oximedia-gpu = { workspace = true, optional = true }
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+rayon = { workspace = true, optional = true }
+nom.workspace = true
+byteorder = "1.5"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["lut-integration", "gpu-accel", "rayon"]
+lut-integration = ["oximedia-lut"]
+gpu-accel = ["oximedia-gpu"]
+rayon = ["dep:rayon"]

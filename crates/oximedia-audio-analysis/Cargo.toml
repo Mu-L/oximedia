@@ -1,0 +1,25 @@
+[package]
+name = "oximedia-audio-analysis"
+description = "Audio analysis tools for media including loudness, spectrum, and speech detection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core = { workspace = true }
+oximedia-audio = { workspace = true }
+oximedia-mir = { workspace = true }
+thiserror = { workspace = true }
+rustfft = "6"
+ndarray = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+rayon = { workspace = true }
+
+[dev-dependencies]

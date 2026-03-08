@@ -1,0 +1,20 @@
+[package]
+name = "oximedia-watermark"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Professional audio watermarking and steganography for OxiMedia"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core.workspace = true
+oximedia-audio.workspace = true
+thiserror.workspace = true
+rustfft = "6"
+rand = { workspace = true }
+reed-solomon-erasure = "6"

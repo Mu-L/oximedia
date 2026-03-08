@@ -1,0 +1,24 @@
+[package]
+name = "oximedia-scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Scene understanding and AI-powered video analysis for OxiMedia"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+oximedia-core = { workspace = true }
+oximedia-cv = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+ndarray = { workspace = true }
+rayon = { workspace = true }

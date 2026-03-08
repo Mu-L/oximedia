@@ -1,0 +1,21 @@
+[package]
+name = "oximedia-repair"
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+description = "Media file repair and recovery tools for OxiMedia"
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+authors = ["OxiMedia Contributors"]
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core = { workspace = true }
+oximedia-container = { workspace = true }
+oximedia-codec = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]

@@ -1,0 +1,62 @@
+[package]
+name = "oximedia-workflow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Comprehensive workflow orchestration engine for OxiMedia"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+async-trait = { workspace = true }
+futures = "0.3"
+
+# Error handling
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+
+# Database
+rusqlite = { workspace = true }
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
+
+# Time and scheduling
+chrono = { workspace = true, features = ["serde"] }
+cron = "0.15"
+
+# Logging and tracing
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+
+# UUID generation
+uuid = { workspace = true }
+
+# HTTP and WebSocket
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower = "0.5"
+
+# URL parsing
+url = { version = "2.5", features = ["serde"] }
+
+# Collections
+indexmap = { version = "2.11", features = ["serde"] }
+dashmap = { workspace = true }
+
+# Concurrency
+parking_lot = { workspace = true }
+
+# CLI
+clap = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

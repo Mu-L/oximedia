@@ -1,0 +1,785 @@
+//! Diamond search patterns for motion estimation.
+//!
+//! This module provides implementations of the Small Diamond Search Pattern (SDSP)
+//! and Large Diamond Search Pattern (LDSP) for efficient motion estimation.
+//!
+//! The diamond search is one of the most widely used fast motion estimation
+//! algorithms due to its good balance between quality and speed.
+
+#![forbid(unsafe_code)]
+#![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::must_use_candidate)]
+
+use super::search::{MotionSearch, SearchConfig, SearchContext};
+use super::types::{BlockMatch, MotionVector, MvPrecision};
+
+/// Small Diamond Search Pattern (SDSP).
+///
+/// A 4-point pattern for fine refinement:
+/// ```text
+///       *
+///     * O *
+///       *
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct SmallDiamond {
+    /// Pattern offsets (dx, dy) for each point.
+    pub points: [(i32, i32); 4],
+}
+
+impl Default for SmallDiamond {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SmallDiamond {
+    /// Standard SDSP offsets.
+    pub const PATTERN: [(i32, i32); 4] = [(0, -1), (-1, 0), (1, 0), (0, 1)];
+
+    /// Creates a new small diamond pattern.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            points: Self::PATTERN,
+        }
+    }
+
+    /// Returns the number of points in the pattern.
+    #[must_use]
+    pub const fn size(&self) -> usize {
+        4
+    }
+
+    /// Gets the offset at a given index.
+    #[must_use]
+    pub const fn get(&self, index: usize) -> Option<(i32, i32)> {
+        if index < 4 {
+            Some(self.points[index])
+        } else {
+            None
+        }
+    }
+
+    /// Searches using the small diamond pattern.
+    pub fn search(
+        &self,
+        ctx: &SearchContext,
+        config: &SearchConfig,
+        center: MotionVector,
+    ) -> (MotionVector, u32, usize) {
+        let mut best_mv = center;
+        let mut best_sad = ctx.calculate_sad(&center).unwrap_or(u32::MAX);
+        let mut best_idx = 4; // Center
+
+        for (idx, &(dx, dy)) in self.points.iter().enumerate() {
+            let mv =
+                MotionVector::from_full_pel(center.full_pel_x() + dx, center.full_pel_y() + dy);
+
+            if !ctx.is_valid_mv(&mv, &config.range) {
+                continue;
+            }
+
+            if let Some(sad) = ctx.calculate_sad(&mv) {
+                if sad < best_sad {
+                    best_sad = sad;
+                    best_mv = mv;
+                    best_idx = idx;
+                }
+            }
+        }
+
+        (best_mv, best_sad, best_idx)
+    }
+}
+
+/// Large Diamond Search Pattern (LDSP).
+///
+/// An 8-point pattern for coarse search:
+/// ```text
+///       *
+///     * * *
+///   * * O * *
+///     * * *
+///       *
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct LargeDiamond {
+    /// Pattern offsets (dx, dy) for each point.
+    pub points: [(i32, i32); 8],
+}
+
+impl Default for LargeDiamond {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LargeDiamond {
+    /// Standard LDSP offsets.
+    pub const PATTERN: [(i32, i32); 8] = [
+        (0, -2),  // Top
+        (-1, -1), // Top-left
+        (1, -1),  // Top-right
+        (-2, 0),  // Left
+        (2, 0),   // Right
+        (-1, 1),  // Bottom-left
+        (1, 1),   // Bottom-right
+        (0, 2),   // Bottom
+    ];
+
+    /// Creates a new large diamond pattern.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            points: Self::PATTERN,
+        }
+    }
+
+    /// Returns the number of points in the pattern.
+    #[must_use]
+    pub const fn size(&self) -> usize {
+        8
+    }
+
+    /// Gets the offset at a given index.
+    #[must_use]
+    pub const fn get(&self, index: usize) -> Option<(i32, i32)> {
+        if index < 8 {
+            Some(self.points[index])
+        } else {
+            None
+        }
+    }
+
+    /// Searches using the large diamond pattern.
+    pub fn search(
+        &self,
+        ctx: &SearchContext,
+        config: &SearchConfig,
+        center: MotionVector,
+    ) -> (MotionVector, u32, usize) {
+        let mut best_mv = center;
+        let mut best_sad = ctx.calculate_sad(&center).unwrap_or(u32::MAX);
+        let mut best_idx = 8; // Center
+
+        for (idx, &(dx, dy)) in self.points.iter().enumerate() {
+            let mv =
+                MotionVector::from_full_pel(center.full_pel_x() + dx, center.full_pel_y() + dy);
+
+            if !ctx.is_valid_mv(&mv, &config.range) {
+                continue;
+            }
+
+            if let Some(sad) = ctx.calculate_sad(&mv) {
+                if sad < best_sad {
+                    best_sad = sad;
+                    best_mv = mv;
+                    best_idx = idx;
+                }
+            }
+        }
+
+        (best_mv, best_sad, best_idx)
+    }
+}
+
+/// Extended Diamond Search Pattern.
+///
+/// A 16-point pattern for larger steps:
+/// ```text
+///           *
+///         * * *
+///       * * * * *
+///     * * * O * * *
+///       * * * * *
+///         * * *
+///           *
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct ExtendedDiamond {
+    /// Inner ring (4 points, distance 1).
+    pub inner: [(i32, i32); 4],
+    /// Middle ring (8 points, distance 2).
+    pub middle: [(i32, i32); 8],
+    /// Outer ring (4 points, distance 3).
+    pub outer: [(i32, i32); 4],
+}
+
+impl Default for ExtendedDiamond {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ExtendedDiamond {
+    /// Creates a new extended diamond pattern.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            inner: SmallDiamond::PATTERN,
+            middle: LargeDiamond::PATTERN,
+            outer: [(0, -3), (-3, 0), (3, 0), (0, 3)],
+        }
+    }
+
+    /// Searches using all rings of the extended diamond.
+    pub fn search(
+        &self,
+        ctx: &SearchContext,
+        config: &SearchConfig,
+        center: MotionVector,
+    ) -> (MotionVector, u32) {
+        let mut best_mv = center;
+        let mut best_sad = ctx.calculate_sad(&center).unwrap_or(u32::MAX);
+
+        // Search all rings
+        for &(dx, dy) in self.outer.iter().chain(&self.middle).chain(&self.inner) {
+            let mv =
+                MotionVector::from_full_pel(center.full_pel_x() + dx, center.full_pel_y() + dy);
+
+            if !ctx.is_valid_mv(&mv, &config.range) {
+                continue;
+            }
+
+            if let Some(sad) = ctx.calculate_sad(&mv) {
+                if sad < best_sad {
+                    best_sad = sad;
+                    best_mv = mv;
+                }
+            }
+        }
+
+        (best_mv, best_sad)
+    }
+}
+
+/// Adaptive diamond search that switches between SDSP and LDSP.
+///
+/// This implementation uses LDSP initially and switches to SDSP when:
+/// 1. The best point is at the center (convergence)
+/// 2. A threshold number of iterations has passed
+#[derive(Clone, Debug)]
+pub struct AdaptiveDiamond {
+    /// Small diamond pattern.
+    sdsp: SmallDiamond,
+    /// Large diamond pattern.
+    ldsp: LargeDiamond,
+    /// Maximum LDSP iterations before switching to SDSP.
+    max_ldsp_iterations: u32,
+    /// SAD threshold for early switch to SDSP.
+    switch_threshold: u32,
+}
+
+impl Default for AdaptiveDiamond {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AdaptiveDiamond {
+    /// Creates a new adaptive diamond search.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            sdsp: SmallDiamond::new(),
+            ldsp: LargeDiamond::new(),
+            max_ldsp_iterations: 8,
+            switch_threshold: 512,
+        }
+    }
+
+    /// Sets the maximum LDSP iterations.
+    #[must_use]
+    pub const fn max_iterations(mut self, max: u32) -> Self {
+        self.max_ldsp_iterations = max;
+        self
+    }
+
+    /// Sets the SAD threshold for early switch.
+    #[must_use]
+    pub const fn switch_threshold(mut self, threshold: u32) -> Self {
+        self.switch_threshold = threshold;
+        self
+    }
+}
+
+impl MotionSearch for AdaptiveDiamond {
+    fn search(&self, ctx: &SearchContext, config: &SearchConfig) -> BlockMatch {
+        self.search_with_predictor(ctx, config, MotionVector::zero())
+    }
+
+    fn search_with_predictor(
+        &self,
+        ctx: &SearchContext,
+        config: &SearchConfig,
+        predictor: MotionVector,
+    ) -> BlockMatch {
+        let mut center = predictor.to_precision(MvPrecision::FullPel);
+        let mut best_sad = ctx.calculate_sad(&center).unwrap_or(u32::MAX);
+
+        // Phase 1: Large diamond search
+        for iteration in 0..self.max_ldsp_iterations {
+            let (new_center, new_sad, best_idx) = self.ldsp.search(ctx, config, center);
+
+            // Check for convergence (center is best)
+            if best_idx >= self.ldsp.size() {
+                break;
+            }
+
+            // Check for early switch
+            if new_sad < self.switch_threshold {
+                center = new_center;
+                best_sad = new_sad;
+                break;
+            }
+
+            center = new_center;
+            best_sad = new_sad;
+
+            // Early termination
+            if config.early_termination && best_sad < config.early_threshold {
+                let cost = config.mv_cost.rd_cost(&center, best_sad);
+                return BlockMatch::new(center, best_sad, cost);
+            }
+
+            // Maximum iterations check (avoid infinite loop)
+            if iteration >= self.max_ldsp_iterations - 1 {
+                break;
+            }
+        }
+
+        // Phase 2: Small diamond refinement
+        loop {
+            let (new_center, new_sad, best_idx) = self.sdsp.search(ctx, config, center);
+
+            // Check for convergence
+            if best_idx >= self.sdsp.size() {
+                break;
+            }
+
+            center = new_center;
+            best_sad = new_sad;
+        }
+
+        let cost = config.mv_cost.rd_cost(&center, best_sad);
+        BlockMatch::new(center, best_sad, cost)
+    }
+}
+
+/// Predictor-based diamond search.
+///
+/// Uses multiple predictors (spatial/temporal) to initialize search
+/// from the most promising starting point.
+#[derive(Clone, Debug)]
+pub struct PredictorDiamond {
+    /// Underlying diamond search.
+    diamond: AdaptiveDiamond,
+    /// Maximum number of predictors to try.
+    max_predictors: usize,
+}
+
+impl Default for PredictorDiamond {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PredictorDiamond {
+    /// Creates a new predictor-based diamond search.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            diamond: AdaptiveDiamond::new(),
+            max_predictors: 5,
+        }
+    }
+
+    /// Sets the maximum number of predictors.
+    #[must_use]
+    pub const fn max_predictors(mut self, max: usize) -> Self {
+        self.max_predictors = max;
+        self
+    }
+
+    /// Searches with multiple predictors.
+    pub fn search_multi(
+        &self,
+        ctx: &SearchContext,
+        config: &SearchConfig,
+        predictors: &[MotionVector],
+    ) -> BlockMatch {
+        let mut best = BlockMatch::worst();
+
+        // Try zero MV first
+        if let Some(sad) = ctx.calculate_sad(&MotionVector::zero()) {
+            let cost = config.mv_cost.rd_cost(&MotionVector::zero(), sad);
+            let candidate = BlockMatch::new(MotionVector::zero(), sad, cost);
+            best.update_if_better(&candidate);
+
+            // Early termination for perfect match
+            if sad == 0 {
+                return best;
+            }
+        }
+
+        // Evaluate each predictor
+        for (i, &pred) in predictors.iter().take(self.max_predictors).enumerate() {
+            if i > 0 && pred.is_zero() {
+                continue; // Skip duplicate zero MV
+            }
+
+            // Quick evaluation of predictor
+            let pred_fp = pred.to_precision(MvPrecision::FullPel);
+            if let Some(sad) = ctx.calculate_sad(&pred_fp) {
+                if sad < best.sad {
+                    // Full search from this predictor
+                    let result = self.diamond.search_with_predictor(ctx, config, pred);
+                    best.update_if_better(&result);
+                }
+            }
+        }
+
+        // If no predictor worked well, search from best point so far
+        if best.sad > config.early_threshold {
+            let result = self.diamond.search_with_predictor(ctx, config, best.mv);
+            best.update_if_better(&result);
+        }
+
+        best
+    }
+}
+
+impl MotionSearch for PredictorDiamond {
+    fn search(&self, ctx: &SearchContext, config: &SearchConfig) -> BlockMatch {
+        self.diamond.search(ctx, config)
+    }
+
+    fn search_with_predictor(
+        &self,
+        ctx: &SearchContext,
+        config: &SearchConfig,
+        predictor: MotionVector,
+    ) -> BlockMatch {
+        self.diamond.search_with_predictor(ctx, config, predictor)
+    }
+}
+
+/// Cross diamond search pattern.
+///
+/// Combines cross pattern with diamond for better coverage of
+/// horizontal/vertical motion.
+#[derive(Clone, Debug)]
+pub struct CrossDiamond {
+    /// Cross pattern range.
+    cross_range: i32,
+    /// Diamond search for refinement.
+    diamond: AdaptiveDiamond,
+}
+
+impl Default for CrossDiamond {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CrossDiamond {
+    /// Creates a new cross diamond search.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            cross_range: 4,
+            diamond: AdaptiveDiamond::new(),
+        }
+    }
+
+    /// Sets the cross pattern range.
+    #[must_use]
+    pub const fn cross_range(mut self, range: i32) -> Self {
+        self.cross_range = range;
+        self
+    }
+
+    /// Performs cross pattern search.
+    fn cross_search(
+        &self,
+        ctx: &SearchContext,
+        config: &SearchConfig,
+        center: MotionVector,
+    ) -> (MotionVector, u32) {
+        let mut best_mv = center;
+        let mut best_sad = ctx.calculate_sad(&center).unwrap_or(u32::MAX);
+
+        // Horizontal cross
+        for dx in -self.cross_range..=self.cross_range {
+            if dx == 0 {
+                continue;
+            }
+            let mv = MotionVector::from_full_pel(center.full_pel_x() + dx, center.full_pel_y());
+
+            if !ctx.is_valid_mv(&mv, &config.range) {
+                continue;
+            }
+
+            if let Some(sad) = ctx.calculate_sad(&mv) {
+                if sad < best_sad {
+                    best_sad = sad;
+                    best_mv = mv;
+                }
+            }
+        }
+
+        // Vertical cross
+        for dy in -self.cross_range..=self.cross_range {
+            if dy == 0 {
+                continue;
+            }
+            let mv = MotionVector::from_full_pel(center.full_pel_x(), center.full_pel_y() + dy);
+
+            if !ctx.is_valid_mv(&mv, &config.range) {
+                continue;
+            }
+
+            if let Some(sad) = ctx.calculate_sad(&mv) {
+                if sad < best_sad {
+                    best_sad = sad;
+                    best_mv = mv;
+                }
+            }
+        }
+
+        (best_mv, best_sad)
+    }
+}
+
+impl MotionSearch for CrossDiamond {
+    fn search(&self, ctx: &SearchContext, config: &SearchConfig) -> BlockMatch {
+        self.search_with_predictor(ctx, config, MotionVector::zero())
+    }
+
+    fn search_with_predictor(
+        &self,
+        ctx: &SearchContext,
+        config: &SearchConfig,
+        predictor: MotionVector,
+    ) -> BlockMatch {
+        let center = predictor.to_precision(MvPrecision::FullPel);
+
+        // Phase 1: Cross search
+        let (cross_best, _) = self.cross_search(ctx, config, center);
+
+        // Phase 2: Diamond refinement
+        self.diamond.search_with_predictor(ctx, config, cross_best)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::motion::types::{BlockSize, SearchRange};
+
+    fn create_test_context<'a>(
+        src: &'a [u8],
+        ref_frame: &'a [u8],
+        width: usize,
+        height: usize,
+    ) -> SearchContext<'a> {
+        SearchContext::new(
+            src,
+            width,
+            ref_frame,
+            width,
+            BlockSize::Block8x8,
+            0,
+            0,
+            width,
+            height,
+        )
+    }
+
+    #[test]
+    fn test_small_diamond_pattern() {
+        let sdsp = SmallDiamond::new();
+        assert_eq!(sdsp.size(), 4);
+        assert_eq!(sdsp.get(0), Some((0, -1)));
+        assert_eq!(sdsp.get(4), None);
+    }
+
+    #[test]
+    fn test_large_diamond_pattern() {
+        let ldsp = LargeDiamond::new();
+        assert_eq!(ldsp.size(), 8);
+        assert_eq!(ldsp.get(0), Some((0, -2)));
+        assert_eq!(ldsp.get(8), None);
+    }
+
+    #[test]
+    fn test_small_diamond_search() {
+        let src = vec![100u8; 64];
+        let mut ref_frame = vec![50u8; 144]; // 12x12
+
+        // Place match at offset (1, 0)
+        for row in 0..8 {
+            for col in 0..8 {
+                ref_frame[row * 12 + col + 1] = 100;
+            }
+        }
+
+        let ctx = SearchContext::new(&src, 8, &ref_frame, 12, BlockSize::Block8x8, 0, 0, 12, 12);
+        let config = SearchConfig::with_range(SearchRange::symmetric(4));
+
+        let sdsp = SmallDiamond::new();
+        let (mv, sad, _) = sdsp.search(&ctx, &config, MotionVector::zero());
+
+        // Should find match at (1, 0)
+        assert_eq!(mv.full_pel_x(), 1);
+        assert_eq!(mv.full_pel_y(), 0);
+        assert_eq!(sad, 0);
+    }
+
+    #[test]
+    fn test_large_diamond_search() {
+        let src = vec![100u8; 64];
+        let mut ref_frame = vec![50u8; 256]; // 16x16
+
+        // Place match at offset (2, 0)
+        for row in 0..8 {
+            for col in 0..8 {
+                ref_frame[row * 16 + col + 2] = 100;
+            }
+        }
+
+        let ctx = SearchContext::new(&src, 8, &ref_frame, 16, BlockSize::Block8x8, 0, 0, 16, 16);
+        let config = SearchConfig::with_range(SearchRange::symmetric(4));
+
+        let ldsp = LargeDiamond::new();
+        let (mv, sad, _) = ldsp.search(&ctx, &config, MotionVector::zero());
+
+        // Should find match at (2, 0)
+        assert_eq!(mv.full_pel_x(), 2);
+        assert_eq!(mv.full_pel_y(), 0);
+        assert_eq!(sad, 0);
+    }
+
+    #[test]
+    fn test_extended_diamond_search() {
+        let src = vec![100u8; 64];
+        let mut ref_frame = vec![50u8; 256];
+
+        // Place match at offset (3, 0)
+        for row in 0..8 {
+            for col in 0..8 {
+                ref_frame[row * 16 + col + 3] = 100;
+            }
+        }
+
+        let ctx = SearchContext::new(&src, 8, &ref_frame, 16, BlockSize::Block8x8, 0, 0, 16, 16);
+        let config = SearchConfig::with_range(SearchRange::symmetric(4));
+
+        let extended = ExtendedDiamond::new();
+        let (mv, sad) = extended.search(&ctx, &config, MotionVector::zero());
+
+        // Should find match at (3, 0)
+        assert_eq!(mv.full_pel_x(), 3);
+        assert_eq!(mv.full_pel_y(), 0);
+        assert_eq!(sad, 0);
+    }
+
+    #[test]
+    fn test_adaptive_diamond_convergence() {
+        let src = vec![100u8; 64];
+        let mut ref_frame = vec![50u8; 256];
+
+        // Place match at (4, 4)
+        for row in 0..8 {
+            for col in 0..8 {
+                ref_frame[(row + 4) * 16 + col + 4] = 100;
+            }
+        }
+
+        let ctx = SearchContext::new(&src, 8, &ref_frame, 16, BlockSize::Block8x8, 0, 0, 16, 16);
+        let config = SearchConfig::with_range(SearchRange::symmetric(8));
+
+        let adaptive = AdaptiveDiamond::new();
+        let result = adaptive.search(&ctx, &config);
+
+        // Should find close to the optimal
+        assert!(result.sad < 500);
+    }
+
+    #[test]
+    fn test_predictor_diamond() {
+        let src = vec![100u8; 64];
+        let mut ref_frame = vec![50u8; 256];
+
+        // Place match at (4, 4)
+        for row in 0..8 {
+            for col in 0..8 {
+                ref_frame[(row + 4) * 16 + col + 4] = 100;
+            }
+        }
+
+        let ctx = SearchContext::new(&src, 8, &ref_frame, 16, BlockSize::Block8x8, 0, 0, 16, 16);
+        let config = SearchConfig::with_range(SearchRange::symmetric(8));
+
+        let predictor = PredictorDiamond::new();
+        let predictors = [
+            MotionVector::from_full_pel(3, 3), // Close to optimal
+            MotionVector::from_full_pel(0, 0),
+        ];
+
+        let result = predictor.search_multi(&ctx, &config, &predictors);
+
+        // Good predictor should help find optimal
+        assert!(result.sad < 200);
+    }
+
+    #[test]
+    fn test_cross_diamond() {
+        let src = vec![100u8; 64];
+        let mut ref_frame = vec![50u8; 256];
+
+        // Place match at (4, 0) - horizontal motion
+        for row in 0..8 {
+            for col in 0..8 {
+                ref_frame[row * 16 + col + 4] = 100;
+            }
+        }
+
+        let ctx = SearchContext::new(&src, 8, &ref_frame, 16, BlockSize::Block8x8, 0, 0, 16, 16);
+        let config = SearchConfig::with_range(SearchRange::symmetric(8));
+
+        let cross = CrossDiamond::new();
+        let result = cross.search(&ctx, &config);
+
+        // Cross pattern should handle horizontal motion well
+        assert!(result.sad < 300);
+    }
+
+    #[test]
+    fn test_adaptive_diamond_early_switch() {
+        let src = vec![100u8; 64];
+        let ref_frame = vec![100u8; 256];
+
+        // Near-perfect match at origin
+        let ctx = SearchContext::new(&src, 8, &ref_frame, 16, BlockSize::Block8x8, 0, 0, 16, 16);
+        let config = SearchConfig::with_range(SearchRange::symmetric(8));
+
+        let adaptive = AdaptiveDiamond::new().switch_threshold(100);
+        let result = adaptive.search(&ctx, &config);
+
+        // Should find match quickly
+        assert_eq!(result.sad, 0);
+    }
+
+    #[test]
+    fn test_diamond_builder_pattern() {
+        let adaptive = AdaptiveDiamond::new()
+            .max_iterations(16)
+            .switch_threshold(1000);
+
+        assert_eq!(adaptive.max_ldsp_iterations, 16);
+        assert_eq!(adaptive.switch_threshold, 1000);
+    }
+}

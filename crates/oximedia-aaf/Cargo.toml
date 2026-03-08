@@ -1,0 +1,33 @@
+[package]
+name = "oximedia-aaf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Advanced Authoring Format (AAF) support for OxiMedia - SMPTE ST 377-1 compliant"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core.workspace = true
+oximedia-timecode.workspace = true
+thiserror.workspace = true
+uuid = { workspace = true }
+chrono = { workspace = true }
+byteorder = "1.5"
+serde = { workspace = true }
+bitflags.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+
+[features]
+default = []
+
+[lib]
+name = "oximedia_aaf"
+path = "src/lib.rs"

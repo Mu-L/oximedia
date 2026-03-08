@@ -1,0 +1,24 @@
+[package]
+name = "oximedia-shots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Advanced shot detection and classification engine for OxiMedia"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core = { workspace = true }
+oximedia-cv = { workspace = true }
+oximedia-scene = { workspace = true }
+oximedia-edl = { workspace = true }
+oximedia-timecode = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }
+ndarray = { workspace = true }

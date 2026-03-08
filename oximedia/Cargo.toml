@@ -1,0 +1,42 @@
+[package]
+name = "oximedia"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Patent-free multimedia framework for Rust"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core.workspace = true
+oximedia-io.workspace = true
+oximedia-container.workspace = true
+oximedia-cv.workspace = true
+
+[[example]]
+name = "probe_file"
+path = "../examples/probe_file.rs"
+
+[[example]]
+name = "corner_detection"
+path = "../examples/corner_detection.rs"
+
+[[example]]
+name = "optical_flow"
+path = "../examples/optical_flow.rs"
+
+[[example]]
+name = "face_detection"
+path = "../examples/face_detection.rs"
+
+[[example]]
+name = "image_processing"
+path = "../examples/image_processing.rs"
+
+[[example]]
+name = "decode_video"
+path = "../examples/decode_video.rs"

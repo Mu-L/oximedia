@@ -1,0 +1,12 @@
+--- crates/oximedia-core/src/hdr/mod.rs
++++ crates/oximedia-core/src/hdr/mod.rs
+@@ -53,6 +53,9 @@
+ let metadata = HdrMetadata {
+     mdcv: Some(mdcv),
+     cll: Some(cll),
++    hdr10_plus: None,
++    dolby_vision: None,
++    hlg: None,
+     transfer: TransferCharacteristic::Pq,
+     primaries: ColorPrimaries::BT2020,
+ };

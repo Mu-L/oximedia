@@ -1,0 +1,56 @@
+[package]
+name = "oximedia-distributed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Distributed encoding coordinator for OxiMedia"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+
+# Internal dependencies
+oximedia-core.workspace = true
+oximedia-codec.workspace = true
+oximedia-io.workspace = true
+
+# gRPC and serialization
+tonic = { workspace = true }
+tonic-prost = "0.14"
+prost = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# HTTP dependencies for tonic
+http = { workspace = true }
+http-body-util = { workspace = true }
+tower = "0.5"
+hyper = { workspace = true }
+
+# Service discovery
+hickory-resolver = "0.25"
+
+# Time utilities
+chrono = { workspace = true }
+
+# Collections and utilities
+dashmap = { workspace = true }
+uuid = { workspace = true }
+
+# System information
+num_cpus = "1.17"
+hostname = "0.4"
+sys-info = "0.9"
+
+[build-dependencies]
+tonic-build = "0.14"
+tonic-prost-build = "0.14"

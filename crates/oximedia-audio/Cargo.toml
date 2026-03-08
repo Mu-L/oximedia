@@ -1,0 +1,32 @@
+[package]
+name = "oximedia-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Audio codec implementations for OxiMedia"
+
+[lints]
+workspace = true
+
+[features]
+default = ["opus", "vorbis", "flac", "mp3"]
+opus = []
+vorbis = []
+flac = []
+mp3 = []
+pcm = []
+
+[dependencies]
+oximedia-core.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+rubato = "1.0"
+audioadapter = "2.0"
+audioadapter-buffers = "2.0"
+rustfft = "6"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

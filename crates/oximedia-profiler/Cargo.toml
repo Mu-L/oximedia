@@ -1,0 +1,28 @@
+[package]
+name = "oximedia-profiler"
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+description = "Performance profiling and optimization tools for OxiMedia"
+readme = "README.md"
+homepage.workspace = true
+repository.workspace = true
+keywords = ["profiling", "performance", "optimization", "benchmarking"]
+categories = ["development-tools::profiling"]
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sysinfo = "0.38"
+
+[dev-dependencies]
+criterion = "0.8"
+
+[lib]
+name = "oximedia_profiler"
+path = "src/lib.rs"

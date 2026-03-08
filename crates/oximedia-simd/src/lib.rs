@@ -1,0 +1,436 @@
+//! Hand-written assembly SIMD kernels for `OxiMedia`
+//!
+//! This crate provides highly optimized assembly implementations of critical
+//! performance paths in the `OxiMedia` video codec, including:
+//! - DCT (Discrete Cosine Transform) in various sizes
+//! - Interpolation kernels (bilinear, bicubic, 8-tap)
+//! - SAD (Sum of Absolute Differences) for motion estimation
+//!
+//! All assembly is wrapped in safe Rust APIs with proper alignment checks,
+//! buffer validation, and runtime CPU feature detection.
+
+#![deny(unsafe_op_in_unsafe_fn)]
+#![allow(dead_code)]
+
+use std::sync::OnceLock;
+
+#[cfg(target_arch = "x86_64")]
+mod x86;
+
+#[cfg(target_arch = "aarch64")]
+mod arm;
+
+mod scalar;
+
+pub mod accumulator;
+pub mod alpha_premul;
+pub mod audio_ops;
+pub mod bitwise_ops;
+pub mod blend;
+pub mod blend_simd;
+pub mod color_convert_simd;
+pub mod color_space;
+pub mod convolution;
+pub mod filter;
+pub mod fixed_point;
+pub mod gather_scatter;
+pub mod histogram;
+pub mod interleave;
+pub mod lookup_table;
+pub mod math_ops;
+pub mod matrix;
+pub mod min_max;
+pub mod pack_unpack;
+pub mod pixel_ops;
+pub mod prefix_sum;
+pub mod reduce;
+pub mod saturate;
+pub mod threshold;
+pub mod transpose;
+pub mod vector_math;
+pub mod yuv_ops;
+
+/// CPU features detected at runtime
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct CpuFeatures {
+    pub avx2: bool,
+    pub avx512f: bool,
+    pub avx512bw: bool,
+    pub neon: bool,
+}
+
+static CPU_FEATURES: OnceLock<CpuFeatures> = OnceLock::new();
+
+/// Detect CPU features at runtime
+pub fn detect_cpu_features() -> CpuFeatures {
+    *CPU_FEATURES.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            detect_x86_features()
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            detect_arm_features()
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            CpuFeatures {
+                avx2: false,
+                avx512f: false,
+                avx512bw: false,
+                neon: false,
+            }
+        }
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+fn detect_x86_features() -> CpuFeatures {
+    CpuFeatures {
+        avx2: is_x86_feature_detected!("avx2"),
+        avx512f: is_x86_feature_detected!("avx512f"),
+        avx512bw: is_x86_feature_detected!("avx512bw"),
+        neon: false,
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn detect_arm_features() -> CpuFeatures {
+    CpuFeatures {
+        avx2: false,
+        avx512f: false,
+        avx512bw: false,
+        neon: cfg!(target_feature = "neon") || std::arch::is_aarch64_feature_detected!("neon"),
+    }
+}
+
+/// DCT transform sizes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DctSize {
+    Dct4x4,
+    Dct8x8,
+    Dct16x16,
+    Dct32x32,
+}
+
+/// Interpolation filter types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterpolationFilter {
+    Bilinear,
+    Bicubic,
+    EightTap,
+}
+
+/// Block sizes for SAD operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockSize {
+    Block16x16,
+    Block32x32,
+    Block64x64,
+}
+
+/// Error types for SIMD operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimdError {
+    InvalidAlignment,
+    InvalidBufferSize,
+    UnsupportedOperation,
+    CpuFeatureNotAvailable,
+}
+
+impl std::fmt::Display for SimdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SimdError::InvalidAlignment => write!(f, "Invalid buffer alignment"),
+            SimdError::InvalidBufferSize => write!(f, "Invalid buffer size"),
+            SimdError::UnsupportedOperation => write!(f, "Unsupported operation"),
+            SimdError::CpuFeatureNotAvailable => write!(f, "Required CPU feature not available"),
+        }
+    }
+}
+
+impl std::error::Error for SimdError {}
+
+pub type Result<T> = std::result::Result<T, SimdError>;
+
+/// Perform forward DCT transform
+///
+/// # Safety
+/// - `input` must be properly aligned (32-byte for AVX2)
+/// - Buffer sizes must match the transform size
+/// - No overlapping buffers
+///
+/// # Arguments
+/// - `input`: Input pixel data
+/// - `output`: Output DCT coefficients
+/// - `size`: Transform size
+///
+/// # Returns
+/// - `Ok(())` on success
+/// - `Err(SimdError)` if validation fails
+///
+/// # Errors
+///
+/// Returns an error if buffer sizes don't match the transform size.
+pub fn forward_dct(input: &[i16], output: &mut [i16], size: DctSize) -> Result<()> {
+    let required_size = match size {
+        DctSize::Dct4x4 => 16,
+        DctSize::Dct8x8 => 64,
+        DctSize::Dct16x16 => 256,
+        DctSize::Dct32x32 => 1024,
+    };
+
+    if input.len() < required_size || output.len() < required_size {
+        return Err(SimdError::InvalidBufferSize);
+    }
+
+    let features = detect_cpu_features();
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if features.avx2 {
+            return x86::forward_dct_avx2(input, output, size);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        if features.neon {
+            return arm::forward_dct_neon(input, output, size);
+        }
+    }
+
+    // Fallback to scalar implementation
+    scalar::forward_dct_scalar(input, output, size)
+}
+
+/// Perform inverse DCT transform
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Buffer alignment is insufficient
+/// - Buffer sizes don't match the transform size
+/// - CPU features validation fails
+pub fn inverse_dct(input: &[i16], output: &mut [i16], size: DctSize) -> Result<()> {
+    let required_size = match size {
+        DctSize::Dct4x4 => 16,
+        DctSize::Dct8x8 => 64,
+        DctSize::Dct16x16 => 256,
+        DctSize::Dct32x32 => 1024,
+    };
+
+    if input.len() < required_size || output.len() < required_size {
+        return Err(SimdError::InvalidBufferSize);
+    }
+
+    let features = detect_cpu_features();
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if features.avx2 {
+            return x86::inverse_dct_avx2(input, output, size);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        if features.neon {
+            return arm::inverse_dct_neon(input, output, size);
+        }
+    }
+
+    // Fallback to scalar implementation
+    scalar::inverse_dct_scalar(input, output, size)
+}
+
+/// Perform interpolation for motion compensation
+///
+/// # Arguments
+/// - `src`: Source image data
+/// - `dst`: Destination buffer
+/// - `src_stride`: Source stride in pixels
+/// - `dst_stride`: Destination stride in pixels
+/// - `width`: Block width
+/// - `height`: Block height
+/// - `dx`: Horizontal fractional position (0-15)
+/// - `dy`: Vertical fractional position (0-15)
+/// - `filter`: Interpolation filter type
+///
+/// # Errors
+///
+/// Returns an error if buffer sizes are invalid
+#[allow(clippy::too_many_arguments)]
+pub fn interpolate(
+    src: &[u8],
+    dst: &mut [u8],
+    src_stride: usize,
+    dst_stride: usize,
+    width: usize,
+    height: usize,
+    dx: i32,
+    dy: i32,
+    filter: InterpolationFilter,
+) -> Result<()> {
+    // Validate buffer sizes
+    if src.len() < (height + 8) * src_stride {
+        return Err(SimdError::InvalidBufferSize);
+    }
+    if dst.len() < height * dst_stride {
+        return Err(SimdError::InvalidBufferSize);
+    }
+
+    let features = detect_cpu_features();
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if features.avx2 {
+            return x86::interpolate_avx2(
+                src, dst, src_stride, dst_stride, width, height, dx, dy, filter,
+            );
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        if features.neon {
+            return arm::interpolate_neon(
+                src, dst, src_stride, dst_stride, width, height, dx, dy, filter,
+            );
+        }
+    }
+
+    // Fallback to scalar implementation
+    scalar::interpolate_scalar(
+        src, dst, src_stride, dst_stride, width, height, dx, dy, filter,
+    )
+}
+
+/// Calculate Sum of Absolute Differences (SAD)
+///
+/// # Arguments
+/// - `src1`: First source block
+/// - `src2`: Second source block
+/// - `stride1`: Stride for src1
+/// - `stride2`: Stride for src2
+/// - `size`: Block size
+///
+/// # Returns
+/// - `Ok(sad_value)` on success
+/// - `Err(SimdError)` if validation fails
+///
+/// # Errors
+///
+/// Returns an error if buffer sizes are invalid
+pub fn sad(
+    src1: &[u8],
+    src2: &[u8],
+    stride1: usize,
+    stride2: usize,
+    size: BlockSize,
+) -> Result<u32> {
+    let (width, height) = match size {
+        BlockSize::Block16x16 => (16, 16),
+        BlockSize::Block32x32 => (32, 32),
+        BlockSize::Block64x64 => (64, 64),
+    };
+
+    if src1.len() < height * stride1 || src2.len() < height * stride2 {
+        return Err(SimdError::InvalidBufferSize);
+    }
+
+    let features = detect_cpu_features();
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if features.avx512bw {
+            return x86::sad_avx512(src1, src2, stride1, stride2, size);
+        }
+        if features.avx2 {
+            return x86::sad_avx2(src1, src2, stride1, stride2, size);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        if features.neon {
+            return arm::sad_neon(src1, src2, stride1, stride2, size);
+        }
+    }
+
+    // Fallback to scalar implementation
+    scalar::sad_scalar(src1, src2, stride1, stride2, width, height)
+}
+
+/// Check if a pointer is properly aligned for SIMD operations
+#[inline]
+#[must_use]
+pub fn is_aligned(ptr: *const u8, alignment: usize) -> bool {
+    (ptr as usize).is_multiple_of(alignment)
+}
+
+/// Validate buffer alignment for AVX2 (32-byte alignment)
+///
+/// # Errors
+///
+/// Returns an error if buffer is not 32-byte aligned
+pub fn validate_avx2_alignment(buffer: &[u8]) -> Result<()> {
+    if !is_aligned(buffer.as_ptr(), 32) {
+        return Err(SimdError::InvalidAlignment);
+    }
+    Ok(())
+}
+
+/// Validate buffer alignment for AVX-512 (64-byte alignment)
+///
+/// # Errors
+///
+/// Returns an error if buffer is not 64-byte aligned
+pub fn validate_avx512_alignment(buffer: &[u8]) -> Result<()> {
+    if !is_aligned(buffer.as_ptr(), 64) {
+        return Err(SimdError::InvalidAlignment);
+    }
+    Ok(())
+}
+
+/// Validate buffer alignment for NEON (16-byte alignment)
+///
+/// # Errors
+///
+/// Returns an error if buffer is not 16-byte aligned
+pub fn validate_neon_alignment(buffer: &[u8]) -> Result<()> {
+    if !is_aligned(buffer.as_ptr(), 16) {
+        return Err(SimdError::InvalidAlignment);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cpu_feature_detection() {
+        let features = detect_cpu_features();
+        // Just ensure it doesn't crash
+        println!("Detected CPU features: {features:?}");
+    }
+
+    #[test]
+    fn test_alignment_check() {
+        let aligned = [0u8; 64];
+        assert!(is_aligned(aligned.as_ptr(), 8));
+    }
+
+    #[test]
+    fn test_dct_sizes() {
+        assert_eq!(
+            match DctSize::Dct4x4 {
+                DctSize::Dct4x4 => 16,
+                _ => 0,
+            },
+            16
+        );
+    }
+}

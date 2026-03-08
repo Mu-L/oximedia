@@ -1,0 +1,47 @@
+[package]
+name = "oximedia-graphics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Broadcast graphics engine for OxiMedia"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+rand.workspace = true
+oximedia-core.workspace = true
+oximedia-image.workspace = true
+
+# Graphics rendering
+tiny-skia = "0.12"
+fontdue = "0.9"
+ab_glyph = "0.2"
+kurbo = "0.11"
+palette = "0.7"
+
+# GPU rendering
+wgpu = { version = "24", optional = true }
+bytemuck = { version = "1", features = ["derive"] }
+
+# Template and control
+tera = "1"
+tokio = { workspace = true, optional = true }
+axum = { version = "0.8", optional = true }
+
+[features]
+default = ["gpu", "server"]
+gpu = ["dep:wgpu"]
+server = ["dep:tokio", "dep:axum"]
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3"

@@ -1,0 +1,39 @@
+[package]
+name = "oximedia-collab"
+version.workspace = true
+edition = "2021"
+authors = ["OxiMedia Contributors"]
+description = "Real-time collaboration system for multi-user video editing"
+license = "Apache-2.0"
+homepage.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+yrs = "0.25"
+serde = { workspace = true }
+serde_json = { workspace = true }
+oxicode = { version = "0.1", features = ["serde"] }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+futures = "0.3"
+tokio-tungstenite = "0.28"
+bytes = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+flate2 = { workspace = true }
+lz4 = "1.28"
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = "1.10"
+
+[lib]
+name = "oximedia_collab"
+path = "src/lib.rs"

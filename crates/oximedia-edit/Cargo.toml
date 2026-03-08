@@ -1,0 +1,25 @@
+[package]
+name = "oximedia-edit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Video timeline editor for OxiMedia"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core.workspace = true
+oximedia-codec = { workspace = true }
+oximedia-audio = { workspace = true }
+oximedia-graph = { workspace = true }
+thiserror.workspace = true
+bytes.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing.workspace = true
+futures = "0.3"

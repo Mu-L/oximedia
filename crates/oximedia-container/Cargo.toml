@@ -1,0 +1,26 @@
+[package]
+name = "oximedia-container"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Container demuxer/muxer for OxiMedia"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core.workspace = true
+oximedia-io.workspace = true
+bytes.workspace = true
+bitflags.workspace = true
+async-trait.workspace = true
+nom.workspace = true
+md-5 = "0.10"
+tokio = { workspace = true, features = ["io-util", "sync"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

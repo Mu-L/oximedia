@@ -1,0 +1,61 @@
+[package]
+name = "oximedia-mam"
+description = "Media Asset Management system for organizing and tracking media files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Database
+sqlx = { workspace = true, features = ["postgres", "uuid", "chrono", "json", "migrate"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Date/Time
+chrono = { workspace = true }
+
+# UUID
+uuid = { workspace = true }
+
+# Search Engine
+tantivy = "0.22"
+
+# Web Framework
+actix-web = { version = "4", features = ["rustls-0_23"] }
+actix-rt = "2"
+
+# GraphQL
+async-graphql = { version = "7", features = ["uuid", "chrono"] }
+async-graphql-actix-web = "7"
+
+# Authentication
+jsonwebtoken = "9"
+bcrypt = "0.19"
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Utilities
+bytes = { workspace = true }
+
+# Cryptography
+sha2 = { workspace = true }
+
+# HTTP client
+reqwest = { workspace = true }

@@ -1,0 +1,21 @@
+[package]
+name = "oximedia-metadata"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Comprehensive metadata standards support for OxiMedia (ID3v2, Vorbis, APE, iTunes, XMP, EXIF, IPTC, etc.)"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+quick-xml = "0.39"
+encoding_rs = "0.8"

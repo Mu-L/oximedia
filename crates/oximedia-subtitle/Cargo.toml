@@ -1,0 +1,34 @@
+[package]
+name = "oximedia-subtitle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Subtitle and closed caption rendering for OxiMedia"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core.workspace = true
+oximedia-codec.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+nom.workspace = true
+serde = { workspace = true, features = ["derive"] }
+
+# Font rendering and text layout
+fontdue = "0.9"
+ab_glyph = "0.2"
+unicode-bidi = "0.3"
+unicode-segmentation = "1.12"
+
+# XML parsing for TTML
+quick-xml = "0.39"
+
+[features]
+default = []
+# Enable CEA-608/708 closed caption support
+closed-captions = []

@@ -1,0 +1,21 @@
+[package]
+name = "oximedia-optimize"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Codec optimization and tuning suite for OxiMedia"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core.workspace = true
+oximedia-codec.workspace = true
+thiserror.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]

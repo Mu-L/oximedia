@@ -1,0 +1,36 @@
+[package]
+name = "oximedia-audiopost"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors = ["OxiMedia Contributors"]
+description = "Professional audio post-production suite: ADR, Foley, sound design, mixing, restoration"
+keywords = ["audio", "post-production", "mixing", "adr", "foley"]
+categories = ["multimedia::audio", "multimedia::encoding"]
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core = { workspace = true }
+oximedia-audio = { workspace = true }
+oximedia-effects = { workspace = true }
+oximedia-timeline = { workspace = true }
+oximedia-metering = { workspace = true }
+oximedia-timecode = { workspace = true }
+thiserror = { workspace = true }
+rustfft = "6"
+rubato = "1.0"
+rand = { workspace = true }
+rayon = { workspace = true }
+ndarray = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]

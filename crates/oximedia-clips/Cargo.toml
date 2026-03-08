@@ -1,0 +1,25 @@
+[package]
+name = "oximedia-clips"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Professional clip management and logging system for OxiMedia"
+readme = "README.md"
+
+[dependencies]
+oximedia-core = { workspace = true }
+oximedia-timecode = { workspace = true }
+oximedia-edl = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["fs", "sync"] }
+sqlx = { workspace = true, features = ["migrate"] }
+chrono = { workspace = true }
+uuid = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

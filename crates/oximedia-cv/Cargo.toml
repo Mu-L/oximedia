@@ -1,0 +1,33 @@
+[package]
+name = "oximedia-cv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Computer vision for OxiMedia"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+onnx = ["ort"]
+cuda = ["onnx"]
+rocm = ["onnx"]
+tensorrt = ["onnx"]
+
+[dependencies]
+oximedia-core = { workspace = true }
+oximedia-codec = { workspace = true }
+thiserror = { workspace = true }
+ort = { workspace = true, optional = true }
+ndarray = { workspace = true }
+bytes = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+rustfft = "6.4"
+
+[build-dependencies]
+cc.workspace = true

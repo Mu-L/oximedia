@@ -1,0 +1,559 @@
+//! Vectorscope for color and saturation analysis.
+//!
+//! A vectorscope displays chrominance (color) information in a polar plot,
+//! with hue represented as angle and saturation as distance from center.
+//! This is essential for:
+//! - Checking white balance and color casts
+//! - Measuring color saturation
+//! - Ensuring colors match SMPTE standards
+//! - Identifying skin tones
+//! - Detecting out-of-gamut colors
+//!
+//! The vectorscope uses Cb (U) and Cr (V) components as X and Y axes.
+
+use crate::render::{rgb_to_ycbcr, Canvas};
+use crate::{GamutColorspace, ScopeConfig, ScopeData, ScopeType, VectorscopeMode};
+use oximedia_core::OxiResult;
+use std::f32::consts::PI;
+
+/// Generates a YUV vectorscope from RGB frame data.
+///
+/// The vectorscope displays color information in a circular plot:
+/// - Center: no color (grayscale)
+/// - Distance from center: saturation
+/// - Angle: hue
+///
+/// # Arguments
+///
+/// * `frame` - RGB24 frame data (width * height * 3 bytes)
+/// * `width` - Frame width in pixels
+/// * `height` - Frame height in pixels
+/// * `config` - Scope configuration
+///
+/// # Errors
+///
+/// Returns an error if frame data is invalid or insufficient.
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_possible_wrap)]
+#[allow(clippy::cast_sign_loss)]
+pub fn generate_vectorscope(
+    frame: &[u8],
+    width: u32,
+    height: u32,
+    config: &ScopeConfig,
+) -> OxiResult<ScopeData> {
+    let expected_size = (width * height * 3) as usize;
+    if frame.len() < expected_size {
+        return Err(oximedia_core::OxiError::InvalidData(format!(
+            "Frame data too small: expected {expected_size}, got {}",
+            frame.len()
+        )));
+    }
+
+    let scope_width = config.width;
+    let scope_height = config.height;
+
+    let mut canvas = Canvas::new(scope_width, scope_height);
+
+    // Create accumulation buffer for intensity
+    let mut accumulator = vec![0u32; (scope_width * scope_height) as usize];
+
+    let center_x = scope_width / 2;
+    let center_y = scope_height / 2;
+    let max_radius = (scope_width.min(scope_height) / 2 - 10) as f32;
+
+    // Apply gain (zoom)
+    let gain = config.vectorscope_gain;
+
+    // Process all pixels
+    for y in 0..height {
+        for x in 0..width {
+            let pixel_idx = ((y * width + x) * 3) as usize;
+            let r = frame[pixel_idx];
+            let g = frame[pixel_idx + 1];
+            let b = frame[pixel_idx + 2];
+
+            let (_luma, cb, cr) = rgb_to_ycbcr(r, g, b);
+
+            // Cb and Cr are in range 0-255, with 128 = neutral
+            // Map to -128 to +127 range
+            let cb_centered = f32::from(cb) - 128.0;
+            let cr_centered = f32::from(cr) - 128.0;
+
+            // Apply gain and map to scope coordinates
+            let scope_x_f = center_x as f32 + (cb_centered * gain * max_radius) / 128.0;
+            let scope_y_f = center_y as f32 - (cr_centered * gain * max_radius) / 128.0;
+
+            let scope_x = scope_x_f as i32;
+            let scope_y = scope_y_f as i32;
+
+            // Check bounds
+            if scope_x >= 0
+                && scope_x < scope_width as i32
+                && scope_y >= 0
+                && scope_y < scope_height as i32
+            {
+                let idx = (scope_y as u32 * scope_width + scope_x as u32) as usize;
+                if idx < accumulator.len() {
+                    accumulator[idx] = accumulator[idx].saturating_add(1);
+                }
+            }
+        }
+    }
+
+    // Find max value for normalization
+    let max_val = accumulator.iter().copied().max().unwrap_or(1);
+
+    // Draw accumulated vectorscope
+    match config.vectorscope_mode {
+        VectorscopeMode::Circular => {
+            // Circular mask: only show pixels within max_radius
+            for y in 0..scope_height {
+                for x in 0..scope_width {
+                    let dx = x as f32 - center_x as f32;
+                    let dy = y as f32 - center_y as f32;
+                    let distance = (dx * dx + dy * dy).sqrt();
+
+                    if distance <= max_radius {
+                        let idx = (y * scope_width + x) as usize;
+                        let count = accumulator[idx];
+
+                        if count > 0 {
+                            let normalized = ((count as f32 / max_val as f32).sqrt() * 255.0) as u8;
+                            canvas.accumulate_pixel(x, y, normalized);
+                        }
+                    }
+                }
+            }
+        }
+        VectorscopeMode::Rectangular => {
+            // Show all pixels
+            for y in 0..scope_height {
+                for x in 0..scope_width {
+                    let idx = (y * scope_width + x) as usize;
+                    let count = accumulator[idx];
+
+                    if count > 0 {
+                        let normalized = ((count as f32 / max_val as f32).sqrt() * 255.0) as u8;
+                        canvas.accumulate_pixel(x, y, normalized);
+                    }
+                }
+            }
+        }
+    }
+
+    // Highlight out-of-gamut colors if requested
+    if config.highlight_gamut {
+        highlight_out_of_gamut(&mut canvas, config, &accumulator, max_val);
+    }
+
+    // Draw graticule
+    if config.show_graticule {
+        crate::render::draw_vectorscope_graticule(&mut canvas, config);
+    }
+
+    // Draw labels
+    if config.show_labels {
+        draw_vectorscope_labels(&mut canvas);
+    }
+
+    Ok(ScopeData {
+        width: scope_width,
+        height: scope_height,
+        data: canvas.data,
+        scope_type: ScopeType::Vectorscope,
+    })
+}
+
+/// Highlights out-of-gamut pixels based on the selected colorspace.
+fn highlight_out_of_gamut(
+    canvas: &mut Canvas,
+    config: &ScopeConfig,
+    accumulator: &[u32],
+    max_val: u32,
+) {
+    let scope_width = canvas.width;
+    let scope_height = canvas.height;
+    let center_x = scope_width / 2;
+    let center_y = scope_height / 2;
+
+    // Get gamut limits for the selected colorspace
+    let gamut_limit = match config.gamut_colorspace {
+        GamutColorspace::Rec709 => 118.0,  // Conservative limit for BT.709
+        GamutColorspace::Rec2020 => 158.0, // Wider gamut for BT.2020
+        GamutColorspace::DciP3 => 135.0,   // P3 gamut
+    };
+
+    for y in 0..scope_height {
+        for x in 0..scope_width {
+            let idx = (y * scope_width + x) as usize;
+            let count = accumulator[idx];
+
+            if count > 0 {
+                let dx = x as f32 - center_x as f32;
+                let dy = y as f32 - center_y as f32;
+                let distance = (dx * dx + dy * dy).sqrt();
+
+                // If beyond gamut limit, highlight in red
+                if distance > gamut_limit {
+                    #[allow(clippy::cast_possible_truncation)]
+                    #[allow(clippy::cast_sign_loss)]
+                    let normalized = ((count as f32 / max_val as f32).sqrt() * 255.0) as u8;
+                    canvas.blend_pixel(x, y, [255, 0, 0, normalized]);
+                }
+            }
+        }
+    }
+}
+
+/// Draws labels for vectorscope (hue angles).
+fn draw_vectorscope_labels(canvas: &mut Canvas) {
+    let center_x = canvas.width / 2;
+    let center_y = canvas.height / 2;
+    let radius = (canvas.width.min(canvas.height) / 2) as f32 - 20.0;
+
+    // Label positions for primary and secondary colors
+    let labels = [
+        (104_f32, "R"),  // Red
+        (168_f32, "Yl"), // Yellow
+        (241_f32, "G"),  // Green
+        (284_f32, "Cy"), // Cyan
+        (348_f32, "B"),  // Blue
+        (61_f32, "Mg"),  // Magenta
+    ];
+
+    for (angle, _label) in &labels {
+        let rad = angle.to_radians();
+
+        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_sign_loss)]
+        let x = (center_x as f32 + rad.cos() * radius) as u32;
+        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_sign_loss)]
+        let y = (center_y as f32 - rad.sin() * radius) as u32;
+
+        // Draw a small dot for label position
+        if x >= 1 && x < canvas.width - 1 && y >= 1 && y < canvas.height - 1 {
+            canvas.set_pixel(x, y, crate::render::colors::WHITE);
+            canvas.set_pixel(x + 1, y, crate::render::colors::WHITE);
+            canvas.set_pixel(x, y + 1, crate::render::colors::WHITE);
+            canvas.set_pixel(x + 1, y + 1, crate::render::colors::WHITE);
+        }
+    }
+}
+
+/// Calculates the hue angle from Cb/Cr components.
+///
+/// Returns angle in degrees (0-360).
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub fn calculate_hue(cb: u8, cr: u8) -> f32 {
+    let cb_centered = f32::from(cb) - 128.0;
+    let cr_centered = f32::from(cr) - 128.0;
+
+    let angle_rad = cb_centered.atan2(cr_centered);
+    let mut angle_deg = angle_rad * 180.0 / PI;
+
+    // Normalize to 0-360
+    if angle_deg < 0.0 {
+        angle_deg += 360.0;
+    }
+
+    angle_deg
+}
+
+/// Calculates the saturation from Cb/Cr components.
+///
+/// Returns saturation in range 0-1.
+#[must_use]
+pub fn calculate_saturation(cb: u8, cr: u8) -> f32 {
+    let cb_centered = f32::from(cb) - 128.0;
+    let cr_centered = f32::from(cr) - 128.0;
+
+    let magnitude = (cb_centered * cb_centered + cr_centered * cr_centered).sqrt();
+
+    // Normalize to 0-1 range (max theoretical distance is ~181)
+    (magnitude / 181.0).min(1.0)
+}
+
+/// Checks if a color is within the skin tone range.
+///
+/// Skin tones typically fall along a specific line in the vectorscope
+/// (approximately 123° ± 15°).
+#[must_use]
+pub fn is_skin_tone(cb: u8, cr: u8) -> bool {
+    let hue = calculate_hue(cb, cr);
+    let saturation = calculate_saturation(cb, cr);
+
+    // Skin tone hue range: approximately 108-138 degrees
+    // Saturation: typically 0.1-0.6
+    (108.0..=138.0).contains(&hue) && (0.1..=0.6).contains(&saturation)
+}
+
+/// Vectorscope statistics.
+#[derive(Debug, Clone)]
+pub struct VectorscopeStats {
+    /// Average saturation (0-1).
+    pub avg_saturation: f32,
+
+    /// Maximum saturation (0-1).
+    pub max_saturation: f32,
+
+    /// Dominant hue angle (degrees).
+    pub dominant_hue: f32,
+
+    /// Percentage of pixels that are skin tone.
+    pub skin_tone_percent: f32,
+
+    /// Percentage of pixels out of gamut.
+    pub out_of_gamut_percent: f32,
+}
+
+/// Computes vectorscope statistics from frame data.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn compute_vectorscope_stats(
+    frame: &[u8],
+    width: u32,
+    height: u32,
+    gamut: GamutColorspace,
+) -> VectorscopeStats {
+    let mut saturation_sum = 0.0f32;
+    let mut max_saturation = 0.0f32;
+    let mut hue_histogram = vec![0u32; 360];
+    let mut skin_tone_count = 0u32;
+    let mut out_of_gamut_count = 0u32;
+    let pixel_count = width * height;
+
+    let gamut_limit = match gamut {
+        GamutColorspace::Rec709 => 118.0,
+        GamutColorspace::Rec2020 => 158.0,
+        GamutColorspace::DciP3 => 135.0,
+    };
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel_idx = ((y * width + x) * 3) as usize;
+            if pixel_idx + 2 >= frame.len() {
+                break;
+            }
+
+            let r = frame[pixel_idx];
+            let g = frame[pixel_idx + 1];
+            let b = frame[pixel_idx + 2];
+
+            let (_luma, cb, cr) = rgb_to_ycbcr(r, g, b);
+
+            let saturation = calculate_saturation(cb, cr);
+            let hue = calculate_hue(cb, cr);
+
+            saturation_sum += saturation;
+            max_saturation = max_saturation.max(saturation);
+
+            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_sign_loss)]
+            let hue_bin = (hue as usize).min(359);
+            hue_histogram[hue_bin] += 1;
+
+            if is_skin_tone(cb, cr) {
+                skin_tone_count += 1;
+            }
+
+            // Check if out of gamut
+            let cb_centered = f32::from(cb) - 128.0;
+            let cr_centered = f32::from(cr) - 128.0;
+            let distance = (cb_centered * cb_centered + cr_centered * cr_centered).sqrt();
+            if distance > gamut_limit {
+                out_of_gamut_count += 1;
+            }
+        }
+    }
+
+    let avg_saturation = saturation_sum / pixel_count as f32;
+
+    // Find dominant hue (most common)
+    let dominant_hue_bin = hue_histogram
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &count)| count)
+        .map_or(0, |(bin, _)| bin);
+
+    VectorscopeStats {
+        avg_saturation,
+        max_saturation,
+        dominant_hue: dominant_hue_bin as f32,
+        skin_tone_percent: (skin_tone_count as f32 / pixel_count as f32) * 100.0,
+        out_of_gamut_percent: (out_of_gamut_count as f32 / pixel_count as f32) * 100.0,
+    }
+}
+
+/// SMPTE color bar target positions.
+///
+/// Returns (Cb, Cr) coordinates for 75% color bars.
+#[must_use]
+pub fn smpte_color_bars_75() -> Vec<(u8, u8)> {
+    vec![
+        (128, 128), // White
+        (44, 156),  // Yellow
+        (85, 176),  // Cyan
+        (34, 204),  // Green
+        (222, 80),  // Magenta
+        (171, 100), // Red
+        (212, 52),  // Blue
+    ]
+}
+
+/// SMPTE color bar target positions.
+///
+/// Returns (Cb, Cr) coordinates for 100% color bars.
+#[must_use]
+pub fn smpte_color_bars_100() -> Vec<(u8, u8)> {
+    vec![
+        (128, 128), // White
+        (16, 181),  // Yellow
+        (66, 202),  // Cyan
+        (0, 235),   // Green
+        (255, 54),  // Magenta
+        (202, 74),  // Red
+        (240, 34),  // Blue
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_frame(width: u32, height: u32) -> Vec<u8> {
+        let mut frame = vec![0u8; (width * height * 3) as usize];
+
+        // Create a frame with various colors
+        for y in 0..height {
+            for x in 0..width {
+                let idx = ((y * width + x) * 3) as usize;
+
+                // Create color gradient
+                let r = ((x * 255) / width) as u8;
+                let g = ((y * 255) / height) as u8;
+                let b = 128u8;
+
+                frame[idx] = r;
+                frame[idx + 1] = g;
+                frame[idx + 2] = b;
+            }
+        }
+
+        frame
+    }
+
+    #[test]
+    fn test_generate_vectorscope() {
+        let frame = create_test_frame(100, 100);
+        let config = ScopeConfig::default();
+
+        let result = generate_vectorscope(&frame, 100, 100, &config);
+        assert!(result.is_ok());
+
+        let scope = result.expect("should succeed in test");
+        assert_eq!(scope.width, config.width);
+        assert_eq!(scope.height, config.height);
+        assert_eq!(scope.scope_type, ScopeType::Vectorscope);
+    }
+
+    #[test]
+    fn test_calculate_hue() {
+        // Neutral (no color)
+        let hue = calculate_hue(128, 128);
+        assert!(hue >= 0.0 && hue < 360.0);
+
+        // Red-ish
+        let hue = calculate_hue(128, 200);
+        assert!(hue >= 0.0 && hue < 360.0);
+    }
+
+    #[test]
+    fn test_calculate_saturation() {
+        // Neutral (no saturation)
+        let sat = calculate_saturation(128, 128);
+        assert!(sat < 0.01);
+
+        // High saturation
+        let sat = calculate_saturation(255, 255);
+        assert!(sat > 0.5);
+    }
+
+    #[test]
+    fn test_is_skin_tone() {
+        // Test boundary conditions for skin tone detection
+
+        // Not skin tone (neutral gray - no saturation)
+        assert!(!is_skin_tone(128, 128));
+
+        // Not skin tone (too saturated - far from center)
+        assert!(!is_skin_tone(50, 200));
+
+        // Not skin tone (wrong hue - too blue)
+        assert!(!is_skin_tone(180, 128));
+
+        // Test that the function at least works without panicking
+        // Real skin tone detection would need actual skin tone RGB values
+        // converted to YCbCr to get accurate Cb/Cr coordinates
+        let _result = is_skin_tone(115, 135);
+    }
+
+    #[test]
+    fn test_compute_vectorscope_stats() {
+        let frame = create_test_frame(100, 100);
+        let stats = compute_vectorscope_stats(&frame, 100, 100, GamutColorspace::Rec709);
+
+        assert!(stats.avg_saturation >= 0.0);
+        assert!(stats.max_saturation >= stats.avg_saturation);
+        assert!(stats.dominant_hue >= 0.0 && stats.dominant_hue < 360.0);
+        assert!(stats.skin_tone_percent >= 0.0 && stats.skin_tone_percent <= 100.0);
+    }
+
+    #[test]
+    fn test_smpte_color_bars() {
+        let bars_75 = smpte_color_bars_75();
+        assert_eq!(bars_75.len(), 7);
+
+        let bars_100 = smpte_color_bars_100();
+        assert_eq!(bars_100.len(), 7);
+    }
+
+    #[test]
+    fn test_vectorscope_modes() {
+        let frame = create_test_frame(50, 50);
+
+        // Test circular mode
+        let mut config = ScopeConfig::default();
+        config.vectorscope_mode = VectorscopeMode::Circular;
+        let result = generate_vectorscope(&frame, 50, 50, &config);
+        assert!(result.is_ok());
+
+        // Test rectangular mode
+        config.vectorscope_mode = VectorscopeMode::Rectangular;
+        let result = generate_vectorscope(&frame, 50, 50, &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_gamut_highlighting() {
+        let frame = create_test_frame(50, 50);
+
+        let mut config = ScopeConfig::default();
+        config.highlight_gamut = true;
+
+        // Test all colorspaces
+        config.gamut_colorspace = GamutColorspace::Rec709;
+        let result = generate_vectorscope(&frame, 50, 50, &config);
+        assert!(result.is_ok());
+
+        config.gamut_colorspace = GamutColorspace::Rec2020;
+        let result = generate_vectorscope(&frame, 50, 50, &config);
+        assert!(result.is_ok());
+
+        config.gamut_colorspace = GamutColorspace::DciP3;
+        let result = generate_vectorscope(&frame, 50, 50, &config);
+        assert!(result.is_ok());
+    }
+}

@@ -1,0 +1,24 @@
+[package]
+name = "oximedia-align"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Video alignment and registration tools for multi-camera synchronization in OxiMedia"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core.workspace = true
+oximedia-audio.workspace = true
+oximedia-graph.workspace = true
+thiserror.workspace = true
+nalgebra = "0.33"
+rayon.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

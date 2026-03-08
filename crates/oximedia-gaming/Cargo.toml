@@ -1,0 +1,27 @@
+[package]
+name = "oximedia-gaming"
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+description = "Game streaming and screen capture optimization for OxiMedia"
+homepage.workspace = true
+repository.workspace = true
+keywords = ["game", "streaming", "capture", "screen", "recording"]
+categories = ["multimedia", "game-engines"]
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core = { workspace = true }
+oximedia-codec = { workspace = true }
+oximedia-audio = { workspace = true }
+oximedia-graph = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+
+[lib]
+name = "oximedia_gaming"
+path = "src/lib.rs"

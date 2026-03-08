@@ -1,0 +1,34 @@
+[package]
+name = "oximedia-timesync"
+description = "Time synchronization and media clock management"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+oximedia-core.workspace = true
+oximedia-timecode.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+bitflags.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+
+# For shared memory IPC
+memmap2 = "0.9"
+
+# For CRC calculation in PTP
+crc = "3"
+
+[dev-dependencies]
+tokio-test = "0.4"

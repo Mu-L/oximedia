@@ -1,0 +1,39 @@
+[package]
+name = "oximedia-jobs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Job queue and worker management for OxiMedia video transcoding"
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+
+# Database
+rusqlite = { workspace = true }
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Time handling
+chrono = { workspace = true }
+
+# UUID generation
+uuid = { workspace = true }
+
+# Workspace crates
+oximedia-core.workspace = true
+
+[dev-dependencies]
+tempfile = "3.26"
