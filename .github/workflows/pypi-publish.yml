@@ -82,9 +82,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "28.3"
+        run: brew install protobuf
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -106,9 +104,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: "28.3"
+        shell: pwsh
+        run: |
+          $url = "https://github.com/protocolbuffers/protobuf/releases/download/v28.3/protoc-28.3-win64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\protoc.zip"
+          Expand-Archive -Path "$env:TEMP\protoc.zip" -DestinationPath "$env:LOCALAPPDATA\protoc" -Force
+          echo "$env:LOCALAPPDATA\protoc\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
