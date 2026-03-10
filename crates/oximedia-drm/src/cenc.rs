@@ -5,8 +5,11 @@
 
 use crate::{DrmError, DrmSystem, Result};
 use bytes::{BufMut, BytesMut};
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM};
-use ring::rand::{SecureRandom, SystemRandom};
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes128Gcm, Nonce as GcmNonce,
+};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use uuid::Uuid;
@@ -311,7 +314,6 @@ impl SampleEncryptionInfo {
 pub struct CencEncryptor {
     scheme: EncryptionScheme,
     key: Vec<u8>,
-    rng: SystemRandom,
     pattern: Option<EncryptionPattern>,
 }
 
@@ -328,7 +330,6 @@ impl CencEncryptor {
         Ok(Self {
             scheme,
             key,
-            rng: SystemRandom::new(),
             pattern: None,
         })
     }
@@ -347,9 +348,7 @@ impl CencEncryptor {
         };
 
         let mut iv = vec![0u8; iv_size];
-        self.rng
-            .fill(&mut iv)
-            .map_err(|e| DrmError::EncryptionError(format!("Failed to generate IV: {:?}", e)))?;
+        rand::rng().fill_bytes(&mut iv);
 
         Ok(iv)
     }
@@ -504,26 +503,13 @@ impl CencEncryptor {
             )));
         }
 
-        // Using AES-128-GCM from ring for encryption
-        // Note: For production, you'd want proper AES-CTR/CBC implementation
-        // This is a simplified version using available ring APIs
-        let unbound_key = UnboundKey::new(&AES_128_GCM, &self.key)
-            .map_err(|e| DrmError::EncryptionError(format!("Failed to create key: {:?}", e)))?;
-        let key = LessSafeKey::new(unbound_key);
-
-        let nonce_bytes = [0u8; 12]; // GCM nonce
-        let nonce = Nonce::assume_unique_for_key(nonce_bytes);
-
-        let mut in_out = block.to_vec();
-        // Pad to include auth tag space
-        in_out.resize(block.len() + 16, 0);
-
-        let _tag = key
-            .seal_in_place_separate_tag(nonce, Aad::empty(), &mut in_out[..block.len()])
-            .map_err(|e| DrmError::EncryptionError(format!("Encryption failed: {:?}", e)))?;
-
-        // Return only the first 16 bytes (encrypted block, without auth tag)
-        Ok(in_out[..16].to_vec())
+        let cipher = Aes128Gcm::new_from_slice(&self.key)
+            .map_err(|e| DrmError::EncryptionError(format!("Failed to create cipher: {e}")))?;
+        let nonce = GcmNonce::from([0u8; 12]);
+        let in_out = block.to_vec();
+        let ciphertext = cipher.encrypt(&nonce, in_out.as_ref())
+            .map_err(|e| DrmError::EncryptionError(format!("Encryption failed: {e}")))?;
+        Ok(ciphertext[..16].to_vec())
     }
 }
 
@@ -609,7 +595,6 @@ impl CencDecryptor {
         let encryptor = CencEncryptor {
             scheme: self.scheme,
             key: self.key.clone(),
-            rng: SystemRandom::new(),
             pattern: self.pattern,
         };
         encryptor.encrypt_ctr(data, iv)

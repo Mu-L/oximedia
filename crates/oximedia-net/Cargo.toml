@@ -25,7 +25,7 @@ sha1 = { workspace = true }
 hmac = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
-ring = { workspace = true }
+ed25519-dalek = { workspace = true }
 base64 = { workspace = true }
 hyper = { workspace = true, features = ["server", "http1", "http2"] }
 hyper-util = { workspace = true }
