@@ -8,9 +8,10 @@ pub mod rules;
 pub mod severity;
 
 pub use channels::{
-    AlertChannel, DiscordChannel, EmailChannel, FileChannel, SlackChannel, SmsChannel,
-    WebhookChannel,
+    AlertChannel, DiscordChannel, FileChannel, SlackChannel, SmsChannel, WebhookChannel,
 };
+#[cfg(feature = "email")]
+pub use channels::EmailChannel;
 pub use conditions::{
     AbsenceCondition, AlertCondition, AnomalyCondition, CompositeCondition, RateCondition,
     ThresholdCondition,
