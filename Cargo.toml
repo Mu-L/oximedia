@@ -426,7 +426,7 @@ oxiarc-archive = "0.2.2"
 scirs2-core = { version = "0.3.1", features = ["random", "linalg"] }
 
 # Network and HTTP
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "form"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "form"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http = "1"
@@ -434,7 +434,7 @@ http-body-util = "0.1"
 
 # TLS
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 ring = "0.17"
 
 # Database

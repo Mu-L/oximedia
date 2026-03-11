@@ -72,8 +72,8 @@ futures = "0.3"
 pin-project = "1"
 
 # CDN/Cloud storage (optional - require newer Rust versions)
-aws-sdk-s3 = { version = "1", optional = true }
-aws-config = { version = "1", optional = true }
+aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = ["rustls", "rt-tokio"] }
+aws-config = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }
 azure_storage = { version = "0.21", optional = true }
 azure_storage_blobs = { version = "0.21", optional = true }
 google-cloud-storage = { version = "0.24", optional = true }

@@ -23,16 +23,17 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 
-# AWS SDK
-aws-config = "1.8"
-aws-sdk-s3 = "1.29"
-aws-sdk-mediaconvert = "1.28"
-aws-sdk-medialive = "1.31"
-aws-sdk-mediapackage = "1.25"
-aws-sdk-cloudwatch = "1.29"
-aws-sdk-sts = "1.25"
-aws-sdk-kms = "1.26"
+# AWS SDK (ring-based TLS to avoid aws-lc-sys C dependency)
+aws-config = { version = "1.8", default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }
+aws-sdk-s3 = { version = "1.29", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-sdk-mediaconvert = { version = "1.28", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-sdk-medialive = { version = "1.31", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-sdk-mediapackage = { version = "1.25", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-sdk-cloudwatch = { version = "1.29", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-sdk-sts = { version = "1.25", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-sdk-kms = { version = "1.26", default-features = false, features = ["rustls", "rt-tokio"] }
 aws-smithy-types = "1.3"
+aws-smithy-runtime = { version = "1", features = ["tls-rustls", "client"] }
 aws-smithy-runtime-api = "1.9"
 
 # Azure SDK

@@ -27,8 +27,8 @@ hex = "0.4"
 lru = "0.16"
 
 # AWS S3
-aws-sdk-s3 = { version = "1.125", optional = true }
-aws-config = { version = "1.8", optional = true }
+aws-sdk-s3 = { version = "1.125", optional = true, default-features = false, features = ["rustls", "rt-tokio"] }
+aws-config = { version = "1.8", optional = true, default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }
 
 # Azure Blob Storage
 azure_storage = { version = "0.21", optional = true }
