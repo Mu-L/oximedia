@@ -19,8 +19,10 @@ bitflags.workspace = true
 async-trait.workspace = true
 nom.workspace = true
 md-5 = "0.10"
-tokio = { workspace = true, features = ["io-util", "sync"] }
 thiserror.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["io-util", "sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

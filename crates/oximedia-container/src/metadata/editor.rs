@@ -3,19 +3,29 @@
 //! Provides a convenient interface for reading and modifying metadata
 //! in media files.
 
+use crate::ContainerFormat;
+
+#[cfg(not(target_arch = "wasm32"))]
 use oximedia_core::OxiResult;
+#[cfg(not(target_arch = "wasm32"))]
 use oximedia_io::FileSource;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 
+#[cfg(not(target_arch = "wasm32"))]
 use super::reader::{detect_format, FlacMetadataReader, MatroskaMetadataReader, MetadataReader};
+#[cfg(not(target_arch = "wasm32"))]
 use super::tags::{StandardTag, TagMap, TagValue};
+#[cfg(not(target_arch = "wasm32"))]
 use super::util::MediaSourceExt;
+#[cfg(not(target_arch = "wasm32"))]
 use super::writer::{
     FlacMetadataWriter, MatroskaMetadataWriter, MetadataWriter, OggMetadataWriter,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use crate::demux::Demuxer;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::demux::MatroskaDemuxer;
-use crate::ContainerFormat;
 
 /// Metadata format detection result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,6 +51,7 @@ impl From<ContainerFormat> for MetadataFormat {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// A metadata editor for media files.
 ///
 /// Provides high-level operations for reading and writing metadata tags.
@@ -76,6 +87,7 @@ pub struct MetadataEditor {
     modified: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl MetadataEditor {
     /// Opens a media file for metadata editing.
     ///
@@ -264,6 +276,7 @@ impl MetadataEditor {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Reads metadata from a file without creating an editor.
 ///
 /// This is a convenience function for read-only metadata access.
@@ -276,6 +289,7 @@ pub async fn read_metadata(path: impl AsRef<Path>) -> OxiResult<TagMap> {
     Ok(editor.tags)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Writes metadata to a file.
 ///
 /// This is a convenience function for updating metadata without
@@ -291,7 +305,7 @@ pub async fn write_metadata(path: impl AsRef<Path>, tags: &TagMap) -> OxiResult<
     editor.save().await
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

@@ -1,6 +1,7 @@
 //! Monitoring and progress tracking
 
 pub mod progress;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod reporter;
 pub mod stats;
 

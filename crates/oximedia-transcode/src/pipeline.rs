@@ -445,9 +445,18 @@ impl Pipeline {
         // Ensure output directory exists.
         if let Some(parent) = output_path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| TranscodeError::IoError(e.to_string()))?;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| TranscodeError::IoError(e.to_string()))?;
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    return Err(TranscodeError::IoError(
+                        "Filesystem operations not supported on wasm32".to_string(),
+                    ));
+                }
             }
         }
 
@@ -610,7 +619,16 @@ impl Pipeline {
     async fn verify_output(&self) -> Result<TranscodeOutput> {
         let output_path = &self.config.output;
 
+        #[cfg(not(target_arch = "wasm32"))]
         let metadata = tokio::fs::metadata(output_path).await.map_err(|e| {
+            TranscodeError::IoError(format!(
+                "Output file '{}' not found or unreadable: {}",
+                output_path.display(),
+                e
+            ))
+        })?;
+        #[cfg(target_arch = "wasm32")]
+        let metadata = std::fs::metadata(output_path).map_err(|e| {
             TranscodeError::IoError(format!(
                 "Output file '{}' not found or unreadable: {}",
                 output_path.display(),

@@ -7,6 +7,7 @@ use oximedia_codec::VideoFrame;
 use oximedia_core::{PixelFormat, Rational, SampleFormat, Timestamp};
 use std::collections::VecDeque;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
 
 use crate::clip::Clip;
@@ -350,6 +351,7 @@ impl FrameCache {
 }
 
 /// Background renderer for non-blocking rendering.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct BackgroundRenderer {
     /// Timeline to render.
     timeline: Arc<Timeline>,
@@ -359,6 +361,7 @@ pub struct BackgroundRenderer {
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl BackgroundRenderer {
     /// Create a new background renderer.
     #[must_use]

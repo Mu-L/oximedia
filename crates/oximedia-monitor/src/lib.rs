@@ -97,23 +97,30 @@ pub mod system_metrics;
 pub mod trace_span;
 pub mod uptime_tracker;
 
-pub use alert::{Alert, AlertManager, AlertRule, AlertSeverity};
+pub use alert::{Alert, AlertRule, AlertSeverity};
+#[cfg(not(target_arch = "wasm32"))]
+pub use alert::AlertManager;
 pub use config::{AlertConfig, ApiConfig, MetricsConfig, MonitorConfig, StorageConfig};
 pub use error::{MonitorError, MonitorResult};
 pub use metrics::{
-    ApplicationMetrics, EncodingMetrics, JobMetrics, MetricsCollector, QualityMetrics,
-    SystemMetrics, WorkerMetrics, WorkerStatus,
+    ApplicationMetrics, EncodingMetrics, JobMetrics, QualityMetrics,
+    WorkerMetrics, WorkerStatus,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use metrics::{MetricsCollector, SystemMetrics};
 pub use simple::{
     CodecMetrics, Comparison, FiredAlert, HealthCheck, HealthCheckAggregator, HealthStatus,
     NotificationAction, SimpleAlertManager, SimpleAlertRule, SimpleMetricsCollector,
     SimpleMetricsSnapshot,
 };
-pub use storage::{QueryEngine, RingBuffer, SqliteStorage, TimeRange, TimeSeriesQuery};
+pub use storage::RingBuffer;
+#[cfg(not(target_arch = "wasm32"))]
+pub use storage::{QueryEngine, SqliteStorage, TimeRange, TimeSeriesQuery};
 
 use std::sync::Arc;
 
 /// Main monitoring system.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct OximediaMonitor {
     config: MonitorConfig,
     metrics_collector: Arc<MetricsCollector>,
@@ -122,6 +129,7 @@ pub struct OximediaMonitor {
     alert_manager: Option<Arc<AlertManager>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl OximediaMonitor {
     /// Create a new monitoring system.
     ///

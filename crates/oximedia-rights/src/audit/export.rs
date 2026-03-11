@@ -2,6 +2,7 @@
 
 use crate::{audit::AuditEntry, database::RightsDatabase, Result};
 use chrono::{DateTime, Utc};
+#[cfg(not(target_arch = "wasm32"))]
 use sqlx::Row;
 
 /// Audit exporter

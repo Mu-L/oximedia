@@ -1,8 +1,11 @@
 //! Expiration alerts
 
-use crate::{database::RightsDatabase, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::database::RightsDatabase;
+use crate::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -78,6 +81,7 @@ impl ExpirationAlert {
         self.notification_sent = true;
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save alert to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
         sqlx::query(
@@ -104,6 +108,7 @@ impl ExpirationAlert {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Load alert from database by ID
     pub async fn load(db: &RightsDatabase, id: &str) -> Result<Option<Self>> {
         let row = sqlx::query(
@@ -139,6 +144,7 @@ impl ExpirationAlert {
         Ok(Some(alert))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Get pending alerts (not yet sent and alert date has passed)
     pub async fn get_pending_alerts(db: &RightsDatabase) -> Result<Vec<Self>> {
         let now = Utc::now();
@@ -175,6 +181,7 @@ impl ExpirationAlert {
             .collect()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Get all alerts for a grant
     pub async fn list_for_grant(db: &RightsDatabase, grant_id: &str) -> Result<Vec<Self>> {
         let rows = sqlx::query(
@@ -208,6 +215,7 @@ impl ExpirationAlert {
             .collect()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Delete alert from database
     pub async fn delete(db: &RightsDatabase, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM expiration_alerts WHERE id = ?")

@@ -109,9 +109,14 @@ impl BatchProcessor {
         info!("Starting batch processing of {} jobs", self.jobs.len());
         let start_time = std::time::Instant::now();
 
+        #[cfg(not(target_arch = "wasm32"))]
         if self.parallel {
             self.process_parallel().await?;
         } else {
+            self.process_sequential().await?;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
             self.process_sequential().await?;
         }
 
@@ -136,6 +141,7 @@ impl BatchProcessor {
     }
 
     /// Process jobs in parallel.
+    #[cfg(not(target_arch = "wasm32"))]
     async fn process_parallel(&mut self) -> ConformResult<()> {
         // Process jobs in parallel using rayon
         let results: Vec<BatchResult> = self

@@ -129,9 +129,11 @@ pub use group::{
     ClipGroup, ClipLink, CompoundClip, CompoundClipManager, GroupManager, LinkManager, LinkType,
 };
 pub use marker::{InOutPoints, Marker, MarkerId, MarkerManager, MarkerType, Region, RegionManager};
+#[cfg(not(target_arch = "wasm32"))]
+pub use render::BackgroundRenderer;
 pub use render::{
-    BackgroundRenderer, ExportRenderer, ExportSettings, PreviewRenderer, RenderConfig, RenderFrame,
-    RenderQuality, TimelineRenderer,
+    ExportRenderer, ExportSettings, PreviewRenderer, RenderConfig, RenderFrame, RenderQuality,
+    TimelineRenderer,
 };
 pub use timeline::{PlaybackState, Timeline, TimelineConfig, Track, TrackType};
 pub use transition::{

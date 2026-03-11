@@ -137,6 +137,7 @@ mod hw_accel;
 mod multipass;
 mod normalization;
 mod parallel;
+#[cfg(not(target_arch = "wasm32"))]
 mod pipeline;
 mod progress;
 mod quality;
@@ -157,6 +158,7 @@ pub mod codec_profile;
 pub mod concat_transcode;
 pub mod crop_scale;
 pub mod encoding_log;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod examples;
 pub mod frame_stats;
 pub mod output_verify;
@@ -186,6 +188,7 @@ pub use builder::TranscodeBuilder;
 pub use multipass::{MultiPassConfig, MultiPassEncoder, MultiPassMode};
 pub use normalization::{AudioNormalizer, LoudnessStandard, LoudnessTarget, NormalizationConfig};
 pub use parallel::{ParallelConfig, ParallelEncodeBuilder, ParallelEncoder};
+#[cfg(not(target_arch = "wasm32"))]
 pub use pipeline::{Pipeline, PipelineStage, TranscodePipeline};
 pub use progress::{ProgressCallback, ProgressInfo, ProgressTracker};
 pub use quality::{QualityConfig, QualityMode, QualityPreset, RateControlMode, TuneMode};
@@ -512,33 +515,49 @@ impl Transcoder {
     /// - Input file is invalid or cannot be opened
     /// - Output configuration is invalid
     /// - Transcoding fails
+    /// - On wasm32 targets (filesystem-based transcoding is not supported)
     pub async fn transcode(self) -> Result<TranscodeOutput> {
-        // Validate configuration
-        let input = self
-            .config
-            .input
-            .ok_or_else(|| TranscodeError::InvalidInput("No input file specified".to_string()))?;
-        let output = self
-            .config
-            .output
-            .ok_or_else(|| TranscodeError::InvalidOutput("No output file specified".to_string()))?;
-
-        // Create a basic pipeline and execute
-        let mut pipeline = TranscodePipeline::builder()
-            .input(&input)
-            .output(&output)
-            .build()?;
-
-        // Apply configuration to pipeline
-        if let Some(codec) = &self.config.video_codec {
-            pipeline.set_video_codec(codec);
-        }
-        if let Some(codec) = &self.config.audio_codec {
-            pipeline.set_audio_codec(codec);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = self;
+            return Err(TranscodeError::Unsupported(
+                "Filesystem-based transcoding is not supported on wasm32".to_string(),
+            ));
         }
 
-        // Execute pipeline
-        pipeline.execute().await
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Validate configuration
+            let input = self
+                .config
+                .input
+                .ok_or_else(|| {
+                    TranscodeError::InvalidInput("No input file specified".to_string())
+                })?;
+            let output = self
+                .config
+                .output
+                .ok_or_else(|| {
+                    TranscodeError::InvalidOutput("No output file specified".to_string())
+                })?;
+
+            // Create a basic pipeline and execute
+            let mut pipeline = TranscodePipeline::builder()
+                .input(&input)
+                .output(&output)
+                .build()?;
+
+            // Apply configuration to pipeline
+            if let Some(codec) = &self.config.video_codec {
+                pipeline.set_video_codec(codec);
+            }
+            if let Some(codec) = &self.config.audio_codec {
+                pipeline.set_audio_codec(codec);
+            }
+
+            // Execute pipeline
+            pipeline.execute().await
+        }
     }
 }
 

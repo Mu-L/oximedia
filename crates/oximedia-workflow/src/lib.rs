@@ -43,22 +43,28 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod api;
 pub mod approval_gate;
 pub mod audit_log;
 pub mod builder;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
 pub mod cost_tracking;
 pub mod dag;
 pub mod error;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod executor;
 pub mod monitoring;
 pub mod notification_system;
 pub mod patterns;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod persistence;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod queue;
 pub mod resource_pool;
 pub mod retry_policy;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod scheduler;
 pub mod sla;
 pub mod sla_tracking;
@@ -74,6 +80,7 @@ pub mod templates;
 pub mod triggers;
 pub mod utils;
 pub mod validation;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod websocket;
 pub mod workflow;
 pub mod workflow_audit;
@@ -88,19 +95,24 @@ pub mod workflow_version;
 pub use builder::{
     QcTaskBuilder, TaskBuilder, TranscodeTaskBuilder, TransferTaskBuilder, WorkflowBuilder,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use cli::Cli;
 pub use dag::{
     audio_normalize, ingest_transcode, subtitle_burn, DagError, DagRunStatus, DagWorkflowEngine,
     NodeId, NodeStatus, WorkflowDag, WorkflowEdge, WorkflowNode, WorkflowTemplate,
 };
 pub use error::{Result, WorkflowError};
+#[cfg(not(target_arch = "wasm32"))]
 pub use executor::{
     parse_condition, DefaultTaskExecutor, ExecutionContext, TaskExecutor, WorkflowExecutor,
 };
 pub use monitoring::{MonitoringService, SystemStatistics, TaskMetrics, WorkflowMetrics};
 pub use patterns::*;
+#[cfg(not(target_arch = "wasm32"))]
 pub use persistence::PersistenceManager;
+#[cfg(not(target_arch = "wasm32"))]
 pub use queue::{QueueStatistics, TaskQueue};
+#[cfg(not(target_arch = "wasm32"))]
 pub use scheduler::{FileWatcher, ScheduledWorkflow, Trigger, WorkflowScheduler};
 pub use task::{
     AnalysisType, HttpMethod, NotificationChannel, RetryPolicy, Task, TaskId, TaskPriority,
@@ -116,10 +128,12 @@ pub use validation::{
     ComplexityAnalyzer, ComplexityLevel, ComplexityMetrics, TaskValidator, ValidationReport,
     ValidationRule, WorkflowValidator,
 };
+#[cfg(not(target_arch = "wasm32"))]
 pub use websocket::{WebSocketManager, WebSocketState, WorkflowEvent};
 pub use workflow::{Edge, Workflow, WorkflowConfig, WorkflowId, WorkflowState};
 
 /// Workflow engine - main entry point for the orchestration system.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct WorkflowEngine {
     persistence: std::sync::Arc<PersistenceManager>,
     scheduler: std::sync::Arc<WorkflowScheduler>,
@@ -127,6 +141,7 @@ pub struct WorkflowEngine {
     executor: std::sync::Arc<dyn TaskExecutor>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl WorkflowEngine {
     /// Create a new workflow engine with the specified database path.
     ///

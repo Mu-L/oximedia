@@ -14,8 +14,10 @@ categories = ["multimedia", "network-programming"]
 workspace = true
 
 [dependencies]
-tokio = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

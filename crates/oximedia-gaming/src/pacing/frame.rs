@@ -70,6 +70,7 @@ impl FramePacer {
     /// # Errors
     ///
     /// Returns error if timing calculation fails.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn wait_for_next_frame(&mut self) -> GamingResult<FrameTimingInfo> {
         let now = Instant::now();
         self.frame_count += 1;
@@ -96,6 +97,38 @@ impl FramePacer {
         Ok(FrameTimingInfo {
             frame_number: self.frame_count,
             actual_time: last_frame_instant.duration_since(now),
+            target_time: self.target_frame_time,
+            timing_error,
+            should_drop: timing_error > self.target_frame_time,
+        })
+    }
+
+    /// Get next frame timing info without async waiting (for WASM).
+    ///
+    /// # Errors
+    ///
+    /// Returns error if timing calculation fails.
+    #[cfg(target_arch = "wasm32")]
+    pub fn next_frame_timing(&mut self) -> GamingResult<FrameTimingInfo> {
+        let now = Instant::now();
+        self.frame_count += 1;
+
+        let timing_error = if let Some(last_time) = self.last_frame_time {
+            let elapsed = now.duration_since(last_time);
+            if elapsed >= self.target_frame_time {
+                elapsed.saturating_sub(self.target_frame_time)
+            } else {
+                Duration::ZERO
+            }
+        } else {
+            Duration::ZERO
+        };
+
+        self.last_frame_time = Some(now);
+
+        Ok(FrameTimingInfo {
+            frame_number: self.frame_count,
+            actual_time: Duration::ZERO,
             target_time: self.target_frame_time,
             timing_error,
             should_drop: timing_error > self.target_frame_time,

@@ -5,12 +5,17 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(not(target_arch = "wasm32"))]
 use async_trait::async_trait;
+#[cfg(not(target_arch = "wasm32"))]
 use oximedia_core::OxiResult;
 use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::time::Instant;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::{Muxer, MuxerConfig, Packet, StreamInfo};
 
 /// Configuration for streaming muxer.
@@ -79,6 +84,7 @@ impl StreamingMuxerConfig {
 }
 
 /// Wrapper that adds streaming capabilities to any muxer.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct StreamingMuxer<M: Muxer> {
     inner: M,
     #[allow(dead_code)]
@@ -89,6 +95,7 @@ pub struct StreamingMuxer<M: Muxer> {
     last_packet_time: Option<Instant>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<M: Muxer> StreamingMuxer<M> {
     /// Creates a new streaming muxer with default configuration.
     pub const fn new(inner: M) -> Self {
@@ -143,6 +150,7 @@ impl<M: Muxer> StreamingMuxer<M> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl<M: Muxer> Muxer for StreamingMuxer<M> {
     fn add_stream(&mut self, info: StreamInfo) -> OxiResult<usize> {
@@ -176,10 +184,12 @@ impl<M: Muxer> Muxer for StreamingMuxer<M> {
 }
 
 /// Packet sender for background muxing.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct PacketSender {
     tx: mpsc::UnboundedSender<Packet>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PacketSender {
     /// Creates a new packet sender.
     const fn new(tx: mpsc::UnboundedSender<Packet>) -> Self {
@@ -233,6 +243,7 @@ impl PacketSender {
 ///     sender.send(packet)?;
 /// }
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn spawn_muxer<M: Muxer + Send + 'static>(mut muxer: M) -> OxiResult<PacketSender> {
     // Write header first
     muxer.write_header().await?;

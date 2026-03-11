@@ -80,6 +80,7 @@ pub mod multicam;
 pub mod nested;
 pub mod nested_compound;
 pub mod nested_timeline;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod playback;
 pub mod razor_tool;
 pub mod render;

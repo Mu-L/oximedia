@@ -3,6 +3,7 @@
 use crate::{database::RightsDatabase, license::LicenseTerms, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -119,6 +120,7 @@ impl LicenseAgreement {
         self.updated_at = Utc::now();
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save agreement to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
         let terms_json = serde_json::to_string(&self.terms)
@@ -152,6 +154,7 @@ impl LicenseAgreement {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Load agreement from database by ID
     pub async fn load(db: &RightsDatabase, id: &str) -> Result<Option<Self>> {
         let row = sqlx::query(
@@ -203,6 +206,7 @@ impl LicenseAgreement {
         Ok(Some(agreement))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// List agreements for a grant
     pub async fn list_for_grant(db: &RightsDatabase, grant_id: &str) -> Result<Vec<Self>> {
         let rows = sqlx::query(
@@ -252,6 +256,7 @@ impl LicenseAgreement {
             .collect()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Delete agreement from database
     pub async fn delete(db: &RightsDatabase, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM license_agreements WHERE id = ?")

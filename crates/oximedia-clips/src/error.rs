@@ -9,6 +9,7 @@ pub type ClipResult<T> = Result<T, ClipError>;
 #[derive(Debug, thiserror::Error)]
 pub enum ClipError {
     /// Database error.
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 

@@ -87,7 +87,7 @@ pub mod color_blend;
 pub mod mask_layer;
 pub mod path_builder;
 
-#[cfg(feature = "server")]
+#[cfg(all(feature = "server", not(target_arch = "wasm32")))]
 pub mod control;
 
 #[cfg(feature = "gpu")]

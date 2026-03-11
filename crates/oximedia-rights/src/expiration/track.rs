@@ -2,6 +2,7 @@
 
 use crate::{database::RightsDatabase, rights::RightsGrant, Result};
 use chrono::{DateTime, Duration, Utc};
+#[cfg(not(target_arch = "wasm32"))]
 use sqlx::Row;
 
 /// Expiration tracker

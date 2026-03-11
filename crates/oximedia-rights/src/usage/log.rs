@@ -3,6 +3,7 @@
 use crate::{database::RightsDatabase, rights::UsageType, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use sqlx::Row;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -74,6 +75,7 @@ impl UsageLog {
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save log to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
         let metadata_json = serde_json::to_string(&self.metadata)
@@ -101,6 +103,7 @@ impl UsageLog {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Load log from database by ID
     pub async fn load(db: &RightsDatabase, id: &str) -> Result<Option<Self>> {
         let row = sqlx::query(
@@ -145,6 +148,7 @@ impl UsageLog {
         .transpose()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// List logs for an asset
     pub async fn list_for_asset(db: &RightsDatabase, asset_id: &str) -> Result<Vec<Self>> {
         let rows = sqlx::query(

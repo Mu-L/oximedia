@@ -25,4 +25,6 @@ md-5 = "0.10"
 hex = "0.4"
 
 [dev-dependencies]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio.workspace = true

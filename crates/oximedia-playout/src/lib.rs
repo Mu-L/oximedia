@@ -30,28 +30,39 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use thiserror::Error;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::{mpsc, RwLock};
 
 /// SCTE-35 ad insertion and splice point management.
 pub mod ad_insertion;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod api;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod asrun;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod automation;
 pub mod branding;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod bxf;
 pub mod catchup;
 pub mod cg;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod channel;
 /// Channel format and configuration registry (SD/HD/UHD, frame rate, audio).
 pub mod channel_config;
 pub mod clip_store;
 pub mod compliance_ingest;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod content;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod device;
 pub mod event_log;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod failover;
 /// Frame ring buffer with pre-roll gating and overflow/underrun detection.
 pub mod frame_buffer;
@@ -63,8 +74,10 @@ pub mod ingest;
 /// Signal routing from programme sources to SDI/IP/RTMP/file targets.
 pub mod media_router_playout;
 pub mod monitoring;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod output;
 pub mod output_router;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod playback;
 pub mod playlist;
 /// Playlist ingest session: format detection, item validation, clip trimming.
@@ -84,7 +97,6 @@ pub mod secondary_events;
 pub mod signal_chain;
 pub mod tally_system;
 /// Timecode burn-in overlay for monitoring outputs.
-pub mod timecode_overlay;
 
 /// Result type for playout operations
 pub type Result<T> = std::result::Result<T, PlayoutError>;
@@ -307,6 +319,7 @@ pub enum PlayoutState {
 }
 
 /// Internal server state
+#[cfg(not(target_arch = "wasm32"))]
 struct ServerState {
     state: PlayoutState,
     scheduler: Option<Arc<scheduler::Scheduler>>,
@@ -317,6 +330,7 @@ struct ServerState {
 }
 
 /// Professional broadcast playout server
+#[cfg(not(target_arch = "wasm32"))]
 pub struct PlayoutServer {
     config: PlayoutConfig,
     state: Arc<RwLock<ServerState>>,
@@ -327,6 +341,7 @@ pub struct PlayoutServer {
 }
 
 /// Control commands for the playout server
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum ControlCommand {
@@ -339,6 +354,7 @@ enum ControlCommand {
     Shutdown,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PlayoutServer {
     /// Create a new playout server with the given configuration
     pub async fn new(config: PlayoutConfig) -> Result<Self> {

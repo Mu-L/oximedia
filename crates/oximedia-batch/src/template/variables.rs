@@ -25,6 +25,7 @@ impl PresetVariables {
 
     /// Load system variables
     pub fn load_system(context: &mut TemplateContext) {
+        #[cfg(not(target_arch = "wasm32"))]
         if let Ok(hostname) = hostname::get() {
             context.set(
                 "hostname".to_string(),

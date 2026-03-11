@@ -22,6 +22,7 @@ pub mod clearance;
 pub mod clearance_workflow;
 pub mod compliance;
 pub mod contract;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod database;
 pub mod distribution_rights;
 pub mod distribution_window;
@@ -64,6 +65,7 @@ pub type Result<T> = std::result::Result<T, RightsError>;
 #[derive(Error, Debug)]
 pub enum RightsError {
     /// Database error
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
@@ -121,10 +123,12 @@ pub enum RightsError {
 }
 
 /// Main rights management system
+#[cfg(not(target_arch = "wasm32"))]
 pub struct RightsManager {
     db: database::RightsDatabase,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl RightsManager {
     /// Create a new rights manager with the specified database path
     pub async fn new(database_path: &str) -> Result<Self> {

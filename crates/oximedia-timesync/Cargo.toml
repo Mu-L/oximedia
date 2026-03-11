@@ -15,7 +15,6 @@ workspace = true
 [dependencies]
 oximedia-core.workspace = true
 oximedia-timecode.workspace = true
-tokio.workspace = true
 thiserror.workspace = true
 bytes.workspace = true
 bitflags.workspace = true
@@ -24,14 +23,15 @@ serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 
-# For shared memory IPC
-memmap2.workspace = true
-
-# For OS clock adjustment
-libc.workspace = true
-
 # For CRC calculation in PTP
 crc = "3"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio.workspace = true
+# For shared memory IPC
+memmap2.workspace = true
+# For OS clock adjustment
+libc.workspace = true
 
 [dev-dependencies]
 tokio-test = "0.4"

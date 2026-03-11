@@ -56,4 +56,6 @@ pub mod write_journal;
 
 // Re-export commonly used types
 pub use bits::BitReader;
-pub use source::{FileSource, MediaSource, MemorySource};
+#[cfg(not(target_arch = "wasm32"))]
+pub use source::FileSource;
+pub use source::{MediaSource, MemorySource};

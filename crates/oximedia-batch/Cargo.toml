@@ -20,14 +20,10 @@ oximedia-farm = { workspace = true }
 oximedia-monitor = { workspace = true }
 oximedia-metadata = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-rusqlite = { workspace = true }
-r2d2 = { workspace = true }
-r2d2_sqlite = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
 tracing = { workspace = true }
@@ -36,12 +32,6 @@ async-trait = { workspace = true }
 clap = { workspace = true }
 regex = "1.12"
 glob = "0.3"
-notify = "7.0"
-mlua = { version = "0.9", features = ["lua54", "vendored", "async", "serialize"] }
-axum = "0.8"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
-hyper = { workspace = true }
 prometheus = { workspace = true }
 flate2 = { workspace = true }
 tar = "0.4"
@@ -50,7 +40,19 @@ walkdir = "2.5"
 sha2 = { workspace = true }
 hex = "0.4"
 num_cpus = "1.17"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 hostname = "0.4"
+tokio = { workspace = true }
+rusqlite = { workspace = true }
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
+notify = "7.0"
+mlua = { version = "0.9", features = ["lua54", "vendored", "async", "serialize"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+hyper = { workspace = true }
 reqwest = { workspace = true }
 
 [dev-dependencies]

@@ -602,6 +602,7 @@ mod tests {
     // Packager integration tests (writes to /tmp)
     // -----------------------------------------------------------------------
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn test_package_hls_writes_manifest() {
         let dir = std::path::PathBuf::from("/tmp/oximedia_test_hls_package");
@@ -623,6 +624,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn test_package_abr_hls_writes_master_playlist() {
         let dir = std::path::PathBuf::from("/tmp/oximedia_test_hls_abr");
@@ -646,6 +648,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn test_package_dash_writes_mpd() {
         let dir = std::path::PathBuf::from("/tmp/oximedia_test_dash_package");
@@ -667,6 +670,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn test_package_abr_dash_writes_mpd() {
         let dir = std::path::PathBuf::from("/tmp/oximedia_test_dash_abr");

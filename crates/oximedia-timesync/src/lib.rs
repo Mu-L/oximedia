@@ -118,6 +118,7 @@ pub mod clock_steering;
 pub mod dante_clock;
 pub mod drift_monitor;
 pub mod error;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod ffi;
 pub mod frequency_estimator;
 pub mod frequency_sync;
@@ -151,7 +152,9 @@ pub use ptp::{
     ClockIdentity, CommunicationMode, DelayMechanism, Domain, PortIdentity, PtpTimestamp,
 };
 
-pub use ntp::{NtpClient, NtpPacket, NtpTimestamp, ServerPool, Stratum};
+#[cfg(not(target_arch = "wasm32"))]
+pub use ntp::NtpClient;
+pub use ntp::{NtpPacket, NtpTimestamp, ServerPool, Stratum};
 
 pub use clock::{
     discipline::ClockDiscipline, drift::DriftEstimator, holdover::HoldoverManager,

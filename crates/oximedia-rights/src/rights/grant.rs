@@ -1,7 +1,8 @@
 //! Rights grants management
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::database::RightsDatabase;
 use crate::{
-    database::RightsDatabase,
     license::LicenseType,
     rights::{UsageRestriction, UsageType},
     territory::TerritoryRestriction,
@@ -9,6 +10,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -131,6 +133,7 @@ impl RightsGrant {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save grant to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
         let territory_json = self
@@ -178,6 +181,7 @@ impl RightsGrant {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Load grant from database by ID
     pub async fn load(db: &RightsDatabase, id: &str) -> Result<Option<Self>> {
         let row = sqlx::query(
@@ -233,6 +237,7 @@ impl RightsGrant {
         .transpose()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// List all grants for an asset
     pub async fn list_for_asset(db: &RightsDatabase, asset_id: &str) -> Result<Vec<Self>> {
         let rows = sqlx::query(
@@ -293,6 +298,7 @@ impl RightsGrant {
             .collect()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Delete grant from database
     pub async fn delete(db: &RightsDatabase, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM rights_grants WHERE id = ?")

@@ -2,7 +2,7 @@
 
 [target.wasm32-unknown-unknown]
 # Use lld for faster linking
-rustflags = ['-C', 'link-arg=-s']
+rustflags = ['-C', 'link-arg=-s', '--cfg', 'getrandom_backend="wasm_js"']
 
 [build]
 # Set default target for this crate

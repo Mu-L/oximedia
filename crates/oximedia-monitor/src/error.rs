@@ -21,8 +21,14 @@ pub enum MonitorError {
     Storage(String),
 
     /// Database error.
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
+
+    /// Database error (wasm32 variant).
+    #[cfg(target_arch = "wasm32")]
+    #[error("Database error: {0}")]
+    Database(String),
 
     /// Alert error.
     #[error("Alert error: {0}")]
@@ -49,8 +55,14 @@ pub enum MonitorError {
     Serialization(#[from] serde_json::Error),
 
     /// HTTP error.
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
+
+    /// HTTP error (wasm32 variant).
+    #[cfg(target_arch = "wasm32")]
+    #[error("HTTP error: {0}")]
+    Http(String),
 
     /// Email error.
     #[error("Email error: {0}")]

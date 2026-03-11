@@ -1,6 +1,8 @@
 //! Royalty payment tracking
 
-use crate::{database::RightsDatabase, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::database::RightsDatabase;
+use crate::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -91,6 +93,7 @@ impl RoyaltyPayment {
         self.payment_date = Some(Utc::now());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
         sqlx::query(

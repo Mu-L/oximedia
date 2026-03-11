@@ -405,9 +405,9 @@ pub fn wasm_check_conform(properties_json: &str, spec: &str) -> Result<String, J
     Ok(checks_to_json(spec, &checks))
 }
 
-/// List all built-in delivery specs as a JSON array.
+/// List all built-in delivery conformance specs as a JSON array.
 #[wasm_bindgen]
-pub fn wasm_list_delivery_specs() -> String {
+pub fn wasm_list_conform_specs() -> String {
     let specs = builtin_specs();
     let items: Vec<String> = specs.iter().map(|s| spec_to_json(s)).collect();
     format!("[{}]", items.join(","))
@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn test_list_delivery_specs() {
-        let json = wasm_list_delivery_specs();
+        let json = wasm_list_conform_specs();
         assert!(json.starts_with('['));
         assert!(json.contains("broadcast_hd"));
         assert!(json.contains("netflix"));

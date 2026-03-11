@@ -1,8 +1,9 @@
 //! Music clearance tracking
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::database::RightsDatabase;
 use crate::{
     clearance::{ClearanceStatus, ClearanceType},
-    database::RightsDatabase,
     Result,
 };
 use chrono::{DateTime, Utc};
@@ -61,6 +62,7 @@ impl MusicClearance {
         self.approved_date = Some(Utc::now());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
         let metadata = serde_json::json!({

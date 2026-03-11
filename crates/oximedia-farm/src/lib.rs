@@ -54,10 +54,13 @@
 
 pub mod capacity_planner;
 pub mod checkpoint;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod communication;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod coordinator;
 pub mod dependency;
 pub mod farm_config;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod fault_tolerance;
 pub mod health;
 pub mod job_queue;
@@ -65,6 +68,7 @@ pub mod job_template;
 pub mod metrics;
 pub mod node_affinity;
 pub mod node_monitor;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod persistence;
 pub mod priority_queue;
 pub mod render_stats;
@@ -72,6 +76,7 @@ pub mod resource_manager;
 pub mod scheduler;
 pub mod task_allocator;
 pub mod task_preemption;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod worker;
 pub mod worker_pool;
 
@@ -81,6 +86,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// Re-export protobuf generated code
+#[cfg(not(target_arch = "wasm32"))]
 pub mod pb {
     tonic::include_proto!("oximedia.farm");
 }
@@ -103,11 +109,23 @@ pub enum FarmError {
     #[error("Task error: {0}")]
     Task(String),
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Network error: {0}")]
     Network(#[from] tonic::transport::Error),
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("gRPC status error: {0}")]
     Status(#[from] tonic::Status),
+
+    /// Network error (wasm32 variant)
+    #[cfg(target_arch = "wasm32")]
+    #[error("Network error: {0}")]
+    Network(String),
+
+    /// gRPC status error (wasm32 variant)
+    #[cfg(target_arch = "wasm32")]
+    #[error("gRPC status error: {0}")]
+    Status(String),
 
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -115,8 +133,14 @@ pub enum FarmError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
+
+    /// Database error (wasm32 variant)
+    #[cfg(target_arch = "wasm32")]
+    #[error("Database error: {0}")]
+    Database(String),
 
     #[error("Scheduling error: {0}")]
     Scheduling(String),
@@ -545,7 +569,9 @@ impl Default for WorkerConfig {
 }
 
 // Re-export main types
+#[cfg(not(target_arch = "wasm32"))]
 pub use coordinator::Coordinator;
+#[cfg(not(target_arch = "wasm32"))]
 pub use worker::Worker;
 
 #[cfg(test)]

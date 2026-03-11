@@ -18,7 +18,6 @@ oximedia-cv = { workspace = true }
 oximedia-scene = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-tokio = { workspace = true }
 rayon = { workspace = true }
 ndarray = { workspace = true }
 

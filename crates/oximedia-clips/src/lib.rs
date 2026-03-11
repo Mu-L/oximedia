@@ -60,9 +60,11 @@ pub mod clip_relations;
 pub mod clip_search;
 pub mod clip_tag;
 pub mod clip_timeline;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod database;
 pub mod export;
 pub mod group;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod import;
 pub mod logging;
 pub mod marker;
@@ -79,12 +81,14 @@ pub mod trim;
 pub mod version;
 
 mod error;
+#[cfg(not(target_arch = "wasm32"))]
 mod manager;
 
 pub use clip::{Clip, ClipId, ClipMetadata, SubClip};
 pub use error::{ClipError, ClipResult};
 pub use group::{Bin, BinId, Collection, CollectionId, Folder, FolderId, SmartCollection};
 pub use logging::{Favorite, Keyword, Rating};
+#[cfg(not(target_arch = "wasm32"))]
 pub use manager::ClipManager;
 pub use marker::{Marker, MarkerId, MarkerType};
 pub use note::{Annotation, Note, NoteId};

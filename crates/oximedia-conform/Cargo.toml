@@ -27,9 +27,11 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+rayon = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, features = ["full"] }
 async-trait = { workspace = true }
-rayon = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
 

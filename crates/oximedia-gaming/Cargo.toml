@@ -18,6 +18,8 @@ oximedia-codec = { workspace = true, default-features = true }
 oximedia-audio = { workspace = true }
 oximedia-graph = { workspace = true }
 thiserror = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 
 [dev-dependencies]

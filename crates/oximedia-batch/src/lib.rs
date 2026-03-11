@@ -11,17 +11,21 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod api;
 pub mod batch_report;
 pub mod batch_runner;
 pub mod batch_schedule;
 pub mod checkpointing;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod cli;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod database;
 pub mod dep_graph;
 pub mod dependency;
 pub mod error;
 pub mod examples;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod execution;
 pub mod job;
 pub mod job_archive;
@@ -32,36 +36,45 @@ pub mod operations;
 pub mod output_collector;
 pub mod pipeline_validator;
 pub mod presets;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod processor;
 pub mod progress_tracker;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod queue;
 pub mod rate_limiter;
 pub mod resource_estimator;
 pub mod retry_policy;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod script;
 pub mod task_group;
 pub mod template;
 pub mod throttle;
 pub mod types;
 pub mod utils;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod watch;
 
 pub use error::{BatchError, Result};
 pub use job::{BatchJob, BatchOperation, InputSpec, OutputSpec};
 pub use types::{JobId, JobState, Priority, RetryPolicy};
 
+#[cfg(not(target_arch = "wasm32"))]
 use database::Database;
+#[cfg(not(target_arch = "wasm32"))]
 use execution::ExecutionEngine;
+#[cfg(not(target_arch = "wasm32"))]
 use queue::JobQueue;
 use std::sync::Arc;
 
 /// Main batch processing engine
+#[cfg(not(target_arch = "wasm32"))]
 pub struct BatchEngine {
     queue: Arc<JobQueue>,
     engine: Arc<ExecutionEngine>,
     database: Arc<Database>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl BatchEngine {
     /// Create a new batch processing engine
     ///

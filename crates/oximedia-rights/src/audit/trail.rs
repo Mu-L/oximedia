@@ -1,8 +1,11 @@
 //! Audit trail logging
 
-use crate::{database::RightsDatabase, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::database::RightsDatabase;
+use crate::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use sqlx::Row;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -65,6 +68,7 @@ impl AuditEntry {
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
         let changes_json = serde_json::to_string(&self.changes)

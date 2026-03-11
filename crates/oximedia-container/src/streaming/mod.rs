@@ -8,10 +8,9 @@
 pub mod demux;
 pub mod mux;
 
-pub use demux::{
-    spawn_demuxer, PacketReceiver, ProgressiveBuffer, StreamingDemuxer, StreamingDemuxerConfig,
-    StreamingState,
-};
-pub use mux::{
-    spawn_muxer, LatencyMonitor, MuxingStats, PacketSender, StreamingMuxer, StreamingMuxerConfig,
-};
+#[cfg(not(target_arch = "wasm32"))]
+pub use demux::{spawn_demuxer, PacketReceiver};
+pub use demux::{ProgressiveBuffer, StreamingDemuxer, StreamingDemuxerConfig, StreamingState};
+#[cfg(not(target_arch = "wasm32"))]
+pub use mux::{spawn_muxer, PacketSender, StreamingMuxer};
+pub use mux::{LatencyMonitor, MuxingStats, StreamingMuxerConfig};

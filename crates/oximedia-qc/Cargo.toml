@@ -13,7 +13,7 @@ readme = "README.md"
 workspace = true
 
 [features]
-default = ["json", "xml", "database", "pdf"]
+default = ["json", "xml", "pdf"]
 json = ["dep:serde", "dep:serde_json"]
 xml = ["dep:quick-xml", "dep:serde"]
 database = ["dep:rusqlite"]

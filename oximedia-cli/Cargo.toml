@@ -64,7 +64,7 @@ oximedia-archive.workspace = true
 oximedia-watermark.workspace = true
 oximedia-image.workspace = true
 oximedia-imf.workspace = true
-oximedia-qc.workspace = true
+oximedia-qc = { workspace = true, features = ["database"] }
 oximedia-aaf.workspace = true
 oximedia-mixer.workspace = true
 oximedia-audiopost.workspace = true

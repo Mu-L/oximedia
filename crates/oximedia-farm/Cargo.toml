@@ -13,7 +13,6 @@ workspace = true
 
 [dependencies]
 # Core async runtime
-tokio = { workspace = true, features = ["full"] }
 async-trait.workspace = true
 
 # Error handling
@@ -21,18 +20,6 @@ thiserror.workspace = true
 
 # Logging and tracing
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
-
-# gRPC and serialization
-tonic = { workspace = true }
-tonic-prost = "0.14"
-prost = { workspace = true }
-prost-types = { workspace = true }
-
-# Database
-rusqlite = { workspace = true }
-r2d2 = { workspace = true }
-r2d2_sqlite = { workspace = true }
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
@@ -51,7 +38,6 @@ parking_lot = { workspace = true }
 # System information
 num_cpus = "1.17"
 hostname = "0.4"
-sysinfo = "0.36"
 
 # Network utilities
 bytes.workspace = true
@@ -65,11 +51,6 @@ rand.workspace = true
 # Configuration
 config = "0.15"
 
-# TLS support
-tokio-rustls = { workspace = true }
-rustls = { workspace = true }
-rustls-pemfile = "2.2.0"
-
 # Internal dependencies
 oximedia-core.workspace = true
 oximedia-codec = { workspace = true, default-features = true }
@@ -77,7 +58,22 @@ oximedia-io.workspace = true
 oximedia-transcode.workspace = true
 oximedia-qc.workspace = true
 
-[build-dependencies]
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tonic = { workspace = true }
+tonic-prost = "0.14"
+prost = { workspace = true }
+prost-types = { workspace = true }
+rusqlite = { workspace = true }
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
+sysinfo = "0.36"
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = "2.2.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.build-dependencies]
 tonic-build = "0.14"
 tonic-prost-build = "0.14"
 

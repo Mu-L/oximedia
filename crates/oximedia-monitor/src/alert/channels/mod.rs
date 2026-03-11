@@ -1,19 +1,29 @@
 //! Alert notification channels.
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod discord;
-#[cfg(feature = "email")]
+#[cfg(all(not(target_arch = "wasm32"), feature = "email"))]
 pub mod email;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod file;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod slack;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod sms;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod webhook;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use discord::DiscordChannel;
-#[cfg(feature = "email")]
+#[cfg(all(not(target_arch = "wasm32"), feature = "email"))]
 pub use email::EmailChannel;
+#[cfg(not(target_arch = "wasm32"))]
 pub use file::FileChannel;
+#[cfg(not(target_arch = "wasm32"))]
 pub use slack::SlackChannel;
+#[cfg(not(target_arch = "wasm32"))]
 pub use sms::SmsChannel;
+#[cfg(not(target_arch = "wasm32"))]
 pub use webhook::WebhookChannel;
 
 use crate::alert::Alert;

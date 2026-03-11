@@ -18,7 +18,13 @@ pub enum BatchError {
 
     /// Database error
     #[error("Database error: {0}")]
+    #[cfg(not(target_arch = "wasm32"))]
     DatabaseError(#[from] rusqlite::Error),
+
+    /// Database error (wasm32 variant)
+    #[error("Database error: {0}")]
+    #[cfg(target_arch = "wasm32")]
+    DatabaseError(String),
 
     /// I/O error
     #[error("I/O error: {0}")]
@@ -97,12 +103,14 @@ pub enum BatchError {
     IntegrationError(String),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<mlua::Error> for BatchError {
     fn from(err: mlua::Error) -> Self {
         Self::ScriptError(err.to_string())
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<notify::Error> for BatchError {
     fn from(err: notify::Error) -> Self {
         Self::WatchError(err.to_string())
@@ -121,6 +129,7 @@ impl From<glob::PatternError> for BatchError {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<r2d2::Error> for BatchError {
     fn from(err: r2d2::Error) -> Self {
         Self::FileOperationError(format!("Connection pool error: {err}"))

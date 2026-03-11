@@ -17,7 +17,7 @@ use wasm_bindgen::prelude::*;
 /// # Returns
 /// JSON object with video and audio codec recommendations.
 #[wasm_bindgen]
-pub fn wasm_recommend_codec(use_case: &str) -> Result<String, JsValue> {
+pub fn wasm_recommend_codec_for_use_case(use_case: &str) -> Result<String, JsValue> {
     let valid = ["streaming", "archival", "editing", "broadcast"];
     if !valid.contains(&use_case) {
         return Err(crate::utils::js_err(&format!(
@@ -48,7 +48,7 @@ pub fn wasm_recommend_codec(use_case: &str) -> Result<String, JsValue> {
 /// # Returns
 /// JSON object with recommended settings.
 #[wasm_bindgen]
-pub fn wasm_recommend_settings(codec: &str, target: &str) -> Result<String, JsValue> {
+pub fn wasm_recommend_encoding_settings(codec: &str, target: &str) -> Result<String, JsValue> {
     let valid_codecs = ["av1", "vp9", "vp8", "opus", "vorbis", "flac"];
     if !valid_codecs.contains(&codec) {
         return Err(crate::utils::js_err(&format!(
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn test_recommend_codec() {
-        let result = wasm_recommend_codec("streaming");
+        let result = wasm_recommend_codec_for_use_case("streaming");
         assert!(result.is_ok());
         let json = result.expect("should succeed");
         assert!(json.contains("AV1"));
@@ -155,13 +155,13 @@ mod tests {
 
     #[test]
     fn test_recommend_codec_invalid() {
-        let result = wasm_recommend_codec("gaming");
+        let result = wasm_recommend_codec_for_use_case("gaming");
         assert!(result.is_err());
     }
 
     #[test]
     fn test_recommend_settings() {
-        let result = wasm_recommend_settings("av1", "quality");
+        let result = wasm_recommend_encoding_settings("av1", "quality");
         assert!(result.is_ok());
         let json = result.expect("should succeed");
         assert!(json.contains("slow"));

@@ -34,6 +34,8 @@ bytemuck = { version = "1", features = ["derive"] }
 
 # Template and control
 tera = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, optional = true }
 axum = { version = "0.8", optional = true }
 

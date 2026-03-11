@@ -201,6 +201,7 @@ impl ParallelEncoder {
     /// pipeline builder for actual transcoding. The pipeline is
     /// executed on a per-thread tokio runtime so that async I/O
     /// works within the rayon thread pool.
+    #[cfg(not(target_arch = "wasm32"))]
     fn execute_job(job: TranscodeConfig) -> Result<TranscodeOutput> {
         let input = job
             .input
@@ -238,6 +239,14 @@ impl ParallelEncoder {
             })?;
 
         rt.block_on(pipeline.execute())
+    }
+
+    /// Executes a single transcode job synchronously (wasm32 stub).
+    #[cfg(target_arch = "wasm32")]
+    fn execute_job(_job: TranscodeConfig) -> Result<TranscodeOutput> {
+        Err(TranscodeError::Unsupported(
+            "Parallel job execution is not supported on wasm32".to_string(),
+        ))
     }
 
     /// Gets the results of completed jobs.

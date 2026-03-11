@@ -63,9 +63,26 @@ impl GpuDevice {
     /// List all available GPU devices
     pub fn list_devices() -> Result<Vec<GpuDeviceInfo>> {
         let instance = Self::create_instance();
-        let adapters = instance.enumerate_adapters(wgpu::Backends::all());
 
-        Ok(adapters.iter().map(Self::adapter_info).collect())
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let adapters = instance.enumerate_adapters(wgpu::Backends::all());
+            Ok(adapters.iter().map(Self::adapter_info).collect())
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            // On wasm, enumerate_adapters is not available; request a single adapter instead
+            let adapter = pollster::block_on(instance.request_adapter(&RequestAdapterOptions {
+                power_preference: PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            }));
+            match adapter {
+                Some(a) => Ok(vec![Self::adapter_info(&a)]),
+                None => Ok(Vec::new()),
+            }
+        }
     }
 
     /// Get device information
@@ -100,8 +117,27 @@ impl GpuDevice {
 
     async fn select_adapter(instance: &Instance, device_index: Option<usize>) -> Result<Adapter> {
         if let Some(index) = device_index {
-            let adapters = instance.enumerate_adapters(wgpu::Backends::all());
-            adapters.into_iter().nth(index).ok_or(GpuError::NoAdapter)
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let adapters = instance.enumerate_adapters(wgpu::Backends::all());
+                return adapters.into_iter().nth(index).ok_or(GpuError::NoAdapter);
+            }
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                // On wasm, enumerate_adapters is not available; only index 0 is supported
+                if index != 0 {
+                    return Err(GpuError::NoAdapter);
+                }
+                return instance
+                    .request_adapter(&RequestAdapterOptions {
+                        power_preference: PowerPreference::HighPerformance,
+                        compatible_surface: None,
+                        force_fallback_adapter: false,
+                    })
+                    .await
+                    .ok_or(GpuError::NoAdapter);
+            }
         } else {
             // Select high-performance adapter by default
             instance
