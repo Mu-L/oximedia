@@ -54,22 +54,15 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          args: --release --out dist
+          args: --release --out dist --compatibility manylinux_2_34
           manylinux: 'off'
           working-directory: crates/oximedia-py
-
-      - name: Repair wheel for manylinux
-        run: |
-          pip install auditwheel patchelf
-          for whl in crates/oximedia-py/dist/*.whl; do
-            auditwheel repair "$whl" --plat manylinux_2_34_x86_64 -w crates/oximedia-py/dist-repaired/ || cp "$whl" crates/oximedia-py/dist-repaired/
-          done
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-x86_64-py${{ matrix.python-version }}
-          path: crates/oximedia-py/dist-repaired/
+          path: crates/oximedia-py/dist/
 
   # Build wheels for Linux aarch64 (native ARM runner, no manylinux container)
   linux-aarch64:
@@ -94,22 +87,15 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          args: --release --out dist
+          args: --release --out dist --compatibility manylinux_2_34
           manylinux: 'off'
           working-directory: crates/oximedia-py
-
-      - name: Repair wheel for manylinux
-        run: |
-          pip install auditwheel patchelf
-          for whl in crates/oximedia-py/dist/*.whl; do
-            auditwheel repair "$whl" --plat manylinux_2_34_aarch64 -w crates/oximedia-py/dist-repaired/ || cp "$whl" crates/oximedia-py/dist-repaired/
-          done
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-aarch64-py${{ matrix.python-version }}
-          path: crates/oximedia-py/dist-repaired/
+          path: crates/oximedia-py/dist/
 
   # # Build wheels for macOS (x86_64 and arm64) — already built
   # macos:
