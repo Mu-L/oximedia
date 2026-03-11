@@ -61,7 +61,7 @@ jobs:
         run: |
           source "$HOME/.cargo/env"
           cd crates/oximedia-py
-          maturin build --release --out dist --compatibility manylinux_2_34
+          maturin build --release --out dist --compatibility manylinux_2_34 --auditwheel skip
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -99,7 +99,7 @@ jobs:
         run: |
           source "$HOME/.cargo/env"
           cd crates/oximedia-py
-          maturin build --release --out dist --compatibility manylinux_2_34
+          maturin build --release --out dist --compatibility manylinux_2_34 --auditwheel skip
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
