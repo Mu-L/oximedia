@@ -343,5 +343,7 @@ fn test_encoder_stats() {
 
     let stats = encoder.get_stats();
     assert_eq!(stats.frames_encoded, 1);
-    assert!(stats.average_encoding_time.as_millis() > 0);
+    // Use microsecond resolution: encoding a 1920×1080 RGBA frame always
+    // takes at least 1 µs even on the fastest hardware.
+    assert!(stats.average_encoding_time.as_micros() > 0);
 }

@@ -290,3 +290,374 @@ mod tests {
         assert_eq!(cache.utilization(), 0.0);
     }
 }
+
+// ============================================================================
+// Disk-Bounded LRU Cache Manager
+// ============================================================================
+
+/// Statistics snapshot for a `DiskBoundedCache`.
+#[derive(Debug, Clone)]
+pub struct DiskCacheStats {
+    /// Number of entries currently in the cache.
+    pub entry_count: usize,
+    /// Total bytes occupied by cached proxies.
+    pub used_bytes: u64,
+    /// Maximum allowed bytes.
+    pub max_bytes: u64,
+    /// Cache utilisation fraction in `[0.0, 1.0]`.
+    pub utilization: f64,
+    /// Total number of LRU evictions performed since construction.
+    pub eviction_count: u64,
+    /// Total number of successful insertions.
+    pub insertion_count: u64,
+    /// Total number of cache hits (access to an existing entry).
+    pub hit_count: u64,
+    /// Total number of cache misses (lookup that found nothing).
+    pub miss_count: u64,
+}
+
+/// A disk-space-bounded LRU proxy cache that automatically evicts entries
+/// when the configured space limit would be exceeded.
+///
+/// Unlike the simpler `ProxyCache`, `DiskBoundedCache`:
+/// * Enforces a hard disk-space ceiling on insertions.
+/// * Uses LRU eviction automatically upon every insertion that would violate the limit.
+/// * Maintains hit/miss/eviction counters for telemetry.
+/// * Supports lookup with automatic LRU touch.
+#[derive(Debug)]
+pub struct DiskBoundedCache {
+    /// Inner ordered list of entries; oldest-accessed first (front = LRU end).
+    entries: std::collections::VecDeque<CacheEntry>,
+    /// Maximum allowed total size in bytes.
+    max_bytes: u64,
+    /// Current total size in bytes.
+    used_bytes: u64,
+    /// Cumulative eviction count.
+    eviction_count: u64,
+    /// Cumulative insertion count.
+    insertion_count: u64,
+    /// Cumulative hit count.
+    hit_count: u64,
+    /// Cumulative miss count.
+    miss_count: u64,
+}
+
+impl DiskBoundedCache {
+    /// Create a new cache with a disk-space limit of `max_bytes`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a descriptive string if `max_bytes` is zero.
+    pub fn new(max_bytes: u64) -> Result<Self, String> {
+        if max_bytes == 0 {
+            return Err("DiskBoundedCache: max_bytes must be > 0".to_string());
+        }
+        Ok(Self {
+            entries: std::collections::VecDeque::new(),
+            max_bytes,
+            used_bytes: 0,
+            eviction_count: 0,
+            insertion_count: 0,
+            hit_count: 0,
+            miss_count: 0,
+        })
+    }
+
+    /// Insert a proxy entry identified by `path` with `size_bytes` and access time `now_ms`.
+    ///
+    /// If an entry with the same path already exists it is updated in-place (moved to the
+    /// MRU end).  Before inserting, LRU entries are evicted until the new entry fits within
+    /// the space limit.  If the single entry itself is larger than the limit, the insert
+    /// is rejected and `false` is returned.
+    ///
+    /// Returns `true` when the entry was inserted/updated, `false` when it was rejected.
+    pub fn insert(&mut self, path: &str, size_bytes: u64, now_ms: u64) -> bool {
+        if size_bytes > self.max_bytes {
+            return false;
+        }
+
+        // If the path already exists, remove the old entry first
+        if let Some(pos) = self.entries.iter().position(|e| e.path == path) {
+            let old_size = self.entries[pos].size_bytes;
+            self.entries.remove(pos);
+            self.used_bytes = self.used_bytes.saturating_sub(old_size);
+        }
+
+        // Evict LRU entries until there is room for the new entry
+        while !self.entries.is_empty() && self.used_bytes + size_bytes > self.max_bytes {
+            // Front of VecDeque is the LRU end
+            if let Some(evicted) = self.entries.pop_front() {
+                self.used_bytes = self.used_bytes.saturating_sub(evicted.size_bytes);
+                self.eviction_count += 1;
+            }
+        }
+
+        // Push the new entry to the MRU end (back)
+        self.entries
+            .push_back(CacheEntry::new(path, size_bytes, now_ms));
+        self.used_bytes += size_bytes;
+        self.insertion_count += 1;
+        true
+    }
+
+    /// Look up a cache entry by path.
+    ///
+    /// On hit: moves the entry to the MRU position and updates access time.
+    /// On miss: increments the miss counter.
+    ///
+    /// Returns a clone of the entry on hit, or `None` on miss.
+    pub fn access(&mut self, path: &str, now_ms: u64) -> Option<CacheEntry> {
+        if let Some(pos) = self.entries.iter().position(|e| e.path == path) {
+            // Move to MRU end
+            if let Some(mut entry) = self.entries.remove(pos) {
+                entry.last_access_ms = now_ms;
+                entry.hit_count = entry.hit_count.saturating_add(1);
+                let clone = entry.clone();
+                self.entries.push_back(entry);
+                self.hit_count += 1;
+                Some(clone)
+            } else {
+                // Position was found but remove returned None — should not happen
+                self.miss_count += 1;
+                None
+            }
+        } else {
+            self.miss_count += 1;
+            None
+        }
+    }
+
+    /// Remove and return the path of the least-recently-used entry.
+    ///
+    /// Returns `None` if the cache is empty.
+    pub fn evict_lru(&mut self) -> Option<String> {
+        self.entries.pop_front().map(|e| {
+            self.used_bytes = self.used_bytes.saturating_sub(e.size_bytes);
+            self.eviction_count += 1;
+            e.path
+        })
+    }
+
+    /// Remove all entries, returning their paths.
+    pub fn clear(&mut self) -> Vec<String> {
+        let paths: Vec<String> = self.entries.iter().map(|e| e.path.clone()).collect();
+        self.entries.clear();
+        self.used_bytes = 0;
+        self.eviction_count += paths.len() as u64;
+        paths
+    }
+
+    /// Whether the cache contains an entry for `path`.
+    pub fn contains(&self, path: &str) -> bool {
+        self.entries.iter().any(|e| e.path == path)
+    }
+
+    /// Number of entries in the cache.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Current total used bytes.
+    pub fn used_bytes(&self) -> u64 {
+        self.used_bytes
+    }
+
+    /// Maximum allowed bytes.
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
+    /// Cache utilisation fraction in `[0.0, 1.0]`.
+    pub fn utilization(&self) -> f64 {
+        (self.used_bytes as f64 / self.max_bytes as f64).min(1.0)
+    }
+
+    /// Collect and return a statistics snapshot.
+    pub fn stats(&self) -> DiskCacheStats {
+        DiskCacheStats {
+            entry_count: self.entries.len(),
+            used_bytes: self.used_bytes,
+            max_bytes: self.max_bytes,
+            utilization: self.utilization(),
+            eviction_count: self.eviction_count,
+            insertion_count: self.insertion_count,
+            hit_count: self.hit_count,
+            miss_count: self.miss_count,
+        }
+    }
+}
+
+#[cfg(test)]
+mod disk_bounded_tests {
+    use super::*;
+
+    fn make_cache(max_bytes: u64) -> DiskBoundedCache {
+        DiskBoundedCache::new(max_bytes).expect("valid max_bytes")
+    }
+
+    #[test]
+    fn test_new_rejects_zero_max() {
+        assert!(DiskBoundedCache::new(0).is_err());
+    }
+
+    #[test]
+    fn test_insert_single_entry() {
+        let mut cache = make_cache(1_000);
+        assert!(cache.insert("a.mp4", 100, 1_000));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.used_bytes(), 100);
+    }
+
+    #[test]
+    fn test_insert_over_limit_rejected() {
+        let mut cache = make_cache(500);
+        assert!(!cache.insert("huge.mp4", 1_000, 1_000));
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn test_lru_eviction_on_insert() {
+        let mut cache = make_cache(200);
+        cache.insert("a.mp4", 100, 1_000);
+        cache.insert("b.mp4", 100, 2_000);
+        // Both fit; total = 200
+        assert_eq!(cache.len(), 2);
+        // Insert a third entry that requires eviction of LRU ("a.mp4")
+        cache.insert("c.mp4", 100, 3_000);
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.contains("a.mp4"), "a.mp4 should have been evicted");
+        assert!(cache.contains("b.mp4"));
+        assert!(cache.contains("c.mp4"));
+        assert_eq!(cache.stats().eviction_count, 1);
+    }
+
+    #[test]
+    fn test_access_hit_moves_to_mru() {
+        // max_bytes=200 so two 100-byte entries fill the cache completely.
+        // Inserting a third entry must evict the LRU one.
+        let mut cache = make_cache(200);
+        cache.insert("a.mp4", 100, 1_000);
+        cache.insert("b.mp4", 100, 2_000);
+        // Access "a.mp4" → it becomes MRU; "b.mp4" becomes LRU
+        let entry = cache.access("a.mp4", 5_000).expect("hit expected");
+        assert_eq!(entry.path, "a.mp4");
+
+        // Insert "c.mp4" → should evict "b.mp4" (now LRU), not "a.mp4"
+        cache.insert("c.mp4", 100, 6_000);
+        assert!(!cache.contains("b.mp4"), "b.mp4 should be evicted");
+        assert!(cache.contains("a.mp4"), "a.mp4 is MRU, should survive");
+    }
+
+    #[test]
+    fn test_access_miss_increments_counter() {
+        let mut cache = make_cache(1_000);
+        let result = cache.access("nonexistent.mp4", 1_000);
+        assert!(result.is_none());
+        assert_eq!(cache.stats().miss_count, 1);
+    }
+
+    #[test]
+    fn test_hit_count_increments() {
+        let mut cache = make_cache(1_000);
+        cache.insert("a.mp4", 100, 1_000);
+        cache.access("a.mp4", 2_000);
+        cache.access("a.mp4", 3_000);
+        assert_eq!(cache.stats().hit_count, 2);
+    }
+
+    #[test]
+    fn test_update_existing_entry() {
+        let mut cache = make_cache(500);
+        cache.insert("a.mp4", 200, 1_000);
+        // Update with new size
+        cache.insert("a.mp4", 300, 2_000);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.used_bytes(), 300);
+    }
+
+    #[test]
+    fn test_evict_lru_explicit() {
+        let mut cache = make_cache(500);
+        cache.insert("old.mp4", 100, 1_000);
+        cache.insert("new.mp4", 100, 9_000);
+        let evicted = cache.evict_lru();
+        assert_eq!(evicted, Some("old.mp4".to_string()));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.used_bytes(), 100);
+    }
+
+    #[test]
+    fn test_evict_lru_empty_returns_none() {
+        let mut cache = make_cache(500);
+        assert!(cache.evict_lru().is_none());
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut cache = make_cache(1_000);
+        cache.insert("a.mp4", 100, 1_000);
+        cache.insert("b.mp4", 200, 2_000);
+        let cleared = cache.clear();
+        assert_eq!(cleared.len(), 2);
+        assert!(cache.is_empty());
+        assert_eq!(cache.used_bytes(), 0);
+    }
+
+    #[test]
+    fn test_utilization() {
+        let mut cache = make_cache(1_000);
+        cache.insert("a.mp4", 500, 1_000);
+        assert!((cache.utilization() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_stats_fields() {
+        let mut cache = make_cache(1_000);
+        cache.insert("a.mp4", 100, 1_000);
+        cache.insert("b.mp4", 100, 2_000);
+        cache.access("a.mp4", 3_000);
+        cache.access("missing.mp4", 4_000);
+        let s = cache.stats();
+        assert_eq!(s.entry_count, 2);
+        assert_eq!(s.insertion_count, 2);
+        assert_eq!(s.hit_count, 1);
+        assert_eq!(s.miss_count, 1);
+    }
+
+    #[test]
+    fn test_rapid_create_evict_cycles() {
+        // Stress: 1000 inserts into a small cache (holds ≤5 entries)
+        let mut cache = make_cache(500);
+        let mut total_evictions = 0u64;
+        for i in 0..1_000u64 {
+            let path = format!("proxy_{i}.mp4");
+            cache.insert(&path, 100, i * 10);
+            total_evictions = cache.stats().eviction_count;
+        }
+        // Should have evicted many entries but remain within limits
+        assert!(cache.used_bytes() <= 500);
+        assert!(
+            total_evictions > 900,
+            "expected many evictions, got {total_evictions}"
+        );
+    }
+
+    #[test]
+    fn test_multiple_evictions_per_insert() {
+        // Insert 10 small entries, then one large one that forces many evictions
+        let mut cache = make_cache(1_000);
+        for i in 0..10u64 {
+            cache.insert(&format!("{i}.mp4"), 100, i);
+        }
+        assert_eq!(cache.len(), 10);
+        // Insert one 600-byte entry: must evict 6 old ones to make room
+        cache.insert("big.mp4", 600, 100);
+        assert!(cache.used_bytes() <= 1_000);
+        assert!(cache.contains("big.mp4"));
+    }
+}

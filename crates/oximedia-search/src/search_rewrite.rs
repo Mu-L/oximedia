@@ -139,6 +139,125 @@ impl Default for SynonymDictionary {
     }
 }
 
+impl SynonymDictionary {
+    /// Create a pre-populated dictionary with common media production synonyms.
+    ///
+    /// Covers audio, video, image, codec, and workflow terminology commonly
+    /// used in media asset management searches.
+    #[must_use]
+    pub fn media_defaults() -> Self {
+        let mut dict = Self::new();
+
+        // Audio synonyms
+        dict.add_group(&["audio", "sound", "music", "soundtrack"]);
+        dict.add_group(&["voice", "speech", "narration", "dialogue"]);
+        dict.add_group(&["noise", "static", "hiss", "hum"]);
+        dict.add_group(&["loud", "noisy", "amplified"]);
+        dict.add_group(&["quiet", "silent", "muted", "mute"]);
+        dict.add_group(&["bass", "low-frequency", "subwoofer"]);
+        dict.add_group(&["treble", "high-frequency", "highs"]);
+
+        // Video synonyms
+        dict.add_group(&["video", "clip", "footage", "recording"]);
+        dict.add_group(&["frame", "still", "snapshot", "capture"]);
+        dict.add_group(&["slow-motion", "slowmo", "slow-mo", "timelapse"]);
+        dict.add_group(&["cut", "edit", "trim", "splice"]);
+        dict.add_group(&["transition", "dissolve", "fade", "wipe"]);
+
+        // Image synonyms
+        dict.add_group(&["image", "photo", "picture", "photograph"]);
+        dict.add_group(&["thumbnail", "preview", "icon"]);
+        dict.add_group(&["portrait", "headshot", "closeup"]);
+        dict.add_group(&["landscape", "panorama", "wide-angle"]);
+
+        // Resolution / quality synonyms
+        dict.add_group(&["high-definition", "hd", "1080p", "fullhd"]);
+        dict.add_group(&["ultra-hd", "uhd", "4k", "2160p"]);
+        dict.add_group(&["standard-definition", "sd", "480p"]);
+        dict.add_group(&["high-quality", "hq", "lossless"]);
+        dict.add_group(&["low-quality", "lq", "lossy", "compressed"]);
+
+        // Codec synonyms
+        dict.add_group(&["encode", "compress", "transcode"]);
+        dict.add_group(&["decode", "decompress", "playback"]);
+        dict.add_group(&["codec", "encoder", "decoder", "compressor"]);
+        dict.add_group(&["bitrate", "datarate", "bandwidth"]);
+
+        // Color synonyms
+        dict.add_group(&["color", "colour", "hue", "tint"]);
+        dict.add_group(&["brightness", "luminance", "exposure"]);
+        dict.add_group(&["contrast", "dynamic-range"]);
+        dict.add_group(&["saturation", "chroma", "vibrance"]);
+        dict.add_group(&["grayscale", "monochrome", "black-and-white", "bw"]);
+
+        // Production workflow synonyms
+        dict.add_group(&["render", "export", "output", "publish"]);
+        dict.add_group(&["import", "ingest", "upload"]);
+        dict.add_group(&["project", "timeline", "sequence"]);
+        dict.add_group(&["effect", "filter", "plugin"]);
+        dict.add_group(&["subtitle", "caption", "closed-caption"]);
+        dict.add_group(&["watermark", "overlay", "logo"]);
+
+        dict
+    }
+}
+
+/// A query rewriter pre-configured with media industry synonyms.
+///
+/// Convenience constructor that sets up the [`QueryRewriter`] with the
+/// [`SynonymDictionary::media_defaults`] dictionary and all standard
+/// rewrite strategies enabled.
+impl QueryRewriter {
+    /// Create a query rewriter pre-loaded with media production synonyms.
+    #[must_use]
+    pub fn with_media_synonyms() -> Self {
+        Self::new().with_synonyms(SynonymDictionary::media_defaults())
+    }
+
+    /// Rewrite a query and return the expanded query as a single string.
+    ///
+    /// Tokens are joined with spaces. Expansion tokens are wrapped in
+    /// parenthesised OR groups for boolean-query engines, e.g.:
+    /// `"audio" -> "audio OR sound OR music OR soundtrack"`
+    #[must_use]
+    pub fn rewrite_to_string(&self, query: &str) -> String {
+        let result = self.rewrite(query);
+        if result.tokens.is_empty() {
+            return String::new();
+        }
+
+        let mut groups: Vec<Vec<&RewrittenToken>> = Vec::new();
+        let mut current_group: Vec<&RewrittenToken> = Vec::new();
+
+        for token in &result.tokens {
+            if token.is_expansion {
+                current_group.push(token);
+            } else {
+                if !current_group.is_empty() {
+                    groups.push(current_group);
+                    current_group = Vec::new();
+                }
+                current_group.push(token);
+            }
+        }
+        if !current_group.is_empty() {
+            groups.push(current_group);
+        }
+
+        let mut parts = Vec::new();
+        for group in &groups {
+            if group.len() == 1 {
+                parts.push(group[0].text.clone());
+            } else {
+                // Group the original term with its expansions using OR
+                let or_terms: Vec<&str> = group.iter().map(|t| t.text.as_str()).collect();
+                parts.push(format!("({})", or_terms.join(" OR ")));
+            }
+        }
+        parts.join(" ")
+    }
+}
+
 /// Query rewriter that applies various strategies to improve search quality.
 #[derive(Debug, Clone)]
 pub struct QueryRewriter {
@@ -532,5 +651,143 @@ mod tests {
         let result = rewriter.rewrite("");
         assert!(result.tokens.is_empty());
         assert_eq!(result.expansion_count, 0);
+    }
+
+    // ── Media synonym dictionary tests ──
+
+    #[test]
+    fn test_media_defaults_not_empty() {
+        let dict = SynonymDictionary::media_defaults();
+        assert!(!dict.is_empty());
+        assert!(dict.len() > 30); // We defined many groups
+    }
+
+    #[test]
+    fn test_media_defaults_audio_synonyms() {
+        let dict = SynonymDictionary::media_defaults();
+        let syns = dict.lookup("audio").expect("audio should have synonyms");
+        assert!(syns.contains(&"sound".to_string()));
+        assert!(syns.contains(&"music".to_string()));
+        assert!(syns.contains(&"soundtrack".to_string()));
+    }
+
+    #[test]
+    fn test_media_defaults_video_synonyms() {
+        let dict = SynonymDictionary::media_defaults();
+        let syns = dict.lookup("video").expect("video should have synonyms");
+        assert!(syns.contains(&"clip".to_string()));
+        assert!(syns.contains(&"footage".to_string()));
+        assert!(syns.contains(&"recording".to_string()));
+    }
+
+    #[test]
+    fn test_media_defaults_image_synonyms() {
+        let dict = SynonymDictionary::media_defaults();
+        let syns = dict.lookup("image").expect("image should have synonyms");
+        assert!(syns.contains(&"photo".to_string()));
+        assert!(syns.contains(&"picture".to_string()));
+    }
+
+    #[test]
+    fn test_media_defaults_color_synonyms() {
+        let dict = SynonymDictionary::media_defaults();
+        let syns = dict.lookup("color").expect("color should have synonyms");
+        assert!(syns.contains(&"colour".to_string()));
+        assert!(syns.contains(&"hue".to_string()));
+    }
+
+    #[test]
+    fn test_media_defaults_bidirectional() {
+        let dict = SynonymDictionary::media_defaults();
+        // Synonym groups are bidirectional
+        let sound_syns = dict.lookup("sound").expect("sound should have synonyms");
+        assert!(sound_syns.contains(&"audio".to_string()));
+        let photo_syns = dict.lookup("photo").expect("photo should have synonyms");
+        assert!(photo_syns.contains(&"image".to_string()));
+    }
+
+    #[test]
+    fn test_media_defaults_codec_synonyms() {
+        let dict = SynonymDictionary::media_defaults();
+        let syns = dict.lookup("codec").expect("codec should have synonyms");
+        assert!(syns.contains(&"encoder".to_string()));
+        assert!(syns.contains(&"decoder".to_string()));
+    }
+
+    #[test]
+    fn test_with_media_synonyms_rewriter() {
+        let rewriter = QueryRewriter::with_media_synonyms();
+        let result = rewriter.rewrite("audio editing");
+        assert!(result.expansion_count > 0);
+        let texts: Vec<&str> = result.tokens.iter().map(|t| t.text.as_str()).collect();
+        // Should contain at least one synonym for "audio"
+        assert!(
+            texts.contains(&"sound") || texts.contains(&"music") || texts.contains(&"soundtrack")
+        );
+    }
+
+    #[test]
+    fn test_rewrite_to_string_basic() {
+        let rewriter = QueryRewriter::new().with_strategies(vec![]);
+        let output = rewriter.rewrite_to_string("hello world");
+        assert_eq!(output, "hello world");
+    }
+
+    #[test]
+    fn test_rewrite_to_string_with_expansions() {
+        let mut dict = SynonymDictionary::new();
+        dict.add_group(&["video", "clip", "footage"]);
+        let rewriter = QueryRewriter::new()
+            .with_synonyms(dict)
+            .with_strategies(vec![RewriteStrategy::SynonymExpansion]);
+        let output = rewriter.rewrite_to_string("video");
+        assert!(output.contains("OR"));
+        assert!(output.contains("video"));
+        assert!(output.contains("clip") || output.contains("footage"));
+    }
+
+    #[test]
+    fn test_rewrite_to_string_empty() {
+        let rewriter = QueryRewriter::new();
+        let output = rewriter.rewrite_to_string("");
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn test_media_defaults_resolution_synonyms() {
+        let dict = SynonymDictionary::media_defaults();
+        let syns = dict.lookup("hd").expect("hd should have synonyms");
+        assert!(syns.contains(&"high-definition".to_string()));
+        assert!(syns.contains(&"1080p".to_string()));
+    }
+
+    #[test]
+    fn test_media_defaults_workflow_synonyms() {
+        let dict = SynonymDictionary::media_defaults();
+        let render_syns = dict.lookup("render").expect("render should have synonyms");
+        assert!(render_syns.contains(&"export".to_string()));
+        assert!(render_syns.contains(&"output".to_string()));
+        let sub_syns = dict
+            .lookup("subtitle")
+            .expect("subtitle should have synonyms");
+        assert!(sub_syns.contains(&"caption".to_string()));
+    }
+
+    #[test]
+    fn test_media_rewriter_no_expansion_for_unknown_term() {
+        let rewriter = QueryRewriter::with_media_synonyms();
+        let result = rewriter.rewrite("xyznonexistent");
+        assert_eq!(result.expansion_count, 0);
+    }
+
+    #[test]
+    fn test_media_defaults_grayscale_synonyms() {
+        let dict = SynonymDictionary::media_defaults();
+        let syns = dict
+            .lookup("grayscale")
+            .expect("grayscale should have synonyms");
+        assert!(syns.contains(&"monochrome".to_string()));
+        assert!(syns.contains(&"black-and-white".to_string()));
+        assert!(syns.contains(&"bw".to_string()));
     }
 }

@@ -1,9 +1,12 @@
 //! Collaboration notification system.
 //!
-//! Provides typed notification kinds, per-notification metadata, and an inbox
-//! that supports delivery, bulk-read, and per-recipient filtering.
+//! Provides typed notification kinds, per-notification metadata, an inbox
+//! that supports delivery, bulk-read, and per-recipient filtering, plus
+//! webhook integrations for external notification dispatch.
 
 #![allow(dead_code)]
+
+use std::collections::HashMap;
 
 /// The category of a collaboration notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +132,250 @@ impl NotificationInbox {
             .iter()
             .filter(|n| n.recipient_id == id)
             .collect()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Webhook notification for external integrations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The HTTP method used for a webhook call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebhookMethod {
+    Post,
+    Put,
+}
+
+impl std::fmt::Display for WebhookMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Post => write!(f, "POST"),
+            Self::Put => write!(f, "PUT"),
+        }
+    }
+}
+
+/// A registered webhook endpoint that receives collaboration events.
+#[derive(Debug, Clone)]
+pub struct WebhookEndpoint {
+    /// Unique identifier for this webhook.
+    pub id: u64,
+    /// Destination URL.
+    pub url: String,
+    /// HTTP method to use.
+    pub method: WebhookMethod,
+    /// Optional HMAC secret for signing payloads (hex-encoded).
+    pub secret: Option<String>,
+    /// Extra HTTP headers to include with every request.
+    pub headers: HashMap<String, String>,
+    /// Filter: only fire for these notification kinds.  Empty = all kinds.
+    pub kinds_filter: Vec<NotificationKind>,
+    /// Whether this webhook is enabled.
+    pub enabled: bool,
+}
+
+impl WebhookEndpoint {
+    /// Create a new enabled webhook endpoint.
+    pub fn new(id: u64, url: impl Into<String>, method: WebhookMethod) -> Self {
+        Self {
+            id,
+            url: url.into(),
+            method,
+            secret: None,
+            headers: HashMap::new(),
+            kinds_filter: Vec::new(),
+            enabled: true,
+        }
+    }
+
+    /// Set an HMAC signing secret.
+    pub fn with_secret(mut self, secret: impl Into<String>) -> Self {
+        self.secret = Some(secret.into());
+        self
+    }
+
+    /// Add an extra header.
+    pub fn with_header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(key.into(), value.into());
+        self
+    }
+
+    /// Restrict firing to a specific set of notification kinds.
+    pub fn with_kinds_filter(mut self, kinds: Vec<NotificationKind>) -> Self {
+        self.kinds_filter = kinds;
+        self
+    }
+
+    /// Disable this webhook.
+    pub fn disable(&mut self) {
+        self.enabled = false;
+    }
+
+    /// Check whether this webhook should fire for the given notification kind.
+    #[must_use]
+    pub fn should_fire(&self, kind: NotificationKind) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if self.kinds_filter.is_empty() {
+            return true;
+        }
+        self.kinds_filter.contains(&kind)
+    }
+
+    /// Build the serialised JSON payload for a notification.
+    ///
+    /// Returns a compact JSON string with the notification fields and the
+    /// webhook's own URL as metadata.
+    #[must_use]
+    pub fn build_payload(&self, notification: &CollabNotification) -> String {
+        // Produce a minimal hand-crafted JSON payload to avoid pulling in
+        // additional serialisation dependencies inside this module.
+        let kind_str = format!("{:?}", notification.kind);
+        format!(
+            r#"{{"webhook_url":"{url}","notification_id":{id},"recipient":"{recip}","sender":"{sender}","kind":"{kind}","message":"{msg}","resource_id":"{res}","timestamp_ms":{ts},"read":{read}}}"#,
+            url = self.url,
+            id = notification.id,
+            recip = notification.recipient_id,
+            sender = notification.sender_id,
+            kind = kind_str,
+            msg = notification.message.replace('"', "\\\""),
+            res = notification.resource_id,
+            ts = notification.timestamp_ms,
+            read = notification.read,
+        )
+    }
+}
+
+/// Delivery record for a single webhook dispatch attempt.
+#[derive(Debug, Clone)]
+pub struct WebhookDelivery {
+    /// The webhook endpoint id.
+    pub endpoint_id: u64,
+    /// The notification id that triggered this delivery.
+    pub notification_id: u64,
+    /// The serialised payload that was (or would be) sent.
+    pub payload: String,
+    /// Whether the delivery was considered successful.
+    pub success: bool,
+    /// Optional error message if the delivery failed.
+    pub error: Option<String>,
+    /// Timestamp of the delivery attempt (epoch milliseconds).
+    pub attempted_at_ms: u64,
+}
+
+/// Registry and dispatcher for webhook endpoints.
+///
+/// In a real deployment, `dispatch` would issue an HTTP request.  Here it
+/// records the delivery attempt into an in-process log so that tests can
+/// inspect what would have been sent without any I/O.
+#[derive(Debug, Default)]
+pub struct WebhookRegistry {
+    endpoints: Vec<WebhookEndpoint>,
+    next_id: u64,
+    /// Delivery log — inspectable in tests.
+    pub deliveries: Vec<WebhookDelivery>,
+}
+
+impl WebhookRegistry {
+    /// Create an empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a new webhook endpoint and return its assigned id.
+    pub fn register(&mut self, url: impl Into<String>, method: WebhookMethod) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.endpoints.push(WebhookEndpoint::new(id, url, method));
+        id
+    }
+
+    /// Register a pre-built endpoint.
+    pub fn register_endpoint(&mut self, mut endpoint: WebhookEndpoint) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        endpoint.id = id;
+        self.endpoints.push(endpoint);
+        id
+    }
+
+    /// Remove an endpoint by id.  Returns `true` if found.
+    pub fn deregister(&mut self, id: u64) -> bool {
+        let before = self.endpoints.len();
+        self.endpoints.retain(|e| e.id != id);
+        self.endpoints.len() != before
+    }
+
+    /// Disable an endpoint without removing it.  Returns `true` if found.
+    pub fn disable(&mut self, id: u64) -> bool {
+        if let Some(ep) = self.endpoints.iter_mut().find(|e| e.id == id) {
+            ep.disable();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Dispatch a notification to all matching endpoints.
+    ///
+    /// Each eligible endpoint gets a delivery record appended to
+    /// `self.deliveries`.  The function returns the number of endpoints
+    /// notified.
+    pub fn dispatch(&mut self, notification: &CollabNotification, now_ms: u64) -> usize {
+        // Collect into a temporary Vec to avoid borrowing `self.endpoints`
+        // and `self.deliveries` at the same time.
+        let deliveries: Vec<WebhookDelivery> = self
+            .endpoints
+            .iter()
+            .filter(|ep| ep.should_fire(notification.kind))
+            .map(|ep| {
+                let payload = ep.build_payload(notification);
+                WebhookDelivery {
+                    endpoint_id: ep.id,
+                    notification_id: notification.id,
+                    payload,
+                    success: true, // simulated success
+                    error: None,
+                    attempted_at_ms: now_ms,
+                }
+            })
+            .collect();
+
+        let count = deliveries.len();
+        self.deliveries.extend(deliveries);
+        count
+    }
+
+    /// Return all delivery records for a given endpoint.
+    #[must_use]
+    pub fn deliveries_for_endpoint(&self, endpoint_id: u64) -> Vec<&WebhookDelivery> {
+        self.deliveries
+            .iter()
+            .filter(|d| d.endpoint_id == endpoint_id)
+            .collect()
+    }
+
+    /// Return all delivery records for a given notification.
+    #[must_use]
+    pub fn deliveries_for_notification(&self, notification_id: u64) -> Vec<&WebhookDelivery> {
+        self.deliveries
+            .iter()
+            .filter(|d| d.notification_id == notification_id)
+            .collect()
+    }
+
+    /// Number of registered endpoints.
+    #[must_use]
+    pub fn endpoint_count(&self) -> usize {
+        self.endpoints.len()
+    }
+
+    /// Number of recorded delivery attempts.
+    #[must_use]
+    pub fn delivery_count(&self) -> usize {
+        self.deliveries.len()
     }
 }
 
@@ -294,5 +541,110 @@ mod tests {
         assert_eq!(n.resource_id, "res-42");
         assert_eq!(n.timestamp_ms, 9_999);
         assert!(!n.read);
+    }
+
+    // ---- WebhookRegistry ----
+
+    fn make_notification(id: u64, kind: NotificationKind) -> CollabNotification {
+        CollabNotification {
+            id,
+            recipient_id: "alice".to_string(),
+            sender_id: "system".to_string(),
+            kind,
+            message: "test message".to_string(),
+            resource_id: "res-1".to_string(),
+            read: false,
+            timestamp_ms: 1_000,
+        }
+    }
+
+    #[test]
+    fn test_webhook_register_and_count() {
+        let mut reg = WebhookRegistry::new();
+        reg.register("https://example.com/hook", WebhookMethod::Post);
+        reg.register("https://example.com/hook2", WebhookMethod::Put);
+        assert_eq!(reg.endpoint_count(), 2);
+    }
+
+    #[test]
+    fn test_webhook_deregister() {
+        let mut reg = WebhookRegistry::new();
+        let id = reg.register("https://example.com/hook", WebhookMethod::Post);
+        assert!(reg.deregister(id));
+        assert_eq!(reg.endpoint_count(), 0);
+        assert!(!reg.deregister(id)); // second call returns false
+    }
+
+    #[test]
+    fn test_webhook_dispatch_fires_all_matching() {
+        let mut reg = WebhookRegistry::new();
+        reg.register("https://a.example.com/hook", WebhookMethod::Post);
+        reg.register("https://b.example.com/hook", WebhookMethod::Post);
+        let notif = make_notification(0, NotificationKind::Mention);
+        let count = reg.dispatch(&notif, 2_000);
+        assert_eq!(count, 2);
+        assert_eq!(reg.delivery_count(), 2);
+    }
+
+    #[test]
+    fn test_webhook_dispatch_respects_kinds_filter() {
+        let mut reg = WebhookRegistry::new();
+        let ep = WebhookEndpoint::new(0, "https://example.com/hook", WebhookMethod::Post)
+            .with_kinds_filter(vec![NotificationKind::Mention]);
+        reg.register_endpoint(ep);
+
+        // Mention → should fire
+        let notif_mention = make_notification(0, NotificationKind::Mention);
+        let count1 = reg.dispatch(&notif_mention, 1_000);
+        assert_eq!(count1, 1);
+
+        // Reply → should NOT fire (not in filter)
+        let notif_reply = make_notification(1, NotificationKind::Reply);
+        let count2 = reg.dispatch(&notif_reply, 2_000);
+        assert_eq!(count2, 0);
+    }
+
+    #[test]
+    fn test_webhook_dispatch_disabled_endpoint_skipped() {
+        let mut reg = WebhookRegistry::new();
+        let id = reg.register("https://example.com/hook", WebhookMethod::Post);
+        reg.disable(id);
+        let notif = make_notification(0, NotificationKind::Mention);
+        let count = reg.dispatch(&notif, 1_000);
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_webhook_build_payload_contains_fields() {
+        let ep = WebhookEndpoint::new(0, "https://example.com", WebhookMethod::Post);
+        let notif = make_notification(7, NotificationKind::Assignment);
+        let payload = ep.build_payload(&notif);
+        assert!(payload.contains("\"notification_id\":7"));
+        assert!(payload.contains("alice"));
+        assert!(payload.contains("Assignment"));
+    }
+
+    #[test]
+    fn test_webhook_deliveries_for_endpoint() {
+        let mut reg = WebhookRegistry::new();
+        let id = reg.register("https://example.com/hook", WebhookMethod::Post);
+        let notif = make_notification(0, NotificationKind::Deadline);
+        reg.dispatch(&notif, 1_000);
+        let deliveries = reg.deliveries_for_endpoint(id);
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].endpoint_id, id);
+    }
+
+    #[test]
+    fn test_webhook_secret_stored() {
+        let ep = WebhookEndpoint::new(0, "https://example.com", WebhookMethod::Post)
+            .with_secret("my_secret_key");
+        assert_eq!(ep.secret, Some("my_secret_key".to_string()));
+    }
+
+    #[test]
+    fn test_webhook_method_display() {
+        assert_eq!(WebhookMethod::Post.to_string(), "POST");
+        assert_eq!(WebhookMethod::Put.to_string(), "PUT");
     }
 }

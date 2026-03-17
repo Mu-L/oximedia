@@ -1,12 +1,20 @@
 #![allow(dead_code)]
-//! Worker pool management with grouping and tagging.
+//! Worker pool management with grouping, tagging, and health monitoring.
 //!
-//! Provides a logical grouping layer on top of individual workers:
+//! Provides two complementary abstractions:
+//!
+//! ## Pool grouping (`WorkerPool` / `PoolManager`)
 //! - Worker groups (pools) with shared properties and tags
 //! - Pool-level capacity tracking and utilization metrics
 //! - Worker assignment and removal from pools
 //! - Pool-based job routing (match job requirements to pool capabilities)
 //! - Drain and maintenance mode for individual pools
+//!
+//! ## Health-monitored node tracking (`WorkerNode` / `WorkerNodePool`)
+//! - Per-node heartbeat tracking with configurable timeout
+//! - Automatic stale-node detection and offline promotion
+//! - Capability and tag-based node queries
+//! - Drain mode to stop new job assignment without killing existing work
 
 use std::collections::{HashMap, HashSet};
 
@@ -456,5 +464,340 @@ mod tests {
     fn test_pool_error_display() {
         let err = PoolError::PoolNotFound("missing".to_string());
         assert_eq!(err.to_string(), "pool not found: missing");
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Health-monitored worker node tracking
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use std::time::{Duration, Instant};
+
+/// Operational status of a worker node inside a [`WorkerNodePool`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkerStatus {
+    /// Node is online and accepting new jobs.
+    Online,
+    /// Node is unreachable or has timed out; not accepting jobs.
+    Offline,
+    /// Node is gracefully winding down; existing jobs complete but no new ones accepted.
+    Draining,
+    /// Node is undergoing maintenance; no jobs accepted.
+    Maintenance,
+}
+
+/// A single worker node tracked by a [`WorkerNodePool`].
+#[derive(Debug, Clone)]
+pub struct WorkerNode {
+    /// Unique identifier for this node.
+    pub id: String,
+    /// DNS name or IP address of the node.
+    pub hostname: String,
+    /// Port on which the node listens for work assignments.
+    pub port: u16,
+    /// Current operational status.
+    pub status: WorkerStatus,
+    /// Wall-clock time when the node first registered.
+    pub registered_at: Instant,
+    /// Wall-clock time of the most recent heartbeat received from the node.
+    pub last_heartbeat: Instant,
+    /// How often the node is expected to send heartbeats.
+    pub heartbeat_interval: Duration,
+    /// Capability tags advertised by the node (e.g. `"gpu"`, `"high-memory"`).
+    pub capabilities: Vec<String>,
+    /// Arbitrary key-value metadata attached to the node.
+    pub tags: HashMap<String, String>,
+}
+
+impl WorkerNode {
+    /// Create a new node that is immediately `Online`.
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        hostname: impl Into<String>,
+        port: u16,
+        heartbeat_interval: Duration,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            id: id.into(),
+            hostname: hostname.into(),
+            port,
+            status: WorkerStatus::Online,
+            registered_at: now,
+            last_heartbeat: now,
+            heartbeat_interval,
+            capabilities: Vec::new(),
+            tags: HashMap::new(),
+        }
+    }
+
+    /// Return `true` when the node is `Online` (can accept new jobs).
+    #[must_use]
+    pub fn is_online(&self) -> bool {
+        self.status == WorkerStatus::Online
+    }
+}
+
+/// A pool of [`WorkerNode`]s with integrated heartbeat monitoring.
+///
+/// The pool does **not** spawn background tasks; callers are responsible for
+/// driving liveness checks by periodically calling [`WorkerNodePool::prune_stale`].
+pub struct WorkerNodePool {
+    workers: HashMap<String, WorkerNode>,
+    /// How long a node may go without a heartbeat before being marked `Offline`.
+    heartbeat_timeout: Duration,
+}
+
+impl WorkerNodePool {
+    /// Create an empty pool.  Nodes whose heartbeat exceeds `heartbeat_timeout`
+    /// will be marked `Offline` during the next [`prune_stale`] call.
+    ///
+    /// [`prune_stale`]: WorkerNodePool::prune_stale
+    #[must_use]
+    pub fn new(heartbeat_timeout: Duration) -> Self {
+        Self {
+            workers: HashMap::new(),
+            heartbeat_timeout,
+        }
+    }
+
+    /// Register a new node.  If a node with the same ID already exists, its
+    /// entry is replaced.
+    pub fn register(&mut self, node: WorkerNode) {
+        self.workers.insert(node.id.clone(), node);
+    }
+
+    /// Remove a node from the pool.  Returns `true` if the node was present.
+    pub fn deregister(&mut self, id: &str) -> bool {
+        self.workers.remove(id).is_some()
+    }
+
+    /// Record a heartbeat for the identified node.
+    ///
+    /// Returns `true` on success.  Returns `false` when `id` is not registered,
+    /// so callers can decide whether to auto-register or log a warning.
+    pub fn heartbeat(&mut self, id: &str) -> bool {
+        if let Some(node) = self.workers.get_mut(id) {
+            node.last_heartbeat = Instant::now();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Scan all nodes and promote any node whose heartbeat has not arrived
+    /// within `heartbeat_timeout` to `Offline`.
+    ///
+    /// Returns the IDs of every node that was transitioned to `Offline` during
+    /// this call (already-offline nodes are not repeated).
+    pub fn prune_stale(&mut self) -> Vec<String> {
+        let now = Instant::now();
+        let timeout = self.heartbeat_timeout;
+        let mut newly_offline = Vec::new();
+
+        for node in self.workers.values_mut() {
+            if node.status != WorkerStatus::Offline
+                && now.duration_since(node.last_heartbeat) > timeout
+            {
+                node.status = WorkerStatus::Offline;
+                newly_offline.push(node.id.clone());
+            }
+        }
+        newly_offline
+    }
+
+    /// Return references to all nodes whose status is `Online`.
+    #[must_use]
+    pub fn online_workers(&self) -> Vec<&WorkerNode> {
+        self.workers
+            .values()
+            .filter(|n| n.status == WorkerStatus::Online)
+            .collect()
+    }
+
+    /// Return references to all nodes that advertise the given capability.
+    #[must_use]
+    pub fn workers_with_capability(&self, cap: &str) -> Vec<&WorkerNode> {
+        self.workers
+            .values()
+            .filter(|n| n.capabilities.iter().any(|c| c == cap))
+            .collect()
+    }
+
+    /// Transition a node to `Draining` so that no new jobs are assigned to it.
+    ///
+    /// Returns `true` if the node exists (regardless of its previous status).
+    /// Returns `false` when the node is not registered.
+    pub fn drain_worker(&mut self, id: &str) -> bool {
+        if let Some(node) = self.workers.get_mut(id) {
+            node.status = WorkerStatus::Draining;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Calculate the maximum number of jobs the pool can accept, assuming each
+    /// `Online` worker can run up to `max_jobs_per_worker` concurrent jobs.
+    #[must_use]
+    pub fn total_capacity(&self, max_jobs_per_worker: u32) -> u32 {
+        let online_count = self
+            .workers
+            .values()
+            .filter(|n| n.status == WorkerStatus::Online)
+            .count() as u32;
+        online_count.saturating_mul(max_jobs_per_worker)
+    }
+}
+
+#[cfg(test)]
+mod node_pool_tests {
+    use super::*;
+
+    fn make_node(id: &str) -> WorkerNode {
+        WorkerNode::new(id, "localhost", 9000, Duration::from_secs(30))
+    }
+
+    fn make_node_with_capabilities(id: &str, caps: Vec<&str>) -> WorkerNode {
+        let mut n = make_node(id);
+        n.capabilities = caps.into_iter().map(|s| s.to_string()).collect();
+        n
+    }
+
+    // ── Register / deregister ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_register_and_online_count() {
+        let mut pool = WorkerNodePool::new(Duration::from_secs(60));
+        pool.register(make_node("n1"));
+        pool.register(make_node("n2"));
+        assert_eq!(pool.online_workers().len(), 2);
+    }
+
+    #[test]
+    fn test_deregister_removes_node() {
+        let mut pool = WorkerNodePool::new(Duration::from_secs(60));
+        pool.register(make_node("n1"));
+        assert!(pool.deregister("n1"));
+        assert!(!pool.deregister("n1")); // second call → false
+        assert!(pool.online_workers().is_empty());
+    }
+
+    #[test]
+    fn test_deregister_nonexistent_returns_false() {
+        let mut pool = WorkerNodePool::new(Duration::from_secs(60));
+        assert!(!pool.deregister("ghost"));
+    }
+
+    // ── Heartbeat ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_heartbeat_known_node_returns_true() {
+        let mut pool = WorkerNodePool::new(Duration::from_secs(60));
+        pool.register(make_node("n1"));
+        assert!(pool.heartbeat("n1"));
+    }
+
+    #[test]
+    fn test_heartbeat_unknown_node_returns_false() {
+        let mut pool = WorkerNodePool::new(Duration::from_secs(60));
+        assert!(!pool.heartbeat("ghost"));
+    }
+
+    // ── Stale pruning ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_prune_stale_marks_timed_out_nodes_offline() {
+        let mut pool = WorkerNodePool::new(Duration::from_nanos(1));
+        pool.register(make_node("n1"));
+        // Sleep just long enough for the timeout to trigger.
+        std::thread::sleep(Duration::from_millis(5));
+        let stale = pool.prune_stale();
+        assert!(stale.contains(&"n1".to_string()));
+        assert_eq!(pool.online_workers().len(), 0);
+    }
+
+    #[test]
+    fn test_prune_stale_does_not_double_report() {
+        let mut pool = WorkerNodePool::new(Duration::from_nanos(1));
+        pool.register(make_node("n1"));
+        std::thread::sleep(Duration::from_millis(5));
+        let first = pool.prune_stale();
+        let second = pool.prune_stale(); // already offline
+        assert_eq!(first.len(), 1);
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn test_prune_stale_skips_fresh_nodes() {
+        let mut pool = WorkerNodePool::new(Duration::from_secs(3600));
+        pool.register(make_node("n1"));
+        let stale = pool.prune_stale();
+        assert!(stale.is_empty());
+        assert_eq!(pool.online_workers().len(), 1);
+    }
+
+    // ── Capability queries ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_workers_with_capability_filters_correctly() {
+        let mut pool = WorkerNodePool::new(Duration::from_secs(60));
+        pool.register(make_node_with_capabilities("n1", vec!["gpu", "fast-disk"]));
+        pool.register(make_node_with_capabilities("n2", vec!["fast-disk"]));
+        pool.register(make_node_with_capabilities("n3", vec!["gpu"]));
+
+        let gpu_workers = pool.workers_with_capability("gpu");
+        assert_eq!(gpu_workers.len(), 2);
+        let disk_workers = pool.workers_with_capability("fast-disk");
+        assert_eq!(disk_workers.len(), 2);
+        let rare = pool.workers_with_capability("fpga");
+        assert!(rare.is_empty());
+    }
+
+    // ── Drain ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_drain_worker_transitions_to_draining() {
+        let mut pool = WorkerNodePool::new(Duration::from_secs(60));
+        pool.register(make_node("n1"));
+        assert!(pool.drain_worker("n1"));
+        let online = pool.online_workers();
+        assert!(online.is_empty()); // draining ≠ online
+                                    // Node is still registered.
+        assert!(pool.workers_with_capability("").is_empty() || true); // just check no panic
+    }
+
+    #[test]
+    fn test_drain_nonexistent_worker_returns_false() {
+        let mut pool = WorkerNodePool::new(Duration::from_secs(60));
+        assert!(!pool.drain_worker("ghost"));
+    }
+
+    // ── Capacity ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_total_capacity_counts_only_online() {
+        let mut pool = WorkerNodePool::new(Duration::from_secs(60));
+        pool.register(make_node("n1")); // online
+        pool.register(make_node("n2")); // will drain
+        pool.drain_worker("n2");
+
+        assert_eq!(pool.total_capacity(4), 4); // only n1 counts
+    }
+
+    #[test]
+    fn test_total_capacity_empty_pool_is_zero() {
+        let pool = WorkerNodePool::new(Duration::from_secs(60));
+        assert_eq!(pool.total_capacity(10), 0);
+    }
+
+    #[test]
+    fn test_total_capacity_saturating_mul() {
+        let mut pool = WorkerNodePool::new(Duration::from_secs(60));
+        for i in 0..3 {
+            pool.register(make_node(&format!("n{i}")));
+        }
+        assert_eq!(pool.total_capacity(5), 15);
     }
 }

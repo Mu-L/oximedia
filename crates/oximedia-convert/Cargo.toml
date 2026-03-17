@@ -7,7 +7,7 @@ rust-version.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "Universal media format converter for OxiMedia"
-authors = ["OxiMedia Contributors"]
+authors.workspace = true
 
 [lints]
 workspace = true
@@ -27,11 +27,9 @@ oximedia-subtitle = { workspace = true }
 oximedia-metadata = { workspace = true }
 oximedia-qc = { workspace = true }
 oximedia-quality = { workspace = true }
-oximedia-batch = { workspace = true }
 oximedia-normalize = { workspace = true }
 oximedia-effects = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
@@ -42,6 +40,10 @@ dashmap = { workspace = true }
 parking_lot = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+oximedia-batch = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

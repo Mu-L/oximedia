@@ -158,13 +158,30 @@ pub struct AngleSwitch {
     pub position: Position,
     /// Angle to switch to.
     pub angle: u32,
+    /// Optional embedded timecode string (e.g. "01:00:10:00") that was used
+    /// to derive this switch position.  Stored for round-trip fidelity.
+    pub timecode_hint: Option<String>,
 }
 
 impl AngleSwitch {
-    /// Creates a new angle switch.
+    /// Creates a new angle switch at a timeline `position`.
     #[must_use]
     pub const fn new(position: Position, angle: u32) -> Self {
-        Self { position, angle }
+        Self {
+            position,
+            angle,
+            timecode_hint: None,
+        }
+    }
+
+    /// Creates a new angle switch carrying a timecode hint string.
+    #[must_use]
+    pub fn with_timecode(position: Position, angle: u32, timecode: impl Into<String>) -> Self {
+        Self {
+            position,
+            angle,
+            timecode_hint: Some(timecode.into()),
+        }
     }
 }
 
@@ -338,6 +355,181 @@ impl MultiCamClip {
                 let synced = ref_tl_in - offsets[i];
                 angle.clip.timeline_in = Position::new(synced);
             }
+        }
+
+        Ok(())
+    }
+
+    /// Adds an angle switch by matching a timecode string against the
+    /// embedded timecode markers of all angles.
+    ///
+    /// The timecode string must be in `HH:MM:SS:FF` (non-drop) or
+    /// `HH:MM:SS;FF` (drop-frame) notation.  The method converts the
+    /// timecode to a frame count using `fps` and then searches each angle's
+    /// clip for a matching frame offset.  When a match is found for the
+    /// specified `angle`, a switch is inserted at the corresponding timeline
+    /// position.
+    ///
+    /// If no embedded timecode is found the method falls back to treating
+    /// the timecode string as an absolute frame offset expressed in
+    /// `HH*3600*fps + MM*60*fps + SS*fps + FF` frames.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the timecode string cannot be parsed, `fps`
+    /// is zero, or the target `angle` does not exist.
+    pub fn add_switch_by_timecode(
+        &mut self,
+        timecode: &str,
+        angle: u32,
+        fps: f64,
+    ) -> TimelineResult<()> {
+        if fps <= 0.0 {
+            return Err(TimelineError::MultiCamError(
+                "fps must be positive for timecode-based switching".to_string(),
+            ));
+        }
+
+        // Verify that the angle exists.
+        if !self.angles.iter().any(|a| a.angle == angle) {
+            return Err(TimelineError::MultiCamError(format!(
+                "Angle {angle} not found for timecode switch"
+            )));
+        }
+
+        // Parse timecode: HH:MM:SS:FF or HH:MM:SS;FF (drop-frame uses ';')
+        let tc_frames = Self::parse_timecode_to_frames(timecode, fps)?;
+
+        // Attempt to find the angle clip's timeline_in offset for the frame.
+        // If the angle clip starts at frame N in its source media, then the
+        // matching timeline position is:
+        //   timeline_in_of_angle_clip + (tc_frames - source_in_frames_of_angle_clip)
+        let timeline_pos = if let Some(cam) = self.angles.iter().find(|a| a.angle == angle) {
+            let source_offset = tc_frames - cam.clip.source_in.value();
+            let raw = cam.clip.timeline_in.value() + source_offset;
+            Position::new(raw)
+        } else {
+            // Fallback: treat tc_frames as an absolute timeline position.
+            Position::new(tc_frames)
+        };
+
+        let switch = AngleSwitch::with_timecode(timeline_pos, angle, timecode);
+        self.add_switch(switch);
+        Ok(())
+    }
+
+    /// Parses a SMPTE timecode string `HH:MM:SS:FF` (or `HH:MM:SS;FF` for
+    /// drop-frame notation) into an absolute frame count at the given `fps`.
+    ///
+    /// Drop-frame correction is applied when the separator before the frame
+    /// field is `;` and fps is close to 29.97 or 59.94.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the string is malformed.
+    pub fn parse_timecode_to_frames(timecode: &str, fps: f64) -> TimelineResult<i64> {
+        // Accept both ':' and ';' as separators; the last separator signals
+        // drop-frame when it is ';'.
+        let is_drop = timecode.contains(';');
+        let s = timecode.replace(';', ":");
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() != 4 {
+            return Err(TimelineError::MultiCamError(format!(
+                "Invalid timecode format '{timecode}': expected HH:MM:SS:FF"
+            )));
+        }
+
+        let parse_part = |p: &str, label: &str| -> TimelineResult<i64> {
+            p.parse::<i64>().map_err(|_| {
+                TimelineError::MultiCamError(format!(
+                    "Invalid timecode component '{p}' for {label} in '{timecode}'"
+                ))
+            })
+        };
+
+        let hh = parse_part(parts[0], "hours")?;
+        let mm = parse_part(parts[1], "minutes")?;
+        let ss = parse_part(parts[2], "seconds")?;
+        let ff = parse_part(parts[3], "frames")?;
+
+        let fps_rounded = fps.round() as i64;
+        let total_seconds = hh * 3600 + mm * 60 + ss;
+        let raw_frames = total_seconds * fps_rounded + ff;
+
+        // Apply drop-frame correction for 29.97 / 59.94 fps.
+        let frames = if is_drop && (fps_rounded == 30 || fps_rounded == 60) {
+            let drop_per_min: i64 = if fps_rounded == 30 { 2 } else { 4 };
+            let total_min = hh * 60 + mm;
+            let dropped = drop_per_min * (total_min - total_min / 10);
+            raw_frames - dropped
+        } else {
+            raw_frames
+        };
+
+        Ok(frames)
+    }
+
+    /// Performs timecode-based synchronisation of all angles.
+    ///
+    /// Each angle may carry an embedded source timecode (stored as the
+    /// `source_in` frame offset of its clip).  This method computes, for
+    /// each angle, the timeline offset that would align its source timecode
+    /// with the reference angle's source timecode and applies it.
+    ///
+    /// If an angle's source timecode cannot be determined (e.g. its clip
+    /// `source_in` is 0 and the angle index is non-zero) the method falls
+    /// back to keeping the clip at its current `timeline_in`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the reference angle is not found.
+    pub fn sync_angles_by_timecode(
+        &mut self,
+        reference_angle: u32,
+        fps: f64,
+    ) -> TimelineResult<()> {
+        if fps <= 0.0 {
+            return Err(TimelineError::MultiCamError(
+                "fps must be positive for timecode sync".to_string(),
+            ));
+        }
+
+        let ref_idx = self
+            .angles
+            .iter()
+            .position(|a| a.angle == reference_angle)
+            .ok_or_else(|| {
+                TimelineError::MultiCamError(format!("Reference angle {reference_angle} not found"))
+            })?;
+
+        // The reference clip's source_in is treated as its "embedded timecode"
+        // in frames.  All other clips are shifted so their source_in aligns.
+        let ref_source_tc = self.angles[ref_idx].clip.source_in.value();
+        let ref_tl_in = self.angles[ref_idx].clip.timeline_in.value();
+
+        // Build a list of (index, new_timeline_in) to apply after computing.
+        let adjustments: Vec<(usize, i64)> = self
+            .angles
+            .iter()
+            .enumerate()
+            .map(|(i, a)| {
+                if i == ref_idx {
+                    (i, ref_tl_in)
+                } else {
+                    // offset = ref_source_tc - angle_source_tc
+                    // New timeline_in = ref_tl_in + (angle_source_tc - ref_source_tc)
+                    let angle_tc = a.clip.source_in.value();
+                    let delta = angle_tc - ref_source_tc;
+                    // Positive delta means this angle starts later in source, so its
+                    // timeline start is pushed later relative to the reference.
+                    let new_tl = ref_tl_in + delta;
+                    (i, new_tl)
+                }
+            })
+            .collect();
+
+        for (i, new_tl) in adjustments {
+            self.angles[i].clip.timeline_in = Position::new(new_tl);
         }
 
         Ok(())
@@ -664,5 +856,126 @@ mod tests {
     fn test_sync_by_audio_correlation_empty() {
         let offsets = sync_by_audio_correlation(&[], 0);
         assert!(offsets.is_empty());
+    }
+
+    // ------------------------------------------------------------------ //
+    // Timecode-based tests                                                 //
+    // ------------------------------------------------------------------ //
+
+    #[test]
+    fn test_parse_timecode_to_frames_basic() {
+        // 01:00:00:00 at 25fps = 3600 * 25 = 90_000
+        let frames =
+            MultiCamClip::parse_timecode_to_frames("01:00:00:00", 25.0).expect("should parse");
+        assert_eq!(frames, 90_000);
+    }
+
+    #[test]
+    fn test_parse_timecode_to_frames_with_frames() {
+        // 00:00:01:12 at 24fps = 24 + 12 = 36
+        let frames =
+            MultiCamClip::parse_timecode_to_frames("00:00:01:12", 24.0).expect("should parse");
+        assert_eq!(frames, 36);
+    }
+
+    #[test]
+    fn test_parse_timecode_invalid_format() {
+        let result = MultiCamClip::parse_timecode_to_frames("not:a:timecode", 25.0);
+        // Should still try parsing but fail on non-integer part
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_timecode_wrong_parts() {
+        let result = MultiCamClip::parse_timecode_to_frames("01:00:00", 25.0);
+        assert!(result.is_err(), "Only 3 parts — should fail");
+    }
+
+    #[test]
+    fn test_add_switch_by_timecode() {
+        let mut multicam = MultiCamClip::new("TC".to_string(), Position::new(0));
+
+        // Angle 1 has source starting at frame 0, timeline starting at 0
+        let mut c1 = create_test_clip("Cam1");
+        c1.source_in = Position::new(0);
+        c1.timeline_in = Position::new(0);
+        multicam
+            .add_angle(CameraAngle::new(1, "Cam1".to_string(), c1))
+            .expect("add angle ok");
+
+        // Switch at 00:00:01:00 @ 25fps = frame 25
+        multicam
+            .add_switch_by_timecode("00:00:01:00", 1, 25.0)
+            .expect("should succeed");
+
+        assert_eq!(multicam.switches.len(), 1);
+        assert_eq!(multicam.switches[0].position.value(), 25);
+        assert_eq!(multicam.switches[0].angle, 1);
+        assert!(multicam.switches[0].timecode_hint.is_some());
+    }
+
+    #[test]
+    fn test_add_switch_by_timecode_missing_angle_fails() {
+        let mut multicam = MultiCamClip::new("TC".to_string(), Position::new(0));
+        let result = multicam.add_switch_by_timecode("00:00:01:00", 99, 25.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_switch_by_timecode_zero_fps_fails() {
+        let mut multicam = MultiCamClip::new("TC".to_string(), Position::new(0));
+        multicam
+            .add_angle(CameraAngle::new(
+                1,
+                "Cam1".to_string(),
+                create_test_clip("Cam1"),
+            ))
+            .expect("add ok");
+        let result = multicam.add_switch_by_timecode("00:00:01:00", 1, 0.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sync_angles_by_timecode() {
+        let mut multicam = MultiCamClip::new("TC".to_string(), Position::new(0));
+
+        // Reference: angle 1, source_in=0, timeline_in=0
+        let mut c1 = create_test_clip("Cam1");
+        c1.source_in = Position::new(0);
+        c1.timeline_in = Position::new(0);
+
+        // Angle 2: source_in=100 (started 100 frames later in source)
+        let mut c2 = create_test_clip("Cam2");
+        c2.source_in = Position::new(100);
+        c2.timeline_in = Position::new(0);
+
+        multicam
+            .add_angle(CameraAngle::new(1, "Cam1".to_string(), c1))
+            .expect("ok");
+        multicam
+            .add_angle(CameraAngle::new(2, "Cam2".to_string(), c2))
+            .expect("ok");
+
+        multicam.sync_angles_by_timecode(1, 25.0).expect("sync ok");
+
+        // Angle 2's source_in is 100 frames ahead, so it should be pushed
+        // 100 frames later on timeline relative to angle 1.
+        let a2_tl = multicam.get_angle(2).expect("ok").clip.timeline_in.value();
+        assert_eq!(a2_tl, 100, "Angle 2 should be at timeline position 100");
+    }
+
+    #[test]
+    fn test_sync_angles_by_timecode_missing_ref_fails() {
+        let mut multicam = MultiCamClip::new("TC".to_string(), Position::new(0));
+        let result = multicam.sync_angles_by_timecode(99, 25.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_angle_switch_with_timecode_hint() {
+        let sw = AngleSwitch::with_timecode(Position::new(100), 2, "00:00:04:00");
+        assert_eq!(sw.position.value(), 100);
+        assert_eq!(sw.angle, 2);
+        assert_eq!(sw.timecode_hint.as_deref(), Some("00:00:04:00"));
     }
 }

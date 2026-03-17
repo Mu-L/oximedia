@@ -41,6 +41,7 @@ pub fn rtmp_360p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("flv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -70,6 +71,7 @@ pub fn rtmp_480p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("flv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -99,6 +101,7 @@ pub fn rtmp_720p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("flv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -128,6 +131,7 @@ pub fn rtmp_1080p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("flv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -158,6 +162,7 @@ pub fn rtmp_1080p_60fps() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("flv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -188,6 +193,7 @@ pub fn rtmp_low_latency() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("flv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -218,6 +224,7 @@ pub fn rtmp_high_quality() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("flv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

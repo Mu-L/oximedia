@@ -1,6 +1,7 @@
 [package]
 name = "oximedia-net"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -17,7 +18,7 @@ oximedia-container = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
-reqwest = { workspace = true, default-features = false, features = ["rustls"] }
+reqwest = { workspace = true }
 async-trait = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
@@ -25,7 +26,7 @@ sha1 = { workspace = true }
 hmac = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
-ring = { workspace = true }
+ed25519-dalek = { workspace = true }
 base64 = { workspace = true }
 hyper = { workspace = true, features = ["server", "http1", "http2"] }
 hyper-util = { workspace = true }

@@ -390,3 +390,279 @@ mod tests {
         assert!((offset - 2.0 / 90_000.0).abs() < 1e-12);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Rich media time using Rational time base
+// ---------------------------------------------------------------------------
+
+use crate::types::Rational;
+
+/// Standard time base: 1/90000 (MPEG / H.264 / VP9 default).
+pub const TB_90K: Rational = Rational {
+    num: 1,
+    den: 90_000,
+};
+
+/// Standard time base: 1/44100 (CD-quality audio).
+pub const TB_44100: Rational = Rational {
+    num: 1,
+    den: 44_100,
+};
+
+/// Standard time base: 1/48000 (broadcast audio).
+pub const TB_48K: Rational = Rational {
+    num: 1,
+    den: 48_000,
+};
+
+/// Standard time base: 1/1000 (millisecond precision).
+pub const TB_1K: Rational = Rational { num: 1, den: 1_000 };
+
+/// A media presentation timestamp with an associated [`Rational`] time base.
+///
+/// `pts` is measured in units of `time_base`; the wall-clock time is
+/// `pts * time_base.num / time_base.den` seconds.
+///
+/// # Examples
+///
+/// ```
+/// use oximedia_core::media_time::{PtsMediaTime, TB_90K};
+///
+/// let t = PtsMediaTime::new(90_000, TB_90K);
+/// assert!((t.to_secs() - 1.0).abs() < 1e-9);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PtsMediaTime {
+    /// Raw tick count (presentation timestamp).
+    pub pts: i64,
+    /// Time base as a rational fraction (e.g. `1/90000`).
+    pub time_base: Rational,
+}
+
+impl PtsMediaTime {
+    /// The canonical zero timestamp in a 1/90000 time base.
+    pub const ZERO: Self = Self {
+        pts: 0,
+        time_base: TB_90K,
+    };
+
+    /// Creates a new `PtsMediaTime`.
+    #[must_use]
+    pub fn new(pts: i64, time_base: Rational) -> Self {
+        Self { pts, time_base }
+    }
+
+    /// Converts seconds to ticks in the given time base and returns the
+    /// resulting `PtsMediaTime`.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    pub fn from_secs(secs: f64, time_base: Rational) -> Self {
+        // ticks = secs / (num/den) = secs * den / num
+        let ticks = (secs * time_base.den as f64 / time_base.num as f64).round() as i64;
+        Self {
+            pts: ticks,
+            time_base,
+        }
+    }
+
+    /// Returns the wall-clock time in seconds.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn to_secs(&self) -> f64 {
+        self.pts as f64 * self.time_base.to_f64()
+    }
+
+    /// Returns the wall-clock time in whole milliseconds (truncated toward
+    /// zero).
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    pub fn to_ms(&self) -> i64 {
+        (self.to_secs() * 1000.0) as i64
+    }
+
+    /// Rescales this timestamp to `new_base`, preserving the wall-clock
+    /// instant as accurately as possible.
+    ///
+    /// Uses 128-bit intermediate arithmetic to prevent overflow.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn rebase(&self, new_base: Rational) -> Self {
+        // new_pts = pts * (old_num / old_den) / (new_num / new_den)
+        //         = pts * old_num * new_den / (old_den * new_num)
+        let scale_num = i128::from(self.time_base.num) * i128::from(new_base.den);
+        let scale_den = i128::from(self.time_base.den) * i128::from(new_base.num);
+        let half = scale_den / 2;
+        let new_pts = ((i128::from(self.pts) * scale_num + half) / scale_den) as i64;
+        Self {
+            pts: new_pts,
+            time_base: new_base,
+        }
+    }
+
+    /// Returns `true` if the presentation timestamp is non-negative (valid
+    /// for presentation).
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.pts >= 0
+    }
+
+    /// Adds a [`MediaDuration`] to this timestamp.
+    ///
+    /// Both operands must share the same time base; if they differ the
+    /// duration is first rebased.
+    #[must_use]
+    pub fn add_duration(&self, d: MediaDuration) -> Self {
+        let d_rebased = d.rebase(self.time_base);
+        Self {
+            pts: self.pts + d_rebased.ticks,
+            time_base: self.time_base,
+        }
+    }
+
+    /// Returns the difference `self - other` as a [`MediaDuration`] in
+    /// `self`'s time base.
+    #[must_use]
+    pub fn subtract(&self, other: &Self) -> MediaDuration {
+        let other_rebased = other.rebase(self.time_base);
+        MediaDuration {
+            ticks: self.pts - other_rebased.pts,
+            time_base: self.time_base,
+        }
+    }
+}
+
+/// A duration expressed in [`Rational`] time-base ticks.
+#[derive(Debug, Clone, Copy)]
+pub struct MediaDuration {
+    /// Raw tick count.
+    pub ticks: i64,
+    /// Time base.
+    pub time_base: Rational,
+}
+
+impl MediaDuration {
+    /// Converts seconds to ticks and returns the resulting `MediaDuration`.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    pub fn from_secs(secs: f64, time_base: Rational) -> Self {
+        let ticks = (secs * time_base.den as f64 / time_base.num as f64).round() as i64;
+        Self { ticks, time_base }
+    }
+
+    /// Returns the duration in seconds.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn to_secs(&self) -> f64 {
+        self.ticks as f64 * self.time_base.to_f64()
+    }
+
+    /// Rescales this duration to `new_base`.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn rebase(&self, new_base: Rational) -> Self {
+        let scale_num = i128::from(self.time_base.num) * i128::from(new_base.den);
+        let scale_den = i128::from(self.time_base.den) * i128::from(new_base.num);
+        let half = scale_den / 2;
+        let new_ticks = ((i128::from(self.ticks) * scale_num + half) / scale_den) as i64;
+        Self {
+            ticks: new_ticks,
+            time_base: new_base,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_pts_media_time {
+    use super::*;
+
+    #[test]
+    fn test_zero_constant() {
+        assert_eq!(PtsMediaTime::ZERO.pts, 0);
+        assert_eq!(PtsMediaTime::ZERO.time_base, TB_90K);
+    }
+
+    #[test]
+    fn test_new_and_to_secs() {
+        let t = PtsMediaTime::new(90_000, TB_90K);
+        assert!((t.to_secs() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_from_secs() {
+        let t = PtsMediaTime::from_secs(2.5, TB_90K);
+        assert!((t.to_secs() - 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_to_ms() {
+        let t = PtsMediaTime::from_secs(1.5, TB_1K);
+        assert_eq!(t.to_ms(), 1500);
+    }
+
+    #[test]
+    fn test_rebase_90k_to_1k() {
+        let t = PtsMediaTime::new(90_000, TB_90K);
+        let r = t.rebase(TB_1K);
+        assert_eq!(r.pts, 1000);
+        assert!((r.to_secs() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rebase_1k_to_44100() {
+        let t = PtsMediaTime::from_secs(1.0, TB_1K);
+        let r = t.rebase(TB_44100);
+        assert_eq!(r.pts, 44_100);
+    }
+
+    #[test]
+    fn test_is_valid() {
+        assert!(PtsMediaTime::new(0, TB_90K).is_valid());
+        assert!(PtsMediaTime::new(100, TB_90K).is_valid());
+        assert!(!PtsMediaTime::new(-1, TB_90K).is_valid());
+    }
+
+    #[test]
+    fn test_add_duration() {
+        let t = PtsMediaTime::new(0, TB_1K);
+        let d = MediaDuration::from_secs(1.5, TB_1K);
+        let t2 = t.add_duration(d);
+        assert_eq!(t2.pts, 1500);
+    }
+
+    #[test]
+    fn test_add_duration_different_base() {
+        let t = PtsMediaTime::new(90_000, TB_90K); // 1 second
+        let d = MediaDuration::from_secs(0.5, TB_1K); // 0.5 seconds in 1k base
+        let t2 = t.add_duration(d);
+        assert!((t2.to_secs() - 1.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_subtract() {
+        let a = PtsMediaTime::new(3000, TB_1K);
+        let b = PtsMediaTime::new(1000, TB_1K);
+        let d = a.subtract(&b);
+        assert!((d.to_secs() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_media_duration_from_secs_to_secs() {
+        let d = MediaDuration::from_secs(0.25, TB_90K);
+        assert!((d.to_secs() - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_media_duration_rebase() {
+        let d = MediaDuration::from_secs(1.0, TB_90K);
+        let r = d.rebase(TB_48K);
+        assert_eq!(r.ticks, 48_000);
+    }
+
+    #[test]
+    fn test_tb_constants() {
+        assert_eq!(TB_90K.den, 90_000);
+        assert_eq!(TB_44100.den, 44_100);
+        assert_eq!(TB_48K.den, 48_000);
+        assert_eq!(TB_1K.den, 1_000);
+    }
+}

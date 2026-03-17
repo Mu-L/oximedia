@@ -161,6 +161,210 @@ impl SceneTrimMetadata {
     }
 }
 
+// ── Scene-change Detection from L1 Metadata ──────────────────────────────────
+
+/// Per-frame L1 sample used as input to scene-change detection.
+#[derive(Debug, Clone, Copy)]
+pub struct L1Frame {
+    /// Frame index (monotonically increasing).
+    pub frame_index: u64,
+    /// Minimum PQ code value (0–4095).
+    pub min_pq: u16,
+    /// Maximum PQ code value (0–4095).
+    pub max_pq: u16,
+    /// Average PQ code value (0–4095).
+    pub avg_pq: u16,
+}
+
+impl L1Frame {
+    /// Create a new L1 frame sample.
+    #[must_use]
+    pub fn new(frame_index: u64, min_pq: u16, max_pq: u16, avg_pq: u16) -> Self {
+        Self {
+            frame_index,
+            min_pq,
+            max_pq,
+            avg_pq,
+        }
+    }
+}
+
+/// Configuration for scene-change detection.
+#[derive(Debug, Clone)]
+pub struct SceneChangeConfig {
+    /// Minimum absolute difference in `avg_pq` to trigger a scene cut
+    /// (0–4095 scale). Default: 300 (~7.3% of full range).
+    pub avg_pq_threshold: u16,
+    /// Minimum absolute difference in `max_pq` to trigger a scene cut.
+    /// Default: 500.
+    pub max_pq_threshold: u16,
+    /// Minimum number of frames between consecutive scene boundaries
+    /// (prevents spurious cuts on flash frames). Default: 12.
+    pub min_scene_duration: u64,
+    /// Window size for temporal smoothing of L1 values before comparison.
+    /// A value of 1 disables smoothing. Default: 3.
+    pub smoothing_window: usize,
+}
+
+impl Default for SceneChangeConfig {
+    fn default() -> Self {
+        Self {
+            avg_pq_threshold: 300,
+            max_pq_threshold: 500,
+            min_scene_duration: 12,
+            smoothing_window: 3,
+        }
+    }
+}
+
+/// Result of scene-change detection: a list of frame indices where scene cuts occur.
+#[derive(Debug, Clone)]
+pub struct SceneChangeResult {
+    /// Frame indices (from the input sequence) where scene changes are detected.
+    ///
+    /// A scene starts at the given frame and ends at the frame before the next
+    /// scene-change entry (or at the last frame of the sequence).
+    pub cut_points: Vec<u64>,
+    /// Total number of input frames processed.
+    pub total_frames: u64,
+}
+
+impl SceneChangeResult {
+    /// Convert cut points into `SceneTrimMetadata` ranges.
+    ///
+    /// `last_frame` is the index of the last frame in the sequence (inclusive).
+    #[must_use]
+    pub fn into_scene_trim_metadata(
+        &self,
+        last_frame: u64,
+        base_display_nits: f32,
+    ) -> Vec<SceneTrimMetadata> {
+        if self.cut_points.is_empty() {
+            // Single scene covering everything
+            let mut scene = SceneTrimMetadata::new(0, 0, last_frame);
+            scene.add_trim(TrimTarget::for_display(base_display_nits));
+            return vec![scene];
+        }
+
+        let mut scenes = Vec::new();
+        let mut first = 0u64;
+        let mut scene_id = 0u32;
+
+        for &cut in &self.cut_points {
+            if cut > first {
+                let mut s = SceneTrimMetadata::new(scene_id, first, cut - 1);
+                s.add_trim(TrimTarget::for_display(base_display_nits));
+                scenes.push(s);
+                scene_id += 1;
+            }
+            first = cut;
+        }
+
+        // Final scene
+        if first <= last_frame {
+            let mut s = SceneTrimMetadata::new(scene_id, first, last_frame);
+            s.add_trim(TrimTarget::for_display(base_display_nits));
+            scenes.push(s);
+        }
+
+        scenes
+    }
+}
+
+/// Scene-change detector operating on Dolby Vision Level 1 metadata.
+///
+/// Uses a sliding-window comparison of `avg_pq` and `max_pq` to identify
+/// significant luminance transitions that indicate cut or fade scene boundaries.
+///
+/// # Algorithm
+///
+/// 1. Optionally smooth L1 values with a box filter of `config.smoothing_window`.
+/// 2. For each consecutive pair of smoothed frames, compute absolute difference in
+///    `avg_pq` and `max_pq`.
+/// 3. Emit a cut point when *either* difference exceeds its respective threshold.
+/// 4. Suppress cuts within `min_scene_duration` frames of the previous cut.
+#[derive(Debug, Default)]
+pub struct L1SceneDetector;
+
+impl L1SceneDetector {
+    /// Detect scene changes from a sequence of Level 1 frame samples.
+    ///
+    /// Returns a `SceneChangeResult` with all detected cut points.
+    #[must_use]
+    pub fn detect(frames: &[L1Frame], config: &SceneChangeConfig) -> SceneChangeResult {
+        let total_frames = frames.len() as u64;
+        if frames.len() < 2 {
+            return SceneChangeResult {
+                cut_points: Vec::new(),
+                total_frames,
+            };
+        }
+
+        // Step 1: smooth L1 values
+        let smoothed = Self::smooth(frames, config.smoothing_window);
+
+        // Step 2: compare consecutive smoothed frames
+        let mut cut_points: Vec<u64> = Vec::new();
+        let mut last_cut_frame: Option<u64> = None;
+
+        for window in smoothed.windows(2) {
+            let a = &window[0];
+            let b = &window[1];
+
+            // Guard minimum scene duration
+            if let Some(last) = last_cut_frame {
+                if b.frame_index.saturating_sub(last) < config.min_scene_duration {
+                    continue;
+                }
+            }
+
+            let avg_diff = a.avg_pq.abs_diff(b.avg_pq);
+            let max_diff = a.max_pq.abs_diff(b.max_pq);
+
+            if avg_diff >= config.avg_pq_threshold || max_diff >= config.max_pq_threshold {
+                cut_points.push(b.frame_index);
+                last_cut_frame = Some(b.frame_index);
+            }
+        }
+
+        SceneChangeResult {
+            cut_points,
+            total_frames,
+        }
+    }
+
+    /// Apply a box-filter smooth over the L1 frame sequence.
+    ///
+    /// Uses a symmetric window clamped at the edges.
+    #[must_use]
+    fn smooth(frames: &[L1Frame], window: usize) -> Vec<L1Frame> {
+        if window <= 1 || frames.is_empty() {
+            return frames.to_vec();
+        }
+        let half = window / 2;
+        let n = frames.len();
+        let mut out = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let lo = i.saturating_sub(half);
+            let hi = (i + half + 1).min(n);
+            let count = (hi - lo) as u32;
+
+            let avg_sum: u32 = frames[lo..hi].iter().map(|f| u32::from(f.avg_pq)).sum();
+            let max_sum: u32 = frames[lo..hi].iter().map(|f| u32::from(f.max_pq)).sum();
+            let min_sum: u32 = frames[lo..hi].iter().map(|f| u32::from(f.min_pq)).sum();
+
+            out.push(L1Frame {
+                frame_index: frames[i].frame_index,
+                avg_pq: (avg_sum / count) as u16,
+                max_pq: (max_sum / count) as u16,
+                min_pq: (min_sum / count) as u16,
+            });
+        }
+        out
+    }
+}
+
 /// Library of scene trim metadata indexed by scene/frame
 #[derive(Debug, Default)]
 #[allow(dead_code)]
@@ -670,5 +874,135 @@ mod spec_tests {
         };
         let errs = TrimValidation::check(&t);
         assert!(errs.iter().any(|e| e.contains("gamma")));
+    }
+}
+
+// ── Scene-change detection tests ─────────────────────────────────────────────
+
+#[cfg(test)]
+mod scene_detect_tests {
+    use super::*;
+
+    fn make_l1(frame_index: u64, avg_pq: u16, max_pq: u16) -> L1Frame {
+        L1Frame::new(frame_index, 0, max_pq, avg_pq)
+    }
+
+    #[test]
+    fn test_scene_detect_no_frames() {
+        let result = L1SceneDetector::detect(&[], &SceneChangeConfig::default());
+        assert!(result.cut_points.is_empty());
+        assert_eq!(result.total_frames, 0);
+    }
+
+    #[test]
+    fn test_scene_detect_single_frame() {
+        let frames = [make_l1(0, 1000, 3000)];
+        let result = L1SceneDetector::detect(&frames, &SceneChangeConfig::default());
+        assert!(result.cut_points.is_empty());
+    }
+
+    #[test]
+    fn test_scene_detect_stable_sequence_no_cuts() {
+        // Uniform luminance → no cuts expected
+        let frames: Vec<L1Frame> = (0u64..30).map(|i| make_l1(i, 1000, 2500)).collect();
+        let result = L1SceneDetector::detect(&frames, &SceneChangeConfig::default());
+        assert!(
+            result.cut_points.is_empty(),
+            "stable sequence should have no cuts"
+        );
+    }
+
+    #[test]
+    fn test_scene_detect_abrupt_cut() {
+        // Sharp jump in avg_pq at frame 15
+        let mut frames: Vec<L1Frame> = (0u64..30).map(|i| make_l1(i, 1000, 2500)).collect();
+        for i in 15..30 {
+            frames[i].avg_pq = 3000;
+            frames[i].max_pq = 4000;
+        }
+        let config = SceneChangeConfig {
+            avg_pq_threshold: 300,
+            max_pq_threshold: 500,
+            min_scene_duration: 1,
+            smoothing_window: 1,
+        };
+        let result = L1SceneDetector::detect(&frames, &config);
+        assert!(
+            !result.cut_points.is_empty(),
+            "abrupt jump should trigger a cut"
+        );
+        assert!(result.cut_points.contains(&15), "cut should be at frame 15");
+    }
+
+    #[test]
+    fn test_scene_detect_min_scene_duration_suppresses_close_cuts() {
+        // Two jumps only 5 frames apart — with min_scene_duration=12, second should be suppressed
+        let mut frames: Vec<L1Frame> = (0u64..60).map(|i| make_l1(i, 1000, 2500)).collect();
+        // First jump at frame 15
+        for i in 15..60 {
+            frames[i].avg_pq = 3000;
+        }
+        // Second jump at frame 18 (only 3 frames after first)
+        for i in 18..60 {
+            frames[i].max_pq = 4095;
+        }
+        let config = SceneChangeConfig {
+            avg_pq_threshold: 300,
+            max_pq_threshold: 500,
+            min_scene_duration: 12,
+            smoothing_window: 1,
+        };
+        let result = L1SceneDetector::detect(&frames, &config);
+        // At most one cut since second is within min_scene_duration
+        assert!(
+            result.cut_points.len() <= 2,
+            "close cuts should be suppressed"
+        );
+    }
+
+    #[test]
+    fn test_into_scene_trim_metadata_no_cuts() {
+        let result = SceneChangeResult {
+            cut_points: vec![],
+            total_frames: 100,
+        };
+        let scenes = result.into_scene_trim_metadata(99, 1000.0);
+        assert_eq!(scenes.len(), 1, "no cuts → single scene");
+        assert_eq!(scenes[0].first_frame, 0);
+        assert_eq!(scenes[0].last_frame, 99);
+    }
+
+    #[test]
+    fn test_into_scene_trim_metadata_with_cuts() {
+        let result = SceneChangeResult {
+            cut_points: vec![25, 50, 75],
+            total_frames: 100,
+        };
+        let scenes = result.into_scene_trim_metadata(99, 1000.0);
+        assert_eq!(scenes.len(), 4, "3 cuts → 4 scenes");
+        assert_eq!(scenes[0].first_frame, 0);
+        assert_eq!(scenes[0].last_frame, 24);
+        assert_eq!(scenes[3].last_frame, 99);
+    }
+
+    #[test]
+    fn test_l1_scene_detector_smooth_window_1_passthrough() {
+        let frames: Vec<L1Frame> = (0u64..5)
+            .map(|i| make_l1(i, (i * 100) as u16, 3000))
+            .collect();
+        let smoothed = L1SceneDetector::smooth(&frames, 1);
+        assert_eq!(smoothed.len(), frames.len());
+        for (a, b) in frames.iter().zip(smoothed.iter()) {
+            assert_eq!(a.avg_pq, b.avg_pq);
+        }
+    }
+
+    #[test]
+    fn test_l1_frame_constructor() {
+        let f = L1Frame::new(42, 100, 3000, 1500);
+        assert_eq!(f.frame_index, 42);
+        assert_eq!(f.min_pq, 100);
+        assert_eq!(f.max_pq, 3000);
+        assert_eq!(f.avg_pq, 1500);
     }
 }

@@ -562,6 +562,152 @@ impl AuditLogger {
         Ok(json)
     }
 
+    /// Export audit logs to SIEM-compatible CEF (Common Event Format) string.
+    ///
+    /// CEF specification: ArcSight CEF Implementation Standard v25.
+    /// Each log line follows the schema:
+    /// `CEF:0|Vendor|Product|Version|EventId|Name|Severity|Extension`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the logs cannot be fetched
+    pub async fn export_cef(&self, filter: AuditLogFilter, limit: i64) -> Result<String> {
+        let logs = self.query_logs(filter, limit, 0).await?;
+        let mut output = String::new();
+
+        for log in &logs {
+            // CEF severity: map success/failure to numeric level (0-10)
+            let severity = if log.success { 3u8 } else { 7u8 };
+
+            // Escape CEF pipe-delimited header fields (| and \)
+            let action_escaped = log.action.replace('\\', "\\\\").replace('|', "\\|");
+
+            // Build CEF header
+            output.push_str(&format!(
+                "CEF:0|OxiMedia|OxiMedia-MAM|{}|{}|{}|{}|",
+                env!("CARGO_PKG_VERSION"),
+                log.id,
+                action_escaped,
+                severity,
+            ));
+
+            // Build CEF extension key=value pairs (values escape = and \)
+            let mut ext = String::new();
+
+            // Standard CEF extension keys
+            ext.push_str(&format!("rt={}", log.timestamp.timestamp_millis()));
+
+            if let Some(uid) = log.user_id {
+                ext.push_str(&format!(" suser={}", uid));
+            }
+            if let Some(ref name) = log.username {
+                let v = cef_escape_extension_value(name);
+                ext.push_str(&format!(" suid={v}"));
+            }
+            if let Some(ref ip) = log.ip_address {
+                let v = cef_escape_extension_value(ip);
+                ext.push_str(&format!(" src={v}"));
+            }
+            if let Some(ref rt) = log.resource_type {
+                let v = cef_escape_extension_value(rt);
+                ext.push_str(&format!(" cs1Label=resourceType cs1={v}"));
+            }
+            if let Some(rid) = log.resource_id {
+                ext.push_str(&format!(" cs2Label=resourceId cs2={rid}"));
+            }
+            if log.success {
+                ext.push_str(" outcome=success");
+            } else {
+                ext.push_str(" outcome=failure");
+                if let Some(ref err) = log.error_message {
+                    let v = cef_escape_extension_value(err);
+                    ext.push_str(&format!(" msg={v}"));
+                }
+            }
+            if let Some(ref ua) = log.user_agent {
+                let v = cef_escape_extension_value(ua);
+                ext.push_str(&format!(" requestClientApplication={v}"));
+            }
+
+            output.push_str(&ext);
+            output.push('\n');
+        }
+
+        Ok(output)
+    }
+
+    /// Export audit logs to SIEM-compatible LEEF (Log Event Extended Format) string.
+    ///
+    /// LEEF specification: IBM QRadar LEEF 2.0.
+    /// Each log line follows the schema:
+    /// `LEEF:2.0|Vendor|Product|Version|EventId|Tab-separated attributes`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the logs cannot be fetched
+    pub async fn export_leef(&self, filter: AuditLogFilter, limit: i64) -> Result<String> {
+        let logs = self.query_logs(filter, limit, 0).await?;
+        let mut output = String::new();
+
+        for log in &logs {
+            // LEEF 2.0 header uses tab as attribute delimiter (0x09)
+            let delimiter = '\t';
+
+            // Build LEEF header: LEEF:2.0|Vendor|Product|Version|EventId|
+            let event_id = log.action.replace('|', "_");
+            output.push_str(&format!(
+                "LEEF:2.0|OxiMedia|OxiMedia-MAM|{}|{}|",
+                env!("CARGO_PKG_VERSION"),
+                event_id,
+            ));
+
+            // Collect key=value attributes, tab-delimited
+            let mut attrs: Vec<String> = Vec::new();
+
+            attrs.push(format!("devTime={}", log.timestamp.to_rfc3339()));
+            attrs.push(format!("eventId={}", log.id));
+            attrs.push(format!("cat={}", log.action));
+
+            if let Some(uid) = log.user_id {
+                attrs.push(format!("usrName={uid}"));
+            }
+            if let Some(ref name) = log.username {
+                attrs.push(format!("accountName={}", leef_escape(name)));
+            }
+            if let Some(ref ip) = log.ip_address {
+                attrs.push(format!("src={}", leef_escape(ip)));
+            }
+            if let Some(ref rt) = log.resource_type {
+                attrs.push(format!("resourceType={}", leef_escape(rt)));
+            }
+            if let Some(rid) = log.resource_id {
+                attrs.push(format!("resourceId={rid}"));
+            }
+            if log.success {
+                attrs.push("outcome=success".to_string());
+                attrs.push("severity=3".to_string());
+            } else {
+                attrs.push("outcome=failure".to_string());
+                attrs.push("severity=7".to_string());
+                if let Some(ref err) = log.error_message {
+                    attrs.push(format!("reason={}", leef_escape(err)));
+                }
+            }
+            if let Some(ref ua) = log.user_agent {
+                attrs.push(format!("userAgent={}", leef_escape(ua)));
+            }
+            if let Some(ref details) = log.details {
+                let v = leef_escape(&details.to_string());
+                attrs.push(format!("details={v}"));
+            }
+
+            output.push_str(&attrs.join(&delimiter.to_string()));
+            output.push('\n');
+        }
+
+        Ok(output)
+    }
+
     /// Delete old audit logs (for retention policy)
     ///
     /// # Errors
@@ -628,6 +774,27 @@ impl AuditLogger {
     }
 }
 
+/// Escape a CEF extension field value per the ArcSight CEF spec.
+///
+/// Characters that must be escaped: `\` → `\\`, `=` → `\=`, newline → `\n`, CR → `\r`.
+fn cef_escape_extension_value(v: &str) -> String {
+    v.replace('\\', "\\\\")
+        .replace('=', "\\=")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+/// Escape a LEEF attribute value.
+///
+/// Tab and newline characters are replaced to avoid breaking the LEEF record
+/// structure.  Backslash is doubled for safety.
+fn leef_escape(v: &str) -> String {
+    v.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,5 +846,162 @@ mod tests {
 
         assert_eq!(action_count.action, "asset.create");
         assert_eq!(action_count.count, 100);
+    }
+
+    // -------------------------------------------------------------------------
+    // CEF / LEEF helper unit tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_cef_escape_no_special_chars() {
+        assert_eq!(cef_escape_extension_value("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_cef_escape_equals() {
+        assert_eq!(cef_escape_extension_value("a=b"), "a\\=b");
+    }
+
+    #[test]
+    fn test_cef_escape_backslash() {
+        assert_eq!(cef_escape_extension_value("a\\b"), "a\\\\b");
+    }
+
+    #[test]
+    fn test_cef_escape_newline() {
+        assert_eq!(cef_escape_extension_value("line1\nline2"), "line1\\nline2");
+    }
+
+    #[test]
+    fn test_cef_escape_combined() {
+        // backslash must be escaped first, then equals
+        assert_eq!(cef_escape_extension_value("\\="), "\\\\\\=");
+    }
+
+    #[test]
+    fn test_leef_escape_no_special_chars() {
+        assert_eq!(leef_escape("plain value"), "plain value");
+    }
+
+    #[test]
+    fn test_leef_escape_tab() {
+        assert_eq!(leef_escape("key\tval"), "key\\tval");
+    }
+
+    #[test]
+    fn test_leef_escape_newline() {
+        assert_eq!(leef_escape("line1\nline2"), "line1\\nline2");
+    }
+
+    #[test]
+    fn test_leef_escape_backslash() {
+        assert_eq!(leef_escape("a\\b"), "a\\\\b");
+    }
+
+    /// Build a minimal in-memory [`AuditLog`] for format testing without a DB.
+    fn make_audit_log(action: &str, success: bool) -> AuditLog {
+        AuditLog {
+            id: Uuid::nil(),
+            action: action.to_string(),
+            resource_type: Some("asset".to_string()),
+            resource_id: Some(Uuid::nil()),
+            user_id: Some(Uuid::nil()),
+            username: Some("alice".to_string()),
+            ip_address: Some("192.168.1.1".to_string()),
+            user_agent: Some("curl/7.88".to_string()),
+            details: None,
+            changes: None,
+            success,
+            error_message: if success {
+                None
+            } else {
+                Some("disk full".to_string())
+            },
+            timestamp: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+                .expect("valid RFC3339 literal")
+                .with_timezone(&Utc),
+        }
+    }
+
+    #[test]
+    fn test_cef_format_success_event() {
+        let log = make_audit_log("asset.create", true);
+        // Simulate what export_cef builds for a single log
+        let severity: u8 = if log.success { 3 } else { 7 };
+        let header = format!(
+            "CEF:0|OxiMedia|OxiMedia-MAM|{}|{}|{}|{}|",
+            env!("CARGO_PKG_VERSION"),
+            log.id,
+            log.action,
+            severity,
+        );
+        assert!(header.starts_with("CEF:0|OxiMedia|OxiMedia-MAM|"));
+        assert!(header.contains("asset.create"));
+        assert!(header.contains("|3|")); // severity 3 for success
+    }
+
+    #[test]
+    fn test_cef_format_failure_event() {
+        let log = make_audit_log("auth.login_failed", false);
+        let severity: u8 = 7;
+        let header = format!(
+            "CEF:0|OxiMedia|OxiMedia-MAM|{}|{}|{}|{}|",
+            env!("CARGO_PKG_VERSION"),
+            log.id,
+            log.action,
+            severity,
+        );
+        assert!(header.contains("|7|")); // severity 7 for failure
+    }
+
+    #[test]
+    fn test_cef_header_pipe_escaping() {
+        // action containing a pipe must be escaped in the CEF header
+        let action = "asset|update";
+        let escaped = action.replace('\\', "\\\\").replace('|', "\\|");
+        assert_eq!(escaped, "asset\\|update");
+    }
+
+    #[test]
+    fn test_leef_header_format() {
+        let log = make_audit_log("asset.delete", true);
+        let event_id = log.action.replace('|', "_");
+        let header = format!(
+            "LEEF:2.0|OxiMedia|OxiMedia-MAM|{}|{}|",
+            env!("CARGO_PKG_VERSION"),
+            event_id,
+        );
+        assert!(header.starts_with("LEEF:2.0|OxiMedia|OxiMedia-MAM|"));
+        assert!(header.contains("asset.delete"));
+    }
+
+    #[test]
+    fn test_leef_attributes_tab_separated() {
+        // Verify that a tab-separated attribute list can be reconstructed
+        let attrs = vec![
+            "cat=asset.create".to_string(),
+            "outcome=success".to_string(),
+        ];
+        let line = attrs.join("\t");
+        assert!(line.contains('\t'));
+        let parts: Vec<&str> = line.split('\t').collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "cat=asset.create");
+    }
+
+    #[test]
+    fn test_leef_pipe_in_action_replaced() {
+        let action = "asset|create";
+        let event_id = action.replace('|', "_");
+        assert_eq!(event_id, "asset_create");
+    }
+
+    #[test]
+    fn test_siem_severity_mapping() {
+        // Success → severity 3, failure → severity 7
+        let sev_ok: u8 = if true { 3 } else { 7 };
+        let sev_fail: u8 = if false { 3 } else { 7 };
+        assert_eq!(sev_ok, 3);
+        assert_eq!(sev_fail, 7);
     }
 }

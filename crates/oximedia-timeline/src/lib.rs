@@ -54,6 +54,7 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
 
+pub mod adjustment_layer;
 pub mod audio;
 pub mod cache;
 pub mod clip;
@@ -68,8 +69,10 @@ pub mod effects;
 pub mod error;
 pub mod export;
 pub mod export_settings;
+pub mod freeze_frame;
 pub mod gap_filler;
 pub mod import;
+pub mod interval_tree;
 pub mod keyframe;
 pub mod keyframe_animation;
 pub mod marker;
@@ -80,6 +83,7 @@ pub mod multicam;
 pub mod nested;
 pub mod nested_compound;
 pub mod nested_timeline;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod playback;
 pub mod razor_tool;
 pub mod render;

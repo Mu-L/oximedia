@@ -150,47 +150,473 @@ pub async fn validate_file(path: &Path) -> ArchiveResult<ValidationResult> {
     Ok(result)
 }
 
-/// Detect container format
-pub async fn detect_container_format(path: &Path) -> ArchiveResult<String> {
-    // Read magic bytes
+/// Known file format identified by magic bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MagicBytesMatch {
+    /// Short identifier (e.g. "png", "flac").
+    pub format_id: String,
+    /// Human-readable format name.
+    pub format_name: String,
+    /// MIME type.
+    pub mime_type: String,
+    /// Offset at which the magic bytes were found.
+    pub offset: usize,
+    /// Length of the magic byte signature that matched.
+    pub signature_len: usize,
+    /// Confidence level (0.0 to 1.0). Magic-byte matches are high confidence;
+    /// extension-only matches are lower.
+    pub confidence: f64,
+}
+
+/// A magic bytes signature entry used for format identification.
+struct MagicSignature {
+    /// Offset in the file where the signature starts.
+    offset: usize,
+    /// The byte sequence to match.
+    bytes: &'static [u8],
+    /// Short format id.
+    format_id: &'static str,
+    /// Human-readable name.
+    format_name: &'static str,
+    /// MIME type.
+    mime_type: &'static str,
+}
+
+/// Return the built-in table of magic byte signatures for media formats.
+///
+/// Covers containers, audio, image, subtitle, and archive formats relevant
+/// to media preservation workflows. Ordered so that signatures requiring
+/// larger offsets come after zero-offset ones; the first match wins in
+/// most cases, but [`identify_format_by_magic`] returns *all* matches.
+fn magic_signatures() -> Vec<MagicSignature> {
+    vec![
+        // --- Containers / Video ---
+        MagicSignature {
+            offset: 0,
+            bytes: &[0x1A, 0x45, 0xDF, 0xA3],
+            format_id: "matroska",
+            format_name: "Matroska/WebM (EBML)",
+            mime_type: "video/x-matroska",
+        },
+        MagicSignature {
+            offset: 4,
+            bytes: b"ftyp",
+            format_id: "mp4",
+            format_name: "ISO Base Media (MP4/MOV)",
+            mime_type: "video/mp4",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b"RIFF",
+            format_id: "riff",
+            format_name: "RIFF container",
+            mime_type: "application/octet-stream",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0x00, 0x00, 0x01, 0xBA],
+            format_id: "mpeg-ps",
+            format_name: "MPEG Program Stream",
+            mime_type: "video/mpeg",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0x47],
+            format_id: "mpeg-ts",
+            format_name: "MPEG Transport Stream",
+            mime_type: "video/mp2t",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11],
+            format_id: "asf",
+            format_name: "ASF/WMV/WMA",
+            mime_type: "video/x-ms-asf",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b"FLV\x01",
+            format_id: "flv",
+            format_name: "Flash Video",
+            mime_type: "video/x-flv",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0x06, 0x0E, 0x2B, 0x34],
+            format_id: "mxf",
+            format_name: "MXF (Material eXchange Format)",
+            mime_type: "application/mxf",
+        },
+        // --- Audio ---
+        MagicSignature {
+            offset: 0,
+            bytes: b"fLaC",
+            format_id: "flac",
+            format_name: "FLAC",
+            mime_type: "audio/flac",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b"OggS",
+            format_id: "ogg",
+            format_name: "Ogg container (Vorbis/Opus/Theora)",
+            mime_type: "audio/ogg",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0xFF, 0xFB],
+            format_id: "mp3",
+            format_name: "MP3 (MPEG Audio Layer III)",
+            mime_type: "audio/mpeg",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0xFF, 0xF3],
+            format_id: "mp3",
+            format_name: "MP3 (MPEG Audio Layer III)",
+            mime_type: "audio/mpeg",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0xFF, 0xF2],
+            format_id: "mp3",
+            format_name: "MP3 (MPEG Audio Layer III)",
+            mime_type: "audio/mpeg",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b"ID3",
+            format_id: "mp3",
+            format_name: "MP3 with ID3 tag",
+            mime_type: "audio/mpeg",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0xFF, 0xF1],
+            format_id: "aac",
+            format_name: "AAC (ADTS)",
+            mime_type: "audio/aac",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0xFF, 0xF9],
+            format_id: "aac",
+            format_name: "AAC (ADTS)",
+            mime_type: "audio/aac",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b".snd",
+            format_id: "au",
+            format_name: "Sun/NeXT AU audio",
+            mime_type: "audio/basic",
+        },
+        MagicSignature {
+            offset: 8,
+            bytes: b"AIFF",
+            format_id: "aiff",
+            format_name: "AIFF audio",
+            mime_type: "audio/aiff",
+        },
+        // --- Image ---
+        MagicSignature {
+            offset: 0,
+            bytes: &[0xFF, 0xD8, 0xFF],
+            format_id: "jpeg",
+            format_name: "JPEG",
+            mime_type: "image/jpeg",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+            format_id: "png",
+            format_name: "PNG",
+            mime_type: "image/png",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b"GIF87a",
+            format_id: "gif",
+            format_name: "GIF87a",
+            mime_type: "image/gif",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b"GIF89a",
+            format_id: "gif",
+            format_name: "GIF89a",
+            mime_type: "image/gif",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0x49, 0x49, 0x2A, 0x00],
+            format_id: "tiff",
+            format_name: "TIFF (little-endian)",
+            mime_type: "image/tiff",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0x4D, 0x4D, 0x00, 0x2A],
+            format_id: "tiff",
+            format_name: "TIFF (big-endian)",
+            mime_type: "image/tiff",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b"BM",
+            format_id: "bmp",
+            format_name: "BMP",
+            mime_type: "image/bmp",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b"RIFF",
+            format_id: "webp_check",
+            format_name: "RIFF (check WEBP)",
+            mime_type: "image/webp",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[
+                0x00, 0x00, 0x00, 0x0C, 0x4A, 0x58, 0x4C, 0x20, 0x0D, 0x0A, 0x87, 0x0A,
+            ],
+            format_id: "jxl",
+            format_name: "JPEG XL (container)",
+            mime_type: "image/jxl",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0xFF, 0x0A],
+            format_id: "jxl",
+            format_name: "JPEG XL (naked codestream)",
+            mime_type: "image/jxl",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b"SDPX",
+            format_id: "dpx",
+            format_name: "DPX (big-endian)",
+            mime_type: "image/x-dpx",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b"XPDS",
+            format_id: "dpx",
+            format_name: "DPX (little-endian)",
+            mime_type: "image/x-dpx",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0x76, 0x2F, 0x31, 0x01],
+            format_id: "exr",
+            format_name: "OpenEXR",
+            mime_type: "image/x-exr",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b"DNG",
+            format_id: "dng",
+            format_name: "Adobe DNG",
+            mime_type: "image/x-adobe-dng",
+        },
+        // --- Subtitle / Caption ---
+        // (text-based, but some have byte-order marks or specific patterns)
+        MagicSignature {
+            offset: 0,
+            bytes: &[0xEF, 0xBB, 0xBF],
+            format_id: "utf8-bom",
+            format_name: "UTF-8 BOM (text/subtitle)",
+            mime_type: "text/plain",
+        },
+        // --- Archive / Compression ---
+        MagicSignature {
+            offset: 0,
+            bytes: &[0x50, 0x4B, 0x03, 0x04],
+            format_id: "zip",
+            format_name: "ZIP archive",
+            mime_type: "application/zip",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0x1F, 0x8B],
+            format_id: "gzip",
+            format_name: "GZIP",
+            mime_type: "application/gzip",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0x28, 0xB5, 0x2F, 0xFD],
+            format_id: "zstd",
+            format_name: "Zstandard",
+            mime_type: "application/zstd",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00],
+            format_id: "xz",
+            format_name: "XZ",
+            mime_type: "application/x-xz",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: &[0x04, 0x22, 0x4D, 0x18],
+            format_id: "lz4",
+            format_name: "LZ4 frame",
+            mime_type: "application/x-lz4",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b"7z\xBC\xAF\x27\x1C",
+            format_id: "7z",
+            format_name: "7-Zip",
+            mime_type: "application/x-7z-compressed",
+        },
+        MagicSignature {
+            offset: 0,
+            bytes: b"Rar!\x1A\x07",
+            format_id: "rar",
+            format_name: "RAR archive",
+            mime_type: "application/vnd.rar",
+        },
+        // --- Multimedia metadata ---
+        MagicSignature {
+            offset: 0,
+            bytes: b"FORM",
+            format_id: "iff",
+            format_name: "IFF (Interchange File Format)",
+            mime_type: "application/octet-stream",
+        },
+    ]
+}
+
+/// Identify a file format using magic bytes analysis.
+///
+/// Reads up to the first 64 bytes of the file and matches against all known
+/// signatures. Returns all matches (there may be more than one for ambiguous
+/// headers like RIFF, which can be AVI, WAV, or WebP). Results are sorted by
+/// descending confidence.
+pub async fn identify_format_by_magic(path: &Path) -> ArchiveResult<Vec<MagicBytesMatch>> {
     let mut file = fs::File::open(path).await?;
-    let mut buffer = vec![0u8; 12];
+    let mut buffer = vec![0u8; 64];
 
     use tokio::io::AsyncReadExt;
-    file.read_exact(&mut buffer).await?;
+    let bytes_read = file.read(&mut buffer).await?;
+    buffer.truncate(bytes_read);
 
-    // Check for common formats
-    if buffer.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
-        return Ok("matroska".to_string());
+    let mut matches = identify_format_from_bytes(&buffer);
+
+    // RIFF sub-format disambiguation
+    if buffer.len() >= 12 && buffer.starts_with(b"RIFF") {
+        let sub = &buffer[8..12];
+        if sub == b"AVI " {
+            matches.retain(|m| m.format_id != "riff" && m.format_id != "webp_check");
+            matches.push(MagicBytesMatch {
+                format_id: "avi".to_string(),
+                format_name: "AVI".to_string(),
+                mime_type: "video/x-msvideo".to_string(),
+                offset: 0,
+                signature_len: 12,
+                confidence: 0.95,
+            });
+        } else if sub == b"WAVE" {
+            matches.retain(|m| m.format_id != "riff" && m.format_id != "webp_check");
+            matches.push(MagicBytesMatch {
+                format_id: "wav".to_string(),
+                format_name: "WAV audio".to_string(),
+                mime_type: "audio/wav".to_string(),
+                offset: 0,
+                signature_len: 12,
+                confidence: 0.95,
+            });
+        } else if sub == b"WEBP" {
+            matches.retain(|m| m.format_id != "riff" && m.format_id != "webp_check");
+            matches.push(MagicBytesMatch {
+                format_id: "webp".to_string(),
+                format_name: "WebP image".to_string(),
+                mime_type: "image/webp".to_string(),
+                offset: 0,
+                signature_len: 12,
+                confidence: 0.95,
+            });
+        }
     }
 
-    if buffer[4..8] == [b'f', b't', b'y', b'p'] {
-        return Ok("mp4".to_string());
+    // Remove the temporary webp_check entry if it slipped through
+    matches.retain(|m| m.format_id != "webp_check");
+
+    // Sort by descending confidence, then by signature length (longer = more specific)
+    matches.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.signature_len.cmp(&a.signature_len))
+    });
+
+    Ok(matches)
+}
+
+/// Identify format from an in-memory byte buffer (no file I/O).
+pub fn identify_format_from_bytes(buffer: &[u8]) -> Vec<MagicBytesMatch> {
+    let signatures = magic_signatures();
+    let mut matches = Vec::new();
+
+    for sig in &signatures {
+        let end = sig.offset + sig.bytes.len();
+        if buffer.len() >= end && buffer[sig.offset..end] == *sig.bytes {
+            matches.push(MagicBytesMatch {
+                format_id: sig.format_id.to_string(),
+                format_name: sig.format_name.to_string(),
+                mime_type: sig.mime_type.to_string(),
+                offset: sig.offset,
+                signature_len: sig.bytes.len(),
+                confidence: 0.90,
+            });
+        }
     }
 
-    if buffer.starts_with(b"RIFF") && buffer[8..12] == *b"AVI " {
-        return Ok("avi".to_string());
+    matches
+}
+
+/// Detect container format.
+///
+/// Uses magic-byte identification first, then falls back to file extension.
+pub async fn detect_container_format(path: &Path) -> ArchiveResult<String> {
+    // Try magic bytes first
+    let magic_matches = identify_format_by_magic(path).await?;
+    if let Some(best) = magic_matches.first() {
+        return Ok(best.format_id.clone());
     }
 
-    if buffer.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return Ok("jpeg".to_string());
-    }
-
-    if buffer.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        return Ok("png".to_string());
-    }
-
-    // Try to detect from extension
+    // Fall back to extension
     if let Some(ext) = path.extension() {
         let ext_str = ext.to_string_lossy().to_lowercase();
-        match ext_str.as_str() {
-            "mkv" | "mka" | "mks" => return Ok("matroska".to_string()),
-            "mp4" | "m4v" | "m4a" => return Ok("mp4".to_string()),
-            "mov" => return Ok("mov".to_string()),
-            "avi" => return Ok("avi".to_string()),
-            "webm" => return Ok("webm".to_string()),
-            _ => {}
-        }
+        let id = match ext_str.as_str() {
+            "mkv" | "mka" | "mks" => "matroska",
+            "mp4" | "m4v" | "m4a" => "mp4",
+            "mov" => "mov",
+            "avi" => "avi",
+            "webm" => "webm",
+            "flac" => "flac",
+            "ogg" | "oga" | "ogv" => "ogg",
+            "wav" => "wav",
+            "mp3" => "mp3",
+            "aac" => "aac",
+            "mxf" => "mxf",
+            "dpx" => "dpx",
+            "exr" => "exr",
+            "tiff" | "tif" => "tiff",
+            "png" => "png",
+            "jpg" | "jpeg" => "jpeg",
+            "gif" => "gif",
+            "bmp" => "bmp",
+            "webp" => "webp",
+            "jxl" => "jxl",
+            "srt" => "srt",
+            "vtt" => "vtt",
+            "ass" | "ssa" => "ass",
+            _ => "unknown",
+        };
+        return Ok(id.to_string());
     }
 
     Ok("unknown".to_string())

@@ -1,6 +1,7 @@
 //! Monitoring and progress tracking
 
 pub mod progress;
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub mod reporter;
 pub mod stats;
 

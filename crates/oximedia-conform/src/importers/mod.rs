@@ -1,7 +1,8 @@
-//! Importers for various timeline formats (EDL, XML, AAF).
+//! Importers for various timeline formats (EDL, XML, AAF, FCPXML).
 
 pub mod aaf;
 pub mod edl;
+pub mod fcpxml;
 pub mod xml;
 
 use crate::error::ConformResult;

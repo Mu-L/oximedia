@@ -20,8 +20,10 @@ pub enum SchedulingAlgorithm {
     Priority,
     /// Deadline-aware scheduling
     Deadline,
-    /// Fair-share scheduling
+    /// Fair-share scheduling (equal share per job regardless of priority)
     FairShare,
+    /// Weighted fair-share scheduling (share proportional to per-job weights)
+    WeightedFairShare,
     /// Backfill scheduling
     Backfill,
 }
@@ -138,6 +140,9 @@ pub struct Scheduler {
     assignments: Arc<RwLock<HashMap<WorkerId, Assignment>>>,
     /// Job task counts (for fair-share)
     job_task_counts: Arc<RwLock<HashMap<JobId, u32>>>,
+    /// Per-job weights for weighted fair-share scheduling (default 1.0 when not set).
+    /// A job with weight 2.0 gets twice the share relative to a job with weight 1.0.
+    job_weights: Arc<RwLock<HashMap<JobId, f64>>>,
 }
 
 impl Scheduler {
@@ -150,7 +155,23 @@ impl Scheduler {
             pending: Arc::new(RwLock::new(VecDeque::new())),
             assignments: Arc::new(RwLock::new(HashMap::new())),
             job_task_counts: Arc::new(RwLock::new(HashMap::new())),
+            job_weights: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Set the weight for a specific job in weighted fair-share scheduling.
+    ///
+    /// Weight must be positive; values ≤ 0.0 are silently treated as 1.0.
+    /// Has no effect when using algorithms other than `WeightedFairShare`.
+    pub fn set_job_weight(&self, job_id: JobId, weight: f64) {
+        let effective = if weight > 0.0 { weight } else { 1.0 };
+        self.job_weights.write().insert(job_id, effective);
+    }
+
+    /// Return the weight for a job (1.0 if none set).
+    #[allow(dead_code)]
+    fn job_weight(&self, job_id: JobId) -> f64 {
+        self.job_weights.read().get(&job_id).copied().unwrap_or(1.0)
     }
 
     /// Add task to queue
@@ -178,6 +199,7 @@ impl Scheduler {
             SchedulingAlgorithm::Priority => self.schedule_priority(worker),
             SchedulingAlgorithm::Deadline => self.schedule_deadline(worker),
             SchedulingAlgorithm::FairShare => self.schedule_fair_share(worker),
+            SchedulingAlgorithm::WeightedFairShare => self.schedule_weighted_fair_share(worker),
             SchedulingAlgorithm::Backfill => self.schedule_backfill(worker),
         }
     }
@@ -244,6 +266,62 @@ impl Scheduler {
             let count = counts.get(&task.job_id).copied().unwrap_or(0);
             if count < min_count {
                 min_count = count;
+                best_idx = idx;
+            }
+        }
+
+        let mut selected = None;
+        for (idx, task) in tasks.into_iter().enumerate() {
+            if idx == best_idx {
+                selected = Some(task);
+            } else {
+                queue.push(task);
+            }
+        }
+
+        selected
+    }
+
+    /// Weighted fair-share scheduling.
+    ///
+    /// Each job receives a share of worker capacity proportional to its
+    /// weight.  The job with the **lowest current allocation relative to its
+    /// weight** is selected next, preventing any single high-weight job from
+    /// monopolising all workers while still giving it a larger slice than
+    /// lower-weight jobs.
+    ///
+    /// Formally, for each candidate job `j` the *deficit* is defined as:
+    ///
+    ///   deficit(j) = running_tasks(j) / weight(j)
+    ///
+    /// The task from the job with the smallest deficit is dequeued, breaking
+    /// ties by arrival order (the task already in the priority heap).
+    fn schedule_weighted_fair_share(&self, _worker: &Worker) -> Option<Task> {
+        let mut queue = self.queue.write();
+        let counts = self.job_task_counts.read();
+        let weights = self.job_weights.read();
+
+        let tasks: Vec<Task> = queue.drain().collect();
+        if tasks.is_empty() {
+            return None;
+        }
+
+        // Compute per-job deficit = running_tasks / weight.
+        // Lower deficit → the job has received less than its fair share
+        // and should be prioritised.
+        let mut best_idx = 0;
+        let mut min_deficit = f64::INFINITY;
+
+        for (idx, task) in tasks.iter().enumerate() {
+            let running = counts.get(&task.job_id).copied().unwrap_or(0) as f64;
+            let weight = weights
+                .get(&task.job_id)
+                .copied()
+                .unwrap_or(1.0)
+                .max(f64::EPSILON);
+            let deficit = running / weight;
+            if deficit < min_deficit {
+                min_deficit = deficit;
                 best_idx = idx;
             }
         }
@@ -721,5 +799,89 @@ mod tests {
         // Should prioritize job2 (fewer running tasks)
         let next = scheduler.schedule(&worker);
         assert!(next.is_some());
+    }
+
+    #[test]
+    fn test_weighted_fair_share_scheduling_returns_some() {
+        let scheduler = Scheduler::new(SchedulingAlgorithm::WeightedFairShare);
+        let worker = create_test_worker();
+
+        let job1 = JobId::new();
+        let job2 = JobId::new();
+
+        // Assign job1 a higher weight than job2.
+        scheduler.set_job_weight(job1, 2.0);
+        scheduler.set_job_weight(job2, 1.0);
+
+        let task1 = Task::new(job1, 1, Priority::Normal);
+        let task2 = Task::new(job2, 1, Priority::Normal);
+
+        scheduler.enqueue(task1);
+        scheduler.enqueue(task2);
+
+        // Both jobs have 0 running tasks → deficit == 0 for both;
+        // either may be chosen.  Just verify we get *a* task back.
+        let first = scheduler.schedule(&worker);
+        assert!(first.is_some());
+
+        // Queue should have exactly one task left.
+        assert_eq!(scheduler.queue_size(), 1);
+    }
+
+    #[test]
+    fn test_weighted_fair_share_set_invalid_weight_treated_as_one() {
+        let scheduler = Scheduler::new(SchedulingAlgorithm::WeightedFairShare);
+        let job_id = JobId::new();
+
+        scheduler.set_job_weight(job_id, -5.0); // invalid → treated as 1.0
+                                                // Should not panic; weight is silently normalised.
+        let task = Task::new(job_id, 1, Priority::Normal);
+        scheduler.enqueue(task);
+
+        let worker = create_test_worker();
+        let result = scheduler.schedule(&worker);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_weighted_fair_share_high_weight_job_prioritised_over_active_low_weight() {
+        // job_a has weight 3.0 with 3 running tasks → deficit = 1.0
+        // job_b has weight 1.0 with 0 running tasks → deficit = 0.0
+        // job_b should be selected (lower deficit = hasn't had its share yet).
+        let scheduler = Scheduler::new(SchedulingAlgorithm::WeightedFairShare);
+        let worker = create_test_worker();
+
+        let job_a = JobId::new();
+        let job_b = JobId::new();
+
+        scheduler.set_job_weight(job_a, 3.0);
+        scheduler.set_job_weight(job_b, 1.0);
+
+        // Simulate 3 running tasks for job_a by enqueuing & assigning them.
+        for frame in 1..=3u32 {
+            let t = Task::new(job_a, frame, Priority::Normal);
+            scheduler.enqueue(t.clone());
+            let w_id = create_test_worker().id;
+            scheduler
+                .assign(w_id, t)
+                .expect("assign should succeed in test");
+        }
+        // Remove from queue (assign doesn't dequeue; we need an empty queue first).
+        // Drain the queue manually then re-enqueue only the candidates.
+        {
+            // Use schedule calls to drain
+            while scheduler.schedule(&worker).is_some() {}
+        }
+
+        // Now enqueue one task per job.
+        let task_a = Task::new(job_a, 10, Priority::Normal);
+        let task_b = Task::new(job_b, 10, Priority::Normal);
+        scheduler.enqueue(task_a);
+        scheduler.enqueue(task_b.clone());
+
+        let selected = scheduler.schedule(&worker).expect("should schedule a task");
+        // job_b has deficit 0.0 (no running tasks) while job_a has deficit 3/3 = 1.0
+        // so job_b's task must be selected.
+        assert_eq!(selected.job_id, task_b.job_id);
     }
 }

@@ -309,6 +309,147 @@ impl HistogramStats {
 }
 
 // ---------------------------------------------------------------------------
+// Percentile markers overlay for histogram display
+// ---------------------------------------------------------------------------
+
+/// Percentile marker positions for histogram overlay rendering.
+///
+/// Contains the bin index (0-255) for each of the key percentile markers.
+#[derive(Debug, Clone, Copy)]
+pub struct PercentileMarkers {
+    /// 1st percentile bin index.
+    pub p01: u8,
+    /// 5th percentile bin index.
+    pub p05: u8,
+    /// 50th percentile (median) bin index.
+    pub p50: u8,
+    /// 95th percentile bin index.
+    pub p95: u8,
+    /// 99th percentile bin index.
+    pub p99: u8,
+}
+
+impl PercentileMarkers {
+    /// Computes percentile markers from raw bin counts.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    #[must_use]
+    pub fn from_counts(counts: &[u64; BINS]) -> Self {
+        let total: u64 = counts.iter().sum();
+        if total == 0 {
+            return Self {
+                p01: 0,
+                p05: 0,
+                p50: 0,
+                p95: 0,
+                p99: 0,
+            };
+        }
+
+        let percentile = |pct: f64| -> u8 {
+            let target = (total as f64 * pct).ceil() as u64;
+            let mut cum = 0u64;
+            for (i, &c) in counts.iter().enumerate() {
+                cum += c;
+                if cum >= target {
+                    return i as u8;
+                }
+            }
+            255
+        };
+
+        Self {
+            p01: percentile(0.01),
+            p05: percentile(0.05),
+            p50: percentile(0.50),
+            p95: percentile(0.95),
+            p99: percentile(0.99),
+        }
+    }
+
+    /// Computes percentile markers from an `ImageHistogram` for a given channel.
+    #[must_use]
+    pub fn from_histogram(hist: &ImageHistogram, channel: HistogramChannel) -> Self {
+        Self::from_counts(hist.raw_counts(channel))
+    }
+
+    /// Returns all marker positions as `(label, bin_index)` pairs.
+    #[must_use]
+    pub fn as_labeled_pairs(&self) -> Vec<(&'static str, u8)> {
+        vec![
+            ("P01", self.p01),
+            ("P05", self.p05),
+            ("P50", self.p50),
+            ("P95", self.p95),
+            ("P99", self.p99),
+        ]
+    }
+
+    /// Returns the inter-percentile range (P99 - P01), i.e., the effective
+    /// dynamic range of the data excluding extreme outliers.
+    #[must_use]
+    pub fn inter_percentile_range(&self) -> u8 {
+        self.p99.saturating_sub(self.p01)
+    }
+
+    /// Returns the inter-quartile-like range (P95 - P05).
+    #[must_use]
+    pub fn robust_range(&self) -> u8 {
+        self.p95.saturating_sub(self.p05)
+    }
+}
+
+/// Histogram overlay data with percentile markers for all channels.
+#[derive(Debug, Clone)]
+pub struct HistogramOverlay {
+    /// Percentile markers for the red channel.
+    pub red: PercentileMarkers,
+    /// Percentile markers for the green channel.
+    pub green: PercentileMarkers,
+    /// Percentile markers for the blue channel.
+    pub blue: PercentileMarkers,
+    /// Percentile markers for the luma channel.
+    pub luma: PercentileMarkers,
+}
+
+impl HistogramOverlay {
+    /// Computes percentile markers for all channels from an `ImageHistogram`.
+    #[must_use]
+    pub fn from_histogram(hist: &ImageHistogram) -> Self {
+        Self {
+            red: PercentileMarkers::from_histogram(hist, HistogramChannel::Red),
+            green: PercentileMarkers::from_histogram(hist, HistogramChannel::Green),
+            blue: PercentileMarkers::from_histogram(hist, HistogramChannel::Blue),
+            luma: PercentileMarkers::from_histogram(hist, HistogramChannel::Luma),
+        }
+    }
+
+    /// Builds the overlay directly from an RGB24 frame.
+    #[must_use]
+    pub fn from_rgb24(frame: &[u8], width: usize, height: usize) -> Self {
+        let hist = ImageHistogram::from_rgb24(frame, width, height);
+        Self::from_histogram(&hist)
+    }
+
+    /// Returns the luma dynamic range (P99 - P01) in code values.
+    #[must_use]
+    pub fn luma_dynamic_range(&self) -> u8 {
+        self.luma.inter_percentile_range()
+    }
+
+    /// Returns true if any channel has P99 at 255 (potential highlight clipping).
+    #[must_use]
+    pub fn has_highlight_clipping(&self) -> bool {
+        self.red.p99 == 255 || self.green.p99 == 255 || self.blue.p99 == 255
+    }
+
+    /// Returns true if any channel has P01 at 0 (potential shadow crushing).
+    #[must_use]
+    pub fn has_shadow_crushing(&self) -> bool {
+        self.red.p01 == 0 || self.green.p01 == 0 || self.blue.p01 == 0
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -425,5 +566,150 @@ mod tests {
         let stats = HistogramStats::from_counts(&counts);
         assert_eq!(stats.mean, 0.0);
         assert_eq!(stats.entropy(), 0.0);
+    }
+
+    // ── PercentileMarkers tests ──────────────────────────────────────
+
+    #[test]
+    fn test_percentile_markers_uniform() {
+        let counts = [1u64; BINS];
+        let m = PercentileMarkers::from_counts(&counts);
+        // P01 ≈ bin 2 (ceil(256*0.01)=3), P99 ≈ bin 252
+        assert!(m.p01 < 10);
+        assert!(m.p99 > 245);
+        assert!((m.p50 as i16 - 127).abs() < 3);
+    }
+
+    #[test]
+    fn test_percentile_markers_single_bin() {
+        let mut counts = [0u64; BINS];
+        counts[100] = 1000;
+        let m = PercentileMarkers::from_counts(&counts);
+        assert_eq!(m.p01, 100);
+        assert_eq!(m.p05, 100);
+        assert_eq!(m.p50, 100);
+        assert_eq!(m.p95, 100);
+        assert_eq!(m.p99, 100);
+    }
+
+    #[test]
+    fn test_percentile_markers_empty() {
+        let counts = [0u64; BINS];
+        let m = PercentileMarkers::from_counts(&counts);
+        assert_eq!(m.p01, 0);
+        assert_eq!(m.p50, 0);
+        assert_eq!(m.p99, 0);
+    }
+
+    #[test]
+    fn test_percentile_markers_two_bins() {
+        let mut counts = [0u64; BINS];
+        counts[0] = 50;
+        counts[255] = 50;
+        let m = PercentileMarkers::from_counts(&counts);
+        assert_eq!(m.p01, 0);
+        assert_eq!(m.p50, 0); // 50% threshold lands on first bin
+        assert_eq!(m.p99, 255);
+    }
+
+    #[test]
+    fn test_inter_percentile_range() {
+        let mut counts = [0u64; BINS];
+        counts[10] = 500;
+        counts[200] = 500;
+        let m = PercentileMarkers::from_counts(&counts);
+        assert!(m.inter_percentile_range() > 100);
+    }
+
+    #[test]
+    fn test_robust_range() {
+        let mut counts = [0u64; BINS];
+        counts[20] = 100;
+        counts[180] = 100;
+        let m = PercentileMarkers::from_counts(&counts);
+        assert!(m.robust_range() > 100);
+    }
+
+    #[test]
+    fn test_as_labeled_pairs() {
+        let mut counts = [0u64; BINS];
+        counts[128] = 100;
+        let m = PercentileMarkers::from_counts(&counts);
+        let pairs = m.as_labeled_pairs();
+        assert_eq!(pairs.len(), 5);
+        assert_eq!(pairs[0].0, "P01");
+        assert_eq!(pairs[4].0, "P99");
+    }
+
+    // ── HistogramOverlay tests ───────────────────────────────────────
+
+    #[test]
+    fn test_histogram_overlay_from_rgb24() {
+        let frame = vec![128u8; 100 * 3];
+        let overlay = HistogramOverlay::from_rgb24(&frame, 100, 1);
+        // All channels should have P01..P99 at 128
+        assert_eq!(overlay.red.p50, 128);
+        assert_eq!(overlay.green.p50, 128);
+        assert_eq!(overlay.blue.p50, 128);
+    }
+
+    #[test]
+    fn test_histogram_overlay_from_histogram() {
+        let frame = vec![128u8; 100 * 3];
+        let hist = ImageHistogram::from_rgb24(&frame, 100, 1);
+        let overlay = HistogramOverlay::from_histogram(&hist);
+        assert_eq!(overlay.luma.p50, 128);
+    }
+
+    #[test]
+    fn test_luma_dynamic_range() {
+        // All same value => range 0
+        let frame = vec![100u8; 100 * 3];
+        let overlay = HistogramOverlay::from_rgb24(&frame, 100, 1);
+        assert_eq!(overlay.luma_dynamic_range(), 0);
+    }
+
+    #[test]
+    fn test_has_highlight_clipping_true() {
+        let frame = vec![255u8; 100 * 3];
+        let overlay = HistogramOverlay::from_rgb24(&frame, 100, 1);
+        assert!(overlay.has_highlight_clipping());
+    }
+
+    #[test]
+    fn test_has_highlight_clipping_false() {
+        let frame = vec![128u8; 100 * 3];
+        let overlay = HistogramOverlay::from_rgb24(&frame, 100, 1);
+        assert!(!overlay.has_highlight_clipping());
+    }
+
+    #[test]
+    fn test_has_shadow_crushing_true() {
+        let frame = vec![0u8; 100 * 3];
+        let overlay = HistogramOverlay::from_rgb24(&frame, 100, 1);
+        assert!(overlay.has_shadow_crushing());
+    }
+
+    #[test]
+    fn test_has_shadow_crushing_false() {
+        let frame = vec![128u8; 100 * 3];
+        let overlay = HistogramOverlay::from_rgb24(&frame, 100, 1);
+        assert!(!overlay.has_shadow_crushing());
+    }
+
+    #[test]
+    fn test_gradient_percentile_markers() {
+        // 256 pixels with values 0..255
+        let mut frame = Vec::with_capacity(256 * 3);
+        for i in 0u8..=255 {
+            frame.push(i);
+            frame.push(i);
+            frame.push(i);
+        }
+        let overlay = HistogramOverlay::from_rgb24(&frame, 256, 1);
+        // P05 ~= 12, P95 ~= 242
+        assert!(overlay.luma.p05 < 20);
+        assert!(overlay.luma.p95 > 230);
+        assert!(overlay.luma_dynamic_range() > 200);
     }
 }

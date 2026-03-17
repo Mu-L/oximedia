@@ -3,7 +3,7 @@
 //! This module provides objective quality metrics to assess
 //! watermark imperceptibility and distortion.
 
-use rustfft::{num_complex::Complex, FftPlanner};
+use oxifft::Complex;
 
 /// Quality metrics for watermarked audio.
 #[derive(Debug, Clone)]
@@ -160,8 +160,6 @@ pub fn calculate_lsd(original: &[f32], watermarked: &[f32], frame_size: usize) -
     }
 
     let num_frames = n / frame_size;
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(frame_size);
 
     let mut total_lsd = 0.0f32;
 
@@ -174,18 +172,18 @@ pub fn calculate_lsd(original: &[f32], watermarked: &[f32], frame_size: usize) -
         }
 
         // FFT of original
-        let mut orig_fft: Vec<Complex<f32>> = original[start..end]
+        let orig_input: Vec<Complex<f32>> = original[start..end]
             .iter()
             .map(|&s| Complex::new(s, 0.0))
             .collect();
-        fft.process(&mut orig_fft);
+        let orig_fft = oxifft::fft(&orig_input);
 
         // FFT of watermarked
-        let mut wm_fft: Vec<Complex<f32>> = watermarked[start..end]
+        let wm_input: Vec<Complex<f32>> = watermarked[start..end]
             .iter()
             .map(|&s| Complex::new(s, 0.0))
             .collect();
-        fft.process(&mut wm_fft);
+        let wm_fft = oxifft::fft(&wm_input);
 
         // Calculate LSD for this frame
         let mut frame_lsd = 0.0f32;
@@ -333,17 +331,15 @@ fn calculate_rms(samples: &[f32]) -> f32 {
 #[must_use]
 pub fn calculate_spectral_centroid(samples: &[f32], sample_rate: u32) -> f32 {
     let frame_size = samples.len().next_power_of_two();
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(frame_size);
 
-    let mut freq_data: Vec<Complex<f32>> = samples
+    let freq_input: Vec<Complex<f32>> = samples
         .iter()
         .map(|&s| Complex::new(s, 0.0))
         .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
         .take(frame_size)
         .collect();
 
-    fft.process(&mut freq_data);
+    let freq_data = oxifft::fft(&freq_input);
 
     let mut weighted_sum = 0.0f32;
     let mut magnitude_sum = 0.0f32;
@@ -368,17 +364,15 @@ pub fn calculate_spectral_centroid(samples: &[f32], sample_rate: u32) -> f32 {
 #[must_use]
 pub fn calculate_spectral_flatness(samples: &[f32]) -> f32 {
     let frame_size = samples.len().next_power_of_two();
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(frame_size);
 
-    let mut freq_data: Vec<Complex<f32>> = samples
+    let freq_input: Vec<Complex<f32>> = samples
         .iter()
         .map(|&s| Complex::new(s, 0.0))
         .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
         .take(frame_size)
         .collect();
 
-    fft.process(&mut freq_data);
+    let freq_data = oxifft::fft(&freq_input);
 
     let n = frame_size / 2;
     let mut geometric_mean = 1.0f32;

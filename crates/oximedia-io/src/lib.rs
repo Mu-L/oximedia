@@ -34,17 +34,22 @@ pub mod async_io;
 pub mod bits;
 pub mod buffer_pool;
 pub mod buffered_io;
+pub mod buffered_reader;
 pub mod checksum;
 pub mod chunked_writer;
 pub mod compression;
+pub mod content_detect;
 pub mod copy_engine;
 pub mod file_metadata;
 pub mod file_watch;
+pub mod format_detector;
 pub mod io_pipeline;
 pub mod io_stats;
 pub mod mmap;
+pub mod mxf_probe;
 pub mod progress_reader;
 pub mod rate_limiter;
+pub mod retrying_source;
 pub mod ring_buffer;
 pub mod scatter_gather;
 pub mod seekable;
@@ -56,4 +61,6 @@ pub mod write_journal;
 
 // Re-export commonly used types
 pub use bits::BitReader;
-pub use source::{FileSource, MediaSource, MemorySource};
+#[cfg(not(target_arch = "wasm32"))]
+pub use source::FileSource;
+pub use source::{MediaSource, MemorySource};

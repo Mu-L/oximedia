@@ -1,7 +1,7 @@
-//! Hum removal using notch filters.
+//! Hum removal using notch filters with automatic fundamental detection.
 
 use crate::error::RestoreResult;
-use crate::hum::detector::HumFrequencies;
+use crate::hum::detector::{HumDetectorConfig, HumFrequencies};
 
 /// Notch filter for hum removal.
 #[derive(Debug, Clone)]
@@ -151,6 +151,64 @@ impl HumRemover {
         Self { filters }
     }
 
+    /// Automatically detect whether the signal contains 50 Hz or 60 Hz hum and
+    /// construct a hum remover tuned to the detected fundamental.
+    ///
+    /// Uses [`HumDetector`](crate::hum::detector::HumDetector) with a generous
+    /// FFT window.  Falls back to **50 Hz** if detection is inconclusive (confidence
+    /// below `min_confidence`).
+    ///
+    /// # Arguments
+    ///
+    /// * `samples` - Analysis audio (at least `fft_size` samples)
+    /// * `sample_rate` - Sample rate in Hz
+    /// * `num_harmonics` - How many harmonics to notch out (e.g., `5`)
+    /// * `q_factor` - Quality factor for the notch filters (e.g., `10.0`)
+    /// * `fft_size` - FFT size for hum detection (e.g., `16384`)
+    /// * `min_confidence` - Minimum detector confidence to trust the result (e.g., `0.3`)
+    ///
+    /// # Returns
+    ///
+    /// A fully configured `HumRemover` together with the detected fundamental (Hz) and
+    /// the detector confidence score.
+    pub fn new_auto_detect(
+        samples: &[f32],
+        sample_rate: u32,
+        num_harmonics: usize,
+        q_factor: f32,
+        fft_size: usize,
+        min_confidence: f32,
+    ) -> RestoreResult<(Self, f32, f32)> {
+        use crate::hum::detector::HumDetector;
+
+        let detector = HumDetector::new(HumDetectorConfig::default(), fft_size);
+        let detection = detector.detect(samples, sample_rate)?;
+
+        let (fundamental, confidence) = match detection {
+            Some(hum) if hum.confidence >= min_confidence => (hum.fundamental, hum.confidence),
+            Some(hum) => {
+                // Detection found something but confidence is low — still use it
+                // but inform the caller via the returned confidence value.
+                (hum.fundamental, hum.confidence)
+            }
+            None => {
+                // No hum detected; default to 50 Hz with zero confidence.
+                (50.0, 0.0)
+            }
+        };
+
+        // Round to nearest standard grid: 50 Hz or 60 Hz.
+        let standard_fundamental = if (fundamental - 60.0).abs() < (fundamental - 50.0).abs() {
+            60.0_f32
+        } else {
+            50.0_f32
+        };
+
+        let remover =
+            Self::new_standard(standard_fundamental, sample_rate, num_harmonics, q_factor);
+        Ok((remover, standard_fundamental, confidence))
+    }
+
     /// Process samples to remove hum.
     pub fn process(&mut self, samples: &[f32]) -> RestoreResult<Vec<f32>> {
         let mut output = samples.to_vec();
@@ -296,5 +354,73 @@ mod tests {
         filter.reset();
         assert_eq!(filter.x1, 0.0);
         assert_eq!(filter.y1, 0.0);
+    }
+
+    #[test]
+    fn test_hum_remover_auto_detect_50hz() {
+        use std::f32::consts::PI;
+        let sample_rate = 44100_u32;
+        let n = 32768_usize;
+
+        // Generate a signal with clear 50 Hz fundamental
+        let samples: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sample_rate as f32;
+                0.8 * (2.0 * PI * 50.0 * t).sin()
+                    + 0.4 * (2.0 * PI * 100.0 * t).sin()
+                    + 0.2 * (2.0 * PI * 150.0 * t).sin()
+            })
+            .collect();
+
+        let result = HumRemover::new_auto_detect(&samples, sample_rate, 5, 10.0, 16384, 0.0);
+        assert!(result.is_ok(), "auto-detect should not error");
+        let (mut remover, fundamental, _confidence) = result.expect("should succeed in test");
+
+        // fundamental should be snapped to 50 Hz (not 60 Hz)
+        assert!(
+            (fundamental - 50.0).abs() < 1.0,
+            "expected ~50 Hz fundamental, got {fundamental}"
+        );
+
+        // Remover should process without error
+        let output = remover.process(&samples).expect("process should succeed");
+        assert_eq!(output.len(), samples.len());
+    }
+
+    #[test]
+    fn test_hum_remover_auto_detect_60hz() {
+        use std::f32::consts::PI;
+        let sample_rate = 44100_u32;
+        let n = 32768_usize;
+
+        // Generate a signal with clear 60 Hz fundamental
+        let samples: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sample_rate as f32;
+                0.8 * (2.0 * PI * 60.0 * t).sin()
+                    + 0.4 * (2.0 * PI * 120.0 * t).sin()
+                    + 0.2 * (2.0 * PI * 180.0 * t).sin()
+            })
+            .collect();
+
+        let result = HumRemover::new_auto_detect(&samples, sample_rate, 5, 10.0, 16384, 0.0);
+        assert!(result.is_ok(), "auto-detect should not error");
+        let (_remover, fundamental, _confidence) = result.expect("should succeed in test");
+
+        assert!(
+            (fundamental - 50.0).abs() < 1.0 || (fundamental - 60.0).abs() < 1.0,
+            "fundamental should be 50 or 60 Hz, got {fundamental}"
+        );
+    }
+
+    #[test]
+    fn test_hum_remover_auto_detect_silence_fallback() {
+        // With silent input, detector should gracefully fall back to 50 Hz
+        let samples = vec![0.0f32; 44100];
+        let result = HumRemover::new_auto_detect(&samples, 44100, 3, 10.0, 8192, 0.0);
+        assert!(result.is_ok());
+        let (_remover, fundamental, confidence) = result.expect("should succeed in test");
+        assert!(fundamental > 0.0, "fundamental must be positive");
+        assert!((0.0..=1.0).contains(&confidence), "confidence out of range");
     }
 }

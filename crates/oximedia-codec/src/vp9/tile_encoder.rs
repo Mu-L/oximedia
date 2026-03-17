@@ -84,11 +84,7 @@ impl Vp9TileConfig {
     /// # Errors
     ///
     /// Returns an error if `tile_cols_log2 > 6` or `tile_rows_log2 > 2`.
-    pub fn new(
-        tile_cols_log2: u32,
-        tile_rows_log2: u32,
-        threads: usize,
-    ) -> CodecResult<Self> {
+    pub fn new(tile_cols_log2: u32, tile_rows_log2: u32, threads: usize) -> CodecResult<Self> {
         if tile_cols_log2 > 6 {
             return Err(CodecError::InvalidParameter(
                 "tile_cols_log2 must be 0-6".to_string(),
@@ -308,11 +304,7 @@ impl Vp9TileFrameSplitter {
     /// # Errors
     ///
     /// Returns an error if the configuration is invalid.
-    pub fn new(
-        config: Vp9TileConfig,
-        frame_width: u32,
-        frame_height: u32,
-    ) -> CodecResult<Self> {
+    pub fn new(config: Vp9TileConfig, frame_width: u32, frame_height: u32) -> CodecResult<Self> {
         config.validate()?;
         let mut splitter = Self {
             config,
@@ -348,9 +340,8 @@ impl Vp9TileFrameSplitter {
                 let width = (sb_col_end * VP9_SB_SIZE).min(self.frame_width) - x;
                 let height = (sb_row_end * VP9_SB_SIZE).min(self.frame_height) - y;
 
-                self.regions.push(Vp9TileRegion::new(
-                    col, row, x, y, width, height, tile_cols,
-                ));
+                self.regions
+                    .push(Vp9TileRegion::new(col, row, x, y, width, height, tile_cols));
             }
         }
     }
@@ -593,8 +584,7 @@ impl Vp9DeblockSync {
     #[must_use]
     pub fn completed_rows(&self, tile_col: u32) -> u32 {
         if tile_col < self.tile_cols {
-            self.completed_sb_rows[tile_col as usize]
-                .load(std::sync::atomic::Ordering::Acquire)
+            self.completed_sb_rows[tile_col as usize].load(std::sync::atomic::Ordering::Acquire)
         } else {
             self.sb_rows
         }
@@ -643,13 +633,8 @@ impl Vp9FrameTileEncoder {
     /// # Errors
     ///
     /// Returns an error if the configuration is invalid.
-    pub fn new(
-        config: Vp9TileConfig,
-        frame_width: u32,
-        frame_height: u32,
-    ) -> CodecResult<Self> {
-        let splitter =
-            Vp9TileFrameSplitter::new(config.clone(), frame_width, frame_height)?;
+    pub fn new(config: Vp9TileConfig, frame_width: u32, frame_height: u32) -> CodecResult<Self> {
+        let splitter = Vp9TileFrameSplitter::new(config.clone(), frame_width, frame_height)?;
         Ok(Self {
             config: Arc::new(config),
             splitter,
@@ -687,12 +672,8 @@ impl Vp9FrameTileEncoder {
         let results: Vec<CodecResult<Vp9EncodedTile>> = regions
             .par_iter()
             .map(|region| {
-                let encoder = Vp9TileEncoder::new(
-                    region.clone(),
-                    base_qindex,
-                    is_keyframe,
-                    enable_deblock,
-                );
+                let encoder =
+                    Vp9TileEncoder::new(region.clone(), base_qindex, is_keyframe, enable_deblock);
                 encoder.encode(frame)
             })
             .collect();

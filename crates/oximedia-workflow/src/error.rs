@@ -47,8 +47,14 @@ pub enum WorkflowError {
     DependencyFailed(String),
 
     /// Database error.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
+
+    /// Database error (non-sqlite or wasm32 variant).
+    #[cfg(any(target_arch = "wasm32", not(feature = "sqlite")))]
+    #[error("Database error: {0}")]
+    Database(String),
 
     /// Serialization error.
     #[error("Serialization error: {0}")]

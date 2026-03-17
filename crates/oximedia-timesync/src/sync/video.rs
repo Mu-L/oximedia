@@ -117,6 +117,7 @@ impl FrameAccurateSync {
     }
 
     /// Wait until next frame should be displayed.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn wait_for_next_frame(&mut self) {
         let next_time = self.video_sync.next_frame();
         let now = Instant::now();

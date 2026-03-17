@@ -18,6 +18,9 @@ pub struct ProfileBuilder {
     audio_bitrate: Option<u64>,
     resolution: Option<(u32, u32)>,
     frame_rate: Option<f64>,
+    #[allow(dead_code)]
+    audio_sample_rate: Option<u32>,
+
     parameters: Vec<(String, String)>,
 }
 
@@ -128,6 +131,8 @@ impl ProfileBuilder {
                 audio_bitrate: self.audio_bitrate,
                 resolution: self.resolution,
                 frame_rate: self.frame_rate,
+                audio_sample_rate: None,
+
                 parameters: self.parameters,
             },
         })
@@ -158,6 +163,8 @@ impl ProfileBuilder {
             audio_bitrate: profile.settings.audio_bitrate,
             resolution: profile.settings.resolution,
             frame_rate: profile.settings.frame_rate,
+            audio_sample_rate: None,
+
             parameters: profile.settings.parameters.clone(),
         }
     }

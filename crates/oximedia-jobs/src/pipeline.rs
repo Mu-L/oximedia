@@ -173,7 +173,11 @@ impl JobPipeline {
         if self.stages.is_empty() {
             return 100.0;
         }
-        let terminal = self.stages.iter().filter(|s| s.status.is_terminal()).count();
+        let terminal = self
+            .stages
+            .iter()
+            .filter(|s| s.status.is_terminal())
+            .count();
         (terminal as f64 / self.stages.len() as f64) * 100.0
     }
 

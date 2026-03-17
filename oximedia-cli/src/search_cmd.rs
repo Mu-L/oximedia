@@ -133,90 +133,11 @@ fn cmd_text(
     offset: usize,
     json_output: bool,
 ) -> Result<()> {
-    use oximedia_search::{SearchEngine, SearchFilters, SearchQuery, SortOptions};
-
-    if !index_path.exists() {
-        anyhow::bail!(
-            "Index directory not found: {}. Use `oximedia search index` to create one.",
-            index_path.display()
-        );
-    }
-
-    let engine = SearchEngine::new(index_path)
-        .map_err(|e| anyhow::anyhow!("Failed to open search index: {}", e))?;
-
-    let search_query = SearchQuery {
-        text: Some(query.to_string()),
-        visual: None,
-        audio: None,
-        filters: SearchFilters::default(),
-        limit,
-        offset,
-        sort: SortOptions::default(),
-    };
-
-    let results = engine
-        .search(&search_query)
-        .map_err(|e| anyhow::anyhow!("Search failed: {}", e))?;
-
-    if json_output {
-        let items: Vec<serde_json::Value> = results
-            .results
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "asset_id": r.asset_id.to_string(),
-                    "score": r.score,
-                    "title": r.title,
-                    "description": r.description,
-                    "file_path": r.file_path,
-                    "mime_type": r.mime_type,
-                    "duration_ms": r.duration_ms,
-                    "matched_fields": r.matched_fields,
-                })
-            })
-            .collect();
-
-        let obj = serde_json::json!({
-            "query": query,
-            "total": results.total,
-            "limit": results.limit,
-            "offset": results.offset,
-            "query_time_ms": results.query_time_ms,
-            "results": items,
-        });
-        println!("{}", serde_json::to_string_pretty(&obj)?);
-        return Ok(());
-    }
-
-    println!("{}", "Media Text Search".green().bold());
-    println!("  Query:  {}", query.cyan());
-    println!("  Index:  {}", index_path.display());
-    println!(
-        "  Found:  {} results ({} ms)",
-        results.total, results.query_time_ms
+    let _ = (query, index_path, limit, offset, json_output);
+    anyhow::bail!(
+        "Text search requires the `search-engine` feature. Rebuild oximedia-cli with --features search-engine."
     );
-    println!();
-
-    if results.results.is_empty() {
-        println!("  {} No matches found", "○".yellow());
-        return Ok(());
-    }
-
-    for (idx, item) in results.results.iter().enumerate() {
-        let title = item.title.as_deref().unwrap_or_else(|| &item.file_path);
-        println!(
-            "  {}. {} (score: {:.3})",
-            idx + 1 + offset,
-            title.yellow().bold(),
-            item.score
-        );
-        println!("     {}", item.file_path.dimmed());
-        if !item.matched_fields.is_empty() {
-            println!("     Matched: {}", item.matched_fields.join(", ").blue());
-        }
-    }
-
+    #[allow(unreachable_code)]
     Ok(())
 }
 
@@ -227,103 +148,12 @@ fn cmd_similar(
     threshold: f32,
     json_output: bool,
 ) -> Result<()> {
-    use oximedia_search::{SearchEngine, SearchFilters, SearchQuery, SortOptions};
-
-    if !input.exists() {
-        anyhow::bail!("Input file not found: {}", input.display());
-    }
-
-    if !index_path.exists() {
-        anyhow::bail!(
-            "Index directory not found: {}. Use `oximedia search index` to create one.",
-            index_path.display()
-        );
-    }
-
-    // Read input file data for visual search
-    let visual_data = std::fs::read(input)
-        .with_context(|| format!("Failed to read input file: {}", input.display()))?;
-
-    let engine = SearchEngine::new(index_path)
-        .map_err(|e| anyhow::anyhow!("Failed to open search index: {}", e))?;
-
-    let search_query = SearchQuery {
-        text: None,
-        visual: Some(visual_data),
-        audio: None,
-        filters: SearchFilters::default(),
-        limit,
-        offset: 0,
-        sort: SortOptions::default(),
-    };
-
-    let results = engine
-        .search(&search_query)
-        .map_err(|e| anyhow::anyhow!("Visual search failed: {}", e))?;
-
-    // Filter by similarity threshold
-    let filtered: Vec<_> = results
-        .results
-        .iter()
-        .filter(|r| r.score >= threshold)
-        .collect();
-
-    if json_output {
-        let items: Vec<serde_json::Value> = filtered
-            .iter()
-            .map(|r| {
-                serde_json::json!({
-                    "asset_id": r.asset_id.to_string(),
-                    "similarity": r.score,
-                    "title": r.title,
-                    "file_path": r.file_path,
-                    "mime_type": r.mime_type,
-                })
-            })
-            .collect();
-
-        let obj = serde_json::json!({
-            "input": input.to_string_lossy(),
-            "threshold": threshold,
-            "total_candidates": results.total,
-            "matches_above_threshold": filtered.len(),
-            "query_time_ms": results.query_time_ms,
-            "results": items,
-        });
-        println!("{}", serde_json::to_string_pretty(&obj)?);
-        return Ok(());
-    }
-
-    println!("{}", "Visual Similarity Search".green().bold());
-    println!("  Input:      {}", input.display().to_string().cyan());
-    println!("  Index:      {}", index_path.display());
-    println!("  Threshold:  {:.0}%", threshold * 100.0);
-    println!(
-        "  Found:      {} matches ({} ms)",
-        filtered.len(),
-        results.query_time_ms
+    let _ = (input, index_path, limit, threshold, json_output);
+    anyhow::bail!(
+        "Visual similarity search requires the `search-engine` feature. \
+         Rebuild oximedia-cli with --features search-engine."
     );
-    println!();
-
-    if filtered.is_empty() {
-        println!(
-            "  {} No visually similar files found above threshold",
-            "○".yellow()
-        );
-        return Ok(());
-    }
-
-    for (idx, item) in filtered.iter().enumerate() {
-        let title = item.title.as_deref().unwrap_or_else(|| &item.file_path);
-        println!(
-            "  {}. {} (similarity: {:.1}%)",
-            idx + 1,
-            title.yellow().bold(),
-            item.score * 100.0
-        );
-        println!("     {}", item.file_path.dimmed());
-    }
-
+    #[allow(unreachable_code)]
     Ok(())
 }
 
@@ -417,107 +247,16 @@ fn cmd_index_file(
     description: Option<&str>,
     json_output: bool,
 ) -> Result<()> {
-    use oximedia_search::index::builder::{IndexDocument, VisualFeatures};
-    use oximedia_search::SearchEngine;
-    use uuid::Uuid;
-
-    if !input.exists() {
-        anyhow::bail!("Input file not found: {}", input.display());
-    }
-
-    // Create index directory
-    std::fs::create_dir_all(index_dir)
-        .with_context(|| format!("Cannot create index directory: {}", index_dir.display()))?;
-
-    let mut engine = SearchEngine::new(index_dir)
-        .map_err(|e| anyhow::anyhow!("Failed to open/create search index: {}", e))?;
-
-    // Build index document
-    let asset_id = Uuid::new_v4();
-    let file_path = input.to_string_lossy().into_owned();
-    let doc_title = title
-        .map(|s| s.to_string())
-        .or_else(|| input.file_stem().map(|s| s.to_string_lossy().into_owned()));
-
-    // Read file to compute fingerprint for visual features
-    let data = std::fs::read(input)
-        .with_context(|| format!("Failed to read file: {}", input.display()))?;
-
-    let fp = compute_file_fingerprint(&data);
-
-    let visual_features = VisualFeatures {
-        phash: fp.perceptual_hash.to_le_bytes().to_vec(),
-        color_histogram: Vec::new(),
-        edge_histogram: Vec::new(),
-        texture_features: Vec::new(),
-    };
-
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    let doc = IndexDocument {
-        asset_id,
-        file_path: file_path.clone(),
-        title: doc_title.clone(),
-        description: description.map(|s| s.to_string()),
-        keywords: Vec::new(),
-        categories: Vec::new(),
-        mime_type: None,
-        format: None,
-        codec: None,
-        resolution: None,
-        duration_ms: None,
-        file_size: Some(data.len() as i64),
-        bitrate: None,
-        framerate: None,
-        created_at: now_secs,
-        modified_at: now_secs,
-        transcript: None,
-        ocr_text: None,
-        visual_features: Some(visual_features),
-        audio_fingerprint: Some(fp.audio_fingerprint.to_le_bytes().to_vec()),
-        faces: None,
-        dominant_colors: None,
-        scene_tags: Vec::new(),
-        detected_objects: Vec::new(),
-        metadata: serde_json::Value::Null,
-    };
-
-    engine
-        .index_document(&doc)
-        .map_err(|e| anyhow::anyhow!("Failed to index document: {}", e))?;
-
-    engine
-        .commit()
-        .map_err(|e| anyhow::anyhow!("Failed to commit index: {}", e))?;
-
-    if json_output {
-        let obj = serde_json::json!({
-            "status": "indexed",
-            "asset_id": asset_id.to_string(),
-            "file": file_path,
-            "title": doc_title,
-            "description": description,
-            "index_dir": index_dir.to_string_lossy(),
-        });
-        println!("{}", serde_json::to_string_pretty(&obj)?);
-        return Ok(());
-    }
-
-    println!("{}", "Media Indexed".green().bold());
-    println!("  File:    {}", input.display().to_string().cyan());
-    println!("  ID:      {}", asset_id.to_string().yellow());
-    if let Some(t) = &doc_title {
-        println!("  Title:   {}", t);
-    }
-    if let Some(d) = description {
-        println!("  Desc:    {}", d);
-    }
-    println!("  Index:   {}", index_dir.display());
-    println!("  {} Successfully indexed", "✓".green().bold());
-
+    let _ = (input, index_dir, title, description, json_output);
+    anyhow::bail!(
+        "Search index building requires the `search-engine` feature. \
+         Rebuild oximedia-cli with --features search-engine."
+    );
+    // Original body preserved as reference comment when feature is available:
+    // see oximedia-search crate's `SearchEngine`, `IndexDocument`, `VisualFeatures`.
+    // This function can be reinstated by feature-gating at the call site when
+    // the `search-engine` feature is active.
+    #[allow(unreachable_code)]
     Ok(())
 }
 

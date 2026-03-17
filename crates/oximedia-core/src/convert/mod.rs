@@ -38,6 +38,7 @@
 
 pub mod audio;
 pub mod pixel;
+pub mod simd_pixel;
 
 pub use audio::{
     convert_sample_format, interleaved_to_planar, planar_to_interleaved, AudioConverter,

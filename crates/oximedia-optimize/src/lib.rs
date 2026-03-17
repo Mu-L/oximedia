@@ -12,6 +12,11 @@
 //! - **Reference Frame Management** - Optimal reference frame selection and DPB management
 //! - **Adaptive Quantization** - Variance and psychovisual-based AQ modes
 //! - **Entropy Coding Optimization** - Context modeling for CABAC/CAVLC
+//! - **ROI Encoding** - Region-of-interest based quality allocation via [`roi_encode`]
+//! - **Temporal AQ** - Frame-level QP adaptation based on temporal complexity via [`temporal_aq`]
+//! - **VMAF Prediction** - Lightweight VMAF score estimation from pixel features via [`vmaf_predict`]
+//! - **Content-Adaptive GOP** - GOP structure selection based on content type via [`gop_optimizer`]
+//! - **Scene-Aware QP** - Lookahead-based scene-cut-aware QP adjustment via [`scene_encode`]
 //!
 //! # Architecture
 //!
@@ -27,6 +32,11 @@
 //! - [`mod@reference`] - Reference frame management
 //! - [`aq`] - Adaptive quantization strategies
 //! - [`entropy`] - Entropy coding context optimization
+//! - [`roi_encode`] - Region of interest encoding with per-CTU QP maps
+//! - [`temporal_aq`] - Temporal adaptive quantization with AQ bridge
+//! - [`vmaf_predict`] - VMAF score prediction from spatial/temporal features
+//! - [`gop_optimizer`] - Content-adaptive GOP structure selection
+//! - [`scene_encode`] - Lookahead-based scene-aware QP adjustment
 //!
 //! # Optimization Levels
 //!
@@ -54,7 +64,7 @@
 //! let decision = optimizer.optimize_block(&frame_data, block_info)?;
 //! ```
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::cast_precision_loss)]
@@ -95,12 +105,19 @@ pub mod quality_metric;
 pub mod quantizer_curve;
 pub mod rdo;
 pub mod reference;
+pub mod roi_encode;
 pub mod scene_encode;
 pub mod strategies;
+pub mod temporal_aq;
 pub mod transcode_optimizer;
 pub mod transform;
 pub mod two_pass;
 pub mod utils;
+pub mod vmaf_predict;
+
+/// SIMD-accelerated block difference metrics (SAD, SATD).
+#[allow(unsafe_code)]
+pub mod simd_metrics;
 
 use oximedia_core::OxiResult;
 
@@ -149,6 +166,10 @@ pub struct OptimizerConfig {
     pub parallel_rdo: bool,
     /// Lambda multiplier for rate-distortion tradeoff.
     pub lambda_multiplier: f64,
+    /// Enable ROI-based encoding optimization.
+    pub enable_roi: bool,
+    /// Enable temporal AQ (frame-level QP adaptation).
+    pub enable_temporal_aq: bool,
 }
 
 impl Default for OptimizerConfig {
@@ -161,17 +182,24 @@ impl Default for OptimizerConfig {
             content_type: ContentType::default(),
             parallel_rdo: true,
             lambda_multiplier: 1.0,
+            enable_roi: false,
+            enable_temporal_aq: false,
         }
     }
 }
 
 /// Main optimization engine.
+///
+/// Integrates RDO, psychovisual analysis, motion optimization, adaptive quantization,
+/// ROI encoding, and temporal AQ into a unified pipeline.
 pub struct Optimizer {
     config: OptimizerConfig,
     rdo_engine: rdo::RdoEngine,
     psycho_analyzer: psycho::PsychoAnalyzer,
     motion_optimizer: motion::MotionOptimizer,
     aq_engine: aq::AqEngine,
+    roi_encoder: Option<roi_encode::RoiEncoder>,
+    temporal_aq_bridge: Option<temporal_aq::TemporalAqBridge>,
 }
 
 impl Optimizer {
@@ -182,12 +210,28 @@ impl Optimizer {
         let motion_optimizer = motion::MotionOptimizer::new(&config)?;
         let aq_engine = aq::AqEngine::new(&config)?;
 
+        let roi_encoder = if config.enable_roi {
+            Some(roi_encode::RoiEncoder::new(
+                roi_encode::RoiEncoderConfig::default(),
+            ))
+        } else {
+            None
+        };
+
+        let temporal_aq_bridge = if config.enable_temporal_aq {
+            Some(temporal_aq::TemporalAqBridge::with_defaults())
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             rdo_engine,
             psycho_analyzer,
             motion_optimizer,
             aq_engine,
+            roi_encoder,
+            temporal_aq_bridge,
         })
     }
 
@@ -220,6 +264,76 @@ impl Optimizer {
     pub fn aq_engine(&self) -> &aq::AqEngine {
         &self.aq_engine
     }
+
+    /// Gets a mutable reference to the adaptive quantization engine.
+    pub fn aq_engine_mut(&mut self) -> &mut aq::AqEngine {
+        &mut self.aq_engine
+    }
+
+    /// Gets the ROI encoder, if enabled.
+    #[must_use]
+    pub fn roi_encoder(&self) -> Option<&roi_encode::RoiEncoder> {
+        self.roi_encoder.as_ref()
+    }
+
+    /// Gets a mutable reference to the ROI encoder, if enabled.
+    pub fn roi_encoder_mut(&mut self) -> Option<&mut roi_encode::RoiEncoder> {
+        self.roi_encoder.as_mut()
+    }
+
+    /// Gets the temporal AQ bridge, if enabled.
+    #[must_use]
+    pub fn temporal_aq_bridge(&self) -> Option<&temporal_aq::TemporalAqBridge> {
+        self.temporal_aq_bridge.as_ref()
+    }
+
+    /// Gets a mutable reference to the temporal AQ bridge, if enabled.
+    pub fn temporal_aq_bridge_mut(&mut self) -> Option<&mut temporal_aq::TemporalAqBridge> {
+        self.temporal_aq_bridge.as_mut()
+    }
+
+    /// Processes a frame's temporal activity through the temporal AQ bridge
+    /// and returns the combined AQ result for a given spatial QP offset.
+    ///
+    /// This is the main integration point between temporal and spatial AQ.
+    pub fn process_temporal_aq(
+        &mut self,
+        activity: temporal_aq::TemporalActivity,
+        spatial_qp_offset: i8,
+    ) -> Option<temporal_aq::CombinedAqResult> {
+        if let Some(ref mut bridge) = self.temporal_aq_bridge {
+            bridge.update_temporal(activity);
+            Some(bridge.combine_with_spatial(spatial_qp_offset))
+        } else {
+            None
+        }
+    }
+
+    /// Generates the ROI QP delta map for the current frame.
+    ///
+    /// Returns `None` if ROI encoding is not enabled or no regions are set.
+    pub fn generate_roi_map(&self) -> Option<roi_encode::RoiOptimizeResult> {
+        self.roi_encoder.as_ref().map(|enc| enc.optimize_frame())
+    }
+
+    /// Adds an ROI region to the encoder (if enabled).
+    ///
+    /// Returns `true` if the region was added, `false` if ROI is not enabled.
+    pub fn add_roi_region(&mut self, region: roi_encode::RoiRegion) -> bool {
+        if let Some(ref mut enc) = self.roi_encoder {
+            enc.add_region(region);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clears all ROI regions (if ROI is enabled).
+    pub fn clear_roi_regions(&mut self) {
+        if let Some(ref mut enc) = self.roi_encoder {
+            enc.clear_regions();
+        }
+    }
 }
 
 // Re-export commonly used types
@@ -230,6 +344,9 @@ pub use decision::{
 };
 pub use entropy::{ContextModel, ContextOptimizer, EntropyStats};
 pub use filter::{DeblockOptimizer, FilterDecision, SaoOptimizer};
+pub use gop_optimizer::{
+    ContentAdaptiveGop, ContentGopDecision, GopOptimizer, GopPattern, GopPlan,
+};
 pub use intra::{AngleOptimizer, IntraModeDecision, ModeOptimizer};
 pub use lookahead::{GopStructure, LookaheadAnalyzer, LookaheadFrame};
 pub use motion::{
@@ -241,9 +358,127 @@ pub use presets::{OptimizationPresets, TunePresets};
 pub use psycho::{ContrastSensitivity, PsychoAnalyzer, VisualMasking};
 pub use rdo::{CostEstimate, LambdaCalculator, RdoEngine, RdoResult, RdoqOptimizer};
 pub use reference::{DpbOptimizer, ReferenceSelection};
+pub use roi_encode::{QpDeltaMap, RoiEncoder, RoiEncoderConfig, RoiOptimizeResult, RoiRegion};
+pub use scene_encode::{LookaheadSceneQp, SceneEncodeParams, SceneEncoder, SceneMetrics};
 pub use strategies::{
     BitrateAllocator, ContentAdaptiveOptimizer, OptimizationStrategy, StrategySelector,
     TemporalOptimizer,
 };
+pub use temporal_aq::{CombinedAqResult, TemporalActivity, TemporalAqBridge, TemporalAqEngine};
 pub use transform::{QuantizationOptimizer, TransformSelection};
 pub use utils::{BlockMetrics, FrameMetrics, OptimizationStats};
+pub use vmaf_predict::{
+    BatchVmafPredictor, VmafFeatures, VmafPrediction, VmafPredictor, VmafPredictorConfig,
+};
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    #[test]
+    fn test_optimizer_with_roi() {
+        let config = OptimizerConfig {
+            enable_roi: true,
+            ..Default::default()
+        };
+        let mut optimizer = Optimizer::new(config).expect("Optimizer creation should succeed");
+
+        assert!(optimizer.roi_encoder().is_some());
+        assert!(
+            optimizer.add_roi_region(roi_encode::RoiRegion::with_priority(0, 0, 128, 128, 2.0),)
+        );
+
+        let map = optimizer.generate_roi_map();
+        assert!(map.is_some());
+        let result = map.expect("ROI map should exist");
+        assert!(result.has_active_regions);
+    }
+
+    #[test]
+    fn test_optimizer_without_roi() {
+        let config = OptimizerConfig::default();
+        let mut optimizer = Optimizer::new(config).expect("Optimizer creation should succeed");
+
+        assert!(optimizer.roi_encoder().is_none());
+        assert!(!optimizer.add_roi_region(roi_encode::RoiRegion::new(0, 0, 64, 64),));
+        assert!(optimizer.generate_roi_map().is_none());
+    }
+
+    #[test]
+    fn test_optimizer_with_temporal_aq() {
+        let config = OptimizerConfig {
+            enable_temporal_aq: true,
+            ..Default::default()
+        };
+        let mut optimizer = Optimizer::new(config).expect("Optimizer creation should succeed");
+
+        assert!(optimizer.temporal_aq_bridge().is_some());
+
+        let mut activity = temporal_aq::TemporalActivity::new(0);
+        activity.avg_motion_magnitude = 30.0;
+        activity.motion_coverage = 0.6;
+
+        let result = optimizer.process_temporal_aq(activity, -2);
+        assert!(result.is_some());
+        let combined = result.expect("Temporal AQ result should exist");
+        assert_ne!(combined.final_qp_delta, 0);
+    }
+
+    #[test]
+    fn test_optimizer_without_temporal_aq() {
+        let config = OptimizerConfig::default();
+        let mut optimizer = Optimizer::new(config).expect("Optimizer creation should succeed");
+
+        assert!(optimizer.temporal_aq_bridge().is_none());
+        let result = optimizer.process_temporal_aq(temporal_aq::TemporalActivity::new(0), 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_optimizer_full_pipeline() {
+        let config = OptimizerConfig {
+            enable_roi: true,
+            enable_temporal_aq: true,
+            enable_aq: true,
+            enable_psychovisual: true,
+            content_type: ContentType::Film,
+            ..Default::default()
+        };
+        let mut optimizer = Optimizer::new(config).expect("Optimizer creation should succeed");
+
+        // Add ROI region
+        optimizer.add_roi_region(roi_encode::RoiRegion::with_priority(
+            100, 100, 200, 200, 1.5,
+        ));
+
+        // Process temporal AQ
+        let mut activity = temporal_aq::TemporalActivity::new(0);
+        activity.avg_motion_magnitude = 15.0;
+        activity.motion_coverage = 0.4;
+        let temporal_result = optimizer.process_temporal_aq(activity, -1);
+        assert!(temporal_result.is_some());
+
+        // Generate ROI map
+        let roi_result = optimizer.generate_roi_map();
+        assert!(roi_result.is_some());
+
+        // Verify AQ engine is accessible
+        assert_eq!(optimizer.aq_engine().mode(), aq::AqMode::Combined);
+    }
+
+    #[test]
+    fn test_clear_roi_regions() {
+        let config = OptimizerConfig {
+            enable_roi: true,
+            ..Default::default()
+        };
+        let mut optimizer = Optimizer::new(config).expect("Optimizer creation should succeed");
+
+        optimizer.add_roi_region(roi_encode::RoiRegion::new(0, 0, 64, 64));
+        optimizer.clear_roi_regions();
+        let result = optimizer
+            .generate_roi_map()
+            .expect("ROI map should exist even without regions");
+        assert!(!result.has_active_regions);
+    }
+}

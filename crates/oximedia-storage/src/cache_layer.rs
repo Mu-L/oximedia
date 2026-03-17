@@ -451,6 +451,274 @@ impl ArcCache {
 }
 
 // ---------------------------------------------------------------------------
+// Size-aware ARC cache (evicts by total bytes rather than entry count)
+// ---------------------------------------------------------------------------
+
+/// Adaptive Replacement Cache with byte-based capacity.
+///
+/// Unlike [`ArcCache`] which counts entries, `ArcCacheSized` tracks `used_bytes`
+/// and evicts entries from T1/T2 until the byte budget is satisfied.  The ARC
+/// adaptive parameter **p** is expressed in bytes and updated proportionally.
+///
+/// Ghost lists (B1, B2) retain only keys (zero byte cost) so they can grow
+/// without consuming the byte budget.
+pub struct ArcCacheSized {
+    /// Hard byte limit for live entries (T1 + T2).
+    capacity_bytes: u64,
+    /// Current total bytes of live entries.
+    used_bytes: u64,
+    /// Target bytes in T1 — the ARC adaptive parameter expressed in bytes.
+    p_bytes: u64,
+    /// T1: recently inserted entries (seen once); front = most recent.
+    t1: VecDeque<String>,
+    /// T2: frequently accessed entries (seen 2+); front = most recent.
+    t2: VecDeque<String>,
+    /// B1: ghost keys evicted from T1 (keys only, no byte cost).
+    b1: VecDeque<String>,
+    /// B2: ghost keys evicted from T2 (keys only, no byte cost).
+    b2: VecDeque<String>,
+    /// Live entry metadata indexed by key.
+    entries: HashMap<String, CacheEntry>,
+    /// Total bytes evicted from this cache over its lifetime.
+    pub total_evicted_bytes: u64,
+    /// Total number of eviction events.
+    pub eviction_count: u64,
+}
+
+impl ArcCacheSized {
+    /// Create a new size-aware ARC cache with `capacity_bytes` byte budget.
+    #[must_use]
+    pub fn new(capacity_bytes: u64) -> Self {
+        Self {
+            capacity_bytes,
+            used_bytes: 0,
+            p_bytes: 0,
+            t1: VecDeque::new(),
+            t2: VecDeque::new(),
+            b1: VecDeque::new(),
+            b2: VecDeque::new(),
+            entries: HashMap::new(),
+            total_evicted_bytes: 0,
+            eviction_count: 0,
+        }
+    }
+
+    // ── Internal helpers ────────────────────────────────────────────────
+
+    /// Bytes currently consumed by live entries.
+    #[must_use]
+    pub fn used_bytes(&self) -> u64 {
+        self.used_bytes
+    }
+
+    /// Hard byte limit.
+    #[must_use]
+    pub fn capacity_bytes(&self) -> u64 {
+        self.capacity_bytes
+    }
+
+    /// Cache utilisation as a fraction (0.0–1.0).
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn utilization(&self) -> f64 {
+        if self.capacity_bytes == 0 {
+            return 0.0;
+        }
+        self.used_bytes as f64 / self.capacity_bytes as f64
+    }
+
+    /// Number of live cached entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the cache holds no live entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Current adaptive target for T1 bytes.
+    #[must_use]
+    pub fn adaptive_parameter_bytes(&self) -> u64 {
+        self.p_bytes
+    }
+
+    /// Evict one entry according to the ARC replace rule.
+    ///
+    /// Returns the number of bytes freed.
+    fn replace_one(&mut self, prefer_t2: bool) -> u64 {
+        // Choose victim: if T1 is above target (or `prefer_t2` and T1 == target), evict from T1.
+        let t1_bytes: u64 = self
+            .t1
+            .iter()
+            .filter_map(|k| self.entries.get(k).map(|e| e.size_bytes))
+            .sum();
+
+        let evict_from_t1 = !self.t1.is_empty()
+            && (t1_bytes > self.p_bytes || (prefer_t2 && t1_bytes == self.p_bytes));
+
+        if evict_from_t1 {
+            if let Some(key) = self.t1.pop_back() {
+                if let Some(entry) = self.entries.remove(&key) {
+                    let freed = entry.size_bytes;
+                    self.used_bytes = self.used_bytes.saturating_sub(freed);
+                    self.total_evicted_bytes += freed;
+                    self.eviction_count += 1;
+                    self.b1.push_front(key);
+                    return freed;
+                }
+            }
+        } else if let Some(key) = self.t2.pop_back() {
+            if let Some(entry) = self.entries.remove(&key) {
+                let freed = entry.size_bytes;
+                self.used_bytes = self.used_bytes.saturating_sub(freed);
+                self.total_evicted_bytes += freed;
+                self.eviction_count += 1;
+                self.b2.push_front(key);
+                return freed;
+            }
+        } else if let Some(key) = self.t1.pop_back() {
+            // Fallback: evict from T1 even if under target
+            if let Some(entry) = self.entries.remove(&key) {
+                let freed = entry.size_bytes;
+                self.used_bytes = self.used_bytes.saturating_sub(freed);
+                self.total_evicted_bytes += freed;
+                self.eviction_count += 1;
+                self.b1.push_front(key);
+                return freed;
+            }
+        }
+        0
+    }
+
+    /// Evict entries until `needed_bytes` become available or no more entries exist.
+    fn make_room(&mut self, needed_bytes: u64, prefer_t2: bool) {
+        while self.used_bytes + needed_bytes > self.capacity_bytes
+            && (!self.t1.is_empty() || !self.t2.is_empty())
+        {
+            let freed = self.replace_one(prefer_t2);
+            if freed == 0 {
+                break;
+            }
+        }
+    }
+
+    // ── Public API ───────────────────────────────────────────────────────
+
+    /// Look up a key and update its access metadata.
+    ///
+    /// Promotes from T1 to T2 on first re-access (ARC promotion rule).
+    pub fn get(&mut self, key: &str, now_ms: u64) -> Option<&CacheEntry> {
+        if let Some(pos) = self.t1.iter().position(|k| k == key) {
+            // Promote T1 → T2
+            if let Some(k) = self.t1.remove(pos) {
+                self.t2.push_front(k);
+            }
+            if let Some(e) = self.entries.get_mut(key) {
+                e.access_count += 1;
+                e.last_access_ms = now_ms;
+            }
+            return self.entries.get(key);
+        }
+
+        if let Some(pos) = self.t2.iter().position(|k| k == key) {
+            // Move to front of T2 (MRU position)
+            if let Some(k) = self.t2.remove(pos) {
+                self.t2.push_front(k);
+            }
+            if let Some(e) = self.entries.get_mut(key) {
+                e.access_count += 1;
+                e.last_access_ms = now_ms;
+            }
+            return self.entries.get(key);
+        }
+
+        None
+    }
+
+    /// Insert or refresh an entry.
+    ///
+    /// Adjusts the adaptive parameter and evicts as needed to fit `size_bytes`
+    /// within the byte budget.
+    pub fn put(&mut self, key: impl Into<String>, size_bytes: u64, now_ms: u64) {
+        let key = key.into();
+
+        // Already cached → refresh in place (size may change)
+        if let Some(existing) = self.entries.get(&key) {
+            let old_size = existing.size_bytes;
+            // Remove from its current list position
+            if let Some(pos) = self.t1.iter().position(|k| k == &key) {
+                self.t1.remove(pos);
+            } else if let Some(pos) = self.t2.iter().position(|k| k == &key) {
+                self.t2.remove(pos);
+            }
+            self.used_bytes = self.used_bytes.saturating_sub(old_size);
+            self.entries.remove(&key);
+        }
+
+        // Ghost hit in B1 → increase p (favour recency / T1)
+        let in_b2 = if let Some(pos) = self.b1.iter().position(|k| k == &key) {
+            let b2_bytes: u64 = self
+                .b2
+                .iter()
+                .filter_map(|k| self.entries.get(k).map(|e| e.size_bytes))
+                .sum::<u64>()
+                .max(size_bytes);
+            let b1_bytes = self.b1.len().max(1) as u64 * size_bytes;
+            let delta = b2_bytes / b1_bytes;
+            self.p_bytes = (self.p_bytes + delta.max(1)).min(self.capacity_bytes);
+            self.b1.remove(pos);
+            self.make_room(size_bytes, false);
+            self.t2.push_front(key.clone());
+            self.entries
+                .insert(key.clone(), CacheEntry::new(key, size_bytes, now_ms));
+            self.used_bytes += size_bytes;
+            return;
+        } else {
+            // Check B2 ghost hit
+            self.b2.iter().position(|k| k == &key).is_some()
+        };
+
+        if in_b2 {
+            let pos = self.b2.iter().position(|k| k == &key).unwrap_or(0);
+            let b1_bytes = self.b1.len().max(1) as u64 * size_bytes;
+            let b2_bytes = self.b2.len().max(1) as u64 * size_bytes;
+            let delta = b1_bytes / b2_bytes;
+            self.p_bytes = self.p_bytes.saturating_sub(delta.max(1));
+            self.b2.remove(pos);
+            self.make_room(size_bytes, true);
+            self.t2.push_front(key.clone());
+            self.entries
+                .insert(key.clone(), CacheEntry::new(key, size_bytes, now_ms));
+            self.used_bytes += size_bytes;
+            return;
+        }
+
+        // Completely new key — evict as needed, insert into T1
+        self.make_room(size_bytes, false);
+        self.t1.push_front(key.clone());
+        self.entries
+            .insert(key.clone(), CacheEntry::new(key, size_bytes, now_ms));
+        self.used_bytes += size_bytes;
+    }
+
+    /// Remove a specific entry from the cache.
+    ///
+    /// Returns `true` if the key was present and removed.
+    pub fn remove(&mut self, key: &str) -> bool {
+        if let Some(entry) = self.entries.remove(key) {
+            self.used_bytes = self.used_bytes.saturating_sub(entry.size_bytes);
+            self.t1.retain(|k| k != key);
+            self.t2.retain(|k| k != key);
+            return true;
+        }
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cache statistics
 // ---------------------------------------------------------------------------
 
@@ -834,5 +1102,135 @@ mod tests {
         // s1 and s2 were promoted and should still be accessible
         assert!(cache.get("s1", 8).is_some());
         assert!(cache.get("s2", 9).is_some());
+    }
+
+    // ── ArcCacheSized tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_arc_sized_basic_put_get() {
+        let mut cache = ArcCacheSized::new(1000);
+        cache.put("a", 100, 0);
+        assert!(cache.get("a", 1).is_some());
+        assert_eq!(cache.used_bytes(), 100);
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_arc_sized_miss() {
+        let mut cache = ArcCacheSized::new(1000);
+        assert!(cache.get("missing", 0).is_none());
+    }
+
+    #[test]
+    fn test_arc_sized_evicts_when_full() {
+        // Capacity = 300 bytes; insert three 100-byte entries, then one more
+        let mut cache = ArcCacheSized::new(300);
+        cache.put("a", 100, 0);
+        cache.put("b", 100, 1);
+        cache.put("c", 100, 2);
+        assert_eq!(cache.used_bytes(), 300);
+        // Insert 'd' (100 bytes) — must evict to stay within budget
+        cache.put("d", 100, 3);
+        assert!(
+            cache.used_bytes() <= 300,
+            "used {} > capacity 300",
+            cache.used_bytes()
+        );
+        assert!(cache.eviction_count > 0, "at least one eviction expected");
+    }
+
+    #[test]
+    fn test_arc_sized_used_bytes_not_exceed_capacity() {
+        let mut cache = ArcCacheSized::new(512);
+        for i in 0u64..20 {
+            cache.put(format!("key-{i}"), 64, i * 10);
+        }
+        assert!(
+            cache.used_bytes() <= 512,
+            "used_bytes {} exceeded capacity 512",
+            cache.used_bytes()
+        );
+    }
+
+    #[test]
+    fn test_arc_sized_promotion_t1_to_t2() {
+        let mut cache = ArcCacheSized::new(2000);
+        cache.put("x", 100, 0); // goes to T1
+        let e = cache.get("x", 1); // promotes to T2
+        assert!(e.is_some());
+        assert_eq!(e.map(|v| v.access_count), Some(1));
+        // Still accessible after promotion
+        assert!(cache.get("x", 2).is_some());
+    }
+
+    #[test]
+    fn test_arc_sized_remove() {
+        let mut cache = ArcCacheSized::new(1000);
+        cache.put("r", 200, 0);
+        assert_eq!(cache.used_bytes(), 200);
+        assert!(cache.remove("r"));
+        assert_eq!(cache.used_bytes(), 0);
+        assert!(cache.is_empty());
+        // Double remove
+        assert!(!cache.remove("r"));
+    }
+
+    #[test]
+    fn test_arc_sized_overwrite_same_key() {
+        let mut cache = ArcCacheSized::new(1000);
+        cache.put("k", 100, 0);
+        cache.put("k", 300, 1); // overwrite with larger size
+                                // Only one entry
+        assert_eq!(cache.len(), 1);
+        assert!(cache.used_bytes() <= 1000);
+    }
+
+    #[test]
+    fn test_arc_sized_utilization() {
+        let mut cache = ArcCacheSized::new(1000);
+        cache.put("x", 500, 0);
+        assert!((cache.utilization() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_arc_sized_utilization_zero_capacity() {
+        let cache = ArcCacheSized::new(0);
+        assert_eq!(cache.utilization(), 0.0);
+    }
+
+    #[test]
+    fn test_arc_sized_is_empty() {
+        let cache = ArcCacheSized::new(1024);
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_arc_sized_total_evicted_bytes_increases() {
+        let mut cache = ArcCacheSized::new(200);
+        // Fill exactly
+        cache.put("a", 100, 0);
+        cache.put("b", 100, 1);
+        // Force eviction
+        cache.put("c", 100, 2);
+        assert!(
+            cache.total_evicted_bytes >= 100,
+            "should have evicted at least 100 bytes"
+        );
+    }
+
+    #[test]
+    fn test_arc_sized_stress_byte_budget() {
+        let mut cache = ArcCacheSized::new(1024);
+        for i in 0u64..50 {
+            // Vary sizes between 32 and 256 bytes
+            let size = 32 + (i % 8) * 32;
+            cache.put(format!("key-{i}"), size, i * 5);
+            assert!(
+                cache.used_bytes() <= 1024,
+                "iteration {i}: used {} > capacity 1024",
+                cache.used_bytes()
+            );
+        }
     }
 }

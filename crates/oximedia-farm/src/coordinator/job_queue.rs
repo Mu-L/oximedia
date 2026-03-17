@@ -77,6 +77,47 @@ impl Task {
     }
 }
 
+/// Aggregate progress snapshot for a job.
+#[derive(Debug, Clone)]
+pub struct JobProgress {
+    /// Overall completion percentage in the range `[0.0, 1.0]`.
+    pub percent: f64,
+    /// Total number of tasks in the job.
+    pub total_tasks: usize,
+    /// Number of tasks whose progress has been recorded.
+    pub tracked_tasks: usize,
+}
+
+/// In-memory state used to aggregate per-task progress up to job level.
+#[derive(Debug)]
+struct JobProgressState {
+    /// How many tasks belong to this job.
+    total_tasks: usize,
+    /// Most-recent per-task progress values.
+    task_values: HashMap<TaskId, f64>,
+}
+
+impl JobProgressState {
+    fn new(total_tasks: usize) -> Self {
+        Self {
+            total_tasks,
+            task_values: HashMap::new(),
+        }
+    }
+
+    /// Compute the aggregate [`JobProgress`] from the current state.
+    fn to_job_progress(&self) -> JobProgress {
+        let total = self.total_tasks.max(1);
+        let sum: f64 = self.task_values.values().sum();
+        let percent = sum / total as f64;
+        JobProgress {
+            percent,
+            total_tasks: self.total_tasks,
+            tracked_tasks: self.task_values.len(),
+        }
+    }
+}
+
 /// Job queue manager
 pub struct JobQueue {
     database: Arc<Database>,
@@ -86,6 +127,10 @@ pub struct JobQueue {
     task_progress: Arc<RwLock<HashMap<TaskId, f64>>>,
     /// In-memory tracking of worker -> task assignments for fast lookup.
     worker_assignments: Arc<Mutex<HashMap<WorkerId, Vec<TaskId>>>>,
+    /// In-memory job-level progress aggregation keyed by job ID.
+    job_progress: Arc<RwLock<HashMap<JobId, JobProgressState>>>,
+    /// Maps each known TaskId to its parent JobId for fast progress roll-up.
+    task_to_job: Arc<RwLock<HashMap<TaskId, JobId>>>,
 }
 
 impl JobQueue {
@@ -102,6 +147,8 @@ impl JobQueue {
             max_tasks_per_job,
             task_progress: Arc::new(RwLock::new(HashMap::new())),
             worker_assignments: Arc::new(Mutex::new(HashMap::new())),
+            job_progress: Arc::new(RwLock::new(HashMap::new())),
+            task_to_job: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -169,6 +216,8 @@ impl JobQueue {
             };
 
             self.database.insert_task(&task_record)?;
+            // Register task → job mapping for progress roll-up.
+            self.task_to_job.write().insert(task.task_id, task.job_id);
             tracing::debug!("Task {} created for job {}", task.task_id, task.job_id);
             Ok(task.task_id)
         } else {
@@ -217,10 +266,42 @@ impl JobQueue {
         Ok(())
     }
 
+    /// Initialise job-level progress tracking for a job with a known task count.
+    ///
+    /// This must be called before `update_task_progress` reports are aggregated
+    /// at the job level.  Subsequent calls with the same `job_id` are no-ops so
+    /// that the initialisation is idempotent.
+    pub fn init_job_progress(&self, job_id: JobId, total_tasks: usize) {
+        let mut map = self.job_progress.write();
+        map.entry(job_id)
+            .or_insert_with(|| JobProgressState::new(total_tasks));
+    }
+
+    /// Return a `JobProgress` snapshot for the given job, or `None` when the
+    /// job has not been initialised via `init_job_progress`.
+    #[must_use]
+    pub fn get_job_progress(&self, job_id: JobId) -> Option<JobProgress> {
+        self.job_progress
+            .read()
+            .get(&job_id)
+            .map(|s| s.to_job_progress())
+    }
+
     /// Update task progress
     pub async fn update_task_progress(&self, task_id: TaskId, progress: f64) -> Result<()> {
-        let mut task_progress = self.task_progress.write();
-        task_progress.insert(task_id, progress);
+        {
+            let mut task_progress = self.task_progress.write();
+            task_progress.insert(task_id, progress);
+        }
+        // Roll the per-task value up into the job-level aggregator if the task
+        // is registered in the task→job mapping.
+        let job_id_opt = self.task_to_job.read().get(&task_id).copied();
+        if let Some(job_id) = job_id_opt {
+            let mut jp_map = self.job_progress.write();
+            if let Some(state) = jp_map.get_mut(&job_id) {
+                state.task_values.insert(task_id, progress);
+            }
+        }
         tracing::debug!("Task {} progress: {:.1}%", task_id, progress * 100.0);
         Ok(())
     }

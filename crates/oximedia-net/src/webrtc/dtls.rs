@@ -193,15 +193,21 @@ impl DtlsConnection {
 
 /// Generates a self-signed certificate.
 fn generate_self_signed_cert() -> NetResult<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
-    // Generate key pair using ring
-    let rng = ring::rand::SystemRandom::new();
-    let pkcs8_bytes = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
-        .map_err(|e| NetError::protocol(format!("Failed to generate key: {e}")))?;
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    use ed25519_dalek::SigningKey;
+    use rand::Rng;
+
+    let mut secret = [0u8; 32];
+    rand::rng().fill_bytes(&mut secret);
+    let signing_key = SigningKey::from_bytes(&secret);
+    let pkcs8_doc = signing_key
+        .to_pkcs8_der()
+        .map_err(|e| NetError::protocol(format!("Failed to encode key as PKCS8: {e}")))?;
 
     // Create a simple self-signed certificate
     // In production, use rcgen or similar
     let cert_der = create_dummy_cert();
-    let key_der = PrivateKeyDer::Pkcs8(pkcs8_bytes.as_ref().to_vec().into());
+    let key_der = PrivateKeyDer::Pkcs8(pkcs8_doc.as_bytes().to_vec().into());
 
     Ok((cert_der, key_der))
 }

@@ -130,26 +130,38 @@
 #![allow(clippy::must_use_candidate)]
 #![allow(dead_code)]
 
+pub mod a_b_roll;
 pub mod assembly;
 pub mod auto_caption;
+pub mod auto_chaptering;
+pub mod auto_grade;
+pub mod auto_thumbnail;
 pub mod batch_auto;
+pub mod color_continuity;
 pub mod color_grade_suggest;
 pub mod color_match;
 pub mod content_index;
+pub mod content_indexer;
+pub mod content_warning;
 pub mod cuts;
+pub mod engagement_predictor;
 pub mod error;
 pub mod highlight_reel;
 pub mod highlights;
 pub mod music_sync;
+pub mod music_video_sync;
 pub mod narrative;
+pub mod narrative_structure;
 pub mod pacing_editor;
 pub mod quality_gate;
 pub mod rules;
 pub mod scene_classifier;
+pub mod scene_description;
 pub mod scene_detect_auto;
 pub mod scoring;
 pub mod segment_merge;
 pub mod smart_crop;
+pub mod smart_reframe;
 pub mod smart_trim;
 pub mod subtitle_sync;
 pub mod tag_suggest;

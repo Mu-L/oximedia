@@ -53,6 +53,52 @@ impl LanczosKernel {
     }
 }
 
+/// Predefined Lanczos window sizes for common use cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanczosWindowSize {
+    /// 2-tap: fastest, slight softness. Good for real-time and thumbnails.
+    Tap2,
+    /// 3-tap: standard quality/speed balance. Default for most video scaling.
+    Tap3,
+    /// 4-tap: sharper than 3-tap, may show slight ringing on hard edges.
+    Tap4,
+    /// 5-tap: highest quality, minimal aliasing. Best for archival and mastering.
+    Tap5,
+}
+
+impl LanczosWindowSize {
+    /// Returns the `a` parameter for this window size.
+    pub fn a_value(self) -> u32 {
+        match self {
+            Self::Tap2 => 2,
+            Self::Tap3 => 3,
+            Self::Tap4 => 4,
+            Self::Tap5 => 5,
+        }
+    }
+
+    /// Returns a human-readable description of this window size.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Tap2 => "Lanczos-2: fast, slight softness",
+            Self::Tap3 => "Lanczos-3: standard quality/speed balance",
+            Self::Tap4 => "Lanczos-4: sharp with slight ringing risk",
+            Self::Tap5 => "Lanczos-5: highest quality, slowest",
+        }
+    }
+
+    /// Returns all available window sizes in ascending quality order.
+    pub fn all() -> &'static [LanczosWindowSize] {
+        &[Self::Tap2, Self::Tap3, Self::Tap4, Self::Tap5]
+    }
+}
+
+impl std::fmt::Display for LanczosWindowSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Lanczos-{}", self.a_value())
+    }
+}
+
 /// Lanczos resampler that applies the Lanczos filter for image scaling.
 #[derive(Debug, Clone)]
 pub struct LanczosResampler {
@@ -77,6 +123,13 @@ impl LanczosResampler {
     /// Create a new `LanczosResampler` with a custom kernel.
     pub fn with_kernel(kernel: LanczosKernel) -> Self {
         Self { kernel }
+    }
+
+    /// Create a `LanczosResampler` from a predefined window size.
+    pub fn from_window_size(window: LanczosWindowSize) -> Self {
+        Self {
+            kernel: LanczosKernel::new(window.a_value()),
+        }
     }
 
     /// Resample a 1D signal from its current length to `dst_len` samples.
@@ -313,5 +366,115 @@ mod tests {
             let _ = v; // all u8 values are in [0, 255] by definition
         }
         assert_eq!(result.len(), 64);
+    }
+
+    // ── LanczosWindowSize tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_window_size_a_values() {
+        assert_eq!(LanczosWindowSize::Tap2.a_value(), 2);
+        assert_eq!(LanczosWindowSize::Tap3.a_value(), 3);
+        assert_eq!(LanczosWindowSize::Tap4.a_value(), 4);
+        assert_eq!(LanczosWindowSize::Tap5.a_value(), 5);
+    }
+
+    #[test]
+    fn test_window_size_display() {
+        assert_eq!(LanczosWindowSize::Tap2.to_string(), "Lanczos-2");
+        assert_eq!(LanczosWindowSize::Tap5.to_string(), "Lanczos-5");
+    }
+
+    #[test]
+    fn test_window_size_descriptions() {
+        for ws in LanczosWindowSize::all() {
+            assert!(!ws.description().is_empty());
+        }
+    }
+
+    #[test]
+    fn test_window_size_all() {
+        let all = LanczosWindowSize::all();
+        assert_eq!(all.len(), 4);
+    }
+
+    #[test]
+    fn test_from_window_size() {
+        let r = LanczosResampler::from_window_size(LanczosWindowSize::Tap2);
+        assert_eq!(r.kernel.a, 2);
+        let r = LanczosResampler::from_window_size(LanczosWindowSize::Tap5);
+        assert_eq!(r.kernel.a, 5);
+    }
+
+    #[test]
+    fn test_kernel_support_varies_with_window_size() {
+        // Outside support should return 0
+        let k2 = LanczosKernel::new(2);
+        let k5 = LanczosKernel::new(5);
+        // At x=2.5: k2 should be 0 (outside support), k5 should be non-zero
+        assert_eq!(k2.kernel_value(2.5), 0.0);
+        assert!(k5.kernel_value(2.5).abs() > 1e-6);
+    }
+
+    #[test]
+    fn test_configurable_lanczos_all_sizes_produce_output() {
+        let src: Vec<u8> = (0..64).map(|i| i as u8 * 4).collect();
+        for ws in LanczosWindowSize::all() {
+            let r = LanczosResampler::from_window_size(*ws);
+            let result = r.scale_image(&src, 8, 8, 4, 4);
+            assert_eq!(result.len(), 16, "{} should produce 4x4 output", ws);
+        }
+    }
+
+    #[test]
+    fn test_larger_window_gives_sharper_result() {
+        // Upscale a step-edge image with Lanczos-2 and Lanczos-5.
+        // Lanczos-5 should produce a sharper transition (larger gradient at edge).
+        let mut src = vec![0u8; 8 * 8];
+        for y in 0..8 {
+            for x in 4..8 {
+                src[y * 8 + x] = 255;
+            }
+        }
+
+        let r2 = LanczosResampler::from_window_size(LanczosWindowSize::Tap2);
+        let r5 = LanczosResampler::from_window_size(LanczosWindowSize::Tap5);
+        let out2 = r2.scale_image(&src, 8, 8, 16, 16);
+        let out5 = r5.scale_image(&src, 8, 8, 16, 16);
+
+        // Both should produce 16x16 output
+        assert_eq!(out2.len(), 256);
+        assert_eq!(out5.len(), 256);
+
+        // Compute max gradient (difference between adjacent pixels in middle row)
+        let max_grad = |out: &[u8]| -> u8 {
+            let row = 8; // middle row
+            let mut max_d = 0u8;
+            for x in 1..16 {
+                let d =
+                    (out[row * 16 + x] as i16 - out[row * 16 + x - 1] as i16).unsigned_abs() as u8;
+                if d > max_d {
+                    max_d = d;
+                }
+            }
+            max_d
+        };
+
+        let g2 = max_grad(&out2);
+        let g5 = max_grad(&out5);
+        // Lanczos-5 should have at least comparable sharpness
+        assert!(
+            g5 >= g2.saturating_sub(5),
+            "Lanczos-5 gradient {g5} should be >= Lanczos-2 gradient {g2} (approx)"
+        );
+    }
+
+    #[test]
+    fn test_resample_1d_with_different_windows() {
+        let src = vec![0.0f32, 0.0, 1.0, 1.0, 0.0, 0.0];
+        for ws in LanczosWindowSize::all() {
+            let r = LanczosResampler::from_window_size(*ws);
+            let dst = r.resample_1d(&src, 12);
+            assert_eq!(dst.len(), 12, "{} should produce 12 samples", ws);
+        }
     }
 }

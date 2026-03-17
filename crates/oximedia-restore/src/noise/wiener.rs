@@ -1,8 +1,175 @@
-//! Wiener filtering for noise reduction.
+//! Wiener filtering for noise reduction with optional SIMD-accelerated gain computation.
+//!
+//! On x86/x86-64 CPUs the inner gain-computation loop uses AVX2 (8-wide f32) when
+//! the feature is available at runtime, falling back to SSE2 (4-wide f32) and finally
+//! to a scalar path.  The unsafe blocks are restricted to the SIMD kernels and guarded
+//! by `is_x86_feature_detected!` at runtime so the binary runs correctly on any CPU.
 
 use crate::error::RestoreResult;
 use crate::noise::profile::NoiseProfile;
 use crate::utils::spectral::{apply_window, FftProcessor, WindowFunction};
+
+// ---------------------------------------------------------------------------
+// SIMD helpers
+// ---------------------------------------------------------------------------
+
+/// Scalar fallback: compute Wiener gain for each frequency bin.
+///
+/// `gain[i] = (snr[i] / (snr[i] + 1)).max(min_gain)`
+/// where `snr[i] = signal_pow[i] / noise_pow[i]`
+#[inline]
+fn compute_wiener_gains_scalar(
+    signal_mag: &[f32],
+    noise_mag: &[f32],
+    min_gain: f32,
+    out: &mut [f32],
+) {
+    for ((&sm, &nm), o) in signal_mag.iter().zip(noise_mag.iter()).zip(out.iter_mut()) {
+        let sp = sm * sm;
+        let np = nm * nm;
+        let snr = if np > f32::EPSILON { sp / np } else { 100.0 };
+        *o = (snr / (snr + 1.0)).max(min_gain);
+    }
+}
+
+/// Compute Wiener gains, choosing the widest SIMD path available at runtime.
+///
+/// The function always produces the same numerical result as `compute_wiener_gains_scalar`.
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+fn compute_wiener_gains(signal_mag: &[f32], noise_mag: &[f32], min_gain: f32, out: &mut [f32]) {
+    // Runtime dispatch: prefer AVX2, then SSE2, then scalar.
+    if is_x86_feature_detected!("avx2") {
+        // SAFETY: we have verified AVX2 is available at runtime.
+        unsafe { compute_wiener_gains_avx2(signal_mag, noise_mag, min_gain, out) }
+    } else if is_x86_feature_detected!("sse2") {
+        // SAFETY: we have verified SSE2 is available at runtime.
+        unsafe { compute_wiener_gains_sse2(signal_mag, noise_mag, min_gain, out) }
+    } else {
+        compute_wiener_gains_scalar(signal_mag, noise_mag, min_gain, out);
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn compute_wiener_gains(signal_mag: &[f32], noise_mag: &[f32], min_gain: f32, out: &mut [f32]) {
+    compute_wiener_gains_scalar(signal_mag, noise_mag, min_gain, out);
+}
+
+/// AVX2 implementation: processes 8 bins per iteration.
+///
+/// Formula (per bin):
+/// ```text
+/// snr  = sm*sm / (nm*nm)   [clamped to 100.0 when nm≈0]
+/// gain = snr / (snr + 1.0) [clamped to min_gain]
+/// ```
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[allow(unsafe_code)]
+unsafe fn compute_wiener_gains_avx2(
+    signal_mag: &[f32],
+    noise_mag: &[f32],
+    min_gain: f32,
+    out: &mut [f32],
+) {
+    use std::arch::x86_64::*;
+
+    let n = signal_mag.len().min(noise_mag.len()).min(out.len());
+    let chunks = n / 8;
+
+    let eps = _mm256_set1_ps(f32::EPSILON);
+    let high_snr = _mm256_set1_ps(100.0_f32);
+    let one = _mm256_set1_ps(1.0_f32);
+    let mg = _mm256_set1_ps(min_gain);
+
+    for i in 0..chunks {
+        let base = i * 8;
+        // Load 8 signal and noise magnitudes
+        let sm = _mm256_loadu_ps(signal_mag.as_ptr().add(base));
+        let nm = _mm256_loadu_ps(noise_mag.as_ptr().add(base));
+
+        let sp = _mm256_mul_ps(sm, sm); // sm²
+        let np = _mm256_mul_ps(nm, nm); // nm²
+
+        // mask where np > epsilon
+        let np_ok = _mm256_cmp_ps(np, eps, _CMP_GT_OQ);
+
+        // snr = sp / np  (or 100.0 where np ≈ 0)
+        let raw_snr = _mm256_div_ps(sp, np);
+        let snr = _mm256_blendv_ps(high_snr, raw_snr, np_ok);
+
+        // gain = snr / (snr + 1)
+        let denom = _mm256_add_ps(snr, one);
+        let gain = _mm256_div_ps(snr, denom);
+
+        // clamp to min_gain
+        let clamped = _mm256_max_ps(gain, mg);
+
+        _mm256_storeu_ps(out.as_mut_ptr().add(base), clamped);
+    }
+
+    // Scalar tail
+    let tail_start = chunks * 8;
+    compute_wiener_gains_scalar(
+        &signal_mag[tail_start..n],
+        &noise_mag[tail_start..n],
+        min_gain,
+        &mut out[tail_start..n],
+    );
+}
+
+/// SSE2 implementation: processes 4 bins per iteration.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[allow(unsafe_code)]
+unsafe fn compute_wiener_gains_sse2(
+    signal_mag: &[f32],
+    noise_mag: &[f32],
+    min_gain: f32,
+    out: &mut [f32],
+) {
+    use std::arch::x86_64::*;
+
+    let n = signal_mag.len().min(noise_mag.len()).min(out.len());
+    let chunks = n / 4;
+
+    let eps = _mm_set1_ps(f32::EPSILON);
+    let high_snr = _mm_set1_ps(100.0_f32);
+    let one = _mm_set1_ps(1.0_f32);
+    let mg = _mm_set1_ps(min_gain);
+
+    for i in 0..chunks {
+        let base = i * 4;
+        let sm = _mm_loadu_ps(signal_mag.as_ptr().add(base));
+        let nm = _mm_loadu_ps(noise_mag.as_ptr().add(base));
+
+        let sp = _mm_mul_ps(sm, sm);
+        let np = _mm_mul_ps(nm, nm);
+
+        // SSE2 lacks cmpgt returning a float mask directly; use _mm_cmpgt_ps
+        let np_ok = _mm_cmpgt_ps(np, eps);
+
+        let raw_snr = _mm_div_ps(sp, np);
+        // blend: if np_ok bit set use raw_snr, else high_snr
+        // SSE2 blend via bitwise ops: result = (raw_snr & np_ok) | (high_snr & ~np_ok)
+        let selected = _mm_or_ps(_mm_and_ps(raw_snr, np_ok), _mm_andnot_ps(np_ok, high_snr));
+
+        let denom = _mm_add_ps(selected, one);
+        let gain = _mm_div_ps(selected, denom);
+        let clamped = _mm_max_ps(gain, mg);
+
+        _mm_storeu_ps(out.as_mut_ptr().add(base), clamped);
+    }
+
+    // Scalar tail
+    let tail_start = chunks * 4;
+    compute_wiener_gains_scalar(
+        &signal_mag[tail_start..n],
+        &noise_mag[tail_start..n],
+        min_gain,
+        &mut out[tail_start..n],
+    );
+}
 
 /// Wiener filter configuration.
 #[derive(Debug, Clone)]
@@ -81,33 +248,27 @@ impl WienerFilter {
             let magnitude = fft.magnitude(&spectrum);
             let phase = fft.phase(&spectrum);
 
-            // Compute Wiener filter gains
-            let mut processed_mag = vec![0.0; magnitude.len()];
+            // Compute Wiener filter gains — uses SIMD where available
+            let n = magnitude.len().min(self.noise_profile.magnitude.len());
+            let mut raw_gains = vec![0.0f32; n];
+            compute_wiener_gains(
+                &magnitude[..n],
+                &self.noise_profile.magnitude[..n],
+                self.config.min_gain,
+                &mut raw_gains,
+            );
 
-            for (i, (&signal_mag, &noise_mag)) in magnitude
-                .iter()
-                .zip(self.noise_profile.magnitude.iter())
-                .enumerate()
-            {
-                // Estimate SNR
-                let signal_power = signal_mag * signal_mag;
-                let noise_power = noise_mag * noise_mag;
-
-                // Wiener gain: SNR / (SNR + 1)
-                let snr = if noise_power > f32::EPSILON {
-                    signal_power / noise_power
-                } else {
-                    100.0 // Very high SNR if no noise
-                };
-
-                let gain = (snr / (snr + 1.0)).max(self.config.min_gain);
-
-                // Smooth gain over time
-                let smoothed_gain = self.config.smoothing * self.prev_gain[i]
-                    + (1.0 - self.config.smoothing) * gain;
-                self.prev_gain[i] = smoothed_gain;
-
-                processed_mag[i] = signal_mag * smoothed_gain;
+            // Smooth gains over time and apply to magnitude
+            let mut processed_mag = vec![0.0f32; magnitude.len()];
+            for i in 0..n {
+                let smoothed = self.config.smoothing * self.prev_gain[i]
+                    + (1.0 - self.config.smoothing) * raw_gains[i];
+                self.prev_gain[i] = smoothed;
+                processed_mag[i] = magnitude[i] * smoothed;
+            }
+            // Any extra bins (should not occur normally) — pass through at min_gain
+            for i in n..magnitude.len() {
+                processed_mag[i] = magnitude[i] * self.config.min_gain;
             }
 
             // Reconstruct complex spectrum
@@ -270,7 +431,7 @@ mod tests {
 
     #[test]
     fn test_wiener_filter() {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         // Create noise profile
@@ -298,7 +459,7 @@ mod tests {
 
     #[test]
     fn test_mmse_filter() {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         let noise_samples: Vec<f32> = (0..8192).map(|_| rng.random_range(-0.1..0.1)).collect();
@@ -315,7 +476,7 @@ mod tests {
 
     #[test]
     fn test_reset() {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         let noise_samples: Vec<f32> = (0..8192).map(|_| rng.random_range(-0.1..0.1)).collect();
@@ -335,5 +496,40 @@ mod tests {
         let config = WienerFilterConfig::default();
         assert!(config.min_gain > 0.0 && config.min_gain < 1.0);
         assert!(config.smoothing >= 0.0 && config.smoothing <= 1.0);
+    }
+
+    #[test]
+    fn test_compute_wiener_gains_scalar_vs_simd() {
+        // Verify SIMD path produces numerically equivalent output to scalar path.
+        let n = 64_usize;
+        let signal_mag: Vec<f32> = (0..n).map(|i| (i + 1) as f32 * 0.1).collect();
+        let noise_mag: Vec<f32> = (0..n).map(|i| (i + 1) as f32 * 0.05).collect();
+        let min_gain = 0.01_f32;
+
+        let mut scalar_out = vec![0.0_f32; n];
+        compute_wiener_gains_scalar(&signal_mag, &noise_mag, min_gain, &mut scalar_out);
+
+        let mut simd_out = vec![0.0_f32; n];
+        compute_wiener_gains(&signal_mag, &noise_mag, min_gain, &mut simd_out);
+
+        for (i, (&s, &d)) in scalar_out.iter().zip(simd_out.iter()).enumerate() {
+            assert!((s - d).abs() < 1e-5, "bin {i}: scalar={s} simd={d}");
+        }
+    }
+
+    #[test]
+    fn test_compute_wiener_gains_zero_noise() {
+        // When noise magnitude is ~0, gain should be clamped to min_gain, not NaN/inf.
+        let signal_mag = vec![1.0_f32; 16];
+        let noise_mag = vec![0.0_f32; 16];
+        let min_gain = 0.01_f32;
+
+        let mut out = vec![0.0_f32; 16];
+        compute_wiener_gains_scalar(&signal_mag, &noise_mag, min_gain, &mut out);
+
+        for (i, &g) in out.iter().enumerate() {
+            assert!(g.is_finite(), "gain at bin {i} is not finite: {g}");
+            assert!(g >= min_gain, "gain at bin {i} below min_gain: {g}");
+        }
     }
 }

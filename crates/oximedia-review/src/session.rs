@@ -7,7 +7,9 @@ use crate::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::RwLock;
 
 pub mod close;
@@ -135,10 +137,12 @@ impl ReviewSession {
 }
 
 /// Session manager for handling multiple sessions.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct SessionManager {
     sessions: Arc<RwLock<HashMap<SessionId, ReviewSession>>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SessionManager {
     /// Create a new session manager.
     #[must_use]
@@ -181,6 +185,7 @@ impl SessionManager {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for SessionManager {
     fn default() -> Self {
         Self::new()
@@ -200,7 +205,8 @@ mod tests {
             .title("Test Session")
             .content_id("video-123")
             .workflow_type(WorkflowType::Simple)
-            .build();
+            .build()
+            .expect("valid config");
 
         let session = ReviewSession::create(config)
             .await
@@ -230,7 +236,8 @@ mod tests {
         let config = SessionConfig::builder()
             .title("Test")
             .content_id("test")
-            .build();
+            .build()
+            .expect("valid config");
 
         let session = ReviewSession {
             id: SessionId::new(),

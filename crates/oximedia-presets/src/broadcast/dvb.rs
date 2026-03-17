@@ -41,6 +41,7 @@ pub fn dvb_t_sd() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -71,6 +72,7 @@ pub fn dvb_t_hd() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -101,6 +103,7 @@ pub fn dvb_t2_hd() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -132,6 +135,7 @@ pub fn dvb_t2_uhd() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -162,6 +166,7 @@ pub fn dvb_s2_hd() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -193,6 +198,7 @@ pub fn dvb_s2_uhd() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

@@ -7,7 +7,9 @@
 //! - Unicast and multicast modes
 
 pub mod bmca;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod clock;
+pub mod crc_validation;
 pub mod dataset;
 pub mod message;
 pub mod port;

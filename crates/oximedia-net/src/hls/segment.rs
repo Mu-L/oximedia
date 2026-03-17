@@ -499,8 +499,9 @@ pub struct SegmentFetcher {
     base_url: Option<String>,
     /// Fetch configuration.
     config: FetchConfig,
-    /// HTTP client.
-    client: Client,
+    /// HTTP client (lazily initialised on first fetch to avoid TLS-provider
+    /// panics in environments that have not called `rustls::crypto::ring::default_provider().install_global()`).
+    client: Option<Client>,
     /// Total bytes downloaded.
     bytes_downloaded: u64,
     /// Total fetch time.
@@ -513,17 +514,17 @@ pub struct SegmentFetcher {
 
 impl SegmentFetcher {
     /// Creates a new segment fetcher.
+    ///
+    /// The underlying HTTP client is **not** constructed until the first call
+    /// to `fetch` / `fetch_partial` / `fetch_with_retry`, so creating a
+    /// `SegmentFetcher` is safe in any context (no Tokio runtime or TLS
+    /// provider needed at construction time).
     #[must_use]
     pub fn new() -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .unwrap_or_else(|_| Client::new());
-
         Self {
             base_url: None,
             config: FetchConfig::default(),
-            client,
+            client: None,
             bytes_downloaded: 0,
             total_fetch_time: Duration::ZERO,
             push_hints: Vec::new(),
@@ -537,12 +538,24 @@ impl SegmentFetcher {
         Self {
             base_url: None,
             config: FetchConfig::default(),
-            client,
+            client: Some(client),
             bytes_downloaded: 0,
             total_fetch_time: Duration::ZERO,
             push_hints: Vec::new(),
             partial_fetches: 0,
         }
+    }
+
+    /// Returns a reference to the HTTP client, building it on first call.
+    fn client(&mut self) -> NetResult<&Client> {
+        if self.client.is_none() {
+            let c = Client::builder()
+                .timeout(self.config.timeout)
+                .build()
+                .map_err(|e| NetError::connection(format!("Failed to build HTTP client: {e}")))?;
+            self.client = Some(c);
+        }
+        Ok(self.client.as_ref().expect("client initialised above"))
     }
 
     /// Creates a fetcher with a base URL.
@@ -607,7 +620,10 @@ impl SegmentFetcher {
         let start = Instant::now();
         let is_partial = byte_range.is_some();
 
-        let mut request = self.client.get(&url).timeout(self.config.timeout);
+        // Ensure the HTTP client is initialised (lazy init on first call).
+        self.client()?;
+        let client = self.client.as_ref().expect("client initialised above");
+        let mut request = client.get(&url).timeout(self.config.timeout);
 
         if let Some(range) = byte_range {
             request = request.header("Range", range.to_range_header());
@@ -992,24 +1008,26 @@ mod tests {
     }
 
     // ── SegmentFetcher URL resolution ─────────────────────────────────────────
+    // These tests use #[tokio::test] because SegmentFetcher::new() builds an
+    // HTTP client that requires a Tokio reactor to be active.
 
-    #[test]
-    fn test_resolve_url_absolute() {
+    #[tokio::test]
+    async fn test_resolve_url_absolute() {
         let fetcher = SegmentFetcher::new().with_base_url("https://example.com/stream/");
         let url = fetcher.resolve_url("https://cdn.example.com/seg.ts");
         assert_eq!(url, "https://cdn.example.com/seg.ts");
     }
 
-    #[test]
-    fn test_resolve_url_relative() {
+    #[tokio::test]
+    async fn test_resolve_url_relative() {
         let fetcher =
             SegmentFetcher::new().with_base_url("https://example.com/stream/playlist.m3u8");
         let url = fetcher.resolve_url("segment0.ts");
         assert_eq!(url, "https://example.com/stream/segment0.ts");
     }
 
-    #[test]
-    fn test_resolve_url_absolute_path() {
+    #[tokio::test]
+    async fn test_resolve_url_absolute_path() {
         let fetcher =
             SegmentFetcher::new().with_base_url("https://example.com/stream/playlist.m3u8");
         let url = fetcher.resolve_url("/media/segment0.ts");

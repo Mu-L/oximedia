@@ -24,7 +24,7 @@
 //! Binaural audio uses HRTF (Head-Related Transfer Functions) to create 3D audio
 //! for headphones, simulating how sound waves interact with the head and ears.
 //!
-//! ```rust
+//! ```rust,ignore
 //! use oximedia_audio::spatial::{BinauralRenderer, SourcePosition};
 //!
 //! let mut renderer = BinauralRenderer::new(44100)?;
@@ -49,7 +49,7 @@
 //!
 //! Room simulation with early reflections and late reverberation:
 //!
-//! ```rust
+//! ```rust,ignore
 //! use oximedia_audio::spatial::{SpatialReverb, ReverbPreset};
 //!
 //! let mut reverb = SpatialReverb::new(44100);

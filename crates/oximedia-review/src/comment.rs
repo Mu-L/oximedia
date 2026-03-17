@@ -5,11 +5,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub mod add;
+pub mod pagination;
 pub mod reply;
 pub mod resolve;
 pub mod thread;
 
 pub use add::add_comment;
+pub use pagination::{cursor_page, paginate_comments, CommentPage, CommentSortOrder, PageRequest};
 pub use reply::add_reply;
 pub use resolve::{resolve_comment, unresolve_comment};
 pub use thread::{create_thread, CommentThread};

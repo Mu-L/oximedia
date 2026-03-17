@@ -5,8 +5,14 @@
 //! structure in video encoding. It analyzes scene content, motion patterns,
 //! and complexity to determine optimal GOP lengths, B-frame patterns, and
 //! key frame placement. Supports both fixed and adaptive GOP strategies.
+//!
+//! Content-adaptive GOP selection uses a classifier that maps content features
+//! (motion, complexity, temporal correlation, scene type) to optimal GOP
+//! parameters, including length, B-frame pattern, and reference distance.
 
 use std::collections::VecDeque;
+
+use crate::ContentType;
 
 /// GOP structure pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +107,8 @@ pub struct GopOptimizerConfig {
     pub keyframe_at_scene_change: bool,
     /// Minimum scene duration in frames before a key frame.
     pub min_scene_frames: u32,
+    /// Content type hint for adaptive selection.
+    pub content_type: ContentType,
 }
 
 impl Default for GopOptimizerConfig {
@@ -113,6 +121,7 @@ impl Default for GopOptimizerConfig {
             adaptive_gop: true,
             keyframe_at_scene_change: true,
             min_scene_frames: 8,
+            content_type: ContentType::Generic,
         }
     }
 }
@@ -169,6 +178,201 @@ impl GopPlan {
     }
 }
 
+/// Content-adaptive GOP selection classifier.
+///
+/// Maps content features to optimal GOP parameters based on content type
+/// and measured scene characteristics.
+#[derive(Debug, Clone)]
+pub struct ContentAdaptiveGop {
+    /// Content type hint.
+    content_type: ContentType,
+    /// Minimum GOP length.
+    min_length: u32,
+    /// Maximum GOP length.
+    max_length: u32,
+}
+
+impl ContentAdaptiveGop {
+    /// Creates a new content-adaptive GOP selector.
+    #[must_use]
+    pub fn new(content_type: ContentType, min_length: u32, max_length: u32) -> Self {
+        Self {
+            content_type,
+            min_length,
+            max_length,
+        }
+    }
+
+    /// Selects GOP structure based on content type and scene features.
+    ///
+    /// Uses a decision tree that considers:
+    /// - Content type (animation, film, screen, generic)
+    /// - Average motion magnitude
+    /// - Average complexity
+    /// - Temporal correlation between frames
+    #[must_use]
+    pub fn select_gop(
+        &self,
+        avg_complexity: f64,
+        avg_motion: f64,
+        avg_temporal_corr: f64,
+    ) -> ContentGopDecision {
+        // First, apply content-type-specific base rules
+        let (base_pattern, base_length) = self.content_type_base_rules();
+
+        // Then adapt based on measured features
+        let pattern =
+            self.adapt_pattern(base_pattern, avg_motion, avg_complexity, avg_temporal_corr);
+        let length = self.adapt_length(base_length, avg_motion, avg_complexity, avg_temporal_corr);
+
+        ContentGopDecision {
+            pattern,
+            gop_length: length.clamp(self.min_length, self.max_length),
+            use_hierarchical_refs: self.should_use_hierarchical(avg_temporal_corr, pattern),
+            recommended_ref_frames: self.recommend_ref_frames(pattern, avg_motion),
+        }
+    }
+
+    /// Returns base GOP rules for the content type.
+    fn content_type_base_rules(&self) -> (GopPattern, u32) {
+        match self.content_type {
+            ContentType::Animation => {
+                // Animation: sharp edges, flat areas, high temporal correlation
+                // Use longer GOPs with more B-frames for compression
+                (GopPattern::Ibbbp, 120)
+            }
+            ContentType::Film => {
+                // Film: grain, natural textures, moderate motion
+                // Standard pattern, moderate GOP length
+                (GopPattern::Ibbp, 96)
+            }
+            ContentType::Screen => {
+                // Screen: text, graphics, often static
+                // Fewer B-frames (text can be damaged), longer GOPs for static
+                (GopPattern::Ibp, 200)
+            }
+            ContentType::Generic => {
+                // Generic: balanced defaults
+                (GopPattern::Ibbp, 72)
+            }
+        }
+    }
+
+    /// Adapts the GOP pattern based on measured features.
+    fn adapt_pattern(
+        &self,
+        base: GopPattern,
+        avg_motion: f64,
+        avg_complexity: f64,
+        avg_temporal_corr: f64,
+    ) -> GopPattern {
+        // Very high motion: reduce B-frames to avoid prediction failures
+        if avg_motion > 40.0 {
+            return GopPattern::IpOnly;
+        }
+        if avg_motion > 25.0 {
+            return match base {
+                GopPattern::Ibbbp | GopPattern::Hierarchical => GopPattern::Ibp,
+                GopPattern::Ibbp => GopPattern::Ibp,
+                other => other,
+            };
+        }
+
+        // High temporal correlation + low complexity: more B-frames for compression
+        if avg_temporal_corr > 0.9 && avg_complexity < 0.3 {
+            return match base {
+                GopPattern::IpOnly => GopPattern::Ibp,
+                GopPattern::Ibp => GopPattern::Ibbp,
+                GopPattern::Ibbp => GopPattern::Ibbbp,
+                other => other,
+            };
+        }
+
+        // Low temporal correlation: fewer B-frames
+        if avg_temporal_corr < 0.4 {
+            return match base {
+                GopPattern::Ibbbp | GopPattern::Hierarchical => GopPattern::Ibp,
+                GopPattern::Ibbp => GopPattern::Ibp,
+                other => other,
+            };
+        }
+
+        // High complexity with moderate correlation: standard pattern
+        if avg_complexity > 0.7 && avg_temporal_corr > 0.5 {
+            return GopPattern::Ibbp;
+        }
+
+        base
+    }
+
+    /// Adapts GOP length based on measured features.
+    fn adapt_length(
+        &self,
+        base: u32,
+        avg_motion: f64,
+        avg_complexity: f64,
+        avg_temporal_corr: f64,
+    ) -> u32 {
+        let mut length = base;
+
+        // High motion: shorter GOPs for better random access and adaptation
+        if avg_motion > 20.0 {
+            length = (length as f64 * 0.5) as u32;
+        } else if avg_motion > 10.0 {
+            length = (length as f64 * 0.75) as u32;
+        }
+
+        // Low complexity + high correlation: longer GOPs (more compression)
+        if avg_complexity < 0.3 && avg_temporal_corr > 0.85 {
+            length = (length as f64 * 1.5).min(self.max_length as f64) as u32;
+        }
+
+        // Very high complexity: shorter GOPs for better quality adaptation
+        if avg_complexity > 0.8 {
+            length = (length as f64 * 0.7) as u32;
+        }
+
+        length.max(self.min_length)
+    }
+
+    /// Determines if hierarchical reference structure should be used.
+    fn should_use_hierarchical(&self, avg_temporal_corr: f64, pattern: GopPattern) -> bool {
+        // Hierarchical refs benefit when temporal correlation is high
+        // and there are enough B-frames to build the hierarchy
+        avg_temporal_corr > 0.7 && pattern.b_frame_count() >= 2
+    }
+
+    /// Recommends the number of reference frames.
+    fn recommend_ref_frames(&self, pattern: GopPattern, avg_motion: f64) -> u32 {
+        let base_refs = match pattern {
+            GopPattern::IpOnly => 2,
+            GopPattern::Ibp => 3,
+            GopPattern::Ibbp => 4,
+            GopPattern::Ibbbp | GopPattern::Hierarchical => 5,
+        };
+
+        // High motion benefits from more reference frames
+        if avg_motion > 15.0 {
+            (base_refs + 1).min(8)
+        } else {
+            base_refs
+        }
+    }
+}
+
+/// Result of content-adaptive GOP selection.
+#[derive(Debug, Clone)]
+pub struct ContentGopDecision {
+    /// Selected GOP pattern.
+    pub pattern: GopPattern,
+    /// Recommended GOP length in frames.
+    pub gop_length: u32,
+    /// Whether to use hierarchical reference structure.
+    pub use_hierarchical_refs: bool,
+    /// Recommended number of reference frames.
+    pub recommended_ref_frames: u32,
+}
+
 /// GOP optimizer that analyzes scene data and produces GOP plans.
 #[derive(Debug)]
 pub struct GopOptimizer {
@@ -181,18 +385,31 @@ pub struct GopOptimizer {
     current_frame: u64,
     /// Frames since last key frame.
     frames_since_keyframe: u32,
+    /// Content-adaptive GOP selector (if enabled).
+    adaptive_selector: Option<ContentAdaptiveGop>,
 }
 
 impl GopOptimizer {
     /// Creates a new GOP optimizer.
     #[must_use]
     pub fn new(config: GopOptimizerConfig) -> Self {
+        let adaptive_selector = if config.adaptive_gop {
+            Some(ContentAdaptiveGop::new(
+                config.content_type,
+                config.min_gop_length,
+                config.max_gop_length,
+            ))
+        } else {
+            None
+        };
+
         Self {
             config,
             scene_buffer: VecDeque::new(),
             plans: Vec::new(),
             current_frame: 0,
             frames_since_keyframe: 0,
+            adaptive_selector,
         }
     }
 
@@ -226,6 +443,9 @@ impl GopOptimizer {
     }
 
     /// Selects the best GOP pattern based on scene characteristics.
+    ///
+    /// When content-adaptive mode is enabled, delegates to [`ContentAdaptiveGop`].
+    /// Otherwise falls back to the simple heuristic.
     #[must_use]
     pub fn select_pattern(&self, avg_complexity: f64, avg_motion: f64) -> GopPattern {
         if !self.config.adaptive_gop {
@@ -256,26 +476,40 @@ impl GopOptimizer {
         self.config.default_pattern
     }
 
-    /// Plans a GOP starting at the current position.
+    /// Plans a GOP starting at the current position with content-adaptive selection.
+    ///
+    /// Uses the [`ContentAdaptiveGop`] classifier when available, falling back to
+    /// simple heuristics otherwise.
     pub fn plan_gop(&mut self, scene_infos: &[SceneInfo]) -> GopPlan {
         let start_frame = self.current_frame;
 
-        // Calculate average complexity and motion
+        // Calculate average complexity, motion, and temporal correlation
         #[allow(clippy::cast_precision_loss)]
-        let (avg_complexity, avg_motion) = if scene_infos.is_empty() {
-            (0.5, 5.0)
+        let (avg_complexity, avg_motion, avg_temporal_corr) = if scene_infos.is_empty() {
+            (0.5, 5.0, 0.8)
         } else {
             let c =
                 scene_infos.iter().map(|s| s.complexity).sum::<f64>() / scene_infos.len() as f64;
             let m = scene_infos.iter().map(|s| s.motion_magnitude).sum::<f64>()
                 / scene_infos.len() as f64;
-            (c, m)
+            let t = scene_infos
+                .iter()
+                .map(|s| s.temporal_correlation)
+                .sum::<f64>()
+                / scene_infos.len() as f64;
+            (c, m, t)
         };
 
-        let pattern = self.select_pattern(avg_complexity, avg_motion);
+        // Use content-adaptive selector if available
+        let (pattern, adaptive_length) = if let Some(ref selector) = self.adaptive_selector {
+            let decision = selector.select_gop(avg_complexity, avg_motion, avg_temporal_corr);
+            (decision.pattern, Some(decision.gop_length))
+        } else {
+            (self.select_pattern(avg_complexity, avg_motion), None)
+        };
 
         // Determine GOP length
-        let mut length = self.config.max_gop_length;
+        let mut length = adaptive_length.unwrap_or(self.config.max_gop_length);
         for (i, info) in scene_infos.iter().enumerate() {
             #[allow(clippy::cast_possible_truncation)]
             let frame_offset = i as u32;
@@ -310,6 +544,12 @@ impl GopOptimizer {
     #[must_use]
     pub fn current_frame(&self) -> u64 {
         self.current_frame
+    }
+
+    /// Returns the content-adaptive selector if enabled.
+    #[must_use]
+    pub fn adaptive_selector(&self) -> Option<&ContentAdaptiveGop> {
+        self.adaptive_selector.as_ref()
     }
 
     /// Resets the optimizer state.
@@ -593,5 +833,188 @@ mod tests {
             b_to_p_ratio: 0.85,
         };
         assert!(!analysis.b_frames_effective());
+    }
+
+    // --- New tests for content-adaptive GOP ---
+
+    #[test]
+    fn test_content_adaptive_gop_animation() {
+        let selector = ContentAdaptiveGop::new(ContentType::Animation, 12, 250);
+        let decision = selector.select_gop(0.2, 3.0, 0.95);
+        // Animation + low complexity + high correlation = many B-frames, long GOP
+        assert!(
+            decision.pattern.b_frame_count() >= 2,
+            "Animation should get 2+ B-frames: {:?}",
+            decision.pattern
+        );
+        assert!(
+            decision.gop_length > 50,
+            "Animation with high corr should get long GOP: {}",
+            decision.gop_length
+        );
+    }
+
+    #[test]
+    fn test_content_adaptive_gop_screen() {
+        let selector = ContentAdaptiveGop::new(ContentType::Screen, 12, 250);
+        let decision = selector.select_gop(0.3, 2.0, 0.9);
+        // Screen content: fewer B-frames to preserve text quality
+        assert!(
+            decision.pattern.b_frame_count() <= 2,
+            "Screen content should get few B-frames: {:?}",
+            decision.pattern
+        );
+    }
+
+    #[test]
+    fn test_content_adaptive_gop_high_motion() {
+        let selector = ContentAdaptiveGop::new(ContentType::Generic, 12, 250);
+        let decision = selector.select_gop(0.5, 45.0, 0.4);
+        // Very high motion: IP-only or Ibp
+        assert!(
+            decision.pattern.b_frame_count() <= 1,
+            "High motion should get few B-frames: {:?}",
+            decision.pattern
+        );
+        // Shorter GOP
+        assert!(
+            decision.gop_length < 80,
+            "High motion should get shorter GOP: {}",
+            decision.gop_length
+        );
+    }
+
+    #[test]
+    fn test_content_adaptive_gop_static() {
+        let selector = ContentAdaptiveGop::new(ContentType::Generic, 12, 250);
+        let decision = selector.select_gop(0.1, 1.0, 0.98);
+        // Static: long GOP, many B-frames
+        assert!(
+            decision.gop_length > 60,
+            "Static content should get long GOP: {}",
+            decision.gop_length
+        );
+        assert!(
+            decision.pattern.b_frame_count() >= 2,
+            "Static content should get B-frames: {:?}",
+            decision.pattern
+        );
+    }
+
+    #[test]
+    fn test_content_adaptive_gop_action_film() {
+        let selector = ContentAdaptiveGop::new(ContentType::Film, 12, 250);
+        let decision = selector.select_gop(0.7, 22.0, 0.5);
+        // Action in film: moderate B-frames, shorter GOP
+        assert!(
+            decision.pattern.b_frame_count() <= 2,
+            "Action film should get moderate B-frames: {:?}",
+            decision.pattern
+        );
+    }
+
+    #[test]
+    fn test_content_adaptive_hierarchical_refs() {
+        let selector = ContentAdaptiveGop::new(ContentType::Film, 12, 250);
+        // High correlation + enough B-frames: should use hierarchical
+        let decision = selector.select_gop(0.4, 5.0, 0.85);
+        if decision.pattern.b_frame_count() >= 2 {
+            assert!(
+                decision.use_hierarchical_refs,
+                "Should use hierarchical refs with high corr + B-frames"
+            );
+        }
+    }
+
+    #[test]
+    fn test_content_adaptive_no_hierarchical_low_corr() {
+        let selector = ContentAdaptiveGop::new(ContentType::Generic, 12, 250);
+        let decision = selector.select_gop(0.5, 30.0, 0.3);
+        assert!(
+            !decision.use_hierarchical_refs,
+            "Should not use hierarchical refs with low temporal correlation"
+        );
+    }
+
+    #[test]
+    fn test_content_adaptive_ref_frames() {
+        let selector = ContentAdaptiveGop::new(ContentType::Generic, 12, 250);
+        let decision_low = selector.select_gop(0.5, 5.0, 0.7);
+        let decision_high = selector.select_gop(0.5, 25.0, 0.5);
+        // High motion should recommend more reference frames
+        assert!(
+            decision_high.recommended_ref_frames >= decision_low.recommended_ref_frames,
+            "High motion should get >= ref frames: {} vs {}",
+            decision_high.recommended_ref_frames,
+            decision_low.recommended_ref_frames
+        );
+    }
+
+    #[test]
+    fn test_gop_length_clamped() {
+        let selector = ContentAdaptiveGop::new(ContentType::Animation, 24, 120);
+        let decision = selector.select_gop(0.1, 0.5, 0.99);
+        assert!(
+            decision.gop_length >= 24,
+            "GOP length should be >= min: {}",
+            decision.gop_length
+        );
+        assert!(
+            decision.gop_length <= 120,
+            "GOP length should be <= max: {}",
+            decision.gop_length
+        );
+    }
+
+    #[test]
+    fn test_optimizer_uses_adaptive_selector() {
+        let config = GopOptimizerConfig {
+            adaptive_gop: true,
+            content_type: ContentType::Animation,
+            min_gop_length: 12,
+            max_gop_length: 120,
+            ..Default::default()
+        };
+        let mut optimizer = GopOptimizer::new(config);
+        assert!(optimizer.adaptive_selector().is_some());
+
+        // Plan GOP with static content
+        let scenes: Vec<SceneInfo> = (0..30)
+            .map(|i| {
+                let mut s = SceneInfo::new(i);
+                s.complexity = 0.2;
+                s.motion_magnitude = 2.0;
+                s.temporal_correlation = 0.95;
+                s
+            })
+            .collect();
+        let plan = optimizer.plan_gop(&scenes);
+        // Should use content-adaptive selection
+        assert!(plan.length >= 12);
+        assert!(plan.length <= 120);
+    }
+
+    #[test]
+    fn test_optimizer_no_adaptive_when_disabled() {
+        let config = GopOptimizerConfig {
+            adaptive_gop: false,
+            ..Default::default()
+        };
+        let optimizer = GopOptimizer::new(config);
+        assert!(optimizer.adaptive_selector().is_none());
+    }
+
+    #[test]
+    fn test_content_gop_decision_fields() {
+        let decision = ContentGopDecision {
+            pattern: GopPattern::Ibbp,
+            gop_length: 72,
+            use_hierarchical_refs: true,
+            recommended_ref_frames: 4,
+        };
+        assert_eq!(decision.pattern, GopPattern::Ibbp);
+        assert_eq!(decision.gop_length, 72);
+        assert!(decision.use_hierarchical_refs);
+        assert_eq!(decision.recommended_ref_frames, 4);
     }
 }

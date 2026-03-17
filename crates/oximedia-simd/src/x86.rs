@@ -18,6 +18,7 @@ fn dct_min_len(size: DctSize) -> usize {
         DctSize::Dct8x8 => 64,
         DctSize::Dct16x16 => 256,
         DctSize::Dct32x32 => 1024,
+        DctSize::Dct64x64 => 4096,
     }
 }
 

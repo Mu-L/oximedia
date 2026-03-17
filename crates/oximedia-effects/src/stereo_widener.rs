@@ -21,6 +21,54 @@
 // Types
 // ---------------------------------------------------------------------------
 
+/// Simple stereo widener configuration with a single `width` parameter.
+///
+/// This is a lightweight alternative to [`WidenerConfig`] for callers that
+/// only need to set the width factor.
+///
+/// * `0.0` = mono (full mid, no side)
+/// * `1.0` = original stereo width (identity)
+/// * `2.0` = exaggerated wide stereo
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StereoWidenerConfig {
+    /// Width factor: 0.0 = mono, 1.0 = normal, 2.0 = extra wide.
+    pub width: f32,
+}
+
+impl Default for StereoWidenerConfig {
+    fn default() -> Self {
+        Self { width: 1.0 }
+    }
+}
+
+impl StereoWidenerConfig {
+    /// Create a new config with the given width (clamped to ≥ 0.0).
+    #[must_use]
+    pub fn new(width: f32) -> Self {
+        Self {
+            width: width.max(0.0),
+        }
+    }
+
+    /// Mono preset (width = 0.0).
+    #[must_use]
+    pub fn mono() -> Self {
+        Self { width: 0.0 }
+    }
+
+    /// Normal stereo preset (width = 1.0, identity).
+    #[must_use]
+    pub fn normal() -> Self {
+        Self { width: 1.0 }
+    }
+
+    /// Extra-wide stereo preset (width = 2.0).
+    #[must_use]
+    pub fn wide() -> Self {
+        Self { width: 2.0 }
+    }
+}
+
 /// Algorithm used for stereo width manipulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WidenerMode {
@@ -131,6 +179,21 @@ impl StereoWidener {
             left[i] = l;
             right[i] = r;
         }
+    }
+
+    /// Process owned slices, returning new `(left_out, right_out)` vectors.
+    ///
+    /// Only up to `min(left.len(), right.len())` samples are processed.
+    pub fn process(&mut self, left: &[f32], right: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let n = left.len().min(right.len());
+        let mut l_out = vec![0.0f32; n];
+        let mut r_out = vec![0.0f32; n];
+        for i in 0..n {
+            let (l, r) = self.process_sample(left[i], right[i]);
+            l_out[i] = l;
+            r_out[i] = r;
+        }
+        (l_out, r_out)
     }
 
     /// Reset internal state.
@@ -308,5 +371,64 @@ mod tests {
         let mut w = StereoWidener::new(WidenerMode::MidSide, 1.0);
         let (l, r) = w.process_sample(0.7, 0.7);
         assert!((l - r).abs() < 1e-6);
+    }
+
+    // ---- StereoWidenerConfig tests -----------------------------------------
+
+    #[test]
+    fn test_stereo_widener_config_default() {
+        let c = StereoWidenerConfig::default();
+        assert!((c.width - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stereo_widener_config_mono() {
+        let c = StereoWidenerConfig::mono();
+        assert!((c.width - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stereo_widener_config_wide() {
+        let c = StereoWidenerConfig::wide();
+        assert!((c.width - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stereo_widener_config_new_clamps_negative() {
+        let c = StereoWidenerConfig::new(-0.5);
+        assert!(c.width >= 0.0);
+    }
+
+    #[test]
+    fn test_stereo_widener_config_normal() {
+        let c = StereoWidenerConfig::normal();
+        assert!((c.width - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_stereo_widener_process_slices() {
+        let mut w = StereoWidener::new(WidenerMode::MidSide, 1.0);
+        let left = vec![0.5f32; 16];
+        let right = vec![-0.3f32; 16];
+        let (l_out, r_out) = w.process(&left, &right);
+        assert_eq!(l_out.len(), 16);
+        assert_eq!(r_out.len(), 16);
+        for (&l, &r) in l_out.iter().zip(r_out.iter()) {
+            assert!(l.is_finite());
+            assert!(r.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_stereo_widener_process_preserves_mono_at_zero_width() {
+        let cfg = StereoWidenerConfig::mono();
+        let mut w = StereoWidener::new(WidenerMode::MidSide, cfg.width);
+        let left = vec![0.8f32; 8];
+        let right = vec![-0.4f32; 8];
+        let (l_out, r_out) = w.process(&left, &right);
+        // At width=0 L should equal R (collapsed to mid)
+        for (&l, &r) in l_out.iter().zip(r_out.iter()) {
+            assert!((l - r).abs() < 1e-5);
+        }
     }
 }

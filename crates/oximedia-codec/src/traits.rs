@@ -207,6 +207,17 @@ impl EncoderConfig {
         }
     }
 
+    /// Create VP8 encoder config.
+    #[must_use]
+    pub fn vp8(width: u32, height: u32) -> Self {
+        Self {
+            codec: CodecId::Vp8,
+            width,
+            height,
+            ..Default::default()
+        }
+    }
+
     /// Set CRF quality.
     #[must_use]
     pub fn with_crf(mut self, crf: f32) -> Self {

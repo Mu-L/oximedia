@@ -79,17 +79,22 @@ pub mod crop_region;
 pub mod error;
 pub mod feature_track;
 pub mod gyro;
+pub mod gyro_ekf;
 pub mod horizon;
 pub mod jitter_detect;
 pub mod keyframe_filter;
+pub mod l1_optimal_path;
 pub mod mesh_warp;
 pub mod motion;
 pub mod motion_model;
 pub mod multipass;
+pub mod optical_flow;
 pub mod parallax_compensate;
 pub mod path_planner;
+pub mod per_row_rolling_shutter;
 pub mod rolling;
 pub mod rolling_shutter;
+pub mod saliency_crop;
 pub mod smooth;
 pub mod smoothing;
 pub mod stabilize_config;
@@ -101,6 +106,10 @@ pub mod vibration_isolate;
 pub mod warp;
 pub mod warp_field;
 pub mod zoom;
+
+/// SIMD-accelerated affine warp coordinate transformation.
+#[allow(unsafe_code)]
+pub mod simd_warp;
 
 // Re-export commonly used items
 pub use error::{StabilizeError, StabilizeResult};

@@ -1,9 +1,81 @@
 //! Basic delay effect with feedback and filtering.
+//!
+//! Includes analog-style feedback saturation modeling for warm, characterful
+//! repeats. The saturation stage is applied to the feedback path only, so the
+//! dry signal remains uncolored.
+//!
+//! ## Saturation modes
+//!
+//! | Mode | Character |
+//! |------|-----------|
+//! | `None` | Clean digital delay (no coloring) |
+//! | `Tape` | Soft asymmetric tanh saturation (tape head squash) |
+//! | `Tube` | Asymmetric triode-style warmth (even harmonics) |
+//! | `Diode` | Hard-knee diode clipping (bright edge) |
 
 use crate::{
     utils::{DelayLine, ParameterSmoother},
     AudioEffect,
 };
+
+// ── Saturation helpers ────────────────────────────────────────────────────────
+
+/// Feedback saturation mode for analog delay emulation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackSaturationMode {
+    /// No saturation (clean digital delay).
+    None,
+    /// Tape-style soft saturation using hyperbolic tangent shaping.
+    Tape,
+    /// Tube/triode-style even-harmonic saturation.
+    Tube,
+    /// Diode-clipping hard-knee distortion for aggressive character.
+    Diode,
+}
+
+impl Default for FeedbackSaturationMode {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl FeedbackSaturationMode {
+    /// Apply the saturation nonlinearity to the feedback signal.
+    ///
+    /// `drive` controls the input level to the nonlinearity (1.0 = unity).
+    /// Output is post-normalized to stay roughly within `[-1, 1]`.
+    #[inline]
+    pub fn apply(self, x: f32, drive: f32) -> f32 {
+        match self {
+            Self::None => x,
+            Self::Tape => {
+                // Soft tanh saturation — classic tape head squash.
+                let driven = x * drive;
+                driven.tanh()
+            }
+            Self::Tube => {
+                // Asymmetric triode-style: boost positive half slightly.
+                let driven = x * drive;
+                let pos = (driven + 0.1).tanh();
+                let neg = (driven - 0.1).tanh();
+                // Even-harmonic mix: slightly more positive than negative.
+                0.5 * (pos + neg) + 0.05 * (pos - neg)
+            }
+            Self::Diode => {
+                // Hard-knee diode clipping: linear until knee, then hard clip.
+                let driven = x * drive;
+                let knee = 0.7_f32;
+                if driven.abs() <= knee {
+                    driven
+                } else {
+                    driven.signum() * (knee + (driven.abs() - knee).tanh() * (1.0 - knee))
+                }
+            }
+        }
+    }
+}
+
+// ── DelayConfig ───────────────────────────────────────────────────────────────
 
 /// Configuration for delay effect.
 #[derive(Debug, Clone)]
@@ -18,6 +90,10 @@ pub struct DelayConfig {
     pub dry: f32,
     /// Low-pass filter cutoff for feedback (0.0 = no filtering, 1.0 = maximum filtering).
     pub tone: f32,
+    /// Feedback saturation mode (default: `None` = clean digital).
+    pub saturation: FeedbackSaturationMode,
+    /// Saturation drive level (1.0 = unity, higher = more harmonic content).
+    pub saturation_drive: f32,
 }
 
 impl Default for DelayConfig {
@@ -28,6 +104,8 @@ impl Default for DelayConfig {
             wet: 0.5,
             dry: 0.5,
             tone: 0.0,
+            saturation: FeedbackSaturationMode::None,
+            saturation_drive: 1.0,
         }
     }
 }
@@ -42,6 +120,8 @@ impl DelayConfig {
             wet: wet.clamp(0.0, 1.0),
             dry: (1.0 - wet).clamp(0.0, 1.0),
             tone: 0.0,
+            saturation: FeedbackSaturationMode::None,
+            saturation_drive: 1.0,
         }
     }
 
@@ -63,19 +143,59 @@ impl DelayConfig {
         Self::new(750.0, 0.6, 0.5).with_tone(0.4)
     }
 
+    /// Analog tape delay preset with tape saturation.
+    #[must_use]
+    pub fn tape() -> Self {
+        Self {
+            saturation: FeedbackSaturationMode::Tape,
+            saturation_drive: 1.5,
+            ..Self::new(380.0, 0.5, 0.45).with_tone(0.3)
+        }
+    }
+
+    /// Vintage tube delay with triode character.
+    #[must_use]
+    pub fn tube() -> Self {
+        Self {
+            saturation: FeedbackSaturationMode::Tube,
+            saturation_drive: 1.2,
+            ..Self::new(420.0, 0.4, 0.4).with_tone(0.2)
+        }
+    }
+
     /// Set tone control.
     #[must_use]
     pub fn with_tone(mut self, tone: f32) -> Self {
         self.tone = tone.clamp(0.0, 1.0);
         self
     }
+
+    /// Set saturation mode.
+    #[must_use]
+    pub fn with_saturation(mut self, mode: FeedbackSaturationMode, drive: f32) -> Self {
+        self.saturation = mode;
+        self.saturation_drive = drive.clamp(0.1, 10.0);
+        self
+    }
 }
 
+// ── MonoDelay ─────────────────────────────────────────────────────────────────
+
 /// Simple mono delay effect.
+///
+/// The delay line is a pre-allocated circular buffer sized to accommodate
+/// up to 2 seconds at the given sample rate — no allocations occur during
+/// audio processing.
+///
+/// The feedback path optionally passes through a saturation stage before
+/// being written back into the delay line, modeling the nonlinear character
+/// of analog delay hardware (tape machines, bucket-brigade devices, tube circuits).
 pub struct MonoDelay {
+    /// Pre-allocated circular buffer (ring buffer).
     delay_line: DelayLine,
     delay_samples: usize,
     config: DelayConfig,
+    /// One-pole low-pass state for tone/brightness control in the feedback path.
     tone_filter: f32,
     tone_smoother: ParameterSmoother,
     sample_rate: f32,
@@ -83,6 +203,9 @@ pub struct MonoDelay {
 
 impl MonoDelay {
     /// Create a new mono delay.
+    ///
+    /// Allocates a circular ring buffer large enough for a 2-second delay at
+    /// the given sample rate. No further allocations happen during processing.
     #[must_use]
     pub fn new(config: DelayConfig, sample_rate: f32) -> Self {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -129,22 +252,34 @@ impl MonoDelay {
         self.config.tone = tone.clamp(0.0, 1.0);
         self.tone_smoother.set_target(self.config.tone);
     }
+
+    /// Set the feedback saturation mode.
+    pub fn set_saturation(&mut self, mode: FeedbackSaturationMode, drive: f32) {
+        self.config.saturation = mode;
+        self.config.saturation_drive = drive.clamp(0.1, 10.0);
+    }
 }
 
 impl AudioEffect for MonoDelay {
     fn process_sample(&mut self, input: f32) -> f32 {
-        // Read delayed sample
+        // Read delayed sample.
         let delayed = self.delay_line.read(self.delay_samples);
 
-        // Apply tone filter to feedback (simple one-pole lowpass)
+        // Apply one-pole low-pass tone control to the feedback path.
         let tone = self.tone_smoother.next();
         self.tone_filter = delayed * (1.0 - tone) + self.tone_filter * tone;
 
-        // Write input + filtered feedback to delay line
-        let feedback_signal = self.tone_filter * self.config.feedback;
+        // Apply feedback saturation nonlinearity before writing back.
+        let saturated = self
+            .config
+            .saturation
+            .apply(self.tone_filter, self.config.saturation_drive);
+
+        // Write input + saturated feedback to the delay line.
+        let feedback_signal = saturated * self.config.feedback;
         self.delay_line.write(input + feedback_signal);
 
-        // Mix wet and dry
+        // Mix wet and dry.
         delayed * self.config.wet + input * self.config.dry
     }
 
@@ -157,7 +292,18 @@ impl AudioEffect for MonoDelay {
     fn latency_samples(&self) -> usize {
         0 // Zero latency (delay is part of the effect)
     }
+
+    fn set_wet_dry(&mut self, wet: f32) {
+        self.config.wet = wet.clamp(0.0, 1.0);
+        self.config.dry = 1.0 - self.config.wet;
+    }
+
+    fn wet_dry(&self) -> f32 {
+        self.config.wet
+    }
 }
+
+// ── StereoDelay ───────────────────────────────────────────────────────────────
 
 /// Stereo delay effect.
 pub struct StereoDelay {
@@ -212,7 +358,7 @@ impl StereoDelay {
         let out_l = self.left.process_sample(input_l);
         let out_r = self.right.process_sample(input_r);
 
-        // Apply cross-feedback if enabled
+        // Apply cross-feedback if enabled.
         if self.cross_feedback > 0.0 {
             let cross_l = out_r * self.cross_feedback;
             let cross_r = out_l * self.cross_feedback;
@@ -237,7 +383,18 @@ impl AudioEffect for StereoDelay {
         self.left.reset();
         self.right.reset();
     }
+
+    fn set_wet_dry(&mut self, wet: f32) {
+        self.left.set_wet_dry(wet);
+        self.right.set_wet_dry(wet);
+    }
+
+    fn wet_dry(&self) -> f32 {
+        self.left.wet_dry()
+    }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -260,7 +417,20 @@ mod tests {
     }
 
     #[test]
-    fn test_mono_delay() {
+    fn test_tape_preset() {
+        let tape = DelayConfig::tape();
+        assert_eq!(tape.saturation, FeedbackSaturationMode::Tape);
+        assert!(tape.saturation_drive > 1.0);
+    }
+
+    #[test]
+    fn test_tube_preset() {
+        let tube = DelayConfig::tube();
+        assert_eq!(tube.saturation, FeedbackSaturationMode::Tube);
+    }
+
+    #[test]
+    fn test_mono_delay_clean() {
         let config = DelayConfig::new(100.0, 0.5, 0.5);
         let mut delay = MonoDelay::new(config, 48000.0);
 
@@ -268,13 +438,81 @@ mod tests {
         let out1 = delay.process_sample(1.0);
         assert!((out1 - 0.5).abs() < 0.01); // Should be mostly dry initially
 
-        // Process silence - should get delayed echo
+        // Process silence — should get delayed echo after 100 ms.
         for _ in 0..4799 {
             delay.process_sample(0.0);
         }
 
         let echo = delay.process_sample(0.0);
-        assert!(echo.abs() > 0.1); // Should have echo now
+        assert!(echo.abs() > 0.1, "Should have echo: {echo}");
+    }
+
+    #[test]
+    fn test_mono_delay_tape_saturation() {
+        let config = DelayConfig::tape();
+        let mut delay = MonoDelay::new(config, 48000.0);
+
+        // Process hot signal through tape delay — all outputs must stay finite.
+        for _ in 0..2000 {
+            let out = delay.process_sample(0.9);
+            assert!(out.is_finite(), "tape delay output must be finite");
+        }
+    }
+
+    #[test]
+    fn test_mono_delay_tube_saturation() {
+        let config = DelayConfig::tube();
+        let mut delay = MonoDelay::new(config, 48000.0);
+
+        for _ in 0..2000 {
+            let out = delay.process_sample(0.8);
+            assert!(out.is_finite(), "tube delay output must be finite");
+        }
+    }
+
+    #[test]
+    fn test_mono_delay_diode_saturation() {
+        let config =
+            DelayConfig::new(200.0, 0.5, 0.5).with_saturation(FeedbackSaturationMode::Diode, 2.0);
+        let mut delay = MonoDelay::new(config, 48000.0);
+
+        for _ in 0..2000 {
+            let out = delay.process_sample(0.7);
+            assert!(out.is_finite(), "diode delay output must be finite");
+        }
+    }
+
+    #[test]
+    fn test_saturation_none_is_linear() {
+        let x = 0.5_f32;
+        assert!((FeedbackSaturationMode::None.apply(x, 1.0) - x).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_saturation_tape_bounded() {
+        for &x in &[-2.0_f32, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0] {
+            let out = FeedbackSaturationMode::Tape.apply(x, 1.5);
+            assert!(
+                out.abs() <= 1.0 + 1e-5,
+                "tape output {out} exceeds unity for input {x}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_saturation_tube_finite() {
+        for &x in &[-2.0_f32, -1.0, 0.0, 1.0, 2.0] {
+            let out = FeedbackSaturationMode::Tube.apply(x, 1.2);
+            assert!(out.is_finite(), "tube output must be finite for input {x}");
+        }
+    }
+
+    #[test]
+    fn test_saturation_diode_finite() {
+        for &x in &[-2.0_f32, -1.0, -0.7, 0.0, 0.7, 1.0, 2.0] {
+            let out = FeedbackSaturationMode::Diode.apply(x, 2.0);
+            assert!(out.is_finite(), "diode output must be finite for input {x}");
+        }
     }
 
     #[test]
@@ -301,5 +539,22 @@ mod tests {
         // After reset, delay line should be clear
         let output = delay.process_sample(0.0);
         assert!(output.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_wet_dry_trait() {
+        let config = DelayConfig::new(100.0, 0.5, 0.4);
+        let mut delay = MonoDelay::new(config, 48000.0);
+
+        // Initial wet level from config
+        assert!((delay.wet_dry() - 0.4).abs() < 1e-5);
+
+        // Update via trait method
+        delay.set_wet_dry(0.7);
+        assert!((delay.wet_dry() - 0.7).abs() < 1e-5);
+
+        // Clamping
+        delay.set_wet_dry(1.5);
+        assert!((delay.wet_dry() - 1.0).abs() < 1e-5);
     }
 }

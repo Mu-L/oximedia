@@ -103,7 +103,7 @@ impl std::fmt::Display for PluginCapability {
 ///
 /// For simple cases, use [`StaticPlugin`](crate::StaticPlugin) with
 /// the builder pattern. For shared libraries, implement this trait
-/// on your own type and use the [`declare_plugin!`] macro.
+/// on your own type and use the `declare_plugin!` macro.
 pub trait CodecPlugin: Send + Sync {
     /// Get plugin metadata and identification.
     fn info(&self) -> CodecPluginInfo;

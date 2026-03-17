@@ -6,13 +6,14 @@
 //! - `parse_filters` / `parse_filter_graph` for filtergraph strings
 //! - `parse_and_translate` end-to-end pipeline
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use oximedia_compat_ffmpeg::{
     arg_parser::FfmpegArgs,
     codec_map::CodecMap,
     filter_lex::{parse_filter_graph, parse_filters},
     parse_and_translate,
 };
+use std::hint::black_box;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 

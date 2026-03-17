@@ -5,10 +5,10 @@
 //! standalone functions.
 
 use pyo3::prelude::*;
-use std::collections::HashMap;
 
 use oximedia_core::PixelFormat;
 use oximedia_quality::{Frame, MetricType, QualityAssessor};
+use std::collections::HashMap;
 
 /// Quality score result accessible from Python.
 #[pyclass]

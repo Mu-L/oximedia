@@ -337,6 +337,235 @@ pub struct TakeManagerStats {
     pub cue_count: usize,
 }
 
+// ── Sample-Accurate Crossfade Engine ─────────────────────────────────────────
+
+/// Shape of a crossfade curve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossfadeCurve {
+    /// Linear equal-gain crossfade (simple overlap).
+    Linear,
+    /// Constant-power (equal-loudness) crossfade using cos/sin law.
+    ConstantPower,
+    /// S-curve crossfade using a raised-cosine window (smooth start and end).
+    SCurve,
+    /// Exponential fade-out / exponential fade-in (logarithmic amplitude).
+    Exponential,
+}
+
+impl CrossfadeCurve {
+    /// Compute the gain for the outgoing signal at normalised crossfade
+    /// position `t` (0.0 = start of crossfade, 1.0 = end of crossfade).
+    #[must_use]
+    pub fn gain_out(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => 1.0 - t,
+            Self::ConstantPower => {
+                // Use power-law (squared cosine) so that gain_out + gain_in = 1
+                // at every sample: cos²(θ) + sin²(θ) = 1 for all θ.
+                // This keeps blended amplitude constant for unity input signals.
+                let angle = t * std::f32::consts::FRAC_PI_2;
+                let c = angle.cos();
+                c * c
+            }
+            Self::SCurve => {
+                // Hann window shaped fade: 0.5 * (1 + cos(π * t))
+                0.5 * (1.0 + (std::f32::consts::PI * t).cos())
+            }
+            Self::Exponential => {
+                // Exponential: 10^(-t * 60 / 20) — 60 dB attenuation over the crossfade.
+                10.0_f32.powf(-t * 60.0 / 20.0)
+            }
+        }
+    }
+
+    /// Compute the gain for the incoming signal at normalised position `t`.
+    #[must_use]
+    pub fn gain_in(self, t: f32) -> f32 {
+        // The incoming gain is the mirror of the outgoing gain.
+        self.gain_out(1.0 - t)
+    }
+}
+
+/// Error type for crossfade operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CrossfadeError {
+    /// Crossfade length is zero.
+    ZeroLength,
+    /// The audio buffers have different lengths.
+    LengthMismatch {
+        /// Length of the outgoing buffer.
+        out_len: usize,
+        /// Length of the incoming buffer.
+        in_len: usize,
+    },
+    /// The crossfade length exceeds the available audio.
+    CrossfadeTooLong {
+        /// Requested crossfade length.
+        requested: usize,
+        /// Available samples.
+        available: usize,
+    },
+}
+
+impl std::fmt::Display for CrossfadeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroLength => write!(f, "Crossfade length must be > 0"),
+            Self::LengthMismatch { out_len, in_len } => write!(
+                f,
+                "Buffer length mismatch: outgoing={out_len}, incoming={in_len}"
+            ),
+            Self::CrossfadeTooLong {
+                requested,
+                available,
+            } => write!(
+                f,
+                "Crossfade length {requested} exceeds available samples {available}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CrossfadeError {}
+
+/// Sample-accurate crossfade engine for seamless take splicing.
+///
+/// Given two audio takes (outgoing and incoming), the engine produces a single
+/// blended output that transitions from the outgoing take to the incoming take
+/// over exactly `crossfade_samples` samples.
+///
+/// The crossfade region is centered on the splice point:
+/// - The last `crossfade_samples / 2` samples of the outgoing take overlap with
+///   the first `crossfade_samples / 2` samples of the incoming take.
+///   If `crossfade_samples` is odd, one extra sample is added to the outgoing
+///   tail.
+///
+/// # Scheduling
+///
+/// ```text
+/// Outgoing take: [─────────────────────[XFADE]
+///                                       ↕ blend region
+/// Incoming take:               [XFADE]─────────────────────]
+/// Output:         [out_head][BLENDED][in_tail]
+/// ```
+#[derive(Debug, Clone)]
+pub struct CrossfadeEngine {
+    /// Number of samples for the crossfade region.
+    pub crossfade_samples: usize,
+    /// Crossfade curve shape.
+    pub curve: CrossfadeCurve,
+}
+
+impl CrossfadeEngine {
+    /// Create a new crossfade engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CrossfadeError::ZeroLength`] if `crossfade_samples` is zero.
+    pub fn new(crossfade_samples: usize, curve: CrossfadeCurve) -> Result<Self, CrossfadeError> {
+        if crossfade_samples == 0 {
+            return Err(CrossfadeError::ZeroLength);
+        }
+        Ok(Self {
+            crossfade_samples,
+            curve,
+        })
+    }
+
+    /// Splice `outgoing` and `incoming` takes with a sample-accurate crossfade.
+    ///
+    /// The crossfade region is constructed from the **last** `crossfade_samples`
+    /// samples of `outgoing` blended with the **first** `crossfade_samples`
+    /// samples of `incoming`.
+    ///
+    /// Returns a new buffer:
+    /// `[outgoing[..n_out - xfade]] + [blended xfade region] + [incoming[xfade..]]`
+    ///
+    /// # Errors
+    ///
+    /// - [`CrossfadeError::CrossfadeTooLong`] if either buffer is shorter than
+    ///   `crossfade_samples`.
+    pub fn splice(&self, outgoing: &[f32], incoming: &[f32]) -> Result<Vec<f32>, CrossfadeError> {
+        let xf = self.crossfade_samples;
+
+        if outgoing.len() < xf {
+            return Err(CrossfadeError::CrossfadeTooLong {
+                requested: xf,
+                available: outgoing.len(),
+            });
+        }
+        if incoming.len() < xf {
+            return Err(CrossfadeError::CrossfadeTooLong {
+                requested: xf,
+                available: incoming.len(),
+            });
+        }
+
+        let pre_len = outgoing.len() - xf;
+        let post_len = incoming.len() - xf;
+        let total = pre_len + xf + post_len;
+        let mut output = Vec::with_capacity(total);
+
+        // Pre-crossfade region: pure outgoing.
+        output.extend_from_slice(&outgoing[..pre_len]);
+
+        // Crossfade region: blend outgoing tail with incoming head.
+        for i in 0..xf {
+            let t = i as f32 / xf as f32;
+            let g_out = self.curve.gain_out(t);
+            let g_in = self.curve.gain_in(t);
+            let out_sample = outgoing[pre_len + i] * g_out;
+            let in_sample = incoming[i] * g_in;
+            output.push(out_sample + in_sample);
+        }
+
+        // Post-crossfade region: pure incoming.
+        output.extend_from_slice(&incoming[xf..]);
+
+        Ok(output)
+    }
+
+    /// Compute only the blended crossfade region from the **last** `n` samples
+    /// of `outgoing` and the **first** `n` samples of `incoming`, where
+    /// `n = crossfade_samples`.
+    ///
+    /// Returns a `Vec<f32>` of length `crossfade_samples`.
+    ///
+    /// # Errors
+    ///
+    /// - [`CrossfadeError::CrossfadeTooLong`] if either buffer is shorter than
+    ///   `crossfade_samples`.
+    pub fn blend_region(
+        &self,
+        outgoing: &[f32],
+        incoming: &[f32],
+    ) -> Result<Vec<f32>, CrossfadeError> {
+        let xf = self.crossfade_samples;
+        if outgoing.len() < xf {
+            return Err(CrossfadeError::CrossfadeTooLong {
+                requested: xf,
+                available: outgoing.len(),
+            });
+        }
+        if incoming.len() < xf {
+            return Err(CrossfadeError::CrossfadeTooLong {
+                requested: xf,
+                available: incoming.len(),
+            });
+        }
+        let out_offset = outgoing.len() - xf;
+        let mut blended = Vec::with_capacity(xf);
+        for i in 0..xf {
+            let t = i as f32 / xf as f32;
+            let g_out = self.curve.gain_out(t);
+            let g_in = self.curve.gain_in(t);
+            blended.push(outgoing[out_offset + i] * g_out + incoming[i] * g_in);
+        }
+        Ok(blended)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,5 +748,163 @@ mod tests {
         assert_eq!(stats.rated_count, 2);
         assert!((stats.average_rating - 3.0).abs() < f64::EPSILON);
         assert!((stats.total_duration_secs - 10.0).abs() < f64::EPSILON);
+    }
+
+    // ── CrossfadeEngine tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_crossfade_engine_creation() {
+        let engine = CrossfadeEngine::new(256, CrossfadeCurve::ConstantPower).expect("failed");
+        assert_eq!(engine.crossfade_samples, 256);
+    }
+
+    #[test]
+    fn test_crossfade_engine_zero_length_error() {
+        assert!(CrossfadeEngine::new(0, CrossfadeCurve::Linear).is_err());
+    }
+
+    #[test]
+    fn test_crossfade_engine_output_length() {
+        let engine = CrossfadeEngine::new(100, CrossfadeCurve::Linear).expect("failed");
+        let outgoing = vec![0.8f32; 500];
+        let incoming = vec![0.3f32; 400];
+        let spliced = engine.splice(&outgoing, &incoming).expect("splice");
+        // Expected: (500 - 100) + 100 + (400 - 100) = 800
+        assert_eq!(spliced.len(), 800);
+    }
+
+    #[test]
+    fn test_crossfade_engine_linear_curve_midpoint() {
+        // At the midpoint of a linear crossfade, both signals should be at 50%.
+        let engine = CrossfadeEngine::new(100, CrossfadeCurve::Linear).expect("failed");
+        let outgoing = vec![1.0f32; 200]; // constant 1.0
+        let incoming = vec![0.0f32; 200]; // constant 0.0
+        let spliced = engine.splice(&outgoing, &incoming).expect("splice");
+        // At the midpoint of the crossfade region (sample index 150 in output):
+        let mid = spliced[149]; // 99 samples into the xfade region, index=150-1
+        assert!(
+            (mid - 0.5).abs() < 0.1,
+            "Midpoint should be near 0.5, got {mid}"
+        );
+    }
+
+    #[test]
+    fn test_crossfade_engine_constant_power_energy_preserved() {
+        // At any point in a constant-power crossfade, cos²(t) + sin²(t) = 1.
+        let engine = CrossfadeEngine::new(1000, CrossfadeCurve::ConstantPower).expect("failed");
+        let outgoing = vec![1.0f32; 1500];
+        let incoming = vec![1.0f32; 1500];
+        let spliced = engine.splice(&outgoing, &incoming).expect("splice");
+        // Within the crossfade region, energy should be approximately constant.
+        let xf_start = 500usize; // outgoing.len() - 1000
+        for i in 0..1000 {
+            let s = spliced[xf_start + i];
+            // cos²(t) + sin²(t) = 1 → blended amplitude of 1.0 + 1.0 should be ~1.0
+            assert!(
+                (s - 1.0).abs() < 0.02,
+                "Energy not constant at sample {i}: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_crossfade_engine_too_short_outgoing() {
+        let engine = CrossfadeEngine::new(200, CrossfadeCurve::SCurve).expect("failed");
+        let outgoing = vec![0.5f32; 100]; // too short
+        let incoming = vec![0.5f32; 300];
+        assert!(engine.splice(&outgoing, &incoming).is_err());
+    }
+
+    #[test]
+    fn test_crossfade_engine_too_short_incoming() {
+        let engine = CrossfadeEngine::new(200, CrossfadeCurve::SCurve).expect("failed");
+        let outgoing = vec![0.5f32; 400];
+        let incoming = vec![0.5f32; 100]; // too short
+        assert!(engine.splice(&outgoing, &incoming).is_err());
+    }
+
+    #[test]
+    fn test_crossfade_blend_region_length() {
+        let engine = CrossfadeEngine::new(50, CrossfadeCurve::Exponential).expect("failed");
+        let out = vec![0.5f32; 200];
+        let inc = vec![0.5f32; 200];
+        let blend = engine.blend_region(&out, &inc).expect("blend");
+        assert_eq!(blend.len(), 50);
+    }
+
+    #[test]
+    fn test_crossfade_all_curves_finite() {
+        let curves = [
+            CrossfadeCurve::Linear,
+            CrossfadeCurve::ConstantPower,
+            CrossfadeCurve::SCurve,
+            CrossfadeCurve::Exponential,
+        ];
+        for curve in curves {
+            let engine = CrossfadeEngine::new(256, curve).expect("failed");
+            let out = vec![0.7f32; 512];
+            let inc = vec![0.4f32; 512];
+            let spliced = engine.splice(&out, &inc).expect("splice");
+            for &s in &spliced {
+                assert!(s.is_finite(), "{curve:?} produced non-finite sample: {s}");
+            }
+        }
+    }
+
+    // ── ADR workflow integration test ─────────────────────────────────────────
+
+    #[test]
+    fn test_adr_workflow_create_session_add_cues_record_sync() {
+        // Integration test: complete ADR workflow.
+        let mut mgr = TakeManager::new("scene-42-adr");
+
+        // Step 1: Register takes for several cues.
+        let cues = ["line-1", "line-2", "line-3"];
+        for (cue_idx, &cue) in cues.iter().enumerate() {
+            for take_num in 1u32..=3 {
+                let take_id = format!("{cue}-take{take_num}");
+                let mut take = make_take(&take_id, take_num, cue);
+                take.set_audio(
+                    format!("/sessions/scene-42/{cue}/take{take_num}.wav"),
+                    2.5 + cue_idx as f64 * 0.1,
+                );
+                if take_num == 2 {
+                    take.rate(5); // Best take
+                }
+                mgr.add_take(take);
+            }
+        }
+
+        assert_eq!(mgr.take_count(), 9);
+        assert_eq!(mgr.cue_count(), 3);
+
+        // Step 2: Select the best-rated take for each cue.
+        for cue in &cues {
+            let best = mgr.best_rated_take(cue).expect("should have a rated take");
+            let id = best.id.clone();
+            assert!(mgr.select_take(&id));
+        }
+
+        // Step 3: Verify all cues have a selection.
+        let unselected = mgr.cues_without_selection();
+        assert!(
+            unselected.is_empty(),
+            "All cues should be selected; unselected: {unselected:?}"
+        );
+
+        // Step 4: Simulate sync by building a crossfade engine for take stitching.
+        let engine =
+            CrossfadeEngine::new(512, CrossfadeCurve::ConstantPower).expect("crossfade engine");
+
+        // Simulate two adjacent takes being spliced.
+        let take_a: Vec<f32> = (0..2400).map(|i| (i as f32 * 0.01).sin() * 0.8).collect();
+        let take_b: Vec<f32> = (0..2400).map(|i| (i as f32 * 0.01).cos() * 0.7).collect();
+        let spliced = engine.splice(&take_a, &take_b).expect("splice");
+        assert_eq!(spliced.len(), take_a.len() + take_b.len() - 512);
+
+        // Step 5: Verify stats.
+        let stats = mgr.stats();
+        assert_eq!(stats.selected_count, 3);
+        assert_eq!(stats.total_takes, 9);
     }
 }

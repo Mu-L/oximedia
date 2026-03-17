@@ -173,6 +173,112 @@ pub struct AssetList {
     pub offset: i64,
 }
 
+// ---------------------------------------------------------------------------
+// Batch operation result types
+// ---------------------------------------------------------------------------
+
+/// Per-asset failure record for batch metadata updates.
+#[derive(Debug, Clone)]
+pub struct BatchUpdateFailure {
+    /// ID of the asset that could not be updated.
+    pub asset_id: Uuid,
+    /// Human-readable reason for the failure.
+    pub reason: String,
+}
+
+/// Aggregate result for [`AssetManager::batch_update_metadata`] and related.
+#[derive(Debug, Clone)]
+pub struct BatchUpdateResult {
+    /// Number of assets successfully updated.
+    pub success_count: usize,
+    /// Number of assets that could not be updated.
+    pub failure_count: usize,
+    /// Per-asset failure details.
+    pub failures: Vec<BatchUpdateFailure>,
+}
+
+impl BatchUpdateResult {
+    /// Return `true` if all updates succeeded.
+    #[must_use]
+    pub fn is_all_success(&self) -> bool {
+        self.failure_count == 0
+    }
+
+    /// Return the total number of assets processed.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.success_count + self.failure_count
+    }
+}
+
+/// Per-asset failure record for batch deletes.
+#[derive(Debug, Clone)]
+pub struct BatchDeleteFailure {
+    /// ID of the asset that could not be deleted.
+    pub asset_id: Uuid,
+    /// Human-readable reason for the failure.
+    pub reason: String,
+}
+
+/// Aggregate result for [`AssetManager::batch_delete`].
+#[derive(Debug, Clone)]
+pub struct BatchDeleteResult {
+    /// Number of assets successfully soft-deleted.
+    pub deleted_count: usize,
+    /// Number of assets that could not be deleted.
+    pub failure_count: usize,
+    /// Per-asset failure details.
+    pub failures: Vec<BatchDeleteFailure>,
+}
+
+impl BatchDeleteResult {
+    /// Return `true` if all deletes succeeded.
+    #[must_use]
+    pub fn is_all_success(&self) -> bool {
+        self.failure_count == 0
+    }
+
+    /// Total assets processed.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.deleted_count + self.failure_count
+    }
+}
+
+/// Per-asset failure record for batch status updates.
+#[derive(Debug, Clone)]
+pub struct BatchStatusFailure {
+    /// ID of the asset whose status could not be changed.
+    pub asset_id: Uuid,
+    /// Human-readable reason for the failure.
+    pub reason: String,
+}
+
+/// Aggregate result for [`AssetManager::batch_set_status`].
+#[derive(Debug, Clone)]
+pub struct BatchStatusResult {
+    /// Number of assets whose status was changed.
+    pub updated_count: usize,
+    /// Number of assets where the status change failed.
+    pub failure_count: usize,
+    /// Per-asset failure details.
+    pub failures: Vec<BatchStatusFailure>,
+}
+
+impl BatchStatusResult {
+    /// Return `true` if all status updates succeeded.
+    #[must_use]
+    pub fn is_all_success(&self) -> bool {
+        self.failure_count == 0
+    }
+
+    /// Total assets processed.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.updated_count + self.failure_count
+    }
+}
+
 impl AssetManager {
     /// Create a new asset manager
     #[must_use]
@@ -464,6 +570,239 @@ impl AssetManager {
             limit: pagination.limit,
             offset: pagination.offset,
         })
+    }
+
+    // -------------------------------------------------------------------------
+    // Batch / bulk database operations
+    // -------------------------------------------------------------------------
+
+    /// Apply the same [`UpdateAssetRequest`] to multiple assets in a single
+    /// logical operation.
+    ///
+    /// Each asset update is executed individually so that partial failures can
+    /// be reported without rolling back successful updates.  A summary is
+    /// returned describing the per-asset outcome.
+    ///
+    /// # Errors
+    ///
+    /// Never returns a top-level `Err`; per-asset failures are captured in
+    /// [`BatchUpdateResult::failures`].
+    pub async fn batch_update_metadata(
+        &self,
+        asset_ids: Vec<Uuid>,
+        req: UpdateAssetRequest,
+    ) -> BatchUpdateResult {
+        let mut result = BatchUpdateResult {
+            success_count: 0,
+            failure_count: 0,
+            failures: Vec::new(),
+        };
+
+        for id in asset_ids {
+            match self.update_asset(id, req.clone()).await {
+                Ok(_) => result.success_count += 1,
+                Err(e) => {
+                    result.failure_count += 1;
+                    result.failures.push(BatchUpdateFailure {
+                        asset_id: id,
+                        reason: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Apply individual [`UpdateAssetRequest`] values to specific assets.
+    ///
+    /// Useful when each asset needs a different metadata update.  Each entry
+    /// in `updates` is `(asset_id, request)`.
+    ///
+    /// Returns a [`BatchUpdateResult`] summarising outcomes.
+    ///
+    /// # Errors
+    ///
+    /// Never returns a top-level `Err`; per-asset failures are in the result.
+    pub async fn batch_update_metadata_individual(
+        &self,
+        updates: Vec<(Uuid, UpdateAssetRequest)>,
+    ) -> BatchUpdateResult {
+        let mut result = BatchUpdateResult {
+            success_count: 0,
+            failure_count: 0,
+            failures: Vec::new(),
+        };
+
+        for (id, req) in updates {
+            match self.update_asset(id, req).await {
+                Ok(_) => result.success_count += 1,
+                Err(e) => {
+                    result.failure_count += 1;
+                    result.failures.push(BatchUpdateFailure {
+                        asset_id: id,
+                        reason: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Soft-delete multiple assets in a single batch operation.
+    ///
+    /// Each deletion is applied individually; failures are collected and
+    /// returned rather than causing the whole batch to abort.
+    ///
+    /// # Errors
+    ///
+    /// Never returns a top-level `Err`.
+    pub async fn batch_delete(&self, asset_ids: Vec<Uuid>) -> BatchDeleteResult {
+        let mut result = BatchDeleteResult {
+            deleted_count: 0,
+            failure_count: 0,
+            failures: Vec::new(),
+        };
+
+        for id in asset_ids {
+            match self.delete_asset(id).await {
+                Ok(()) => result.deleted_count += 1,
+                Err(e) => {
+                    result.failure_count += 1;
+                    result.failures.push(BatchDeleteFailure {
+                        asset_id: id,
+                        reason: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Fetch multiple assets by their IDs in a single call.
+    ///
+    /// Returns a tuple `(found, missing)` where `found` is the list of
+    /// successfully retrieved assets and `missing` contains IDs that were
+    /// not found in the database.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error only if the connection itself fails.
+    pub async fn batch_get(&self, asset_ids: Vec<Uuid>) -> Result<(Vec<Asset>, Vec<Uuid>)> {
+        let mut found = Vec::new();
+        let mut missing = Vec::new();
+
+        for id in asset_ids {
+            match sqlx::query_as::<_, Asset>("SELECT * FROM assets WHERE id = $1")
+                .bind(id)
+                .fetch_optional(self.db.pool())
+                .await?
+            {
+                Some(asset) => found.push(asset),
+                None => missing.push(id),
+            }
+        }
+
+        Ok((found, missing))
+    }
+
+    /// Change the status field for multiple assets at once.
+    ///
+    /// This is a lightweight alternative to a full metadata update when only
+    /// the workflow status needs to change (e.g. bulk approval, bulk archive).
+    ///
+    /// Returns the number of assets whose status was successfully changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error only if the connection itself fails.
+    pub async fn batch_set_status(
+        &self,
+        asset_ids: Vec<Uuid>,
+        new_status: &str,
+    ) -> Result<BatchStatusResult> {
+        let mut result = BatchStatusResult {
+            updated_count: 0,
+            failure_count: 0,
+            failures: Vec::new(),
+        };
+
+        for id in asset_ids {
+            let outcome =
+                sqlx::query("UPDATE assets SET status = $1, updated_at = NOW() WHERE id = $2")
+                    .bind(new_status)
+                    .bind(id)
+                    .execute(self.db.pool())
+                    .await;
+
+            match outcome {
+                Ok(r) if r.rows_affected() > 0 => result.updated_count += 1,
+                Ok(_) => {
+                    result.failure_count += 1;
+                    result.failures.push(BatchStatusFailure {
+                        asset_id: id,
+                        reason: "asset not found".to_string(),
+                    });
+                }
+                Err(e) => {
+                    result.failure_count += 1;
+                    result.failures.push(BatchStatusFailure {
+                        asset_id: id,
+                        reason: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Upsert custom metadata fields for multiple assets.
+    ///
+    /// For each `(asset_id, fields)` entry the provided key-value pairs are
+    /// merged into the asset's `custom_metadata` JSON column.  Existing keys
+    /// not present in `fields` are left untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error only if the connection itself fails.
+    pub async fn batch_upsert_custom_fields(
+        &self,
+        updates: Vec<(Uuid, HashMap<String, serde_json::Value>)>,
+    ) -> BatchUpdateResult {
+        let mut result = BatchUpdateResult {
+            success_count: 0,
+            failure_count: 0,
+            failures: Vec::new(),
+        };
+
+        for (id, fields) in updates {
+            let req = UpdateAssetRequest {
+                title: None,
+                description: None,
+                keywords: None,
+                categories: None,
+                copyright: None,
+                license: None,
+                creator: None,
+                custom: Some(fields),
+                status: None,
+            };
+            match self.update_asset(id, req).await {
+                Ok(_) => result.success_count += 1,
+                Err(e) => {
+                    result.failure_count += 1;
+                    result.failures.push(BatchUpdateFailure {
+                        asset_id: id,
+                        reason: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        result
     }
 
     /// Get asset storage path
@@ -1437,5 +1776,161 @@ mod tests {
         let pagination = Pagination::default();
         assert_eq!(pagination.limit, 50);
         assert_eq!(pagination.offset, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // Batch operation result type unit tests (no DB required)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_batch_update_result_is_all_success_when_no_failures() {
+        let r = BatchUpdateResult {
+            success_count: 5,
+            failure_count: 0,
+            failures: vec![],
+        };
+        assert!(r.is_all_success());
+        assert_eq!(r.total(), 5);
+    }
+
+    #[test]
+    fn test_batch_update_result_not_all_success_with_failure() {
+        let r = BatchUpdateResult {
+            success_count: 3,
+            failure_count: 2,
+            failures: vec![
+                BatchUpdateFailure {
+                    asset_id: Uuid::nil(),
+                    reason: "not found".to_string(),
+                },
+                BatchUpdateFailure {
+                    asset_id: Uuid::nil(),
+                    reason: "permission denied".to_string(),
+                },
+            ],
+        };
+        assert!(!r.is_all_success());
+        assert_eq!(r.total(), 5);
+        assert_eq!(r.failures.len(), 2);
+    }
+
+    #[test]
+    fn test_batch_delete_result_is_all_success() {
+        let r = BatchDeleteResult {
+            deleted_count: 10,
+            failure_count: 0,
+            failures: vec![],
+        };
+        assert!(r.is_all_success());
+        assert_eq!(r.total(), 10);
+    }
+
+    #[test]
+    fn test_batch_delete_result_partial_failure() {
+        let r = BatchDeleteResult {
+            deleted_count: 7,
+            failure_count: 3,
+            failures: vec![
+                BatchDeleteFailure {
+                    asset_id: Uuid::nil(),
+                    reason: "locked".to_string(),
+                };
+                3
+            ],
+        };
+        assert!(!r.is_all_success());
+        assert_eq!(r.total(), 10);
+    }
+
+    #[test]
+    fn test_batch_status_result_is_all_success() {
+        let r = BatchStatusResult {
+            updated_count: 4,
+            failure_count: 0,
+            failures: vec![],
+        };
+        assert!(r.is_all_success());
+        assert_eq!(r.total(), 4);
+    }
+
+    #[test]
+    fn test_batch_status_result_partial_failure() {
+        let r = BatchStatusResult {
+            updated_count: 2,
+            failure_count: 1,
+            failures: vec![BatchStatusFailure {
+                asset_id: Uuid::nil(),
+                reason: "asset not found".to_string(),
+            }],
+        };
+        assert!(!r.is_all_success());
+        assert_eq!(r.total(), 3);
+        assert_eq!(r.failures[0].reason, "asset not found");
+    }
+
+    #[test]
+    fn test_batch_update_failure_fields() {
+        let id = Uuid::new_v4();
+        let f = BatchUpdateFailure {
+            asset_id: id,
+            reason: "disk full".to_string(),
+        };
+        assert_eq!(f.asset_id, id);
+        assert_eq!(f.reason, "disk full");
+    }
+
+    #[test]
+    fn test_batch_delete_failure_fields() {
+        let id = Uuid::new_v4();
+        let f = BatchDeleteFailure {
+            asset_id: id,
+            reason: "already deleted".to_string(),
+        };
+        assert_eq!(f.asset_id, id);
+        assert_eq!(f.reason, "already deleted");
+    }
+
+    #[test]
+    fn test_batch_status_failure_fields() {
+        let id = Uuid::new_v4();
+        let f = BatchStatusFailure {
+            asset_id: id,
+            reason: "timeout".to_string(),
+        };
+        assert_eq!(f.asset_id, id);
+        assert_eq!(f.reason, "timeout");
+    }
+
+    #[test]
+    fn test_batch_update_result_zero_total() {
+        let r = BatchUpdateResult {
+            success_count: 0,
+            failure_count: 0,
+            failures: vec![],
+        };
+        assert!(r.is_all_success()); // vacuously true
+        assert_eq!(r.total(), 0);
+    }
+
+    #[test]
+    fn test_batch_delete_result_zero_total() {
+        let r = BatchDeleteResult {
+            deleted_count: 0,
+            failure_count: 0,
+            failures: vec![],
+        };
+        assert!(r.is_all_success());
+        assert_eq!(r.total(), 0);
+    }
+
+    #[test]
+    fn test_batch_status_result_zero_total() {
+        let r = BatchStatusResult {
+            updated_count: 0,
+            failure_count: 0,
+            failures: vec![],
+        };
+        assert!(r.is_all_success());
+        assert_eq!(r.total(), 0);
     }
 }

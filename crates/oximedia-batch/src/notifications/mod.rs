@@ -138,21 +138,30 @@ impl NotificationService {
                 self.send_email(to, from, smtp_server, *smtp_port, event)
                     .await
             }
+            #[cfg(not(target_arch = "wasm32"))]
             NotificationChannel::Webhook { url, headers: _ } => {
                 tracing::info!("Sending webhook notification to {}", url);
                 self.send_webhook(url, event).await
             }
+            #[cfg(not(target_arch = "wasm32"))]
             NotificationChannel::Slack { webhook_url } => {
                 tracing::info!("Sending Slack notification");
                 self.send_slack(webhook_url, event).await
             }
+            #[cfg(not(target_arch = "wasm32"))]
             NotificationChannel::Discord { webhook_url } => {
                 tracing::info!("Sending Discord notification");
                 self.send_discord(webhook_url, event).await
             }
+            #[cfg(not(target_arch = "wasm32"))]
             NotificationChannel::Teams { webhook_url } => {
                 tracing::info!("Sending Teams notification");
                 self.send_teams(webhook_url, event).await
+            }
+            #[cfg(target_arch = "wasm32")]
+            _ => {
+                tracing::warn!("HTTP-based notifications are not supported on wasm32");
+                Ok(())
             }
         }
     }
@@ -247,6 +256,7 @@ impl NotificationService {
         lines.join("\n")
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn send_webhook(&self, url: &str, event: &NotificationEvent) -> Result<()> {
         let client = reqwest::Client::new();
         let payload = serde_json::to_string(event)?;
@@ -269,6 +279,7 @@ impl NotificationService {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn send_slack(&self, webhook_url: &str, event: &NotificationEvent) -> Result<()> {
         let client = reqwest::Client::new();
 
@@ -295,6 +306,7 @@ impl NotificationService {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn send_discord(&self, webhook_url: &str, event: &NotificationEvent) -> Result<()> {
         let client = reqwest::Client::new();
 
@@ -321,6 +333,7 @@ impl NotificationService {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     async fn send_teams(&self, webhook_url: &str, event: &NotificationEvent) -> Result<()> {
         let client = reqwest::Client::new();
 

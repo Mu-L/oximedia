@@ -2,12 +2,15 @@
 //!
 //! Provides NTP v4 client functionality with server pool support.
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod client;
 pub mod filter;
+pub mod nts;
 pub mod packet;
 pub mod pool;
 pub mod stratum;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use client::NtpClient;
 pub use packet::{NtpPacket, NtpTimestamp};
 pub use pool::ServerPool;

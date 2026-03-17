@@ -433,6 +433,332 @@ impl Default for ScreenTypeDetector {
     }
 }
 
+/// Result of automatic background color analysis.
+#[derive(Debug, Clone)]
+pub struct BackgroundColorAnalysis {
+    /// Detected dominant background color.
+    pub primary_color: Rgb,
+    /// Secondary background color (if bimodal distribution detected).
+    pub secondary_color: Option<Rgb>,
+    /// Confidence score for the detected color (0.0-1.0).
+    pub confidence: f32,
+    /// Detected screen type.
+    pub screen_type: ScreenType,
+    /// Fraction of pixels belonging to the detected background.
+    pub coverage: f32,
+}
+
+/// K-means based background color detector.
+///
+/// Uses iterative k-means clustering in HSV space to robustly identify
+/// the dominant background color, handling lighting variations and gradients.
+pub struct KmeansBackgroundDetector {
+    /// Number of clusters for k-means.
+    num_clusters: usize,
+    /// Maximum k-means iterations.
+    max_iterations: usize,
+    /// Convergence threshold for cluster centre movement.
+    convergence_threshold: f32,
+    /// Minimum saturation to include pixel in analysis.
+    min_saturation: f32,
+    /// Minimum value/brightness for pixels.
+    min_value: f32,
+}
+
+impl KmeansBackgroundDetector {
+    /// Create a new K-means background detector.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            num_clusters: 4,
+            max_iterations: 20,
+            convergence_threshold: 0.5,
+            min_saturation: 0.2,
+            min_value: 0.1,
+        }
+    }
+
+    /// Set number of colour clusters.
+    pub fn set_num_clusters(&mut self, k: usize) {
+        self.num_clusters = k.clamp(2, 16);
+    }
+
+    /// Set maximum number of k-means iterations.
+    pub fn set_max_iterations(&mut self, iters: usize) {
+        self.max_iterations = iters.clamp(5, 100);
+    }
+
+    /// Analyse a video frame and return background color analysis.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no suitable background region is found.
+    pub fn analyse(&self, frame: &VideoFrame) -> CvResult<BackgroundColorAnalysis> {
+        // Sample pixels from border regions where background is most likely present.
+        let pixels = self.sample_border_pixels(frame)?;
+        if pixels.len() < self.num_clusters {
+            return Err(CvError::detection_failed(
+                "insufficient pixels for background detection",
+            ));
+        }
+
+        // Filter by saturation/value
+        let filtered: Vec<Hsv> = pixels
+            .iter()
+            .map(|rgb| rgb.to_hsv())
+            .filter(|hsv| hsv.s >= self.min_saturation && hsv.v >= self.min_value)
+            .collect();
+
+        if filtered.is_empty() {
+            return Err(CvError::detection_failed("no saturated pixels found"));
+        }
+
+        // Run k-means clustering in HSV space.
+        let (centres, assignments) = self.kmeans_hsv(&filtered)?;
+
+        // Count cluster sizes
+        let mut cluster_counts = vec![0usize; centres.len()];
+        for &a in &assignments {
+            if a < cluster_counts.len() {
+                cluster_counts[a] += 1;
+            }
+        }
+
+        // Find largest cluster (primary background)
+        let primary_idx = cluster_counts
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, &c)| c)
+            .map(|(i, _)| i)
+            .ok_or_else(|| CvError::detection_failed("k-means produced no clusters"))?;
+
+        let primary_hsv = centres[primary_idx];
+        let primary_rgb = primary_hsv.to_rgb();
+        let total_pixels = filtered.len() as f32;
+        let coverage = cluster_counts[primary_idx] as f32 / total_pixels;
+
+        // Find secondary cluster if coverage < 70%
+        let secondary_color = if coverage < 0.70 && centres.len() >= 2 {
+            let secondary_idx = cluster_counts
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != primary_idx)
+                .max_by_key(|(_, &c)| c)
+                .map(|(i, _)| i);
+
+            secondary_idx.map(|idx| {
+                let sec_hsv = centres[idx];
+                sec_hsv.to_rgb()
+            })
+        } else {
+            None
+        };
+
+        // Confidence based on cluster dominance and saturation
+        let confidence = (coverage * primary_hsv.s).clamp(0.0, 1.0);
+
+        let screen_type_detector = ScreenTypeDetector::new();
+        let screen_type = screen_type_detector.detect(&primary_rgb);
+
+        Ok(BackgroundColorAnalysis {
+            primary_color: primary_rgb,
+            secondary_color,
+            confidence,
+            screen_type,
+            coverage,
+        })
+    }
+
+    /// Sample pixels from the border of the frame.
+    fn sample_border_pixels(&self, frame: &VideoFrame) -> CvResult<Vec<Rgb>> {
+        let w = frame.width as usize;
+        let h = frame.height as usize;
+        let border = (w.min(h) / 10).max(10);
+
+        match frame.format {
+            PixelFormat::Rgb24 => {
+                if frame.planes.is_empty() {
+                    return Err(CvError::invalid_parameter("planes", "empty"));
+                }
+                let data = &frame.planes[0].data;
+                let stride = frame.planes[0].stride;
+                let mut pixels = Vec::new();
+
+                // Top and bottom borders
+                for y in (0..h).filter(|&y| y < border || y >= h - border) {
+                    for x in 0..w {
+                        let idx = y * stride + x * 3;
+                        if idx + 2 < data.len() {
+                            pixels.push(Rgb::new(
+                                data[idx] as f32 / 255.0,
+                                data[idx + 1] as f32 / 255.0,
+                                data[idx + 2] as f32 / 255.0,
+                            ));
+                        }
+                    }
+                }
+                // Left and right borders (middle rows to avoid double-counting corners)
+                for y in border..h - border {
+                    for x in (0..w).filter(|&x| x < border || x >= w - border) {
+                        let idx = y * stride + x * 3;
+                        if idx + 2 < data.len() {
+                            pixels.push(Rgb::new(
+                                data[idx] as f32 / 255.0,
+                                data[idx + 1] as f32 / 255.0,
+                                data[idx + 2] as f32 / 255.0,
+                            ));
+                        }
+                    }
+                }
+
+                Ok(pixels)
+            }
+            PixelFormat::Rgba32 => {
+                if frame.planes.is_empty() {
+                    return Err(CvError::invalid_parameter("planes", "empty"));
+                }
+                let data = &frame.planes[0].data;
+                let stride = frame.planes[0].stride;
+                let mut pixels = Vec::new();
+
+                for y in (0..h).filter(|&y| y < border || y >= h - border) {
+                    for x in 0..w {
+                        let idx = y * stride + x * 4;
+                        if idx + 2 < data.len() {
+                            pixels.push(Rgb::new(
+                                data[idx] as f32 / 255.0,
+                                data[idx + 1] as f32 / 255.0,
+                                data[idx + 2] as f32 / 255.0,
+                            ));
+                        }
+                    }
+                }
+                for y in border..h - border {
+                    for x in (0..w).filter(|&x| x < border || x >= w - border) {
+                        let idx = y * stride + x * 4;
+                        if idx + 2 < data.len() {
+                            pixels.push(Rgb::new(
+                                data[idx] as f32 / 255.0,
+                                data[idx + 1] as f32 / 255.0,
+                                data[idx + 2] as f32 / 255.0,
+                            ));
+                        }
+                    }
+                }
+                Ok(pixels)
+            }
+            _ => Err(CvError::unsupported_format(format!("{}", frame.format))),
+        }
+    }
+
+    /// K-means clustering in HSV space.
+    ///
+    /// Returns (cluster_centres, pixel_assignments).
+    fn kmeans_hsv(&self, pixels: &[Hsv]) -> CvResult<(Vec<Hsv>, Vec<usize>)> {
+        let k = self.num_clusters.min(pixels.len());
+        if k == 0 {
+            return Err(CvError::detection_failed("no pixels to cluster"));
+        }
+
+        // Initialise centres using evenly spaced samples (deterministic).
+        let mut centres: Vec<Hsv> = (0..k).map(|i| pixels[i * pixels.len() / k]).collect();
+
+        let mut assignments = vec![0usize; pixels.len()];
+
+        for _iter in 0..self.max_iterations {
+            // Assign each pixel to nearest centre.
+            let mut changed = false;
+            for (i, pixel) in pixels.iter().enumerate() {
+                let nearest = centres
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        hsv_distance(pixel, a)
+                            .partial_cmp(&hsv_distance(pixel, b))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0);
+                if assignments[i] != nearest {
+                    assignments[i] = nearest;
+                    changed = true;
+                }
+            }
+
+            if !changed {
+                break;
+            }
+
+            // Recompute cluster centres.
+            let old_centres = centres.clone();
+            for c in 0..k {
+                let cluster_pixels: Vec<&Hsv> = pixels
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| assignments[*i] == c)
+                    .map(|(_, p)| p)
+                    .collect();
+
+                if cluster_pixels.is_empty() {
+                    continue;
+                }
+
+                let n = cluster_pixels.len() as f32;
+                // Use circular mean for hue
+                let sin_sum: f32 = cluster_pixels
+                    .iter()
+                    .map(|p| (p.h * std::f32::consts::PI / 180.0).sin())
+                    .sum();
+                let cos_sum: f32 = cluster_pixels
+                    .iter()
+                    .map(|p| (p.h * std::f32::consts::PI / 180.0).cos())
+                    .sum();
+                let mean_h = sin_sum.atan2(cos_sum).to_degrees();
+                let mean_h = if mean_h < 0.0 { mean_h + 360.0 } else { mean_h };
+                let mean_s = cluster_pixels.iter().map(|p| p.s).sum::<f32>() / n;
+                let mean_v = cluster_pixels.iter().map(|p| p.v).sum::<f32>() / n;
+                centres[c] = Hsv::new(mean_h, mean_s, mean_v);
+            }
+
+            // Check convergence
+            let max_move = centres
+                .iter()
+                .zip(old_centres.iter())
+                .map(|(a, b)| hsv_distance(a, b))
+                .fold(0.0_f32, f32::max);
+
+            if max_move < self.convergence_threshold {
+                break;
+            }
+        }
+
+        Ok((centres, assignments))
+    }
+}
+
+impl Default for KmeansBackgroundDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Compute a distance metric between two HSV colours.
+fn hsv_distance(a: &Hsv, b: &Hsv) -> f32 {
+    // Hue distance with circular wrap
+    let dh = {
+        let raw = (a.h - b.h).abs();
+        if raw > 180.0 {
+            360.0 - raw
+        } else {
+            raw
+        }
+    } / 360.0;
+    let ds = a.s - b.s;
+    let dv = a.v - b.v;
+    // Weight hue twice as heavily for coloured screens
+    (2.0 * dh * dh + ds * ds + dv * dv).sqrt()
+}
+
 /// Multi-frame key color detector.
 ///
 /// Analyzes multiple frames to find a consistent key color,

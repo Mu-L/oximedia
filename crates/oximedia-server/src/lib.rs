@@ -129,6 +129,8 @@
 
 /// Structured access log (ring buffer, CLF formatting, summary statistics).
 pub mod access_log;
+/// Admin API: user management, audit log, stats, config, maintenance.
+pub mod admin;
 pub mod api;
 /// API versioning registry (semantic versions, compatibility, deprecation).
 pub mod api_versioning;
@@ -159,6 +161,8 @@ pub mod middleware;
 pub mod models;
 /// Rate limiting for the media server API.
 pub mod rate_limit;
+/// Token-bucket rate limiter with per-client tracking.
+pub mod rate_limiter;
 /// Ring-buffer HTTP request log with slow-request and error queries.
 pub mod request_log;
 /// Lightweight HTTP request router (method matching, pattern matching, route resolution).
@@ -176,27 +180,61 @@ pub mod websocket;
 pub mod ws_handler;
 
 // Streaming server modules
+/// Batch operations (delete, transcode, metadata update) on multiple media items.
+pub mod batch_ops;
 pub mod cdn;
 pub mod dash;
 pub mod dvr;
 pub mod hls;
 pub mod metrics;
+/// Cursor-based pagination for stable, scalable API responses.
+pub mod pagination;
 pub mod record;
+/// Request ID propagation for end-to-end request tracing.
+pub mod request_id;
 pub mod rtmp;
 pub mod streaming_server;
+/// W3C Trace Context distributed tracing (traceparent header).
+pub mod tracing_ctx;
 pub mod transcode;
+/// Webhook delivery system for media and transcode events.
+pub mod webhooks;
+
+/// Background tasks module with persistent task queue for long-running operations.
+pub mod background_tasks;
+/// Header-based API content negotiation (Accept-Version) alongside URL versioning.
+pub mod content_negotiation;
+/// ETags and conditional GET (If-None-Match) for media metadata endpoints.
+pub mod etag_cache;
+/// Internal pub/sub event bus for decoupling handlers from side effects.
+pub mod event_bus;
+/// Lazy deserialization for large JSON request bodies.
+pub mod lazy_deser;
+/// Media processing pipeline (upload → analyze → transcode → notify).
+pub mod media_pipeline;
+/// Media proxy for external storage with caching.
+pub mod media_proxy;
+/// OAuth2/OIDC provider integration skeleton for SSO.
+pub mod oauth2_provider;
+/// Per-user storage and bandwidth quotas with enforcement.
+pub mod quota_management;
+/// Response streaming for large media file downloads.
+pub mod response_streaming;
+/// Server-Sent Events (SSE) endpoint support per RFC 6202.
+pub mod sse;
+/// Filmstrip-style thumbnail sprite generation for video scrubbing.
+pub mod thumbnail_strip;
+/// Circuit breaker integration with the transcoding backend.
+pub mod transcode_circuit_breaker;
 
 pub use streaming_server::{StreamingServer, StreamingServerConfig};
 
 use axum::{
     extract::DefaultBodyLimit,
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Router,
 };
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
+use std::{collections::VecDeque, sync::Arc};
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::{
@@ -254,6 +292,34 @@ impl JobQueue {
     pub fn is_cancelled(&self, job_id: &str) -> bool {
         self.cancelled.contains(job_id)
     }
+
+    /// Returns the number of pending jobs (read-only, safe for concurrent access).
+    #[must_use]
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Returns `true` if the given job ID is in the pending queue (read-only).
+    #[must_use]
+    pub fn is_pending(&self, job_id: &str) -> bool {
+        self.pending.iter().any(|id| id == job_id)
+    }
+
+    /// Returns a snapshot of all pending job IDs (read-only).
+    #[must_use]
+    pub fn pending_ids(&self) -> Vec<String> {
+        self.pending.iter().cloned().collect()
+    }
+
+    /// Dequeues the next pending job ID (FIFO order).
+    pub fn dequeue(&mut self) -> Option<String> {
+        self.pending.pop_front()
+    }
+
+    /// Removes a job ID from the cancelled set (after the worker has acknowledged it).
+    pub fn clear_cancelled(&mut self, job_id: &str) -> bool {
+        self.cancelled.remove(job_id)
+    }
 }
 
 impl Default for JobQueue {
@@ -281,8 +347,8 @@ pub struct AppState {
     pub library: library::MediaLibrary,
     /// Server configuration
     pub config: Config,
-    /// In-memory transcoding job queue
-    pub job_queue: Mutex<JobQueue>,
+    /// In-memory transcoding job queue (RwLock for concurrent read access to job status)
+    pub job_queue: tokio::sync::RwLock<JobQueue>,
 }
 
 impl Server {
@@ -313,7 +379,7 @@ impl Server {
             auth,
             library,
             config,
-            job_queue: Mutex::new(JobQueue::new()),
+            job_queue: tokio::sync::RwLock::new(JobQueue::new()),
         });
 
         Ok(Self { state })
@@ -415,7 +481,24 @@ impl Server {
             // Statistics
             .route("/stats", get(api::stats::get_stats))
             .route("/stats/storage", get(api::stats::get_storage_stats))
-            .route("/stats/bandwidth", get(api::stats::get_bandwidth_stats));
+            .route("/stats/bandwidth", get(api::stats::get_bandwidth_stats))
+            // Batch operations
+            .route("/media/batch/delete", post(batch_ops::batch_delete))
+            .route("/media/batch/transcode", post(batch_ops::batch_transcode))
+            .route(
+                "/media/batch/update-metadata",
+                post(batch_ops::batch_update_metadata),
+            );
+
+        // Admin routes (admin-only)
+        let admin_routes = Router::new()
+            .route("/admin/users", get(admin::list_users))
+            .route("/admin/users/:id/role", put(admin::change_user_role))
+            .route("/admin/users/:id", delete(admin::delete_user))
+            .route("/admin/stats", get(admin::get_admin_stats))
+            .route("/admin/audit", get(admin::get_audit_log))
+            .route("/admin/config", get(admin::get_config))
+            .route("/admin/maintenance/vacuum", post(admin::vacuum_db));
 
         // Streaming routes (no rate limiting for playback)
         let stream_routes = Router::new()
@@ -455,17 +538,52 @@ impl Server {
         // WebSocket route
         let ws_route = Router::new().route("/ws", get(websocket::handler::handle_websocket));
 
-        // Health check
-        let health_route = Router::new()
-            .route("/health", get(handlers::health::health_check))
-            .route("/ready", get(handlers::health::readiness_check));
+        // Webhook routes — use their own Arc<WebhookManager> as state
+        let webhook_manager = Arc::new(webhooks::WebhookManager::new());
+        let webhook_routes: Router = Router::new()
+            .route("/webhooks", get(webhooks::list_webhooks))
+            .route("/webhooks", post(webhooks::create_webhook))
+            .route("/webhooks/:id", get(webhooks::get_webhook))
+            .route("/webhooks/:id", put(webhooks::update_webhook))
+            .route("/webhooks/:id", delete(webhooks::delete_webhook))
+            .route(
+                "/webhooks/:id/deliveries",
+                get(webhooks::get_webhook_deliveries),
+            )
+            .with_state(webhook_manager);
 
-        // Combine all routes
-        Router::new()
+        // Prometheus metrics endpoint — own Arc<ServerMetricsCollector> as state
+        let metrics_collector = Arc::new(metrics::ServerMetricsCollector::new());
+        let metrics_route: Router = Router::new()
+            .route("/metrics", get(metrics::metrics_handler))
+            .with_state(metrics_collector);
+
+        // Apply AppState to all routes that need it, producing Router<()>.
+        let api_v1: Router<()> = Router::new()
             .nest("/api/v1", api_routes)
+            .nest("/api/v1", admin_routes)
             .nest("/api/v1", stream_routes)
             .nest("/api/v1", ws_route)
+            .with_state(self.state.clone());
+
+        // Health check routes (no state needed).
+        let health_route: Router<()> = Router::new()
+            .route("/health", get(handlers::health::health_check))
+            .route("/ready", get(handlers::health::readiness_check))
+            .with_state(self.state.clone());
+
+        // Webhook sub-router (own state, already Router<()>).
+        let webhook_api: Router<()> = Router::new().nest("/api/v1", webhook_routes);
+
+        // Prometheus metrics (own state, already Router<()>).
+        let metrics_api: Router<()> = Router::new().merge(metrics_route);
+
+        // Merge all Router<()> routers together.
+        Router::new()
+            .merge(api_v1)
             .merge(health_route)
+            .merge(webhook_api)
+            .merge(metrics_api)
             .layer(
                 ServiceBuilder::new()
                     // Tracing
@@ -481,7 +599,6 @@ impl Server {
                     // Body size limit (configurable, default 5GB for chunked uploads)
                     .layer(DefaultBodyLimit::max(5 * 1024 * 1024 * 1024)),
             )
-            .with_state(self.state.clone())
     }
 
     /// Starts the server on the specified address.

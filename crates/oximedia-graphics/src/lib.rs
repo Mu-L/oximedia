@@ -81,13 +81,31 @@ pub mod transition_wipe;
 pub mod gradient_fill;
 pub mod shape_render;
 pub mod text_layout;
+pub mod text_layout_ext;
 
 // Wave 15 modules
 pub mod color_blend;
 pub mod mask_layer;
 pub mod path_builder;
 
-#[cfg(feature = "server")]
+// Wave 16 modules
+pub mod color_grade;
+pub mod hdr_composite;
+pub mod lut_apply;
+
+// Wave 17 modules
+pub mod chroma_key;
+pub mod data_visualization;
+pub mod picture_in_picture;
+
+// Wave 18 modules — broadcast overlay components
+pub mod audio_waveform;
+pub mod crawl;
+pub mod logo_bug;
+pub mod stinger_transition;
+pub mod template_variables;
+
+#[cfg(all(feature = "server", not(target_arch = "wasm32")))]
 pub mod control;
 
 #[cfg(feature = "gpu")]

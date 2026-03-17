@@ -14,10 +14,13 @@
 //! ```
 //! use oximedia_cv::enhance::{SuperResolutionEnhancer, UpscaleMode};
 //!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let input = vec![128u8; 64 * 64 * 3];
 //! let enhancer = SuperResolutionEnhancer::new(UpscaleMode::Bicubic2x);
 //! let output = enhancer.upscale(&input, 64, 64)?;
 //! assert_eq!(output.len(), 128 * 128 * 3);
+//! Ok(())
+//! }
 //! ```
 
 #![allow(clippy::too_many_arguments)]
@@ -166,10 +169,13 @@ impl SuperResolutionEnhancer {
     /// ```
     /// use oximedia_cv::enhance::{SuperResolutionEnhancer, UpscaleMode};
     ///
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let input = vec![128u8; 32 * 32 * 3];
     /// let enhancer = SuperResolutionEnhancer::new(UpscaleMode::Bicubic2x);
     /// let output = enhancer.upscale(&input, 32, 32)?;
     /// assert_eq!(output.len(), 64 * 64 * 3);
+    /// Ok(())
+    /// }
     /// ```
     pub fn upscale(&self, image: &[u8], width: u32, height: u32) -> CvResult<Vec<u8>> {
         if width == 0 || height == 0 {
@@ -533,10 +539,13 @@ fn gaussian_blur_rgb(image: &[u8], width: u32, height: u32, sigma: f32) -> Vec<u
 /// ```
 /// use oximedia_cv::enhance::calculate_psnr;
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let original = vec![100u8; 64 * 64 * 3];
 /// let identical = original.clone();
 /// let psnr = calculate_psnr(&original, &identical, 255.0)?;
 /// assert!(psnr.is_infinite());
+/// Ok(())
+/// }
 /// ```
 pub fn calculate_psnr(original: &[u8], upscaled: &[u8], max_value: f64) -> CvResult<f64> {
     if original.len() != upscaled.len() {
@@ -584,9 +593,12 @@ pub fn calculate_psnr(original: &[u8], upscaled: &[u8], max_value: f64) -> CvRes
 /// ```
 /// use oximedia_cv::enhance::calculate_mse;
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let a = vec![0u8; 100];
 /// let b = vec![0u8; 100];
 /// assert_eq!(calculate_mse(&a, &b)?, 0.0);
+/// Ok(())
+/// }
 /// ```
 pub fn calculate_mse(a: &[u8], b: &[u8]) -> CvResult<f64> {
     if a.len() != b.len() {

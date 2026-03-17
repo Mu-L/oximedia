@@ -321,11 +321,8 @@ impl PredictionEngine {
             }
         }
 
-        if count > 0 {
-            (sum / count) as u16
-        } else {
-            src[y * stride + x]
-        }
+        sum.checked_div(count)
+            .map_or(src[y * stride + x], |v| v as u16)
     }
 
     /// Perform inter prediction.

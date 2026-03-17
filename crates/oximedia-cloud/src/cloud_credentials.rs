@@ -184,9 +184,9 @@ impl std::fmt::Display for CredentialStoreError {
 ///
 /// let mut store = CredentialStore::new();
 /// let cred = CloudCredential::new("prod-s3", CredentialType::StaticKey, "AKIA…", "secret");
-/// store.register(cred)?;
+/// store.register(cred).expect("register must succeed");
 ///
-/// let found = store.get("prod-s3")?;
+/// let found = store.get("prod-s3").expect("lookup must succeed");
 /// assert_eq!(found.key_id, "AKIA…");
 /// ```
 #[derive(Debug, Default)]

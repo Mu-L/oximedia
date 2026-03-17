@@ -162,11 +162,7 @@ pub fn feather_matte(input: &Frame, output: &mut Frame, amount: i32) -> VfxResul
                 }
             }
 
-            let avg_alpha = if count > 0 {
-                (alpha_sum / count) as u8
-            } else {
-                0
-            };
+            let avg_alpha = (alpha_sum.checked_div(count).unwrap_or(0)) as u8;
 
             let input_pixel = input.get_pixel(x, y).unwrap_or([0, 0, 0, 0]);
             let output_pixel = [input_pixel[0], input_pixel[1], input_pixel[2], avg_alpha];

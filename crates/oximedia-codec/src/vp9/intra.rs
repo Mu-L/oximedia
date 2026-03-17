@@ -432,11 +432,10 @@ pub fn predict_dc(ctx: &IntraPredContext, output: &mut [u8], stride: usize) {
     }
 
     // Compute average
-    let dc_value = if count > 0 {
-        ((sum + count / 2) / count) as u8
-    } else {
-        128 // Default when no neighbors available
-    };
+    let dc_value = count
+        .checked_div(2)
+        .and_then(|half| (sum + half).checked_div(count))
+        .map_or(128u8, |v| v as u8);
 
     // Fill the block with the DC value
     for row in 0..size {

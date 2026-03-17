@@ -1,6 +1,8 @@
 //! Inter-process communication for time synchronization.
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod shmem;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod socket;
 
 use serde::{Deserialize, Serialize};

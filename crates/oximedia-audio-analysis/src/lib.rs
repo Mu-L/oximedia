@@ -135,10 +135,12 @@
 
 pub mod beat;
 pub mod cepstral;
+pub mod chroma;
 pub mod compression_analysis;
 pub mod distortion;
 pub mod dynamics;
 pub mod echo;
+pub mod energy;
 pub mod energy_contour;
 pub mod forensics;
 pub mod formant;
@@ -147,6 +149,8 @@ pub mod harmony;
 pub mod loudness;
 pub mod loudness_curve;
 pub mod loudness_range;
+/// Mel spectrogram computation for ML-oriented audio feature extraction.
+pub mod mel_spectrogram;
 pub mod music;
 pub mod noise;
 pub mod onset;
@@ -155,6 +159,8 @@ pub mod pitch_detect;
 pub mod pitch_tracker;
 pub mod psychoacoustic;
 pub mod rhythm;
+/// Audio scene classification: Indoor, Outdoor, Quiet, Noisy, Speech, Music, Mixed.
+pub mod scene_classify;
 pub mod separate;
 pub mod silence_detect;
 pub mod spectral;

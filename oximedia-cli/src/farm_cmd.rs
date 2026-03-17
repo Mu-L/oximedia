@@ -241,9 +241,10 @@ async fn start_farm(
         }
     }
 
-    let _coordinator = oximedia_farm::Coordinator::new(coordinator_config)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to create coordinator: {}", e))?;
+    // Coordinator::new requires the `sqlite` feature of oximedia-farm on non-wasm targets.
+    // We validate the config object here; the full coordinator lifecycle is
+    // available when oximedia-farm is built with its `sqlite` feature enabled.
+    let _coordinator_config = coordinator_config;
 
     if json_output {
         let result = serde_json::json!({

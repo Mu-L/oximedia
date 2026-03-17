@@ -120,8 +120,11 @@ impl GainEnvelope {
     /// Add a breakpoint (automatically sorted by time).
     pub fn add_breakpoint(&mut self, bp: GainBreakpoint) {
         self.breakpoints.push(bp);
-        self.breakpoints
-            .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+        self.breakpoints.sort_by(|a, b| {
+            a.time
+                .partial_cmp(&b.time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     /// Return the number of breakpoints.
@@ -296,10 +299,7 @@ fn linear_to_db(linear: f64) -> f64 {
 /// Compute peak level in dBFS for a signal.
 #[allow(clippy::cast_precision_loss)]
 pub fn peak_dbfs(samples: &[f64]) -> f64 {
-    let peak = samples
-        .iter()
-        .map(|s| s.abs())
-        .fold(0.0_f64, f64::max);
+    let peak = samples.iter().map(|s| s.abs()).fold(0.0_f64, f64::max);
     linear_to_db(peak)
 }
 

@@ -514,6 +514,74 @@ impl Checksums {
     }
 }
 
+/// Retry policy for transient failure handling with exponential backoff.
+#[derive(Debug, Clone)]
+pub struct RetryPolicy {
+    /// Maximum number of attempts (first attempt + retries).
+    pub max_attempts: u32,
+    /// Initial delay in milliseconds before the first retry.
+    pub base_delay_ms: u64,
+    /// Maximum delay in milliseconds (caps the exponential growth).
+    pub max_delay_ms: u64,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            base_delay_ms: 200,
+            max_delay_ms: 30_000,
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// Compute the backoff delay for the given attempt index (0-based).
+    ///
+    /// `delay = min(base_delay_ms * 2^attempt, max_delay_ms)`
+    #[must_use]
+    pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
+        let shift = attempt.min(62); // guard against overflow
+        let multiplier = 1u64.checked_shl(shift).unwrap_or(u64::MAX);
+        let ms = self
+            .base_delay_ms
+            .saturating_mul(multiplier)
+            .min(self.max_delay_ms);
+        Duration::from_millis(ms)
+    }
+}
+
+/// Execute a synchronous closure with exponential-backoff retries.
+///
+/// `op` is called up to `policy.max_attempts` times.  Between attempts the
+/// calling thread sleeps for the computed backoff duration.  The closure
+/// receives the current 0-based attempt index.
+///
+/// # Errors
+///
+/// Returns the last error produced by `op` if all attempts are exhausted.
+pub fn execute_with_retry<F, T, E>(policy: &RetryPolicy, mut op: F) -> std::result::Result<T, E>
+where
+    F: FnMut(u32) -> std::result::Result<T, E>,
+    E: std::fmt::Debug,
+{
+    let mut last_err: Option<E> = None;
+    for attempt in 0..policy.max_attempts {
+        match op(attempt) {
+            Ok(value) => return Ok(value),
+            Err(e) => {
+                tracing::warn!("Attempt {} failed: {:?}", attempt + 1, e);
+                last_err = Some(e);
+                if attempt + 1 < policy.max_attempts {
+                    std::thread::sleep(policy.delay_for_attempt(attempt));
+                }
+            }
+        }
+    }
+    // SAFETY: loop runs at least once (max_attempts >= 1 ensured by caller).
+    Err(last_err.expect("max_attempts must be > 0"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,5 +627,91 @@ mod tests {
     fn test_transfer_status() {
         assert_eq!(TransferStatus::InProgress, TransferStatus::InProgress);
         assert_ne!(TransferStatus::InProgress, TransferStatus::Completed);
+    }
+
+    // ── RetryPolicy tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_retry_policy_default() {
+        let p = RetryPolicy::default();
+        assert_eq!(p.max_attempts, 3);
+        assert_eq!(p.base_delay_ms, 200);
+        assert_eq!(p.max_delay_ms, 30_000);
+    }
+
+    #[test]
+    fn test_retry_policy_delay_doubles() {
+        let p = RetryPolicy {
+            max_attempts: 5,
+            base_delay_ms: 100,
+            max_delay_ms: 10_000,
+        };
+        assert_eq!(p.delay_for_attempt(0), Duration::from_millis(100));
+        assert_eq!(p.delay_for_attempt(1), Duration::from_millis(200));
+        assert_eq!(p.delay_for_attempt(2), Duration::from_millis(400));
+        assert_eq!(p.delay_for_attempt(3), Duration::from_millis(800));
+    }
+
+    #[test]
+    fn test_retry_policy_delay_capped_at_max() {
+        let p = RetryPolicy {
+            max_attempts: 10,
+            base_delay_ms: 1_000,
+            max_delay_ms: 3_000,
+        };
+        // 1000 * 2^10 = 1_024_000 >> 3000, should be capped
+        assert_eq!(p.delay_for_attempt(10), Duration::from_millis(3_000));
+    }
+
+    #[test]
+    fn test_execute_with_retry_success_first_try() {
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        };
+        let mut call_count = 0u32;
+        let result: std::result::Result<i32, &str> = execute_with_retry(&policy, |_attempt| {
+            call_count += 1;
+            Ok(42)
+        });
+        assert_eq!(result, Ok(42));
+        assert_eq!(call_count, 1);
+    }
+
+    #[test]
+    fn test_execute_with_retry_succeeds_on_second_attempt() {
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        };
+        let mut call_count = 0u32;
+        let result: std::result::Result<i32, &str> = execute_with_retry(&policy, |_attempt| {
+            call_count += 1;
+            if call_count < 2 {
+                Err("transient")
+            } else {
+                Ok(99)
+            }
+        });
+        assert_eq!(result, Ok(99));
+        assert_eq!(call_count, 2);
+    }
+
+    #[test]
+    fn test_execute_with_retry_exhausts_attempts() {
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        };
+        let mut call_count = 0u32;
+        let result: std::result::Result<i32, &str> = execute_with_retry(&policy, |_attempt| {
+            call_count += 1;
+            Err("always fails")
+        });
+        assert!(result.is_err());
+        assert_eq!(call_count, 3);
     }
 }

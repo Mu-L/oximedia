@@ -2,8 +2,12 @@
 //!
 //! Provides a lightweight validator that checks an IMF package structure and
 //! collects issues with their severity, then reports which ones are blocking.
+//! Also provides [`verify_hashes_parallel`] for concurrent hash verification
+//! of multi-asset packages using Rayon.
 
 #![allow(dead_code)]
+
+use rayon::prelude::*;
 
 /// How serious a validation finding is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -156,6 +160,77 @@ impl PackageValidationReport {
 }
 
 // ---------------------------------------------------------------------------
+// Parallel hash verification
+// ---------------------------------------------------------------------------
+
+/// A descriptor for an asset whose hash is to be verified.
+///
+/// Used by [`verify_hashes_parallel`].
+#[derive(Debug, Clone)]
+pub struct HashableAsset {
+    /// Identifier used in error messages.
+    pub id: String,
+    /// Raw data bytes to hash (in-memory representation).
+    ///
+    /// In a real deployment this would be replaced by a path to the MXF file,
+    /// but this in-memory form keeps the validator free of file-system I/O.
+    pub data: Vec<u8>,
+    /// Expected hex-encoded hash.
+    pub expected_hash: String,
+    /// Hash algorithm to use.
+    pub algorithm: crate::essence_hash::HashAlgo,
+}
+
+impl HashableAsset {
+    /// Create a new [`HashableAsset`].
+    pub fn new(
+        id: impl Into<String>,
+        data: Vec<u8>,
+        expected_hash: impl Into<String>,
+        algorithm: crate::essence_hash::HashAlgo,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            data,
+            expected_hash: expected_hash.into(),
+            algorithm,
+        }
+    }
+}
+
+/// Verify the hashes of a slice of assets in parallel.
+///
+/// Returns one `Result<bool, String>` per asset in the same order as the
+/// input slice.  `Ok(true)` means the hash matches; `Ok(false)` means the
+/// computed hash does not match the expected value; `Err(msg)` signals an
+/// internal computation failure.
+///
+/// Parallelism is provided by Rayon's work-stealing thread pool, so large
+/// multi-asset packages benefit from all available CPU cores.
+///
+/// # Example
+/// ```ignore
+/// use oximedia_imf::package_validator::{HashableAsset, verify_hashes_parallel};
+/// use oximedia_imf::essence_hash::HashAlgo;
+///
+/// let assets = vec![
+///     HashableAsset::new("video-001", b"...".to_vec(), "expected_hex", HashAlgo::Sha256),
+/// ];
+/// let results = verify_hashes_parallel(&assets);
+/// assert_eq!(results.len(), 1);
+/// ```
+pub fn verify_hashes_parallel(assets: &[HashableAsset]) -> Vec<Result<bool, String>> {
+    assets
+        .par_iter()
+        .map(|asset| {
+            let computed = crate::essence_hash::compute_hash_hex(&asset.data, asset.algorithm);
+            let matches = computed.eq_ignore_ascii_case(&asset.expected_hash);
+            Ok(matches)
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -261,5 +336,112 @@ mod tests {
         let r = v.finish();
         assert!(r.is_ok());
         assert_eq!(r.total(), 0);
+    }
+
+    // ── verify_hashes_parallel tests ─────────────────────────────────────
+
+    use crate::essence_hash::{compute_hash_hex, HashAlgo};
+
+    #[test]
+    fn test_verify_hashes_parallel_empty() {
+        let results = verify_hashes_parallel(&[]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_verify_hashes_parallel_single_match() {
+        let data = b"IMF essence data";
+        let expected = compute_hash_hex(data, HashAlgo::Sha256);
+        let assets = vec![HashableAsset::new(
+            "asset-001",
+            data.to_vec(),
+            expected,
+            HashAlgo::Sha256,
+        )];
+        let results = verify_hashes_parallel(&assets);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].as_ref().copied().unwrap_or(false), true);
+    }
+
+    #[test]
+    fn test_verify_hashes_parallel_single_mismatch() {
+        let data = b"real data";
+        let assets = vec![HashableAsset::new(
+            "asset-001",
+            data.to_vec(),
+            "aaaa".repeat(16), // wrong SHA-256 hash (64 chars)
+            HashAlgo::Sha256,
+        )];
+        let results = verify_hashes_parallel(&assets);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].as_ref().copied().unwrap_or(true), false);
+    }
+
+    #[test]
+    fn test_verify_hashes_parallel_multi_asset() {
+        let payloads: Vec<&[u8]> = vec![b"video-mxf-data", b"audio-mxf-data", b"subtitle-xml"];
+        let assets: Vec<HashableAsset> = payloads
+            .iter()
+            .enumerate()
+            .map(|(i, data)| {
+                let expected = compute_hash_hex(data, HashAlgo::Sha256);
+                HashableAsset::new(
+                    format!("asset-{i:03}"),
+                    data.to_vec(),
+                    expected,
+                    HashAlgo::Sha256,
+                )
+            })
+            .collect();
+
+        let results = verify_hashes_parallel(&assets);
+        assert_eq!(results.len(), 3);
+        for r in &results {
+            assert_eq!(r.as_ref().copied().unwrap_or(false), true);
+        }
+    }
+
+    #[test]
+    fn test_verify_hashes_parallel_mixed_results() {
+        let data_good = b"correct";
+        let good_hash = compute_hash_hex(data_good, HashAlgo::Sha256);
+        let assets = vec![
+            HashableAsset::new("good", data_good.to_vec(), good_hash, HashAlgo::Sha256),
+            HashableAsset::new("bad", data_good.to_vec(), "0".repeat(64), HashAlgo::Sha256),
+        ];
+        let results = verify_hashes_parallel(&assets);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].as_ref().copied().unwrap_or(false), true);
+        assert_eq!(results[1].as_ref().copied().unwrap_or(true), false);
+    }
+
+    #[test]
+    fn test_verify_hashes_parallel_sha512() {
+        let data = b"sha512 essence";
+        let expected = compute_hash_hex(data, HashAlgo::Sha512);
+        let assets = vec![HashableAsset::new(
+            "asset-512",
+            data.to_vec(),
+            expected,
+            HashAlgo::Sha512,
+        )];
+        let results = verify_hashes_parallel(&assets);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].as_ref().copied().unwrap_or(false), true);
+    }
+
+    #[test]
+    fn test_verify_hashes_parallel_sha1() {
+        let data = b"legacy sha1";
+        let expected = compute_hash_hex(data, HashAlgo::Sha1);
+        let assets = vec![HashableAsset::new(
+            "asset-sha1",
+            data.to_vec(),
+            expected,
+            HashAlgo::Sha1,
+        )];
+        let results = verify_hashes_parallel(&assets);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].as_ref().copied().unwrap_or(false), true);
     }
 }

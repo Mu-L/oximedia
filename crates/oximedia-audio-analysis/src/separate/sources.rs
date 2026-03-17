@@ -1,25 +1,18 @@
 //! Source separation using harmonic-percussive decomposition.
 
 use crate::{AnalysisConfig, AnalysisError, Result};
-use rustfft::{num_complex::Complex, FftPlanner};
-use std::sync::Arc;
+use oxifft::Complex;
 
 /// Source separator for separating audio sources.
 pub struct SourceSeparator {
     config: AnalysisConfig,
-    fft: Arc<dyn rustfft::Fft<f32>>,
-    ifft: Arc<dyn rustfft::Fft<f32>>,
 }
 
 impl SourceSeparator {
     /// Create a new source separator.
     #[must_use]
     pub fn new(config: AnalysisConfig) -> Self {
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(config.fft_size);
-        let ifft = planner.plan_fft_inverse(config.fft_size);
-
-        Self { config, fft, ifft }
+        Self { config }
     }
 
     /// Separate harmonic and percussive components.
@@ -55,7 +48,7 @@ impl SourceSeparator {
 
     /// Compute spectrogram.
     #[allow(clippy::unnecessary_wraps)]
-    fn compute_spectrogram(&self, samples: &[f32]) -> Result<Vec<Vec<Complex<f32>>>> {
+    fn compute_spectrogram(&self, samples: &[f32]) -> Result<Vec<Vec<Complex<f64>>>> {
         let hop_size = self.config.hop_size;
         let window_size = self.config.fft_size;
 
@@ -70,13 +63,13 @@ impl SourceSeparator {
                 break;
             }
 
-            let mut frame: Vec<Complex<f32>> = samples[start..end]
+            let frame: Vec<Complex<f64>> = samples[start..end]
                 .iter()
-                .map(|&s| Complex::new(s, 0.0))
+                .map(|&s| Complex::new(f64::from(s), 0.0))
                 .collect();
 
-            self.fft.process(&mut frame);
-            spectrogram.push(frame);
+            let fft_result = oxifft::fft(&frame);
+            spectrogram.push(fft_result);
         }
 
         Ok(spectrogram)
@@ -86,8 +79,8 @@ impl SourceSeparator {
     #[allow(clippy::unused_self)]
     fn median_filter_horizontal(
         &self,
-        spectrogram: &[Vec<Complex<f32>>],
-    ) -> Vec<Vec<Complex<f32>>> {
+        spectrogram: &[Vec<Complex<f64>>],
+    ) -> Vec<Vec<Complex<f64>>> {
         let kernel_size = 17;
         let mut filtered = spectrogram.to_vec();
 
@@ -96,7 +89,7 @@ impl SourceSeparator {
                 let start = time_idx.saturating_sub(kernel_size / 2);
                 let end = (time_idx + kernel_size / 2 + 1).min(spectrogram.len());
 
-                let mut values: Vec<f32> = (start..end)
+                let mut values: Vec<f64> = (start..end)
                     .map(|t| spectrogram[t][freq_idx].norm())
                     .collect();
 
@@ -114,7 +107,7 @@ impl SourceSeparator {
 
     /// Apply vertical median filtering (enhances percussive content).
     #[allow(clippy::unused_self)]
-    fn median_filter_vertical(&self, spectrogram: &[Vec<Complex<f32>>]) -> Vec<Vec<Complex<f32>>> {
+    fn median_filter_vertical(&self, spectrogram: &[Vec<Complex<f64>>]) -> Vec<Vec<Complex<f64>>> {
         let kernel_size = 17;
         let mut filtered = spectrogram.to_vec();
 
@@ -123,7 +116,7 @@ impl SourceSeparator {
                 let start = freq_idx.saturating_sub(kernel_size / 2);
                 let end = (freq_idx + kernel_size / 2 + 1).min(frame.len());
 
-                let mut values: Vec<f32> = (start..end)
+                let mut values: Vec<f64> = (start..end)
                     .map(|f| spectrogram[time_idx][f].norm())
                     .collect();
 
@@ -141,23 +134,22 @@ impl SourceSeparator {
 
     /// Synthesize audio from spectrogram using overlap-add.
     #[allow(clippy::unnecessary_wraps)]
-    fn synthesize(&self, spectrogram: &[Vec<Complex<f32>>]) -> Result<Vec<f32>> {
+    fn synthesize(&self, spectrogram: &[Vec<Complex<f64>>]) -> Result<Vec<f32>> {
         let hop_size = self.config.hop_size;
         let window_size = self.config.fft_size;
         let output_len = (spectrogram.len() - 1) * hop_size + window_size;
 
-        let mut output = vec![0.0; output_len];
-        let mut window_sum = vec![0.0; output_len];
+        let mut output = vec![0.0f64; output_len];
+        let mut window_sum = vec![0.0f64; output_len];
 
         for (frame_idx, frame) in spectrogram.iter().enumerate() {
-            let mut ifft_frame = frame.clone();
-            self.ifft.process(&mut ifft_frame);
+            let ifft_frame = oxifft::ifft(frame);
 
             let start = frame_idx * hop_size;
 
-            for (i, &value) in ifft_frame.iter().enumerate().take(window_size) {
+            for (i, value) in ifft_frame.iter().enumerate().take(window_size) {
                 if start + i < output.len() {
-                    output[start + i] += value.re / window_size as f32;
+                    output[start + i] += value.re / window_size as f64;
                     window_sum[start + i] += 1.0;
                 }
             }
@@ -170,7 +162,7 @@ impl SourceSeparator {
             }
         }
 
-        Ok(output)
+        Ok(output.iter().map(|&v| v as f32).collect())
     }
 }
 
@@ -198,13 +190,13 @@ mod tests {
         let sample_rate = 44100.0;
         let mut samples = vec![0.0; 8192];
 
-        for i in 0..samples.len() {
+        for (i, sample) in samples.iter_mut().enumerate() {
             // Harmonic component
-            samples[i] += (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate).sin() * 0.3;
+            *sample += (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate).sin() * 0.3;
 
             // Percussive component
             if i % 1000 == 0 {
-                samples[i] += 0.8;
+                *sample += 0.8;
             }
         }
 

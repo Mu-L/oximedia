@@ -57,12 +57,14 @@ pub fn wasm_denoise_frame(
         temporal_window: 5,
         preserve_edges: true,
         preserve_grain: mode_enum == DenoiseMode::GrainAware,
+        ..Default::default()
     };
     config
         .validate()
         .map_err(|e| crate::utils::js_err(&format!("Invalid config: {e}")))?;
 
-    let mut denoiser = Denoiser::new(config);
+    let mut denoiser = Denoiser::new(config)
+        .map_err(|e| crate::utils::js_err(&format!("Denoiser init failed: {e}")))?;
 
     // Build VideoFrame in YUV420P
     let mut frame = VideoFrame::new(PixelFormat::Yuv420p, width, height);
@@ -467,6 +469,7 @@ mod tests {
             temporal_window: 5,
             preserve_edges: true,
             preserve_grain: false,
+            ..Default::default()
         };
         assert!(config.validate().is_ok());
 
@@ -474,7 +477,7 @@ mod tests {
         frame.allocate();
         fill_grayscale_yuv(&gray, 64, 64, &mut frame);
 
-        let mut denoiser = Denoiser::new(config);
+        let mut denoiser = Denoiser::new(config).expect("valid config");
         let result = denoiser.process(&frame);
         assert!(result.is_ok());
         let denoised = result.expect("denoise should succeed");
@@ -491,13 +494,14 @@ mod tests {
             temporal_window: 5,
             preserve_edges: true,
             preserve_grain: false,
+            ..Default::default()
         };
 
         let mut frame = VideoFrame::new(PixelFormat::Yuv420p, 32, 32);
         frame.allocate();
         rgb24_to_yuv420p(&data, 32, 32, &mut frame);
 
-        let mut denoiser = Denoiser::new(config);
+        let mut denoiser = Denoiser::new(config).expect("valid config");
         let result = denoiser.process(&frame);
         assert!(result.is_ok());
         let denoised = result.expect("denoise should succeed");
@@ -553,6 +557,7 @@ mod tests {
                 temporal_window: 5,
                 preserve_edges: true,
                 preserve_grain: *mode == DenoiseMode::GrainAware,
+                ..Default::default()
             };
             assert!(config.validate().is_ok(), "Failed for mode: {mode:?}");
         }

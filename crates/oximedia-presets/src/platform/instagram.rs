@@ -42,6 +42,7 @@ pub fn instagram_feed_square() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -72,6 +73,7 @@ pub fn instagram_feed_portrait() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -102,6 +104,7 @@ pub fn instagram_feed_landscape() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -132,6 +135,7 @@ pub fn instagram_story() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -162,6 +166,7 @@ pub fn instagram_reel() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -192,6 +197,7 @@ pub fn instagram_igtv_vertical() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -222,6 +228,7 @@ pub fn instagram_igtv_horizontal() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

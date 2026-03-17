@@ -12,16 +12,19 @@
 //!
 //! # Examples
 //!
-//! ```
+//! ```no_run
 //! use oximedia_cv::quality::temporal::calculate_temporal_info;
 //! use oximedia_codec::VideoFrame;
 //! use oximedia_core::PixelFormat;
 //!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut frame = VideoFrame::new(PixelFormat::Yuv420p, 1920, 1080);
 //! frame.allocate();
 //!
 //! let info = calculate_temporal_info(&frame)?;
 //! println!("TI: {:.2}", info.ti);
+//! Ok(())
+//! }
 //! ```
 
 use crate::error::{CvError, CvResult};
@@ -90,16 +93,19 @@ impl Default for TemporalInfo {
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use oximedia_cv::quality::temporal::calculate_temporal_info;
 /// use oximedia_codec::VideoFrame;
 /// use oximedia_core::PixelFormat;
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut frame = VideoFrame::new(PixelFormat::Yuv420p, 1280, 720);
 /// frame.allocate();
 ///
 /// let info = calculate_temporal_info(&frame)?;
 /// assert!(info.ti >= 0.0);
+/// Ok(())
+/// }
 /// ```
 pub fn calculate_temporal_info(frame: &VideoFrame) -> CvResult<TemporalInfo> {
     if frame.planes.is_empty() {
@@ -173,11 +179,12 @@ pub fn calculate_temporal_info(frame: &VideoFrame) -> CvResult<TemporalInfo> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use oximedia_cv::quality::temporal::calculate_temporal_metrics;
 /// use oximedia_codec::VideoFrame;
 /// use oximedia_core::PixelFormat;
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut frame1 = VideoFrame::new(PixelFormat::Yuv420p, 1920, 1080);
 /// frame1.allocate();
 /// let mut frame2 = VideoFrame::new(PixelFormat::Yuv420p, 1920, 1080);
@@ -185,6 +192,8 @@ pub fn calculate_temporal_info(frame: &VideoFrame) -> CvResult<TemporalInfo> {
 ///
 /// let metrics = calculate_temporal_metrics(&frame1, &frame2)?;
 /// assert!(metrics.coherence >= 0.0 && metrics.coherence <= 1.0);
+/// Ok(())
+/// }
 /// ```
 pub fn calculate_temporal_metrics(
     frame1: &VideoFrame,
@@ -421,11 +430,12 @@ fn calculate_gradient_magnitude(data: &[u8], x: usize, y: usize, stride: usize) 
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use oximedia_cv::quality::temporal::calculate_temporal_stability;
 /// use oximedia_codec::VideoFrame;
 /// use oximedia_core::PixelFormat;
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut frames = vec![];
 /// for _ in 0..10 {
 ///     let mut frame = VideoFrame::new(PixelFormat::Yuv420p, 1280, 720);
@@ -435,6 +445,8 @@ fn calculate_gradient_magnitude(data: &[u8], x: usize, y: usize, stride: usize) 
 ///
 /// let stability = calculate_temporal_stability(&frames)?;
 /// assert!(stability >= 0.0 && stability <= 1.0);
+/// Ok(())
+/// }
 /// ```
 pub fn calculate_temporal_stability(frames: &[VideoFrame]) -> CvResult<f64> {
     if frames.len() < 2 {
@@ -477,11 +489,12 @@ pub fn calculate_temporal_stability(frames: &[VideoFrame]) -> CvResult<f64> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use oximedia_cv::quality::temporal::detect_scene_changes;
 /// use oximedia_codec::VideoFrame;
 /// use oximedia_core::PixelFormat;
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut frames = vec![];
 /// for _ in 0..20 {
 ///     let mut frame = VideoFrame::new(PixelFormat::Yuv420p, 1280, 720);
@@ -491,6 +504,8 @@ pub fn calculate_temporal_stability(frames: &[VideoFrame]) -> CvResult<f64> {
 ///
 /// let scene_changes = detect_scene_changes(&frames, 0.3)?;
 /// // scene_changes contains indices where scenes change
+/// Ok(())
+/// }
 /// ```
 pub fn detect_scene_changes(frames: &[VideoFrame], threshold: f64) -> CvResult<Vec<usize>> {
     if frames.len() < 2 {

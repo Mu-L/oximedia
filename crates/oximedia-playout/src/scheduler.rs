@@ -3,8 +3,8 @@
 //! Handles time-based scheduling, frame-accurate triggering, cue points,
 //! SCTE-35 marker insertion, and secondary events.
 
-use crate::playlist::{Playlist, PlaylistFormat, PlaylistManager};
-use crate::{PlayoutError, Result};
+use crate::playlist::{Playlist, PlaylistFormat, PlaylistItem, PlaylistManager};
+use crate::{PlayoutConfig, PlayoutError, Result};
 use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc, Weekday};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -888,12 +888,10 @@ impl Scheduler {
             return Ok(());
         }
 
-        let fill_path = self
-            .config
-            .default_fill
-            .as_ref()
-            .expect("invariant: default_fill is Some (checked above)")
-            .clone();
+        let fill_path = match self.config.default_fill.as_ref() {
+            Some(p) => p.clone(),
+            None => return Ok(()),
+        };
 
         // Collect events first with cloning to avoid borrow conflicts
         let sorted_events = {
@@ -951,6 +949,121 @@ impl Scheduler {
         Ok(())
     }
 }
+
+// ─── Multi-channel support ────────────────────────────────────────────────────
+
+/// Opaque identifier for a single broadcast channel managed by
+/// `MultiChannelScheduler`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ChannelId(pub u32);
+
+impl std::fmt::Display for ChannelId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CH{}", self.0)
+    }
+}
+
+/// Manages an independent `Scheduler` per broadcast channel.
+///
+/// Each channel has its own `SchedulerConfig` and isolated event timeline,
+/// enabling multi-channel playout from a single process.
+pub struct MultiChannelScheduler {
+    channels: HashMap<ChannelId, (PlayoutConfig, Arc<Scheduler>)>,
+}
+
+impl MultiChannelScheduler {
+    /// Create an empty multi-channel scheduler.
+    pub fn new() -> Self {
+        Self {
+            channels: HashMap::new(),
+        }
+    }
+
+    /// Add a new channel with the given playout configuration.
+    ///
+    /// Returns `Err` if the channel already exists.
+    pub fn add_channel(&mut self, id: ChannelId, config: PlayoutConfig) -> Result<()> {
+        if self.channels.contains_key(&id) {
+            return Err(PlayoutError::Scheduler(format!(
+                "Channel {id} already exists"
+            )));
+        }
+        let scheduler_config = SchedulerConfig::default();
+        let scheduler = Arc::new(Scheduler::new(scheduler_config));
+        self.channels.insert(id, (config, scheduler));
+        Ok(())
+    }
+
+    /// Remove a channel and discard its schedule.
+    ///
+    /// Returns `Err` if the channel does not exist.
+    pub fn remove_channel(&mut self, id: ChannelId) -> Result<()> {
+        self.channels
+            .remove(&id)
+            .ok_or_else(|| PlayoutError::Scheduler(format!("Channel {id} not found")))?;
+        Ok(())
+    }
+
+    /// Schedule a playlist item on the specified channel.
+    pub fn schedule(&mut self, id: ChannelId, item: PlaylistItem) -> Result<()> {
+        let (_, scheduler) = self
+            .channels
+            .get(&id)
+            .ok_or_else(|| PlayoutError::Scheduler(format!("Channel {id} not found")))?;
+
+        let event = ScheduledEvent::new_content(
+            Utc::now(),
+            item.path.clone(),
+            item.effective_duration(),
+            item.transition_in.clone(),
+            item.transition_out.clone(),
+        );
+        scheduler.add_event(event);
+        Ok(())
+    }
+
+    /// Return the next scheduled item for the given channel, if any.
+    pub fn get_current(&self, id: ChannelId) -> Option<ScheduledEvent> {
+        self.channels
+            .get(&id)
+            .and_then(|(_, sched)| sched.get_next_event())
+    }
+
+    /// Return all currently registered channel IDs.
+    pub fn channel_ids(&self) -> Vec<ChannelId> {
+        let mut ids: Vec<ChannelId> = self.channels.keys().copied().collect();
+        ids.sort_by_key(|c| c.0);
+        ids
+    }
+
+    /// Return the total number of scheduled events across all channels.
+    pub fn total_event_count(&self) -> usize {
+        self.channels.values().map(|(_, s)| s.event_count()).sum()
+    }
+
+    /// Clear the schedule for a single channel.
+    pub fn clear_channel(&self, id: ChannelId) -> Result<()> {
+        let (_, scheduler) = self
+            .channels
+            .get(&id)
+            .ok_or_else(|| PlayoutError::Scheduler(format!("Channel {id} not found")))?;
+        scheduler.clear_schedule();
+        Ok(())
+    }
+
+    /// Return a reference to the underlying `Scheduler` for a channel.
+    pub fn scheduler(&self, id: ChannelId) -> Option<Arc<Scheduler>> {
+        self.channels.get(&id).map(|(_, s)| Arc::clone(s))
+    }
+}
+
+impl Default for MultiChannelScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -1074,5 +1187,125 @@ mod tests {
 
         assert_eq!(cue.frame_offset, 1000);
         assert_eq!(cue.cue_type, CueType::AdBreak);
+    }
+
+    // ── MultiChannelScheduler tests ──────────────────────────────────────
+
+    fn make_playlist_item(path: &str) -> PlaylistItem {
+        PlaylistItem::new(path.to_string(), PathBuf::from(path))
+    }
+
+    #[test]
+    fn test_multi_channel_add_remove() {
+        let mut mcs = MultiChannelScheduler::new();
+        let id = ChannelId(1);
+        mcs.add_channel(id, crate::PlayoutConfig::default())
+            .expect("channel operation should succeed");
+        assert_eq!(mcs.channel_ids(), vec![id]);
+        mcs.remove_channel(id)
+            .expect("channel operation should succeed");
+        assert!(mcs.channel_ids().is_empty());
+    }
+
+    #[test]
+    fn test_multi_channel_duplicate_add_fails() {
+        let mut mcs = MultiChannelScheduler::new();
+        let id = ChannelId(2);
+        mcs.add_channel(id, crate::PlayoutConfig::default())
+            .expect("channel operation should succeed");
+        let res = mcs.add_channel(id, crate::PlayoutConfig::default());
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_multi_channel_remove_nonexistent_fails() {
+        let mut mcs = MultiChannelScheduler::new();
+        let res = mcs.remove_channel(ChannelId(99));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_multi_channel_schedule_item() {
+        let mut mcs = MultiChannelScheduler::new();
+        let id = ChannelId(3);
+        mcs.add_channel(id, crate::PlayoutConfig::default())
+            .expect("channel operation should succeed");
+        mcs.schedule(id, make_playlist_item("/clip.av1"))
+            .expect("channel operation should succeed");
+        assert_eq!(mcs.total_event_count(), 1);
+    }
+
+    #[test]
+    fn test_multi_channel_schedule_unknown_channel_fails() {
+        let mut mcs = MultiChannelScheduler::new();
+        let res = mcs.schedule(ChannelId(42), make_playlist_item("/clip.av1"));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_multi_channel_channel_ids_sorted() {
+        let mut mcs = MultiChannelScheduler::new();
+        for n in [5u32, 1, 3] {
+            mcs.add_channel(ChannelId(n), crate::PlayoutConfig::default())
+                .expect("channel operation should succeed");
+        }
+        let ids = mcs.channel_ids();
+        assert_eq!(ids, vec![ChannelId(1), ChannelId(3), ChannelId(5)]);
+    }
+
+    #[test]
+    fn test_multi_channel_get_current_none_when_empty() {
+        let mut mcs = MultiChannelScheduler::new();
+        let id = ChannelId(7);
+        mcs.add_channel(id, crate::PlayoutConfig::default())
+            .expect("channel operation should succeed");
+        // No events scheduled yet; get_next_event may return None
+        // (depends on current time being in the future relative to any event)
+        // We just verify it doesn't panic.
+        let _ = mcs.get_current(id);
+    }
+
+    #[test]
+    fn test_multi_channel_total_event_count_multi() {
+        let mut mcs = MultiChannelScheduler::new();
+        for n in 1u32..=3 {
+            mcs.add_channel(ChannelId(n), crate::PlayoutConfig::default())
+                .expect("channel operation should succeed");
+            mcs.schedule(ChannelId(n), make_playlist_item("/a.av1"))
+                .expect("channel operation should succeed");
+            mcs.schedule(ChannelId(n), make_playlist_item("/b.av1"))
+                .expect("channel operation should succeed");
+        }
+        assert_eq!(mcs.total_event_count(), 6);
+    }
+
+    #[test]
+    fn test_multi_channel_clear_channel() {
+        let mut mcs = MultiChannelScheduler::new();
+        let id = ChannelId(10);
+        mcs.add_channel(id, crate::PlayoutConfig::default())
+            .expect("channel operation should succeed");
+        mcs.schedule(id, make_playlist_item("/x.av1"))
+            .expect("channel operation should succeed");
+        assert_eq!(mcs.total_event_count(), 1);
+        mcs.clear_channel(id)
+            .expect("channel operation should succeed");
+        assert_eq!(mcs.total_event_count(), 0);
+    }
+
+    #[test]
+    fn test_multi_channel_scheduler_ref() {
+        let mut mcs = MultiChannelScheduler::new();
+        let id = ChannelId(11);
+        mcs.add_channel(id, crate::PlayoutConfig::default())
+            .expect("channel operation should succeed");
+        let sched = mcs.scheduler(id);
+        assert!(sched.is_some());
+    }
+
+    #[test]
+    fn test_channel_id_display() {
+        let id = ChannelId(42);
+        assert_eq!(id.to_string(), "CH42");
     }
 }

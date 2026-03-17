@@ -218,6 +218,68 @@ pub fn timecode_to_audio_samples(tc: &Timecode, sample_rate: u32) -> u64 {
     (secs * sample_rate as f64).round() as u64
 }
 
+// ---------------------------------------------------------------------------
+// NDF ↔ DF conversion utilities
+// ---------------------------------------------------------------------------
+
+/// Convert a non-drop-frame (NDF) timecode to its drop-frame (DF) equivalent.
+///
+/// The conversion preserves the wall-clock time as closely as possible:
+/// the NDF frame count (at the integer fps) is treated as an absolute frame
+/// index, and the equivalent DF timecode at the same nominal fps is returned.
+///
+/// Currently supports 29.97 NDF → 29.97 DF and 59.94 NDF → 59.94 DF.
+///
+/// # Errors
+///
+/// Returns an error if the NDF timecode is not at a rate that has a
+/// corresponding DF variant, or if the resulting DF position would be invalid.
+pub fn ndf_to_df(tc: &Timecode) -> Result<Timecode, TimecodeError> {
+    if tc.frame_rate.drop_frame {
+        return Err(TimecodeError::InvalidConfiguration); // Already drop frame
+    }
+
+    let df_rate = match tc.frame_rate.fps {
+        30 => FrameRate::Fps2997DF,
+        60 => FrameRate::Fps5994DF,
+        24 => FrameRate::Fps23976DF,
+        48 => FrameRate::Fps47952DF,
+        _ => return Err(TimecodeError::InvalidConfiguration),
+    };
+
+    // The NDF frame count (counted as if purely integer fps) is the canonical
+    // frame index.  We reinterpret it as a DF frame index — the DF timecode
+    // display will differ slightly from the NDF display, which is the intended
+    // behaviour (DF displays real elapsed time, NDF does not).
+    Timecode::from_frames(tc.to_frames(), df_rate)
+}
+
+/// Convert a drop-frame (DF) timecode to its non-drop-frame (NDF) equivalent.
+///
+/// The total DF frame count is preserved; the resulting NDF timecode at the
+/// same nominal fps will generally display a slightly different
+/// HH:MM:SS:FF string because NDF ignores the frame-number skips.
+///
+/// # Errors
+///
+/// Returns an error if the timecode is already NDF, or if the fps has no
+/// NDF counterpart.
+pub fn df_to_ndf(tc: &Timecode) -> Result<Timecode, TimecodeError> {
+    if !tc.frame_rate.drop_frame {
+        return Err(TimecodeError::InvalidConfiguration); // Already non-drop frame
+    }
+
+    let ndf_rate = match tc.frame_rate.fps {
+        30 => FrameRate::Fps2997NDF,
+        60 => FrameRate::Fps5994,
+        24 => FrameRate::Fps23976,
+        48 => FrameRate::Fps47952,
+        _ => return Err(TimecodeError::InvalidConfiguration),
+    };
+
+    Timecode::from_frames(tc.to_frames(), ndf_rate)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,5 +379,52 @@ mod tests {
     #[test]
     fn test_negative_seconds_error() {
         assert!(seconds_to_timecode(-1.0, FrameRate::Fps25).is_err());
+    }
+
+    #[test]
+    fn test_ndf_to_df_29_97() {
+        // A 29.97 NDF timecode → 29.97 DF: frame count is preserved
+        let ndf = Timecode::new(0, 1, 0, 0, FrameRate::Fps2997NDF).expect("valid NDF");
+        let df = ndf_to_df(&ndf).expect("ndf_to_df should succeed");
+        assert!(df.frame_rate.drop_frame);
+        assert_eq!(df.frame_rate.fps, 30);
+        // Frame counts must match
+        assert_eq!(ndf.to_frames(), df.to_frames());
+    }
+
+    #[test]
+    fn test_df_to_ndf_29_97() {
+        let df = Timecode::new(0, 1, 0, 2, FrameRate::Fps2997DF).expect("valid DF");
+        let ndf = df_to_ndf(&df).expect("df_to_ndf should succeed");
+        assert!(!ndf.frame_rate.drop_frame);
+        assert_eq!(ndf.frame_rate.fps, 30);
+        assert_eq!(df.to_frames(), ndf.to_frames());
+    }
+
+    #[test]
+    fn test_ndf_to_df_already_df_is_error() {
+        let df = Timecode::new(0, 1, 0, 2, FrameRate::Fps2997DF).expect("valid DF");
+        assert!(ndf_to_df(&df).is_err());
+    }
+
+    #[test]
+    fn test_df_to_ndf_already_ndf_is_error() {
+        let ndf = Timecode::new(0, 1, 0, 0, FrameRate::Fps2997NDF).expect("valid NDF");
+        assert!(df_to_ndf(&ndf).is_err());
+    }
+
+    #[test]
+    fn test_ndf_to_df_unsupported_rate_is_error() {
+        let tc = Timecode::new(0, 0, 1, 0, FrameRate::Fps25).expect("valid");
+        assert!(ndf_to_df(&tc).is_err());
+    }
+
+    #[test]
+    fn test_df_ndf_roundtrip_preserves_frame_count() {
+        // Roundtrip: NDF → DF → NDF must preserve the frame count
+        let ndf = Timecode::new(1, 23, 45, 12, FrameRate::Fps2997NDF).expect("valid NDF");
+        let df = ndf_to_df(&ndf).expect("ndf→df");
+        let back = df_to_ndf(&df).expect("df→ndf");
+        assert_eq!(ndf.to_frames(), back.to_frames());
     }
 }

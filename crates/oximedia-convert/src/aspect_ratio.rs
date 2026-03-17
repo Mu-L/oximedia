@@ -24,11 +24,10 @@ impl AspectRatio {
     #[must_use]
     pub fn new(width: u32, height: u32) -> Self {
         let g = gcd(width, height);
-        let (w, h) = if g > 0 {
-            (width / g, height / g)
-        } else {
-            (width, height)
-        };
+        let (w, h) = (
+            width.checked_div(g).unwrap_or(width),
+            height.checked_div(g).unwrap_or(height),
+        );
         Self {
             width: w,
             height: h,

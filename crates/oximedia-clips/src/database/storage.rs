@@ -236,6 +236,7 @@ impl ClipDatabase {
             created_at,
             modified_at,
             custom_metadata: row.try_get("custom_metadata")?,
+            camera: None,
         })
     }
 
@@ -250,6 +251,122 @@ impl ClipDatabase {
             .await?;
 
         Ok(row.try_get("count")?)
+    }
+
+    /// Saves multiple clips in a single database transaction.
+    ///
+    /// This is significantly faster than calling `save_clip()` in a loop for
+    /// large batches because SQLite commits per-transaction rather than
+    /// per-statement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction cannot be started or any clip fails
+    /// to save.
+    pub async fn batch_save_clips(&self, clips: &[Clip]) -> ClipResult<()> {
+        let mut tx = self.pool.begin().await?;
+
+        for clip in clips {
+            let keywords_json = serde_json::to_string(&clip.keywords)
+                .map_err(|e| ClipError::Serialization(e.to_string()))?;
+
+            let (frame_rate_num, frame_rate_den) = clip
+                .frame_rate
+                .map_or((None, None), |fr| (Some(fr.num), Some(fr.den)));
+
+            sqlx::query(
+                r"
+                INSERT INTO clips (
+                    id, file_path, name, description, duration,
+                    frame_rate_num, frame_rate_den, in_point, out_point,
+                    rating, is_favorite, is_rejected, keywords,
+                    created_at, modified_at, custom_metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    file_path = excluded.file_path,
+                    name = excluded.name,
+                    description = excluded.description,
+                    duration = excluded.duration,
+                    frame_rate_num = excluded.frame_rate_num,
+                    frame_rate_den = excluded.frame_rate_den,
+                    in_point = excluded.in_point,
+                    out_point = excluded.out_point,
+                    rating = excluded.rating,
+                    is_favorite = excluded.is_favorite,
+                    is_rejected = excluded.is_rejected,
+                    keywords = excluded.keywords,
+                    modified_at = excluded.modified_at,
+                    custom_metadata = excluded.custom_metadata
+                ",
+            )
+            .bind(clip.id.to_string())
+            .bind(clip.file_path.to_string_lossy().to_string())
+            .bind(&clip.name)
+            .bind(&clip.description)
+            .bind(clip.duration)
+            .bind(frame_rate_num)
+            .bind(frame_rate_den)
+            .bind(clip.in_point)
+            .bind(clip.out_point)
+            .bind(i64::from(clip.rating.to_value()))
+            .bind(i64::from(clip.is_favorite))
+            .bind(i64::from(clip.is_rejected))
+            .bind(keywords_json)
+            .bind(clip.created_at.to_rfc3339())
+            .bind(clip.modified_at.to_rfc3339())
+            .bind(&clip.custom_metadata)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Returns clips with pagination support.
+    ///
+    /// `page` is 0-indexed; `page_size` is the number of clips per page.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub async fn get_clips_page(&self, page: i64, page_size: i64) -> ClipResult<Vec<Clip>> {
+        let offset = page * page_size;
+        let rows = sqlx::query("SELECT * FROM clips ORDER BY created_at DESC LIMIT ? OFFSET ?")
+            .bind(page_size)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
+
+        rows.iter().map(Self::row_to_clip).collect()
+    }
+
+    /// Searches clips with pagination support.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub async fn search_clips_page(
+        &self,
+        query: &str,
+        page: i64,
+        page_size: i64,
+    ) -> ClipResult<Vec<Clip>> {
+        let search_pattern = format!("%{query}%");
+        let offset = page * page_size;
+
+        let rows = sqlx::query(
+            "SELECT * FROM clips WHERE name LIKE ? OR keywords LIKE ? \
+             ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        )
+        .bind(&search_pattern)
+        .bind(&search_pattern)
+        .bind(page_size)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter().map(Self::row_to_clip).collect()
     }
 }
 

@@ -2,6 +2,7 @@
 name = "oximedia-vfx"
 description = "Visual effects processing pipeline for media production"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -12,11 +13,11 @@ readme = "README.md"
 [dependencies]
 oximedia-core = { workspace = true }
 oximedia-graph = { workspace = true }
-oximedia-gpu = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 ab_glyph = "0.2"
 rand = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 

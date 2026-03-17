@@ -265,20 +265,9 @@ impl LtcAudioEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::FrameRateInfo;
 
     fn make_tc(h: u8, m: u8, s: u8, f: u8, fps: u8, df: bool) -> Timecode {
-        Timecode {
-            hours: h,
-            minutes: m,
-            seconds: s,
-            frames: f,
-            frame_rate: FrameRateInfo {
-                fps,
-                drop_frame: df,
-            },
-            user_bits: 0,
-        }
+        Timecode::from_raw_fields(h, m, s, f, fps, df, 0)
     }
 
     fn default_params() -> LtcSignalParams {

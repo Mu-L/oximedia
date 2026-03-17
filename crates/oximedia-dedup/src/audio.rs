@@ -8,7 +8,7 @@
 //! - Offset detection for shifted audio
 
 use crate::DedupResult;
-use rustfft::{num_complex::Complex, FftPlanner};
+use oxifft::Complex;
 
 /// Audio sample format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,11 +53,7 @@ impl AudioData {
     /// Get number of frames.
     #[must_use]
     pub fn frame_count(&self) -> usize {
-        if self.channels == 0 {
-            0
-        } else {
-            self.samples.len() / self.channels
-        }
+        self.samples.len().checked_div(self.channels).unwrap_or(0)
     }
 
     /// Get duration in seconds.
@@ -277,8 +273,6 @@ impl WindowFunction {
 pub fn compute_spectrogram(audio: &AudioData, config: &FftConfig) -> Vec<Vec<f32>> {
     let mono = audio.to_mono();
     let window = config.window.generate(config.size);
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(config.size);
 
     let frame_count = (mono.samples.len().saturating_sub(config.size)) / config.hop_size + 1;
     let mut spectrogram = Vec::with_capacity(frame_count);
@@ -288,7 +282,7 @@ pub fn compute_spectrogram(audio: &AudioData, config: &FftConfig) -> Vec<Vec<f32
         let end = (start + config.size).min(mono.samples.len());
 
         // Windowed FFT
-        let mut buffer: Vec<Complex<f32>> = (0..config.size)
+        let buffer: Vec<Complex<f32>> = (0..config.size)
             .map(|i| {
                 let idx = start + i;
                 let sample = if idx < end { mono.samples[idx] } else { 0.0 };
@@ -296,10 +290,10 @@ pub fn compute_spectrogram(audio: &AudioData, config: &FftConfig) -> Vec<Vec<f32
             })
             .collect();
 
-        fft.process(&mut buffer);
+        let fft_result = oxifft::fft(&buffer);
 
         // Magnitude spectrum (only first half, as second half is symmetric)
-        let magnitudes: Vec<f32> = buffer[..config.size / 2]
+        let magnitudes: Vec<f32> = fft_result[..config.size / 2]
             .iter()
             .map(|c| (c.re * c.re + c.im * c.im).sqrt())
             .collect();

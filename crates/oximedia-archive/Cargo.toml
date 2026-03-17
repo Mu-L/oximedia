@@ -1,22 +1,26 @@
 [package]
 name = "oximedia-archive"
 version.workspace = true
-edition = "2021"
-authors = ["OxiMedia Contributors"]
+edition.workspace = true
+authors.workspace = true
 description = "Media archive verification and long-term preservation system"
 readme = "README.md"
-license = "Apache-2.0"
+license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
 [lints]
 workspace = true
 
+[features]
+default = []
+sqlite = ["sqlx"]
+
 [dependencies]
 blake3 = "1.8"
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["chrono"] }
+sqlx = { workspace = true, features = ["chrono"], optional = true }
 chrono = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }

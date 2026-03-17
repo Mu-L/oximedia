@@ -291,12 +291,12 @@ mod tests {
 
     #[test]
     fn test_retention_rule_is_expired() {
-        let rule = RetentionRule::new("r1", "expire after 30 days")
-            .with_period(Duration::from_secs(30 * 24 * 3600));
+        let rule =
+            RetentionRule::new("r1", "expire after 30 days").with_period(Duration::from_hours(720));
 
         let now = SystemTime::now();
-        let old = now - Duration::from_secs(31 * 24 * 3600);
-        let recent = now - Duration::from_secs(1 * 24 * 3600);
+        let old = now - Duration::from_hours(744);
+        let recent = now - Duration::from_hours(24);
 
         assert!(rule.is_expired_at(old, now));
         assert!(!rule.is_expired_at(recent, now));
@@ -306,7 +306,7 @@ mod tests {
     fn test_retention_rule_no_period_never_expires() {
         let rule = RetentionRule::new("r2", "never expire");
         let now = SystemTime::now();
-        let ancient = now - Duration::from_secs(365 * 24 * 3600 * 100);
+        let ancient = now - Duration::from_hours(876000);
         assert!(!rule.is_expired_at(ancient, now));
     }
 
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn test_storage_policy_matching_rule() {
         let rule = RetentionRule::new("r1", "expire old")
-            .with_period(Duration::from_secs(90 * 24 * 3600))
+            .with_period(Duration::from_hours(2160))
             .with_tag("archive", "true");
 
         let policy = StoragePolicy::new("p3", "archive policy", StorageClass::Cold).with_rule(rule);

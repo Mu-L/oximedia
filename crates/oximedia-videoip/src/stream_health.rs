@@ -369,7 +369,7 @@ impl StreamHealthMonitor {
         } else if sample.packet_loss >= self.config.loss_warn_threshold {
             self.alerts.push(HealthAlert {
                 severity: AlertSeverity::Warning,
-                message: format!("Elevated packet loss: {:.3}%", sample.packet_loss * 100.0,),
+                message: format!("Elevated packet loss: {:.3}%", sample.packet_loss * 100.0),
                 sample_index: sample.index,
             });
         }

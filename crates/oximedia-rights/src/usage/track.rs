@@ -2,6 +2,7 @@
 
 use crate::{database::RightsDatabase, rights::UsageType, usage::UsageLog, Result};
 use chrono::{DateTime, Utc};
+#[cfg(not(target_arch = "wasm32"))]
 use sqlx::Row;
 
 /// Usage tracker

@@ -133,11 +133,16 @@ mod codec_config;
 pub mod codec_mapping;
 pub mod crf_optimizer;
 mod filters;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod frame_pipeline;
 mod hw_accel;
 mod multipass;
 mod normalization;
 mod parallel;
+#[cfg(not(target_arch = "wasm32"))]
 mod pipeline;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod pipeline_context;
 mod progress;
 mod quality;
 pub mod segment_encoder;
@@ -150,6 +155,8 @@ pub mod validation;
 pub mod ab_compare;
 pub mod abr_ladder;
 pub mod audio_channel_map;
+pub mod audio_only;
+pub mod benchmark;
 pub mod bitrate_control;
 pub mod burn_subs;
 pub mod codec_profile;
@@ -157,39 +164,76 @@ pub mod codec_profile;
 pub mod concat_transcode;
 pub mod crop_scale;
 pub mod encoding_log;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod examples;
 pub mod frame_stats;
-pub mod output_verify;
-pub mod presets;
+pub mod frame_trim;
+pub mod hdr_passthrough;
 /// Rate-distortion analysis for optimal encoding parameter selection.
+pub mod hwaccel;
+pub mod output_verify;
+pub mod per_scene_encode;
+pub mod presets;
+pub mod quality_ladder_gen;
 pub mod rate_distortion;
 pub mod resolution_select;
 pub mod scene_cut;
 pub mod stage_graph;
+/// Watermark and graphic overlay embedding during transcoding.
+pub mod stream_copy;
 pub mod transcode_metrics;
+pub mod transcode_preset;
+pub mod transcode_profile;
 pub mod transcode_session;
 pub mod utils;
-/// Watermark and graphic overlay embedding during transcoding.
+pub mod watch_folder;
 pub mod watermark_overlay;
 pub use codec_config::{
-    codec_config_from_quality, Av1Config, Av1Usage, CodecConfig, H264Config, H264Profile,
-    OpusApplication, OpusConfig, Vp9Config,
+    codec_config_from_quality, Av1Config, Av1Usage, CodecConfig, Ffv1Coder, Ffv1Config, Ffv1Level,
+    FlacConfig, H264Config, H264Profile, JxlConfig, JxlEffort, OpusApplication, OpusConfig,
+    Vp9Config,
 };
+pub use codec_profile::CodecTunePreset;
 pub use filters::{AudioFilter, FilterNode, VideoFilter};
 pub use hw_accel::{
     detect_available_hw_accel, detect_best_hw_accel_for_codec, get_available_encoders,
     HwAccelConfig, HwAccelType, HwEncoder, HwFeature,
 };
+pub use stream_copy::{
+    CopyDecision, StreamCopyConfig, StreamCopyDetector, StreamCopyMode, StreamInfo, StreamType,
+};
 
 pub use abr::{AbrLadder, AbrLadderBuilder, AbrRung, AbrStrategy};
 pub use builder::TranscodeBuilder;
+pub use concat_transcode::{
+    AnnotatedSegment, ConcatPlan, ConcatStep, MixedSourceConcatenator, SourceProperties,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use frame_pipeline::{
+    wire_hdr_into_pipeline, AudioFrameOp, FramePipelineConfig, FramePipelineExecutor,
+    FramePipelineResult, VideoFrameOp,
+};
 pub use multipass::{MultiPassConfig, MultiPassEncoder, MultiPassMode};
 pub use normalization::{AudioNormalizer, LoudnessStandard, LoudnessTarget, NormalizationConfig};
-pub use parallel::{ParallelConfig, ParallelEncodeBuilder, ParallelEncoder};
+pub use parallel::{
+    assemble_av1_tile_bitstream, Av1TileConfig, Av1TileParallelEncoder, Av1TileStats,
+    ParallelConfig, ParallelEncodeBuilder, ParallelEncoder,
+};
+#[cfg(not(target_arch = "wasm32"))]
 pub use pipeline::{Pipeline, PipelineStage, TranscodePipeline};
+#[cfg(not(target_arch = "wasm32"))]
+pub use pipeline_context::{
+    FilterGraph, Frame, FrameDecoder, FrameEncoder, HdrPassthroughConfig, HdrSeiInjector,
+    PassStats, TranscodeContext, TranscodeStats,
+};
 pub use progress::{ProgressCallback, ProgressInfo, ProgressTracker};
 pub use quality::{QualityConfig, QualityMode, QualityPreset, RateControlMode, TuneMode};
+pub use segment_encoder::{
+    ParallelSegmentEncoder, ParallelSegmentResult, ParallelSegmentStats, SegmentSpec,
+};
+pub use thumbnail::{format_vtt_time, SpriteSheet, SpriteSheetConfig};
 pub use transcode_job::{JobPriority, JobQueue, TranscodeJob, TranscodeJobConfig, TranscodeStatus};
+pub use transcode_preset::{TranscodeEstimator, TranscodePreset};
 pub use validation::{InputValidator, OutputValidator, ValidationError};
 
 use thiserror::Error;
@@ -310,6 +354,10 @@ pub struct TranscodeConfig {
     pub subtitle_mode: Option<SubtitleMode>,
     /// Chapter handling mode.
     pub chapter_mode: Option<ChapterMode>,
+    /// Stream copy mode for passthrough without re-encoding.
+    pub stream_copy: Option<StreamCopyMode>,
+    /// Audio channel layout for output.
+    pub audio_channel_layout: Option<audio_channel_map::AudioLayout>,
 }
 
 /// Subtitle handling modes.
@@ -354,6 +402,8 @@ impl Default for TranscodeConfig {
             preserve_metadata: true,
             subtitle_mode: None,
             chapter_mode: None,
+            stream_copy: None,
+            audio_channel_layout: None,
         }
     }
 }
@@ -473,6 +523,23 @@ impl Transcoder {
         self
     }
 
+    /// Sets the stream copy mode for passthrough without re-encoding.
+    ///
+    /// When codecs match between input and output, stream copy avoids
+    /// re-encoding and preserves the original quality.
+    #[must_use]
+    pub fn stream_copy(mut self, mode: StreamCopyMode) -> Self {
+        self.config.stream_copy = Some(mode);
+        self
+    }
+
+    /// Sets the audio channel layout for the output.
+    #[must_use]
+    pub fn audio_channel_layout(mut self, layout: audio_channel_map::AudioLayout) -> Self {
+        self.config.audio_channel_layout = Some(layout);
+        self
+    }
+
     /// Applies a preset configuration.
     #[must_use]
     pub fn preset(mut self, preset: PresetConfig) -> Self {
@@ -500,6 +567,9 @@ impl Transcoder {
         if let Some(mode) = preset.quality_mode {
             self.config.quality_mode = Some(mode);
         }
+        if let Some(layout) = preset.audio_channel_layout {
+            self.config.audio_channel_layout = Some(layout);
+        }
         self
     }
 
@@ -512,33 +582,43 @@ impl Transcoder {
     /// - Input file is invalid or cannot be opened
     /// - Output configuration is invalid
     /// - Transcoding fails
+    /// - On wasm32 targets (filesystem-based transcoding is not supported)
     pub async fn transcode(self) -> Result<TranscodeOutput> {
-        // Validate configuration
-        let input = self
-            .config
-            .input
-            .ok_or_else(|| TranscodeError::InvalidInput("No input file specified".to_string()))?;
-        let output = self
-            .config
-            .output
-            .ok_or_else(|| TranscodeError::InvalidOutput("No output file specified".to_string()))?;
-
-        // Create a basic pipeline and execute
-        let mut pipeline = TranscodePipeline::builder()
-            .input(&input)
-            .output(&output)
-            .build()?;
-
-        // Apply configuration to pipeline
-        if let Some(codec) = &self.config.video_codec {
-            pipeline.set_video_codec(codec);
-        }
-        if let Some(codec) = &self.config.audio_codec {
-            pipeline.set_audio_codec(codec);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = self;
+            return Err(TranscodeError::Unsupported(
+                "Filesystem-based transcoding is not supported on wasm32".to_string(),
+            ));
         }
 
-        // Execute pipeline
-        pipeline.execute().await
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // Validate configuration
+            let input = self.config.input.ok_or_else(|| {
+                TranscodeError::InvalidInput("No input file specified".to_string())
+            })?;
+            let output = self.config.output.ok_or_else(|| {
+                TranscodeError::InvalidOutput("No output file specified".to_string())
+            })?;
+
+            // Create a basic pipeline and execute
+            let mut pipeline = TranscodePipeline::builder()
+                .input(&input)
+                .output(&output)
+                .build()?;
+
+            // Apply configuration to pipeline
+            if let Some(codec) = &self.config.video_codec {
+                pipeline.set_video_codec(codec);
+            }
+            if let Some(codec) = &self.config.audio_codec {
+                pipeline.set_audio_codec(codec);
+            }
+
+            // Execute pipeline
+            pipeline.execute().await
+        }
     }
 }
 
@@ -569,6 +649,8 @@ pub struct PresetConfig {
     pub quality_mode: Option<QualityMode>,
     /// Container format.
     pub container: Option<String>,
+    /// Audio channel layout (mono, stereo, 5.1, 7.1).
+    pub audio_channel_layout: Option<audio_channel_map::AudioLayout>,
 }
 
 /// Output from a successful transcode operation.
@@ -635,6 +717,7 @@ mod tests {
             frame_rate: Some((60, 1)),
             quality_mode: Some(QualityMode::High),
             container: Some("webm".to_string()),
+            audio_channel_layout: None,
         };
 
         let transcoder = Transcoder::new().preset(preset);
@@ -647,6 +730,60 @@ mod tests {
         assert_eq!(transcoder.config.height, Some(1080));
         assert_eq!(transcoder.config.frame_rate, Some((60, 1)));
         assert_eq!(transcoder.config.quality_mode, Some(QualityMode::High));
+    }
+
+    #[test]
+    fn test_stream_copy_mode() {
+        let transcoder = Transcoder::new()
+            .input("input.mp4")
+            .output("output.mp4")
+            .stream_copy(StreamCopyMode::CopyVideo);
+
+        assert_eq!(
+            transcoder.config.stream_copy,
+            Some(StreamCopyMode::CopyVideo)
+        );
+    }
+
+    #[test]
+    fn test_audio_channel_layout_on_transcoder() {
+        let transcoder =
+            Transcoder::new().audio_channel_layout(audio_channel_map::AudioLayout::FivePointOne);
+
+        assert_eq!(
+            transcoder.config.audio_channel_layout,
+            Some(audio_channel_map::AudioLayout::FivePointOne)
+        );
+    }
+
+    #[test]
+    fn test_preset_with_audio_channel_layout() {
+        let preset = PresetConfig {
+            audio_codec: Some("opus".to_string()),
+            audio_bitrate: Some(384_000),
+            audio_channel_layout: Some(audio_channel_map::AudioLayout::FivePointOne),
+            ..PresetConfig::default()
+        };
+
+        let transcoder = Transcoder::new().preset(preset);
+        assert_eq!(
+            transcoder.config.audio_channel_layout,
+            Some(audio_channel_map::AudioLayout::FivePointOne)
+        );
+        assert_eq!(transcoder.config.audio_bitrate, Some(384_000));
+    }
+
+    #[test]
+    fn test_preset_config_default_has_no_channel_layout() {
+        let preset = PresetConfig::default();
+        assert!(preset.audio_channel_layout.is_none());
+    }
+
+    #[test]
+    fn test_config_default_has_no_stream_copy() {
+        let config = TranscodeConfig::default();
+        assert!(config.stream_copy.is_none());
+        assert!(config.audio_channel_layout.is_none());
     }
 
     #[test]

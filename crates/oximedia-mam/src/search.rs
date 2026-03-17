@@ -446,29 +446,37 @@ impl SearchEngine {
 
         // Duration range
         if query.filters.min_duration.is_some() || query.filters.max_duration.is_some() {
+            let field = self.schema.get_field("duration_ms")?;
             let min = query.filters.min_duration.unwrap_or(i64::MIN);
-            let max = query
-                .filters
-                .max_duration
-                .unwrap_or(i64::MAX)
-                .saturating_add(1);
-            let range = RangeQuery::new_i64("duration_ms".to_string(), min..max);
+            let max = query.filters.max_duration.unwrap_or(i64::MAX);
+            let range = RangeQuery::new(
+                std::ops::Bound::Included(Term::from_field_i64(field, min)),
+                std::ops::Bound::Included(Term::from_field_i64(field, max)),
+            );
             filter_queries.push((Occur::Must, Box::new(range)));
         }
 
         // Width range
         if query.filters.min_width.is_some() || query.filters.max_width.is_some() {
+            let field = self.schema.get_field("width")?;
             let min = i64::from(query.filters.min_width.unwrap_or(0));
-            let max = i64::from(query.filters.max_width.unwrap_or(i32::MAX)).saturating_add(1);
-            let range = RangeQuery::new_i64("width".to_string(), min..max);
+            let max = i64::from(query.filters.max_width.unwrap_or(i32::MAX));
+            let range = RangeQuery::new(
+                std::ops::Bound::Included(Term::from_field_i64(field, min)),
+                std::ops::Bound::Included(Term::from_field_i64(field, max)),
+            );
             filter_queries.push((Occur::Must, Box::new(range)));
         }
 
         // Date range
         if query.filters.date_from.is_some() || query.filters.date_to.is_some() {
+            let field = self.schema.get_field("created_at")?;
             let min = query.filters.date_from.unwrap_or(0);
-            let max = query.filters.date_to.unwrap_or(i64::MAX).saturating_add(1);
-            let range = RangeQuery::new_i64("created_at".to_string(), min..max);
+            let max = query.filters.date_to.unwrap_or(i64::MAX);
+            let range = RangeQuery::new(
+                std::ops::Bound::Included(Term::from_field_i64(field, min)),
+                std::ops::Bound::Included(Term::from_field_i64(field, max)),
+            );
             filter_queries.push((Occur::Must, Box::new(range)));
         }
 
@@ -679,7 +687,7 @@ impl SearchEngine {
         let segment_ids = searcher
             .segment_readers()
             .iter()
-            .map(|r| r.segment_id())
+            .map(|r| format!("{:?}", r.segment_id()))
             .collect();
 
         Ok(IndexStatistics {
@@ -695,7 +703,7 @@ impl SearchEngine {
 pub struct IndexStatistics {
     pub num_docs: usize,
     pub num_segments: usize,
-    pub segment_ids: Vec<tantivy::SegmentId>,
+    pub segment_ids: Vec<String>,
 }
 
 #[cfg(test)]

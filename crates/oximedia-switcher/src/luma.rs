@@ -204,12 +204,8 @@ impl LumaKey {
             let cr_plane = &fill.planes[2];
 
             let cb_w = cb_plane.width as usize;
-            let h_ratio = if cb_w > 0 { luma_w / cb_w } else { 1 };
-            let v_ratio = if cb_plane.height > 0 {
-                luma_h / cb_plane.height as usize
-            } else {
-                1
-            };
+            let h_ratio = luma_w.checked_div(cb_w).unwrap_or(1);
+            let v_ratio = luma_h.checked_div(cb_plane.height as usize).unwrap_or(1);
 
             let mut alpha_out = Vec::with_capacity(pixel_count);
 

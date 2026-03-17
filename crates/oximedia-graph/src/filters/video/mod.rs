@@ -28,17 +28,29 @@ mod grading;
 mod ivtc;
 mod log;
 mod lut;
+mod merge;
 mod null;
 mod overlay;
 mod pad;
 mod passthrough;
+mod rate_limit;
 mod scale;
+mod split;
 mod timecode;
 mod tonemap;
 
 // Re-export passthrough and null
 pub use null::NullSink;
 pub use passthrough::PassthroughFilter;
+
+// Re-export split filter
+pub use split::{SplitConfig, SplitFilter};
+
+// Re-export merge filter
+pub use merge::{InputPlacement, MergeConfig, MergeFilter};
+
+// Re-export rate limit filter
+pub use rate_limit::{RateLimitConfig, RateLimitFilter};
 
 // Re-export scale filter
 pub use scale::{

@@ -377,6 +377,305 @@ impl Default for AccelStatistics {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Profiling / Timing Overlay
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A scope-based timer that records elapsed time when dropped.
+///
+/// Typical usage:
+/// ```ignore
+/// let _timer = profiler.start_timer("scale_image");
+/// // ... operation ...
+/// // timer automatically records on drop
+/// ```
+pub struct ScopedTimer {
+    operation_name: String,
+    started_at: Instant,
+    /// Channel to send the result back to the profiler.
+    /// We use a callback approach since we can't hold &mut on the profiler.
+    result_sender: Option<Box<dyn FnOnce(String, Duration, Instant) + Send>>,
+}
+
+impl ScopedTimer {
+    /// Manually stop the timer and return the elapsed duration.
+    /// After calling this, the drop handler will not record again.
+    pub fn stop(mut self) -> Duration {
+        let elapsed = self.started_at.elapsed();
+        if let Some(sender) = self.result_sender.take() {
+            sender(self.operation_name.clone(), elapsed, self.started_at);
+        }
+        elapsed
+    }
+}
+
+impl Drop for ScopedTimer {
+    fn drop(&mut self) {
+        if let Some(sender) = self.result_sender.take() {
+            let elapsed = self.started_at.elapsed();
+            sender(self.operation_name.clone(), elapsed, self.started_at);
+        }
+    }
+}
+
+/// Entry in the profiling timeline.
+#[derive(Debug, Clone)]
+pub struct ProfileEntry {
+    /// Name of the operation.
+    pub operation: String,
+    /// Duration of the operation.
+    pub duration: Duration,
+    /// When the operation started.
+    pub started_at: Instant,
+    /// Frame number (if applicable).
+    pub frame_index: Option<u64>,
+    /// Custom tag for grouping.
+    pub tag: Option<String>,
+}
+
+impl ProfileEntry {
+    /// Duration in milliseconds.
+    #[must_use]
+    pub fn duration_ms(&self) -> f64 {
+        self.duration.as_secs_f64() * 1000.0
+    }
+}
+
+/// A profiler that records per-operation timing for building overlays
+/// and performance reports.
+#[derive(Debug)]
+pub struct AccelProfiler {
+    /// Timeline of recorded profile entries (bounded ring buffer).
+    entries: Vec<ProfileEntry>,
+    /// Maximum entries to retain.
+    max_entries: usize,
+    /// Current frame index for tagging entries.
+    current_frame: u64,
+    /// Whether profiling is enabled (can be toggled at runtime).
+    enabled: bool,
+    /// Per-operation aggregate stats (computed on demand).
+    aggregates: HashMap<String, OperationStats>,
+}
+
+impl AccelProfiler {
+    /// Creates a new profiler with the given max entry count.
+    #[must_use]
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            max_entries: max_entries.max(1),
+            current_frame: 0,
+            enabled: true,
+            aggregates: HashMap::new(),
+        }
+    }
+
+    /// Creates a profiler with default settings (10000 entries).
+    #[must_use]
+    pub fn with_defaults() -> Self {
+        Self::new(10_000)
+    }
+
+    /// Whether the profiler is currently recording.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Enable or disable profiling.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Advance to the next frame.
+    pub fn next_frame(&mut self) {
+        self.current_frame += 1;
+    }
+
+    /// Current frame index.
+    #[must_use]
+    pub fn current_frame(&self) -> u64 {
+        self.current_frame
+    }
+
+    /// Records a completed operation manually.
+    pub fn record(
+        &mut self,
+        operation: &str,
+        duration: Duration,
+        started_at: Instant,
+        tag: Option<&str>,
+    ) {
+        if !self.enabled {
+            return;
+        }
+
+        let entry = ProfileEntry {
+            operation: operation.to_string(),
+            duration,
+            started_at,
+            frame_index: Some(self.current_frame),
+            tag: tag.map(String::from),
+        };
+
+        // Update aggregates
+        self.aggregates
+            .entry(operation.to_string())
+            .or_insert_with(|| OperationStats::new(operation))
+            .record(duration, started_at);
+
+        // Ring buffer behavior
+        if self.entries.len() >= self.max_entries {
+            self.entries.remove(0);
+        }
+        self.entries.push(entry);
+    }
+
+    /// Returns the number of profile entries.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns all profile entries.
+    #[must_use]
+    pub fn entries(&self) -> &[ProfileEntry] {
+        &self.entries
+    }
+
+    /// Returns entries for a specific frame.
+    #[must_use]
+    pub fn entries_for_frame(&self, frame: u64) -> Vec<&ProfileEntry> {
+        self.entries
+            .iter()
+            .filter(|e| e.frame_index == Some(frame))
+            .collect()
+    }
+
+    /// Returns entries for a specific operation.
+    #[must_use]
+    pub fn entries_for_operation(&self, operation: &str) -> Vec<&ProfileEntry> {
+        self.entries
+            .iter()
+            .filter(|e| e.operation == operation)
+            .collect()
+    }
+
+    /// Returns aggregate stats for all tracked operations.
+    #[must_use]
+    pub fn operation_stats(&self) -> &HashMap<String, OperationStats> {
+        &self.aggregates
+    }
+
+    /// Returns aggregate stats for a specific operation.
+    #[must_use]
+    pub fn get_operation_stats(&self, operation: &str) -> Option<&OperationStats> {
+        self.aggregates.get(operation)
+    }
+
+    /// Generates a human-readable timing overlay/report for the most recent frame.
+    #[must_use]
+    pub fn frame_overlay(&self) -> String {
+        let frame = self.current_frame;
+        let frame_entries = self.entries_for_frame(frame);
+
+        if frame_entries.is_empty() {
+            return format!("Frame {frame}: no operations recorded");
+        }
+
+        let total_ms: f64 = frame_entries.iter().map(|e| e.duration_ms()).sum();
+        let mut lines = vec![format!(
+            "Frame {frame} ({} ops, {total_ms:.2}ms total):",
+            frame_entries.len()
+        )];
+
+        for entry in &frame_entries {
+            let pct = if total_ms > 0.0 {
+                entry.duration_ms() / total_ms * 100.0
+            } else {
+                0.0
+            };
+            let tag_str = entry
+                .tag
+                .as_deref()
+                .map(|t| format!(" [{t}]"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "  {}{}: {:.3}ms ({:.1}%)",
+                entry.operation,
+                tag_str,
+                entry.duration_ms(),
+                pct,
+            ));
+        }
+
+        lines.join("\n")
+    }
+
+    /// Generates a summary report of all operations across all frames.
+    #[must_use]
+    pub fn summary_report(&self) -> String {
+        if self.aggregates.is_empty() {
+            return "No operations recorded".to_string();
+        }
+
+        let mut lines = vec![format!(
+            "Profiler Summary ({} operations, {} entries):",
+            self.aggregates.len(),
+            self.entries.len()
+        )];
+
+        let mut ops: Vec<(&String, &OperationStats)> = self.aggregates.iter().collect();
+        ops.sort_by(|a, b| {
+            b.1.total_duration
+                .partial_cmp(&a.1.total_duration)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        for (name, stats) in ops {
+            let avg = stats.average_ms().unwrap_or(0.0);
+            let min = stats.min_ms().unwrap_or(0.0);
+            let max = stats.max_ms().unwrap_or(0.0);
+            lines.push(format!(
+                "  {name}: {count} calls, avg={avg:.3}ms, min={min:.3}ms, max={max:.3}ms",
+                count = stats.invocation_count,
+            ));
+        }
+
+        lines.join("\n")
+    }
+
+    /// Returns the percentile value (0..100) for a given operation's recent durations.
+    ///
+    /// Returns `None` if the operation has no recorded data.
+    #[must_use]
+    pub fn percentile_ms(&self, operation: &str, percentile: f64) -> Option<f64> {
+        let mut durations: Vec<f64> = self
+            .entries
+            .iter()
+            .filter(|e| e.operation == operation)
+            .map(ProfileEntry::duration_ms)
+            .collect();
+
+        if durations.is_empty() {
+            return None;
+        }
+
+        durations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = ((percentile / 100.0) * (durations.len() as f64 - 1.0))
+            .round()
+            .max(0.0) as usize;
+        let idx = idx.min(durations.len() - 1);
+        Some(durations[idx])
+    }
+
+    /// Clears all recorded entries and aggregates.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.aggregates.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,5 +856,206 @@ mod tests {
         assert_eq!(names.len(), 2);
         assert!(names.contains(&"alpha"));
         assert!(names.contains(&"beta"));
+    }
+
+    // ── AccelProfiler tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_profiler_new() {
+        let profiler = AccelProfiler::new(100);
+        assert!(profiler.is_enabled());
+        assert_eq!(profiler.entry_count(), 0);
+        assert_eq!(profiler.current_frame(), 0);
+    }
+
+    #[test]
+    fn test_profiler_with_defaults() {
+        let profiler = AccelProfiler::with_defaults();
+        assert!(profiler.is_enabled());
+    }
+
+    #[test]
+    fn test_profiler_record() {
+        let mut profiler = AccelProfiler::new(100);
+        let now = Instant::now();
+        profiler.record("scale_image", Duration::from_millis(5), now, None);
+        profiler.record("convert_color", Duration::from_millis(3), now, Some("yuv"));
+        assert_eq!(profiler.entry_count(), 2);
+    }
+
+    #[test]
+    fn test_profiler_disabled() {
+        let mut profiler = AccelProfiler::new(100);
+        profiler.set_enabled(false);
+        profiler.record("op", Duration::from_millis(1), Instant::now(), None);
+        assert_eq!(profiler.entry_count(), 0);
+    }
+
+    #[test]
+    fn test_profiler_entries_for_frame() {
+        let mut profiler = AccelProfiler::new(100);
+        let now = Instant::now();
+        profiler.record("op1", Duration::from_millis(1), now, None);
+        profiler.next_frame();
+        profiler.record("op2", Duration::from_millis(2), now, None);
+        profiler.record("op3", Duration::from_millis(3), now, None);
+
+        let frame0 = profiler.entries_for_frame(0);
+        assert_eq!(frame0.len(), 1);
+        assert_eq!(frame0[0].operation, "op1");
+
+        let frame1 = profiler.entries_for_frame(1);
+        assert_eq!(frame1.len(), 2);
+    }
+
+    #[test]
+    fn test_profiler_entries_for_operation() {
+        let mut profiler = AccelProfiler::new(100);
+        let now = Instant::now();
+        profiler.record("scale", Duration::from_millis(1), now, None);
+        profiler.record("color", Duration::from_millis(2), now, None);
+        profiler.record("scale", Duration::from_millis(3), now, None);
+
+        let scales = profiler.entries_for_operation("scale");
+        assert_eq!(scales.len(), 2);
+    }
+
+    #[test]
+    fn test_profiler_frame_overlay() {
+        let mut profiler = AccelProfiler::new(100);
+        let now = Instant::now();
+        profiler.record("scale", Duration::from_millis(10), now, None);
+        profiler.record("color", Duration::from_millis(5), now, Some("gpu"));
+
+        let overlay = profiler.frame_overlay();
+        assert!(overlay.contains("Frame 0"));
+        assert!(overlay.contains("scale"));
+        assert!(overlay.contains("color"));
+        assert!(overlay.contains("[gpu]"));
+        assert!(overlay.contains("2 ops"));
+    }
+
+    #[test]
+    fn test_profiler_frame_overlay_empty() {
+        let profiler = AccelProfiler::new(100);
+        let overlay = profiler.frame_overlay();
+        assert!(overlay.contains("no operations recorded"));
+    }
+
+    #[test]
+    fn test_profiler_summary_report() {
+        let mut profiler = AccelProfiler::new(100);
+        let now = Instant::now();
+        profiler.record("scale", Duration::from_millis(10), now, None);
+        profiler.record("scale", Duration::from_millis(20), now, None);
+        profiler.record("color", Duration::from_millis(5), now, None);
+
+        let report = profiler.summary_report();
+        assert!(report.contains("Profiler Summary"));
+        assert!(report.contains("scale"));
+        assert!(report.contains("2 calls"));
+        assert!(report.contains("color"));
+    }
+
+    #[test]
+    fn test_profiler_summary_empty() {
+        let profiler = AccelProfiler::new(100);
+        let report = profiler.summary_report();
+        assert_eq!(report, "No operations recorded");
+    }
+
+    #[test]
+    fn test_profiler_percentile() {
+        let mut profiler = AccelProfiler::new(100);
+        let now = Instant::now();
+        for i in 1..=10 {
+            profiler.record("op", Duration::from_millis(i), now, None);
+        }
+
+        let p50 = profiler
+            .percentile_ms("op", 50.0)
+            .expect("p50 should be valid");
+        assert!(p50 >= 4.0 && p50 <= 6.0, "p50 = {p50}");
+
+        let p90 = profiler
+            .percentile_ms("op", 90.0)
+            .expect("p90 should be valid");
+        assert!(p90 >= 8.0 && p90 <= 10.0, "p90 = {p90}");
+
+        assert!(profiler.percentile_ms("nonexistent", 50.0).is_none());
+    }
+
+    #[test]
+    fn test_profiler_ring_buffer_eviction() {
+        let mut profiler = AccelProfiler::new(5);
+        let now = Instant::now();
+        for i in 0..10 {
+            profiler.record(&format!("op{}", i), Duration::from_millis(1), now, None);
+        }
+        assert_eq!(profiler.entry_count(), 5);
+        // Oldest should be evicted
+        assert_eq!(profiler.entries()[0].operation, "op5");
+    }
+
+    #[test]
+    fn test_profiler_clear() {
+        let mut profiler = AccelProfiler::new(100);
+        let now = Instant::now();
+        profiler.record("op", Duration::from_millis(1), now, None);
+        assert_eq!(profiler.entry_count(), 1);
+        profiler.clear();
+        assert_eq!(profiler.entry_count(), 0);
+        assert!(profiler.operation_stats().is_empty());
+    }
+
+    #[test]
+    fn test_profiler_operation_stats() {
+        let mut profiler = AccelProfiler::new(100);
+        let now = Instant::now();
+        profiler.record("scale", Duration::from_millis(10), now, None);
+        profiler.record("scale", Duration::from_millis(20), now, None);
+
+        let stats = profiler
+            .get_operation_stats("scale")
+            .expect("stats should be valid");
+        assert_eq!(stats.invocation_count, 2);
+        let avg = stats.average_ms().expect("avg should be valid");
+        assert!((avg - 15.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_profiler_next_frame() {
+        let mut profiler = AccelProfiler::new(100);
+        assert_eq!(profiler.current_frame(), 0);
+        profiler.next_frame();
+        assert_eq!(profiler.current_frame(), 1);
+        profiler.next_frame();
+        assert_eq!(profiler.current_frame(), 2);
+    }
+
+    #[test]
+    fn test_profile_entry_duration_ms() {
+        let entry = ProfileEntry {
+            operation: "test".to_string(),
+            duration: Duration::from_millis(42),
+            started_at: Instant::now(),
+            frame_index: Some(0),
+            tag: None,
+        };
+        assert!((entry.duration_ms() - 42.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_profiler_tagged_entries() {
+        let mut profiler = AccelProfiler::new(100);
+        let now = Instant::now();
+        profiler.record("op", Duration::from_millis(1), now, Some("gpu"));
+        profiler.record("op", Duration::from_millis(2), now, Some("cpu"));
+        profiler.record("op", Duration::from_millis(3), now, None);
+
+        let entries = profiler.entries();
+        assert_eq!(entries[0].tag.as_deref(), Some("gpu"));
+        assert_eq!(entries[1].tag.as_deref(), Some("cpu"));
+        assert!(entries[2].tag.is_none());
     }
 }

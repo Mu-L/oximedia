@@ -1,6 +1,7 @@
 [package]
 name = "oximedia-scaling"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -17,6 +18,8 @@ oximedia-core.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
 serde = { workspace = true }
+scirs2-core.workspace = true
+ndarray.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

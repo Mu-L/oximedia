@@ -319,7 +319,7 @@ impl Message {
     #[must_use]
     pub fn new(message_type: MessageType) -> Self {
         let mut transaction_id = [0u8; 12];
-        use rand::Rng;
+        use rand::RngExt;
         rand::rng().fill(&mut transaction_id);
 
         Self {

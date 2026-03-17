@@ -1,0 +1,23 @@
+[package]
+name = "oximedia-caption-gen"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Advanced caption and subtitle generation — speech alignment, line breaking, WCAG compliance, and speaker diarization for OxiMedia"
+keywords = ["captions", "subtitles", "accessibility", "speech-to-text", "multimedia"]
+categories = ["multimedia", "accessibility", "text-processing"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]

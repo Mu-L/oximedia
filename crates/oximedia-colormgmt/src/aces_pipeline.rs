@@ -261,6 +261,206 @@ impl AcesInputTransform {
     }
 }
 
+// ─── ACES Output Transform 2.0 ───────────────────────────────────────────────
+
+/// Target output colour space for an ACES Output Transform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OutputColorSpace {
+    /// sRGB (IEC 61966-2-1), D65 white point, gamma ~2.2.
+    Srgb,
+    /// Display P3 (DCI-P3 with D65 white point).
+    P3D65,
+    /// Rec.2020, D65, HDR-capable.
+    Rec2020,
+    /// Rec.709 (same gamut as sRGB, but BT.1886 gamma).
+    Rec709,
+}
+
+impl OutputColorSpace {
+    /// Human-readable label.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Srgb => "sRGB",
+            Self::P3D65 => "P3-D65",
+            Self::Rec2020 => "Rec.2020",
+            Self::Rec709 => "Rec.709",
+        }
+    }
+
+    /// ACEScg (AP1) to output-RGB 3×3 matrix (D60 → D65 adaptation included).
+    ///
+    /// Source: ACES CTL transforms and ACES OT 2.0 working document.
+    #[must_use]
+    pub fn acescg_to_output_matrix(self) -> [[f32; 3]; 3] {
+        match self {
+            Self::Srgb | Self::Rec709 => {
+                // ACEScg AP1 → sRGB/Rec.709, D60→D65 adapted (approximate)
+                [
+                    [1.704_859, -0.621_791, -0.083_068],
+                    [-0.130_257, 1.140_804, -0.010_547],
+                    [-0.023_964, -0.128_975, 1.152_939],
+                ]
+            }
+            Self::P3D65 => {
+                // ACEScg AP1 → P3-D65
+                [
+                    [1.286_189, -0.278_894, -0.007_295],
+                    [-0.042_581, 1.062_323, -0.019_742],
+                    [-0.013_604, -0.158_305, 1.171_909],
+                ]
+            }
+            Self::Rec2020 => {
+                // ACEScg AP1 → Rec.2020
+                [
+                    [0.941_700, 0.013_981, 0.044_319],
+                    [0.008_956, 0.948_080, 0.042_964],
+                    [-0.004_789, 0.017_188, 0.987_601],
+                ]
+            }
+        }
+    }
+
+    /// Apply the output OETF (encoding gamma/TRC) to a single linear value.
+    #[must_use]
+    pub fn apply_oetf(self, linear: f32) -> f32 {
+        let v = linear.clamp(0.0, 1.0) as f64;
+        let encoded = match self {
+            Self::Srgb => {
+                if v <= 0.003_130_8 {
+                    12.92 * v
+                } else {
+                    1.055 * v.powf(1.0 / 2.4) - 0.055
+                }
+            }
+            Self::Rec709 => {
+                if v < 0.018 {
+                    4.5 * v
+                } else {
+                    1.099 * v.powf(0.45) - 0.099
+                }
+            }
+            Self::P3D65 => {
+                // DCI-P3 uses 2.6 gamma, but P3-D65 for consumer displays uses sRGB-like
+                1.055 * v.powf(1.0 / 2.4) - 0.055
+            }
+            Self::Rec2020 => {
+                // BT.2020 10-bit OETF
+                const ALPHA: f64 = 1.099_296_826_809_443;
+                const BETA: f64 = 0.018_053_968_510_807;
+                if v < BETA {
+                    4.5 * v
+                } else {
+                    ALPHA * v.powf(0.45) - (ALPHA - 1.0)
+                }
+            }
+        };
+        encoded.clamp(0.0, 1.0) as f32
+    }
+}
+
+/// ACES Reference Rendering Transform (RRT) tone curve.
+///
+/// The RRT maps scene-linear ACES values to an output-referred signal.
+/// This is the standard "S-curve" used in the ACES pipeline.
+///
+/// Based on: ACES CTL `rrt.ctl`, parametric form from ACES developers.
+#[must_use]
+pub fn aces_rrt_tone_curve(x: f32) -> f32 {
+    // Parametric RRT S-curve (simplified; matches ACES 1.0 closely)
+    // Uses the segmented spline model: toe / midpoint / shoulder
+    const A: f32 = 2.51;
+    const B: f32 = 0.03;
+    const C: f32 = 2.43;
+    const D: f32 = 0.59;
+    const E: f32 = 0.14;
+
+    // ACES-fitted curve — identical formula to the widely-used approximation
+    let v = x.max(0.0);
+    ((v * (A * v + B)) / (v * (C * v + D) + E)).clamp(0.0, 1.0)
+}
+
+/// ACES Output Transform 2.0 (OT 2.0).
+///
+/// Implements the full ACES Output Transform pipeline:
+/// 1. Apply the Reference Rendering Transform (RRT) tone curve per channel.
+/// 2. Gamut-convert from ACEScg (AP1) to the target output colour space.
+/// 3. Apply the output OETF (gamma/TRC).
+///
+/// This is the "candidate" ACES OT 2.0 approach as described in the ACES
+/// working group documents, which separates the RRT from the Output Device
+/// Transform (ODT) and applies a unified S-curve before gamut conversion.
+///
+/// # Reference
+///
+/// - ACES Technical Bulletin TB-2014-013
+/// - ACES Output Transform 2.0 Working Document (2022)
+#[derive(Debug, Clone)]
+pub struct AcesOutputTransform2 {
+    /// Target output colour space.
+    pub output_space: OutputColorSpace,
+    /// Peak output luminance in nits (default 100 for SDR).
+    pub peak_luminance: f32,
+    /// Minimum output luminance in nits (default 0 for SDR).
+    pub min_luminance: f32,
+}
+
+impl AcesOutputTransform2 {
+    /// Creates a new ACES OT 2.0 targeting the given output colour space.
+    #[must_use]
+    pub fn new(output_space: OutputColorSpace) -> Self {
+        Self {
+            output_space,
+            peak_luminance: 100.0,
+            min_luminance: 0.0,
+        }
+    }
+
+    /// Set peak output luminance in nits (for HDR outputs).
+    #[must_use]
+    pub fn with_peak_luminance(mut self, nits: f32) -> Self {
+        self.peak_luminance = nits.max(0.0);
+        self
+    }
+
+    /// Apply the complete ACES Output Transform 2.0 to an ACEScg RGB triplet.
+    ///
+    /// Input should be scene-linear ACEScg values (AP1 primaries, D60).
+    /// Output is encoded in the target colour space and transfer function.
+    #[must_use]
+    pub fn apply(&self, acescg: [f32; 3]) -> [f32; 3] {
+        // Step 1: Apply RRT tone curve per channel
+        let rrt = [
+            aces_rrt_tone_curve(acescg[0]),
+            aces_rrt_tone_curve(acescg[1]),
+            aces_rrt_tone_curve(acescg[2]),
+        ];
+
+        // Step 2: Gamut conversion: ACEScg AP1 → output primaries
+        let matrix = self.output_space.acescg_to_output_matrix();
+        let linear_out = [
+            (matrix[0][0] * rrt[0] + matrix[0][1] * rrt[1] + matrix[0][2] * rrt[2]).clamp(0.0, 1.0),
+            (matrix[1][0] * rrt[0] + matrix[1][1] * rrt[1] + matrix[1][2] * rrt[2]).clamp(0.0, 1.0),
+            (matrix[2][0] * rrt[0] + matrix[2][1] * rrt[1] + matrix[2][2] * rrt[2]).clamp(0.0, 1.0),
+        ];
+
+        // Step 3: Apply output OETF
+        [
+            self.output_space.apply_oetf(linear_out[0]),
+            self.output_space.apply_oetf(linear_out[1]),
+            self.output_space.apply_oetf(linear_out[2]),
+        ]
+    }
+
+    /// Apply OT 2.0 to an entire frame.
+    ///
+    /// Each element of `pixels` is an ACEScg `[R, G, B]` triplet.
+    #[must_use]
+    pub fn apply_frame(&self, pixels: &[[f32; 3]]) -> Vec<[f32; 3]> {
+        pixels.iter().map(|&px| self.apply(px)).collect()
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -414,5 +614,99 @@ mod tests {
     fn test_device_name_stored() {
         let idt = AcesInputTransform::cgi_linear();
         assert!(!idt.device_name.is_empty());
+    }
+
+    // ── ACES OT 2.0 tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_aces_ot2_black_maps_to_black() {
+        let ot = AcesOutputTransform2::new(OutputColorSpace::Srgb);
+        let out = ot.apply([0.0, 0.0, 0.0]);
+        for ch in out {
+            assert!(ch.abs() < 1e-4, "Black should map near 0: {ch}");
+        }
+    }
+
+    #[test]
+    fn test_aces_ot2_middle_grey_in_range() {
+        let ot = AcesOutputTransform2::new(OutputColorSpace::Srgb);
+        // Middle grey 0.18 in ACEScg → should be around 0.18 in SDR
+        let out = ot.apply([0.18, 0.18, 0.18]);
+        for ch in out {
+            assert!(ch >= 0.0 && ch <= 1.0, "Output should be in [0,1]: {ch}");
+        }
+    }
+
+    #[test]
+    fn test_aces_ot2_white_point_maps_to_one() {
+        let ot = AcesOutputTransform2::new(OutputColorSpace::Srgb);
+        // Very bright input should map to 1.0 (clamped)
+        let out = ot.apply([100.0, 100.0, 100.0]);
+        for ch in out {
+            assert!(ch >= 0.99, "Bright white should map to ~1.0: {ch}");
+        }
+    }
+
+    #[test]
+    fn test_aces_ot2_rec2020_output() {
+        let ot = AcesOutputTransform2::new(OutputColorSpace::Rec2020);
+        let out = ot.apply([0.5, 0.3, 0.2]);
+        for ch in out {
+            assert!(ch >= 0.0 && ch <= 1.0, "Rec.2020 output in [0,1]: {ch}");
+        }
+    }
+
+    #[test]
+    fn test_aces_ot2_p3_output() {
+        let ot = AcesOutputTransform2::new(OutputColorSpace::P3D65);
+        let out = ot.apply([0.5, 0.3, 0.2]);
+        for ch in out {
+            assert!(ch >= 0.0 && ch <= 1.0, "P3 output in [0,1]: {ch}");
+        }
+    }
+
+    #[test]
+    fn test_aces_ot2_preserves_neutrals() {
+        let ot = AcesOutputTransform2::new(OutputColorSpace::Srgb);
+        // For neutral colors (equal RGB), output should be equal (neutral axis preserved)
+        let out = ot.apply([0.18, 0.18, 0.18]);
+        let max_diff = (out[0] - out[1]).abs().max((out[1] - out[2]).abs());
+        assert!(max_diff < 0.01, "Neutral axis not preserved: {out:?}");
+    }
+
+    #[test]
+    fn test_aces_ot2_monotonic_brightness() {
+        let ot = AcesOutputTransform2::new(OutputColorSpace::Srgb);
+        let out1 = ot.apply([0.1, 0.1, 0.1]);
+        let out2 = ot.apply([0.5, 0.5, 0.5]);
+        let out3 = ot.apply([2.0, 2.0, 2.0]);
+        assert!(out1[0] < out2[0], "Should be monotonic increasing");
+        assert!(out2[0] < out3[0], "Should be monotonic increasing");
+    }
+
+    #[test]
+    fn test_aces_rrt_tone_curve() {
+        // RRT tone curve should produce values in [0, 1]
+        for x in [0.0f32, 0.01, 0.1, 0.18, 0.5, 1.0, 2.0, 10.0] {
+            let y = aces_rrt_tone_curve(x);
+            assert!(
+                y >= 0.0 && y <= 1.0,
+                "RRT curve out of range for x={x}: y={y}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_aces_rrt_monotonic() {
+        let mut prev = 0.0f32;
+        for i in 0..=100 {
+            let x = i as f32 * 0.1;
+            let y = aces_rrt_tone_curve(x);
+            assert!(
+                y >= prev - 1e-6,
+                "RRT curve should be monotonic: {prev} -> {y} at x={x}"
+            );
+            prev = y;
+        }
     }
 }

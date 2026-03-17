@@ -814,4 +814,122 @@ mod tests {
         assert_eq!(buffer[0], 0xFF);
         assert_eq!(buffer[1], 45);
     }
+
+    /// Verify that a round-trip (write → parse) preserves all metadata fields.
+    #[test]
+    fn test_rpu_roundtrip() {
+        use crate::{
+            metadata::{Level1Metadata, Level5Metadata, Level6Metadata, Level8Metadata},
+            DolbyVisionRpu, Profile,
+        };
+
+        // Build an RPU with known Level 1, 5, 6, and 8 metadata.
+        let mut rpu = DolbyVisionRpu::new(Profile::Profile8);
+        rpu.level1 = Some(Level1Metadata {
+            min_pq: 64,
+            avg_pq: 512,
+            max_pq: 3500,
+        });
+        rpu.level5 = Some(Level5Metadata {
+            active_area_left_offset: 10,
+            active_area_right_offset: 20,
+            active_area_top_offset: 5,
+            active_area_bottom_offset: 15,
+        });
+        rpu.level6 = Some(Level6Metadata {
+            max_cll: 1000,
+            max_fall: 400,
+            min_display_mastering_luminance: 50,
+            max_display_mastering_luminance: 10000,
+            master_display_primaries: [[34000, 16000], [13250, 34500], [7500, 3000]],
+            master_display_white_point: [15635, 16450],
+        });
+        rpu.level8 = Some(Level8Metadata::hdr_1000());
+
+        // Serialize to a raw bitstream.
+        let bytes = write_rpu_bitstream(&rpu).expect("write_rpu_bitstream should succeed");
+        assert!(!bytes.is_empty(), "Serialized bitstream must not be empty");
+
+        // Parse back.
+        let parsed =
+            crate::parser::parse_rpu_bitstream(&bytes).expect("parse_rpu_bitstream should succeed");
+
+        // ── Level 1 ─────────────────────────────────────────────────────────
+        let l1_orig = rpu.level1.as_ref().expect("l1 must be present");
+        let l1_parsed = parsed.level1.as_ref().expect("parsed l1 must be present");
+        assert_eq!(
+            l1_orig.min_pq, l1_parsed.min_pq,
+            "min_pq must survive round-trip"
+        );
+        assert_eq!(
+            l1_orig.avg_pq, l1_parsed.avg_pq,
+            "avg_pq must survive round-trip"
+        );
+        assert_eq!(
+            l1_orig.max_pq, l1_parsed.max_pq,
+            "max_pq must survive round-trip"
+        );
+
+        // ── Level 5 ─────────────────────────────────────────────────────────
+        let l5_orig = rpu.level5.as_ref().expect("l5 must be present");
+        let l5_parsed = parsed.level5.as_ref().expect("parsed l5 must be present");
+        assert_eq!(
+            l5_orig.active_area_left_offset, l5_parsed.active_area_left_offset,
+            "active_area_left_offset must survive round-trip"
+        );
+        assert_eq!(
+            l5_orig.active_area_right_offset, l5_parsed.active_area_right_offset,
+            "active_area_right_offset must survive round-trip"
+        );
+        assert_eq!(
+            l5_orig.active_area_top_offset, l5_parsed.active_area_top_offset,
+            "active_area_top_offset must survive round-trip"
+        );
+        assert_eq!(
+            l5_orig.active_area_bottom_offset, l5_parsed.active_area_bottom_offset,
+            "active_area_bottom_offset must survive round-trip"
+        );
+
+        // ── Level 6 ─────────────────────────────────────────────────────────
+        let l6_orig = rpu.level6.as_ref().expect("l6 must be present");
+        let l6_parsed = parsed.level6.as_ref().expect("parsed l6 must be present");
+        assert_eq!(l6_orig.max_cll, l6_parsed.max_cll, "max_cll round-trip");
+        assert_eq!(l6_orig.max_fall, l6_parsed.max_fall, "max_fall round-trip");
+        assert_eq!(
+            l6_orig.min_display_mastering_luminance, l6_parsed.min_display_mastering_luminance,
+            "min_display_mastering_luminance round-trip"
+        );
+        assert_eq!(
+            l6_orig.max_display_mastering_luminance, l6_parsed.max_display_mastering_luminance,
+            "max_display_mastering_luminance round-trip"
+        );
+        assert_eq!(
+            l6_orig.master_display_primaries, l6_parsed.master_display_primaries,
+            "master_display_primaries round-trip"
+        );
+        assert_eq!(
+            l6_orig.master_display_white_point, l6_parsed.master_display_white_point,
+            "master_display_white_point round-trip"
+        );
+
+        // ── Level 8 ─────────────────────────────────────────────────────────
+        let l8_orig = rpu.level8.as_ref().expect("l8 must be present");
+        let l8_parsed = parsed.level8.as_ref().expect("parsed l8 must be present");
+        assert_eq!(
+            l8_orig.target_max_pq, l8_parsed.target_max_pq,
+            "target_max_pq round-trip"
+        );
+        assert_eq!(
+            l8_orig.target_min_pq, l8_parsed.target_min_pq,
+            "target_min_pq round-trip"
+        );
+        assert_eq!(
+            l8_orig.target_eotf, l8_parsed.target_eotf,
+            "target_eotf round-trip"
+        );
+        assert_eq!(
+            l8_orig.peak_luminance, l8_parsed.peak_luminance,
+            "peak_luminance round-trip"
+        );
+    }
 }

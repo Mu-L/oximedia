@@ -12,7 +12,7 @@ pub mod tree;
 pub mod verify;
 
 pub use generate::{ChecksumGenerator, FileChecksum};
-pub use tree::{MerkleNode, MerkleTree};
+pub use tree::{MerkleNode, MerkleProofStep, MerkleTree, ProofDirection};
 pub use verify::{ChecksumVerifier, VerificationReport, VerificationResult};
 
 use serde::{Deserialize, Serialize};

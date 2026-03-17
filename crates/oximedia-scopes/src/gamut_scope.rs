@@ -282,6 +282,240 @@ pub fn analyze_gamut(frame: &[u8], width: u32, height: u32, gamut: TargetGamut) 
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CIE diagram renderer with gamut triangle overlays
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// RGBA color for a gamut triangle outline (Rec.709 = green, P3 = yellow, 2020 = red, sRGB = cyan).
+fn gamut_line_color(gamut: TargetGamut) -> [u8; 4] {
+    match gamut {
+        TargetGamut::Rec709 => [0, 220, 0, 220],
+        TargetGamut::Srgb => [0, 220, 220, 200],
+        TargetGamut::DciP3 => [220, 220, 0, 200],
+        TargetGamut::Rec2020 => [220, 0, 0, 200],
+    }
+}
+
+/// Map a CIE xy chromaticity coordinate to a pixel position within the scope.
+///
+/// The visible CIE chromaticity locus fits roughly in x ∈ [0.0, 0.8], y ∈ [0.0, 0.9].
+/// We map that range to the output image dimensions with a small margin.
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_sign_loss)]
+#[allow(clippy::cast_precision_loss)]
+fn xy_to_pixel(x: f64, y: f64, width: u32, height: u32) -> (i32, i32) {
+    // CIE locus viewport: x ∈ [0.0, 0.8], y ∈ [0.0, 0.9]
+    let margin = 0.05;
+    let x_min = -margin;
+    let x_max = 0.80 + margin;
+    let y_min = -margin;
+    let y_max = 0.90 + margin;
+
+    let px = ((x - x_min) / (x_max - x_min) * (width as f64 - 1.0)).round() as i32;
+    // Y axis is inverted: higher y → lower pixel row
+    let py = ((1.0 - (y - y_min) / (y_max - y_min)) * (height as f64 - 1.0)).round() as i32;
+    (px, py)
+}
+
+/// Draw a Bresenham line between two CIE xy coordinates onto an RGBA buffer.
+#[allow(clippy::cast_possible_wrap)]
+#[allow(clippy::cast_sign_loss)]
+#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_possible_truncation)]
+fn draw_chroma_line(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+    color: [u8; 4],
+) {
+    let w = width as usize;
+    let h = height as usize;
+    let (mut x0, mut y0) = xy_to_pixel(ax, ay, width, height);
+    let (x1, y1) = xy_to_pixel(bx, by, width, height);
+
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx: i32 = if x0 < x1 { 1 } else { -1 };
+    let sy: i32 = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    loop {
+        if x0 >= 0 && y0 >= 0 && (x0 as usize) < w && (y0 as usize) < h {
+            let idx = (y0 as usize * w + x0 as usize) * 4;
+            let a = color[3] as f32 / 255.0;
+            let ia = 1.0 - a;
+            rgba[idx] = (color[0] as f32 * a + rgba[idx] as f32 * ia) as u8;
+            rgba[idx + 1] = (color[1] as f32 * a + rgba[idx + 1] as f32 * ia) as u8;
+            rgba[idx + 2] = (color[2] as f32 * a + rgba[idx + 2] as f32 * ia) as u8;
+            rgba[idx + 3] = 255;
+        }
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+/// Draw a gamut triangle outline for a given `TargetGamut` onto an RGBA buffer.
+///
+/// The triangle is drawn as three connected line segments between the red, green,
+/// and blue primaries of the target color space in CIE xy space.
+///
+/// # Arguments
+///
+/// * `rgba` — RGBA pixel buffer (length must be `width * height * 4`).
+/// * `width` / `height` — buffer dimensions.
+/// * `gamut` — gamut whose triangle to draw.
+/// * `color` — optional RGBA line color; if `None`, the default per-gamut color is used.
+pub fn draw_gamut_triangle(
+    rgba: &mut [u8],
+    width: u32,
+    height: u32,
+    gamut: TargetGamut,
+    color: Option<[u8; 4]>,
+) {
+    let tri = GamutTriangle::for_gamut(gamut);
+    let col = color.unwrap_or_else(|| gamut_line_color(gamut));
+
+    // Draw R→G, G→B, B→R edges
+    draw_chroma_line(
+        rgba,
+        width,
+        height,
+        tri.red.x,
+        tri.red.y,
+        tri.green.x,
+        tri.green.y,
+        col,
+    );
+    draw_chroma_line(
+        rgba,
+        width,
+        height,
+        tri.green.x,
+        tri.green.y,
+        tri.blue.x,
+        tri.blue.y,
+        col,
+    );
+    draw_chroma_line(
+        rgba, width, height, tri.blue.x, tri.blue.y, tri.red.x, tri.red.y, col,
+    );
+}
+
+/// Render a CIE 1931 xy gamut scope with triangle overlays for multiple gamuts.
+///
+/// The output is an RGBA image of size `config.width × config.height` containing:
+/// - Scatter-plotted pixel chromaticities sampled from `frame`.
+/// - Gamut triangle outlines for each gamut in `overlays`.
+/// - Optional spectral locus (horizon curve).
+///
+/// # Arguments
+///
+/// * `frame` — RGB24 frame data (3 bytes per pixel).
+/// * `width` / `height` — frame dimensions.
+/// * `config` — scope configuration.
+/// * `overlays` — list of gamuts whose triangles to overlay (may be empty).
+///
+/// # Errors
+///
+/// Returns an error if `frame.len() < width * height * 3`.
+#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_sign_loss)]
+pub fn render_gamut_scope(
+    frame: &[u8],
+    width: u32,
+    height: u32,
+    config: &GamutScopeConfig,
+    overlays: &[TargetGamut],
+) -> oximedia_core::OxiResult<Vec<u8>> {
+    let expected = (width as usize) * (height as usize) * 3;
+    if frame.len() < expected {
+        return Err(oximedia_core::OxiError::InvalidData(format!(
+            "Frame too small: need {expected}, got {}",
+            frame.len()
+        )));
+    }
+
+    let out_w = config.width as usize;
+    let out_h = config.height as usize;
+    // Dark background
+    let bg = config.background_level;
+    let mut rgba: Vec<u8> = (0..out_w * out_h)
+        .flat_map(|_| [bg, bg, bg, 255u8])
+        .collect();
+
+    // Plot pixel chromaticities
+    let num_pixels = (width as usize) * (height as usize);
+    let intensity = (config.dot_intensity.clamp(0.0, 1.0) * 200.0) as u8;
+    let oob_color: [u8; 4] = [220, 60, 60, intensity];
+    let in_color: [u8; 4] = [60, 200, 100, intensity];
+
+    let triangle = if config.highlight_out_of_gamut {
+        Some(GamutTriangle::for_gamut(config.target_gamut))
+    } else {
+        None
+    };
+
+    for i in 0..num_pixels {
+        let r_lin = srgb_to_linear(f64::from(frame[i * 3]) / 255.0);
+        let g_lin = srgb_to_linear(f64::from(frame[i * 3 + 1]) / 255.0);
+        let b_lin = srgb_to_linear(f64::from(frame[i * 3 + 2]) / 255.0);
+
+        let (x, y, z) = linear_rgb_to_xyz(r_lin, g_lin, b_lin);
+        let chroma = match config.diagram_kind {
+            DiagramKind::CieXy => xyz_to_xy(x, y, z),
+            DiagramKind::CieUpVp => {
+                let (up, vp) = xyz_to_upvp(x, y, z);
+                // u'v' visible locus ≈ u' ∈ [0, 0.62], v' ∈ [0, 0.60] — treat as x,y
+                ChromaXy::new(up, vp)
+            }
+        };
+
+        let is_oob = triangle.as_ref().map_or(false, |t| !t.contains(&chroma));
+        let color = if is_oob { oob_color } else { in_color };
+
+        let (px, py) = xy_to_pixel(chroma.x, chroma.y, config.width, config.height);
+        if px >= 0 && py >= 0 && (px as usize) < out_w && (py as usize) < out_h {
+            let idx = (py as usize * out_w + px as usize) * 4;
+            // Additive blending for brightness accumulation
+            rgba[idx] = rgba[idx].saturating_add(color[0] / 8);
+            rgba[idx + 1] = rgba[idx + 1].saturating_add(color[1] / 8);
+            rgba[idx + 2] = rgba[idx + 2].saturating_add(color[2] / 8);
+            rgba[idx + 3] = 255;
+        }
+    }
+
+    // Draw gamut triangle overlays
+    if config.show_gamut_triangle {
+        draw_gamut_triangle(
+            &mut rgba,
+            config.width,
+            config.height,
+            config.target_gamut,
+            None,
+        );
+    }
+    for &gamut in overlays {
+        draw_gamut_triangle(&mut rgba, config.width, config.height, gamut, None);
+    }
+
+    Ok(rgba)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

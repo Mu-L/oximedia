@@ -367,10 +367,7 @@ mod tests {
     #[test]
     fn test_added_caption() {
         let left = vec![cap(0, 0, 1000, "Hello")];
-        let right = vec![
-            cap(0, 0, 1000, "Hello"),
-            cap(1, 2000, 3000, "New caption"),
-        ];
+        let right = vec![cap(0, 0, 1000, "Hello"), cap(1, 2000, 3000, "New caption")];
         let result = diff_captions(&left, &right, &DiffConfig::default());
         assert_eq!(result.summary.added, 1);
         assert_eq!(result.summary.unchanged, 1);
@@ -378,10 +375,7 @@ mod tests {
 
     #[test]
     fn test_removed_caption() {
-        let left = vec![
-            cap(0, 0, 1000, "Hello"),
-            cap(1, 2000, 3000, "Bye"),
-        ];
+        let left = vec![cap(0, 0, 1000, "Hello"), cap(1, 2000, 3000, "Bye")];
         let right = vec![cap(0, 0, 1000, "Hello")];
         let result = diff_captions(&left, &right, &DiffConfig::default());
         assert_eq!(result.summary.removed, 1);

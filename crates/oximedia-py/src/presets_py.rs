@@ -99,6 +99,7 @@ fn py_to_preset_config(py: &PyPreset) -> PresetConfig {
         } else {
             Some(py.container.clone())
         },
+        audio_channel_layout: None,
     }
 }
 

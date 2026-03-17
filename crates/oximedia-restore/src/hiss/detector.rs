@@ -86,7 +86,7 @@ mod tests {
 
     #[test]
     fn test_hiss_detector() {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         // Create high-frequency noise (hiss)

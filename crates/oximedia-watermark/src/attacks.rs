@@ -104,8 +104,6 @@ pub fn highpass_filter(samples: &[f32], cutoff_hz: f32, sample_rate: u32) -> Vec
 /// Additive white Gaussian noise attack.
 #[must_use]
 pub fn add_noise(samples: &[f32], snr_db: f32) -> Vec<f32> {
-    use rand::Rng;
-
     // Calculate signal power
     let signal_power: f32 = samples.iter().map(|&s| s * s).sum::<f32>() / samples.len() as f32;
 
@@ -113,14 +111,14 @@ pub fn add_noise(samples: &[f32], snr_db: f32) -> Vec<f32> {
     let noise_power = signal_power / 10.0f32.powf(snr_db / 10.0);
     let noise_std = noise_power.sqrt();
 
-    let mut rng = rand::rng();
+    let mut rng = scirs2_core::random::Random::seed(0xDEAD_CAFE);
 
     samples
         .iter()
         .map(|&s| {
             // Box-Muller transform for Gaussian noise
-            let u1: f32 = rng.random_range(1e-10..1.0);
-            let u2: f32 = rng.random_range(0.0..1.0);
+            let u1 = (rng.random_f64() as f32).max(1e-10).min(1.0 - f32::EPSILON);
+            let u2 = rng.random_f64() as f32;
             let noise =
                 noise_std * (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
             s + noise
@@ -191,13 +189,12 @@ pub fn crop(samples: &[f32], start: usize, end: usize) -> Vec<f32> {
 /// Jitter attack (random sample delays).
 #[must_use]
 pub fn jitter(samples: &[f32], max_delay: usize) -> Vec<f32> {
-    use rand::Rng;
-
-    let mut rng = rand::rng();
+    let mut rng = scirs2_core::random::Random::seed(0xBEEF_FACE);
     let mut jittered = samples.to_vec();
 
     for i in max_delay..samples.len() {
-        let delay = rng.random_range(0..=max_delay);
+        let delay = (rng.random_f64() * (max_delay + 1) as f64) as usize;
+        let delay = delay.min(max_delay);
         if i >= delay {
             jittered[i] = samples[i - delay];
         }

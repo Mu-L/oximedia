@@ -128,6 +128,7 @@ pub enum ConformError {
     SessionNotFound(String),
 
     /// Async task error.
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Async task error: {0}")]
     TaskJoin(#[from] tokio::task::JoinError),
 

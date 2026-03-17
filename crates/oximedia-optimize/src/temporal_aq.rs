@@ -5,6 +5,10 @@
 //! (motion activity, scene changes, fade detection) to dynamically adjust QP values
 //! across frames. It helps allocate more bits to high-motion or visually complex
 //! temporal segments while saving bits on static or slowly-changing regions.
+//!
+//! The [`TemporalAqEngine`] can be connected to the spatial [`AqEngine`](crate::aq::AqEngine)
+//! via [`TemporalAqBridge`], which combines temporal and spatial QP offsets into
+//! a unified per-block decision.
 
 /// Number of frames kept in the sliding temporal window.
 const DEFAULT_WINDOW_SIZE: usize = 16;
@@ -121,12 +125,17 @@ impl TemporalAqEngine {
         Self::new(TemporalAqConfig::default())
     }
 
+    /// Returns the engine configuration.
+    pub fn config(&self) -> &TemporalAqConfig {
+        &self.config
+    }
+
     /// Processes a new frame's temporal activity and returns AQ recommendations.
     #[allow(clippy::cast_precision_loss)]
     pub fn process_frame(&mut self, activity: TemporalActivity) -> TemporalAqResult {
         let raw_complexity = activity.complexity_score() * self.config.motion_sensitivity;
-        let is_scene_change = activity.is_scene_change
-            || activity.frame_sad > self.config.scene_change_threshold;
+        let is_scene_change =
+            activity.is_scene_change || activity.frame_sad > self.config.scene_change_threshold;
 
         // Temporal smoothing
         let smoothed = if is_scene_change {
@@ -210,6 +219,125 @@ impl TemporalAqEngine {
         let ratio = fade_count as f64 / self.window.len() as f64;
         ratio > self.config.fade_sensitivity
     }
+
+    /// Returns the window contents for analysis.
+    pub fn window(&self) -> &[TemporalActivity] {
+        &self.window
+    }
+}
+
+/// Bridge between temporal AQ and spatial AQ engines for unified per-block QP adaptation.
+///
+/// The bridge combines temporal (frame-level) QP offsets from [`TemporalAqEngine`]
+/// with spatial (block-level) QP offsets from [`AqEngine`](crate::aq::AqEngine) to produce
+/// a final per-block QP decision.
+#[derive(Debug)]
+pub struct TemporalAqBridge {
+    /// Temporal AQ engine for frame-level decisions.
+    temporal_engine: TemporalAqEngine,
+    /// Weight for temporal component (0.0-1.0).
+    temporal_weight: f64,
+    /// Weight for spatial component (0.0-1.0).
+    spatial_weight: f64,
+    /// Maximum combined QP delta.
+    max_combined_delta: i8,
+    /// Last temporal result for combining with spatial.
+    last_temporal_result: Option<TemporalAqResult>,
+}
+
+impl TemporalAqBridge {
+    /// Creates a new bridge with given weights.
+    pub fn new(config: TemporalAqConfig, temporal_weight: f64, spatial_weight: f64) -> Self {
+        Self {
+            temporal_engine: TemporalAqEngine::new(config),
+            temporal_weight: temporal_weight.clamp(0.0, 1.0),
+            spatial_weight: spatial_weight.clamp(0.0, 1.0),
+            max_combined_delta: 8,
+            last_temporal_result: None,
+        }
+    }
+
+    /// Creates a bridge with default balanced weights (0.4 temporal, 0.6 spatial).
+    pub fn with_defaults() -> Self {
+        Self::new(TemporalAqConfig::default(), 0.4, 0.6)
+    }
+
+    /// Processes a frame's temporal activity to update the temporal component.
+    pub fn update_temporal(&mut self, activity: TemporalActivity) -> &TemporalAqResult {
+        let result = self.temporal_engine.process_frame(activity);
+        self.last_temporal_result = Some(result);
+        // Safe: we just inserted it
+        self.last_temporal_result.as_ref().expect("just inserted")
+    }
+
+    /// Combines temporal QP delta with a spatial AQ QP offset for a specific block.
+    ///
+    /// This is the main integration point: call `update_temporal` once per frame,
+    /// then call `combine_with_spatial` for each block in that frame.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn combine_with_spatial(&self, spatial_qp_offset: i8) -> CombinedAqResult {
+        let temporal_delta = self
+            .last_temporal_result
+            .as_ref()
+            .map(|r| r.qp_delta)
+            .unwrap_or(0);
+
+        let temporal_f = f64::from(temporal_delta) * self.temporal_weight;
+        let spatial_f = f64::from(spatial_qp_offset) * self.spatial_weight;
+        let combined_f = temporal_f + spatial_f;
+
+        let combined = combined_f
+            .round()
+            .max(f64::from(-self.max_combined_delta))
+            .min(f64::from(self.max_combined_delta)) as i8;
+
+        let at_scene_boundary = self
+            .last_temporal_result
+            .as_ref()
+            .map(|r| r.at_scene_boundary)
+            .unwrap_or(false);
+
+        CombinedAqResult {
+            final_qp_delta: combined,
+            temporal_component: temporal_delta,
+            spatial_component: spatial_qp_offset,
+            at_scene_boundary,
+        }
+    }
+
+    /// Returns the underlying temporal engine for direct access.
+    pub fn temporal_engine(&self) -> &TemporalAqEngine {
+        &self.temporal_engine
+    }
+
+    /// Returns the last temporal analysis result.
+    pub fn last_temporal_result(&self) -> Option<&TemporalAqResult> {
+        self.last_temporal_result.as_ref()
+    }
+
+    /// Sets the maximum combined delta.
+    pub fn set_max_combined_delta(&mut self, max_delta: i8) {
+        self.max_combined_delta = max_delta.max(1);
+    }
+
+    /// Resets the bridge state.
+    pub fn reset(&mut self) {
+        self.temporal_engine.reset();
+        self.last_temporal_result = None;
+    }
+}
+
+/// Combined spatial + temporal AQ result for a single block.
+#[derive(Debug, Clone)]
+pub struct CombinedAqResult {
+    /// Final QP delta after combining temporal and spatial components.
+    pub final_qp_delta: i8,
+    /// Temporal component (frame-level).
+    pub temporal_component: i8,
+    /// Spatial component (block-level).
+    pub spatial_component: i8,
+    /// Whether this frame is at a scene boundary.
+    pub at_scene_boundary: bool,
 }
 
 /// Estimates optimal QP adjustment for a given temporal complexity value.
@@ -364,5 +492,183 @@ mod tests {
         let qp = estimate_qp_for_complexity(100.0, 1, 50);
         assert!(qp >= 1);
         assert!(qp <= 51);
+    }
+
+    // --- New tests for TemporalAqBridge ---
+
+    #[test]
+    fn test_bridge_creation() {
+        let bridge = TemporalAqBridge::with_defaults();
+        assert!(bridge.last_temporal_result().is_none());
+        assert_eq!(bridge.temporal_engine().frames_processed(), 0);
+    }
+
+    #[test]
+    fn test_bridge_update_temporal() {
+        let mut bridge = TemporalAqBridge::with_defaults();
+        let mut ta = TemporalActivity::new(0);
+        ta.avg_motion_magnitude = 20.0;
+        ta.motion_coverage = 0.5;
+        let _ = bridge.update_temporal(ta);
+        assert!(bridge.last_temporal_result().is_some());
+        let complexity = bridge
+            .last_temporal_result()
+            .map(|r| r.complexity)
+            .unwrap_or(0.0);
+        assert!(
+            complexity > 0.0,
+            "Complexity should be > 0 for motion: {}",
+            complexity
+        );
+    }
+
+    #[test]
+    fn test_bridge_combine_no_temporal() {
+        let bridge = TemporalAqBridge::with_defaults();
+        let combined = bridge.combine_with_spatial(-3);
+        // No temporal update yet, temporal component should be 0
+        assert_eq!(combined.temporal_component, 0);
+        assert_eq!(combined.spatial_component, -3);
+        // Final delta should be weighted spatial only
+        assert!(combined.final_qp_delta <= 0);
+    }
+
+    #[test]
+    fn test_bridge_combine_with_temporal() {
+        let mut bridge = TemporalAqBridge::new(TemporalAqConfig::default(), 0.5, 0.5);
+        // High motion frame
+        let mut ta = TemporalActivity::new(0);
+        ta.avg_motion_magnitude = 64.0;
+        ta.motion_coverage = 0.9;
+        bridge.update_temporal(ta);
+
+        // Combine with spatial offset
+        let combined = bridge.combine_with_spatial(-2);
+        assert!(
+            combined.final_qp_delta != 0,
+            "Combined delta should be non-zero"
+        );
+    }
+
+    #[test]
+    fn test_bridge_scene_boundary_propagation() {
+        let mut bridge = TemporalAqBridge::with_defaults();
+        let mut ta = TemporalActivity::new(0);
+        ta.is_scene_change = true;
+        ta.frame_sad = 100_000.0;
+        bridge.update_temporal(ta);
+        let combined = bridge.combine_with_spatial(0);
+        assert!(combined.at_scene_boundary);
+    }
+
+    #[test]
+    fn test_bridge_combined_delta_clamping() {
+        let mut bridge = TemporalAqBridge::new(
+            TemporalAqConfig {
+                max_qp_delta: 6,
+                ..Default::default()
+            },
+            1.0,
+            1.0,
+        );
+        bridge.set_max_combined_delta(4);
+
+        // Static frame gives positive temporal delta
+        let ta = TemporalActivity::new(0);
+        bridge.update_temporal(ta);
+        // Combine with large spatial offset
+        let combined = bridge.combine_with_spatial(6);
+        assert!(
+            combined.final_qp_delta <= 4,
+            "Combined delta should be clamped: {}",
+            combined.final_qp_delta
+        );
+        assert!(
+            combined.final_qp_delta >= -4,
+            "Combined delta should be clamped: {}",
+            combined.final_qp_delta
+        );
+    }
+
+    #[test]
+    fn test_bridge_reset() {
+        let mut bridge = TemporalAqBridge::with_defaults();
+        bridge.update_temporal(TemporalActivity::new(0));
+        bridge.reset();
+        assert!(bridge.last_temporal_result().is_none());
+        assert_eq!(bridge.temporal_engine().frames_processed(), 0);
+    }
+
+    #[test]
+    fn test_bridge_high_motion_gets_negative_temporal_delta() {
+        let mut bridge = TemporalAqBridge::with_defaults();
+        let mut ta = TemporalActivity::new(0);
+        ta.avg_motion_magnitude = 64.0;
+        ta.motion_coverage = 0.9;
+        bridge.update_temporal(ta);
+        let temporal_delta = bridge
+            .last_temporal_result()
+            .map(|r| r.qp_delta)
+            .unwrap_or(0);
+        assert!(
+            temporal_delta <= 0,
+            "High motion should give negative temporal delta: {}",
+            temporal_delta
+        );
+    }
+
+    #[test]
+    fn test_bridge_static_gets_positive_temporal_delta() {
+        let mut bridge = TemporalAqBridge::with_defaults();
+        let ta = TemporalActivity::new(0);
+        bridge.update_temporal(ta);
+        let temporal_delta = bridge
+            .last_temporal_result()
+            .map(|r| r.qp_delta)
+            .unwrap_or(0);
+        assert!(
+            temporal_delta >= 0,
+            "Static frame should give non-negative temporal delta: {}",
+            temporal_delta
+        );
+    }
+
+    #[test]
+    fn test_bridge_weights_affect_result() {
+        // All temporal weight
+        let mut bridge_t = TemporalAqBridge::new(TemporalAqConfig::default(), 1.0, 0.0);
+        // All spatial weight
+        let mut bridge_s = TemporalAqBridge::new(TemporalAqConfig::default(), 0.0, 1.0);
+
+        let mut ta = TemporalActivity::new(0);
+        ta.avg_motion_magnitude = 40.0;
+        ta.motion_coverage = 0.7;
+        bridge_t.update_temporal(ta.clone());
+        bridge_s.update_temporal(ta);
+
+        let combined_t = bridge_t.combine_with_spatial(-3);
+        let combined_s = bridge_s.combine_with_spatial(-3);
+
+        // With all-temporal weight, spatial component should be zeroed
+        // With all-spatial weight, temporal component should be zeroed
+        // They should differ
+        assert_ne!(
+            combined_t.final_qp_delta, combined_s.final_qp_delta,
+            "Different weights should produce different results"
+        );
+    }
+
+    #[test]
+    fn test_combined_aq_result_fields() {
+        let result = CombinedAqResult {
+            final_qp_delta: -2,
+            temporal_component: -3,
+            spatial_component: -1,
+            at_scene_boundary: false,
+        };
+        assert_eq!(result.final_qp_delta, -2);
+        assert_eq!(result.temporal_component, -3);
+        assert_eq!(result.spatial_component, -1);
+        assert!(!result.at_scene_boundary);
     }
 }

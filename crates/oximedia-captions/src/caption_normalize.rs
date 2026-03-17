@@ -193,10 +193,7 @@ fn remove_zero_width_chars(text: &str) -> String {
 
 /// Trim each line in a multiline string.
 fn trim_each_line(text: &str) -> String {
-    text.lines()
-        .map(str::trim)
-        .collect::<Vec<_>>()
-        .join("\n")
+    text.lines().map(str::trim).collect::<Vec<_>>().join("\n")
 }
 
 /// Remove empty lines from text.
@@ -243,10 +240,7 @@ fn truncate_lines(text: &str, max_lines: usize) -> String {
     if max_lines == 0 {
         return text.to_string();
     }
-    text.lines()
-        .take(max_lines)
-        .collect::<Vec<_>>()
-        .join("\n")
+    text.lines().take(max_lines).collect::<Vec<_>>().join("\n")
 }
 
 /// Quantize a time value to the nearest multiple of `quantum_ms`.
@@ -366,14 +360,20 @@ pub fn normalize_captions(captions: &[NormCaption], config: &NormalizeConfig) ->
             actions.push(NormRecord {
                 caption_index: i,
                 action: NormAction::DurationClamped,
-                detail: format!("Duration extended from {}ms to {}ms", dur, config.min_duration_ms),
+                detail: format!(
+                    "Duration extended from {}ms to {}ms",
+                    dur, config.min_duration_ms
+                ),
             });
         } else if config.max_duration_ms > 0 && dur > config.max_duration_ms {
             cap.end_ms = cap.start_ms + config.max_duration_ms;
             actions.push(NormRecord {
                 caption_index: i,
                 action: NormAction::DurationClamped,
-                detail: format!("Duration clamped from {}ms to {}ms", dur, config.max_duration_ms),
+                detail: format!(
+                    "Duration clamped from {}ms to {}ms",
+                    dur, config.max_duration_ms
+                ),
             });
         }
     }
@@ -522,10 +522,7 @@ mod tests {
 
     #[test]
     fn test_normalize_gap_enforcement() {
-        let captions = vec![
-            cap(0, 990, "First"),
-            cap(1000, 2000, "Second"),
-        ];
+        let captions = vec![cap(0, 990, "First"), cap(1000, 2000, "Second")];
         let config = NormalizeConfig {
             min_gap_ms: 40,
             min_duration_ms: 0,
@@ -542,10 +539,7 @@ mod tests {
 
     #[test]
     fn test_action_count() {
-        let captions = vec![
-            cap(0, 100, "  A  "),
-            cap(1000, 1100, "  B  "),
-        ];
+        let captions = vec![cap(0, 100, "  A  "), cap(1000, 1100, "  B  ")];
         let config = NormalizeConfig {
             trim_lines: true,
             min_duration_ms: 500,
@@ -568,7 +562,10 @@ mod tests {
 
     #[test]
     fn test_norm_action_display() {
-        assert_eq!(NormAction::WhitespaceCollapsed.to_string(), "whitespace_collapsed");
+        assert_eq!(
+            NormAction::WhitespaceCollapsed.to_string(),
+            "whitespace_collapsed"
+        );
         assert_eq!(NormAction::GapAdjusted.to_string(), "gap_adjusted");
     }
 }

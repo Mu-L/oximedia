@@ -131,6 +131,36 @@ impl ChorusProcessor {
     }
 }
 
+impl crate::AudioEffect for ChorusProcessor {
+    fn process_sample(&mut self, input: f32) -> f32 {
+        #[allow(clippy::cast_possible_truncation)]
+        let out = self.process_sample(input as f64);
+        out as f32
+    }
+
+    fn reset(&mut self) {
+        for dl in &mut self.delay_lines {
+            for s in dl.iter_mut() {
+                *s = 0.0;
+            }
+        }
+        self.write_pos = 0;
+        self.phase = 0.0;
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate as f64;
+    }
+
+    fn set_wet_dry(&mut self, wet: f32) {
+        self.params.mix = wet.clamp(0.0, 1.0) as f64;
+    }
+
+    fn wet_dry(&self) -> f32 {
+        self.params.mix as f32
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

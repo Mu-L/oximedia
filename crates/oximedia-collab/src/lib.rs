@@ -16,6 +16,8 @@ pub mod changeset;
 pub mod comments;
 pub mod conflict_resolve;
 pub mod crdt;
+/// Classic CRDT primitives: GCounter, PNCounter, LWWRegister, MVRegister, GSet, TwoPhaseSet.
+pub mod crdt_primitives;
 pub mod diff_tracker;
 pub mod diff_viewer;
 /// Region-based, track-based, and hierarchical edit locking with automatic expiration and deadlock detection.
@@ -26,18 +28,22 @@ pub mod invite_system;
 pub mod lock;
 pub mod merge_strategy;
 pub mod notification;
+/// Operational transformation log: per-op DAG, OT transform/rebase, apply to `Vec<f32>` state.
+pub mod operation_log;
 pub mod permission;
 pub mod presence;
 pub mod review_link;
 pub mod session;
 pub mod session_lock;
 pub mod session_manager;
-/// Session state snapshots for recovery and time-travel.
+/// Project snapshot and version management with branching and fast-forward merge detection.
 pub mod snapshot_manager;
 pub mod sync;
 pub mod task_tracker;
 /// Fine-grained team role management with capabilities, hierarchies, and role assignment workflows.
 pub mod team_role;
+/// Three-way media project merge: scalar, string, timeline-event, and parameter-map merging.
+pub mod three_way_merge;
 /// Spatial presence tracking (cursor/viewport positions) for collaboration.
 pub mod user_presence_map;
 pub mod version_compare;

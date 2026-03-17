@@ -114,6 +114,13 @@ impl Mob {
         &self.name
     }
 
+    /// Get a mutable reference to the mob ID.
+    ///
+    /// Useful for reassigning the ID when deep-cloning a mob.
+    pub fn mob_id_mut(&mut self) -> &mut Uuid {
+        &mut self.mob_id
+    }
+
     /// Get mob type
     #[must_use]
     pub fn mob_type(&self) -> MobType {

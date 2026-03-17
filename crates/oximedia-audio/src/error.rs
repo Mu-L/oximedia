@@ -38,6 +38,10 @@ pub enum AudioError {
     #[error("End of stream")]
     Eof,
 
+    /// I/O error.
+    #[error("I/O error: {0}")]
+    Io(String),
+
     /// Core error.
     #[error("Core error: {0}")]
     Core(#[from] oximedia_core::OxiError),

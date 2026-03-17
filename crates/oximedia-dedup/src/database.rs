@@ -584,6 +584,101 @@ impl DedupDatabase {
         })
     }
 
+    /// Get all files with their stored metadata.
+    ///
+    /// Returns a list of `(file_path, duration_secs, width, height, video_codec, audio_codec, container)`.
+    /// Fields that were not stored are `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub async fn get_all_files_with_metadata(
+        &self,
+    ) -> DedupResult<
+        Vec<(
+            String,
+            Option<f64>,
+            Option<i32>,
+            Option<i32>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )>,
+    > {
+        let rows = sqlx::query(
+            r#"
+            SELECT f.path,
+                   m.duration,
+                   m.width,
+                   m.height,
+                   m.video_codec,
+                   m.audio_codec,
+                   m.container
+            FROM files f
+            LEFT JOIN metadata m ON m.file_id = f.id
+            ORDER BY f.path
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut result = Vec::with_capacity(rows.len());
+        for row in rows {
+            let path: String = row.get(0);
+            let duration: Option<f64> = row.get(1);
+            let width: Option<i32> = row.get(2);
+            let height: Option<i32> = row.get(3);
+            let video_codec: Option<String> = row.get(4);
+            let audio_codec: Option<String> = row.get(5);
+            let container: Option<String> = row.get(6);
+            result.push((
+                path,
+                duration,
+                width,
+                height,
+                video_codec,
+                audio_codec,
+                container,
+            ));
+        }
+
+        Ok(result)
+    }
+
+    /// Get all fingerprints of a given type together with the owning file path.
+    ///
+    /// Returns `(file_path, fingerprint_hex_string)` pairs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub async fn get_all_fingerprints_by_type(
+        &self,
+        fingerprint_type: &str,
+    ) -> DedupResult<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT f.path, fp.data
+            FROM fingerprints fp
+            JOIN files f ON fp.file_id = f.id
+            WHERE fp.type = ?
+            ORDER BY f.path
+            "#,
+        )
+        .bind(fingerprint_type)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let path: String = row.get(0);
+                let data: String = row.get(1);
+                (path, data)
+            })
+            .collect())
+    }
+
     /// Begin a transaction.
     ///
     /// # Errors

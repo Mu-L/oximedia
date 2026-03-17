@@ -320,6 +320,164 @@ impl Scoreboard {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Real-time data binding — live score update via DataSource trait
+// ---------------------------------------------------------------------------
+
+/// A snapshot of live game state emitted by a data source.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct LiveGameState {
+    /// Home team score.
+    pub home_score: u32,
+    /// Away team score.
+    pub away_score: u32,
+    /// Clock minutes remaining.
+    pub clock_minutes: u32,
+    /// Clock seconds remaining.
+    pub clock_seconds: u32,
+    /// Whether the clock is running.
+    pub clock_running: bool,
+    /// Current period.
+    pub period: u32,
+}
+
+impl LiveGameState {
+    /// Create a new live game state.
+    #[allow(dead_code)]
+    pub fn new(
+        home_score: u32,
+        away_score: u32,
+        clock_minutes: u32,
+        clock_seconds: u32,
+        clock_running: bool,
+        period: u32,
+    ) -> Self {
+        Self {
+            home_score,
+            away_score,
+            clock_minutes,
+            clock_seconds,
+            clock_running,
+            period,
+        }
+    }
+}
+
+/// Trait for a real-time score data source.
+///
+/// Implement this trait to connect live scoring data to a [`LiveScoreboard`].
+/// The `poll` method is called each frame to check for updates.
+#[allow(dead_code)]
+pub trait ScoreDataSource: Send + Sync {
+    /// Poll for the latest game state.
+    ///
+    /// Returns `Some(state)` when new data is available, `None` if no change.
+    fn poll(&mut self) -> Option<LiveGameState>;
+
+    /// Returns `true` if the data source is connected and healthy.
+    fn is_connected(&self) -> bool;
+}
+
+/// A static in-memory data source for testing and development.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct StaticDataSource {
+    state: Option<LiveGameState>,
+    connected: bool,
+}
+
+impl StaticDataSource {
+    /// Create a connected static source with the given initial state.
+    #[allow(dead_code)]
+    pub fn new(state: LiveGameState) -> Self {
+        Self {
+            state: Some(state),
+            connected: true,
+        }
+    }
+
+    /// Create a disconnected static source (simulates a lost feed).
+    #[allow(dead_code)]
+    pub fn disconnected() -> Self {
+        Self {
+            state: None,
+            connected: false,
+        }
+    }
+
+    /// Push a new state to be emitted on the next `poll`.
+    #[allow(dead_code)]
+    pub fn push(&mut self, state: LiveGameState) {
+        self.state = Some(state);
+    }
+}
+
+impl ScoreDataSource for StaticDataSource {
+    fn poll(&mut self) -> Option<LiveGameState> {
+        self.state.take()
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected
+    }
+}
+
+/// A scoreboard with live data binding to a [`ScoreDataSource`].
+pub struct LiveScoreboard {
+    /// Current scoreboard state.
+    pub scoreboard: Scoreboard,
+    /// Number of updates received so far.
+    pub update_count: u64,
+}
+
+impl LiveScoreboard {
+    /// Create a new live scoreboard wrapping the given configuration.
+    #[allow(dead_code)]
+    pub fn new(config: ScoreboardConfig) -> Self {
+        Self {
+            scoreboard: Scoreboard::new(config),
+            update_count: 0,
+        }
+    }
+
+    /// Poll the data source and apply any available state update.
+    ///
+    /// Returns `true` if the scoreboard was updated this call.
+    #[allow(dead_code)]
+    pub fn sync(&mut self, source: &mut dyn ScoreDataSource) -> bool {
+        if !source.is_connected() {
+            return false;
+        }
+        if let Some(state) = source.poll() {
+            self.apply_live_state(&state);
+            self.update_count += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Apply a raw `LiveGameState` snapshot to the internal scoreboard.
+    #[allow(dead_code)]
+    pub fn apply_live_state(&mut self, state: &LiveGameState) {
+        self.scoreboard
+            .apply_update(ScoreboardUpdate::HomeScore(state.home_score));
+        self.scoreboard
+            .apply_update(ScoreboardUpdate::AwayScore(state.away_score));
+        self.scoreboard
+            .apply_update(ScoreboardUpdate::PeriodChange(state.period));
+        let clock = GameClock {
+            minutes: state.clock_minutes,
+            seconds: state.clock_seconds,
+            is_running: state.clock_running,
+            period: state.period,
+        };
+        self.scoreboard
+            .apply_update(ScoreboardUpdate::ClockUpdate(clock));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,5 +598,83 @@ mod tests {
         sb.apply_update(ScoreboardUpdate::ClockUpdate(GameClock::new(5, 30, 2)));
         assert_eq!(sb.config.clock.minutes, 5);
         assert_eq!(sb.config.clock.seconds, 30);
+    }
+
+    // --- LiveScoreboard / data binding tests ---
+
+    fn make_live_state() -> LiveGameState {
+        LiveGameState::new(3, 1, 10, 45, true, 2)
+    }
+
+    #[test]
+    fn test_static_data_source_poll_returns_state() {
+        let mut src = StaticDataSource::new(make_live_state());
+        assert!(src.is_connected());
+        let state = src.poll();
+        assert!(state.is_some());
+        let s = state.expect("state should be present");
+        assert_eq!(s.home_score, 3);
+        assert_eq!(s.away_score, 1);
+    }
+
+    #[test]
+    fn test_static_data_source_poll_returns_none_after_first() {
+        let mut src = StaticDataSource::new(make_live_state());
+        let _ = src.poll(); // consume
+        assert!(src.poll().is_none());
+    }
+
+    #[test]
+    fn test_static_data_source_disconnected() {
+        let src = StaticDataSource::disconnected();
+        assert!(!src.is_connected());
+    }
+
+    #[test]
+    fn test_live_scoreboard_sync_updates_state() {
+        let mut lb = LiveScoreboard::new(make_config());
+        let mut src = StaticDataSource::new(make_live_state());
+        let updated = lb.sync(&mut src);
+        assert!(updated);
+        assert_eq!(lb.scoreboard.config.home.score, 3);
+        assert_eq!(lb.scoreboard.config.away.score, 1);
+        assert_eq!(lb.scoreboard.config.clock.period, 2);
+        assert_eq!(lb.update_count, 1);
+    }
+
+    #[test]
+    fn test_live_scoreboard_sync_no_update_when_no_data() {
+        let mut lb = LiveScoreboard::new(make_config());
+        let mut src = StaticDataSource::new(make_live_state());
+        lb.sync(&mut src); // consume first
+        let updated = lb.sync(&mut src); // no data left
+        assert!(!updated);
+        assert_eq!(lb.update_count, 1);
+    }
+
+    #[test]
+    fn test_live_scoreboard_sync_disconnected_source() {
+        let mut lb = LiveScoreboard::new(make_config());
+        let mut src = StaticDataSource::disconnected();
+        let updated = lb.sync(&mut src);
+        assert!(!updated);
+    }
+
+    #[test]
+    fn test_live_game_state_new() {
+        let s = LiveGameState::new(5, 2, 8, 30, false, 3);
+        assert_eq!(s.home_score, 5);
+        assert_eq!(s.away_score, 2);
+        assert_eq!(s.clock_minutes, 8);
+        assert!(!s.clock_running);
+    }
+
+    #[test]
+    fn test_static_data_source_push() {
+        let mut src = StaticDataSource::new(make_live_state());
+        let _ = src.poll(); // drain
+        src.push(LiveGameState::new(10, 7, 5, 0, true, 4));
+        let state = src.poll().expect("pushed state should be present");
+        assert_eq!(state.home_score, 10);
     }
 }

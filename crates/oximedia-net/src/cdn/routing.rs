@@ -8,7 +8,7 @@ use super::health::HealthChecker;
 use super::RequestContext;
 use crate::error::{NetError, NetResult};
 use parking_lot::RwLock;
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -111,6 +111,15 @@ pub mod job_dependency_graph;
 pub mod node_heartbeat;
 pub mod render_quota;
 
+// Enhancement modules
+pub mod elastic_scaling;
+pub mod failure_recovery;
+pub mod frame_merge;
+pub mod multi_site;
+pub mod node_affinity_rule;
+pub mod render_checkpoint;
+pub mod telemetry;
+
 // Re-exports
 pub use api::{ApiConfig, RenderFarmApi};
 pub use coordinator::{Coordinator, CoordinatorConfig};

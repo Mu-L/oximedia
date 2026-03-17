@@ -194,6 +194,160 @@ impl Default for DedupPolicy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Per-group configurable dedup actions
+// ---------------------------------------------------------------------------
+
+/// Criteria for selecting which file to keep within a duplicate group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeepCriterion {
+    /// Keep the file with the most recent modification timestamp.
+    Newest,
+    /// Keep the file with the oldest modification timestamp.
+    Oldest,
+    /// Keep the file with the largest size (typically highest quality).
+    LargestFile,
+    /// Keep the file with the smallest size (most compressed).
+    SmallestFile,
+    /// Keep the file with the shortest path (likely the "original" location).
+    ShortestPath,
+    /// Keep the file with the longest path.
+    LongestPath,
+}
+
+/// Per-group policy that determines both which file to keep and what
+/// action to apply to the remaining duplicates.
+#[derive(Debug, Clone)]
+pub struct GroupPolicy {
+    /// How to select the file to keep.
+    pub keep: KeepCriterion,
+    /// Action to apply to duplicates (non-kept files).
+    pub action: DedupAction,
+    /// Minimum similarity for this policy to apply.
+    pub min_similarity: f64,
+}
+
+impl Default for GroupPolicy {
+    fn default() -> Self {
+        Self {
+            keep: KeepCriterion::LargestFile,
+            action: DedupAction::Review,
+            min_similarity: 0.95,
+        }
+    }
+}
+
+/// Result of applying a `GroupPolicy` to a duplicate group.
+#[derive(Debug, Clone)]
+pub struct GroupDecision {
+    /// Index of the file to keep (within the group's file list).
+    pub keep_index: usize,
+    /// Path of the file to keep.
+    pub keep_path: String,
+    /// Indices and paths of files to act upon.
+    pub duplicates: Vec<(usize, String)>,
+    /// The action to apply to duplicates.
+    pub action: DedupAction,
+    /// Optional reason.
+    pub reason: String,
+}
+
+/// Score a file path according to a `KeepCriterion`.
+///
+/// Higher is better for all criteria (the file with the highest score is kept).
+fn score_file(path: &str, criterion: KeepCriterion) -> f64 {
+    match criterion {
+        KeepCriterion::LargestFile => std::fs::metadata(path)
+            .map(|m| m.len() as f64)
+            .unwrap_or(0.0),
+        KeepCriterion::SmallestFile => {
+            let size = std::fs::metadata(path)
+                .map(|m| m.len() as f64)
+                .unwrap_or(f64::MAX);
+            // Invert: smaller → higher score
+            if size <= 0.0 {
+                0.0
+            } else {
+                1.0 / size
+            }
+        }
+        KeepCriterion::Newest => std::fs::metadata(path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| {
+                t.duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .ok()
+            })
+            .unwrap_or(0.0),
+        KeepCriterion::Oldest => {
+            let ts = std::fs::metadata(path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64())
+                        .ok()
+                })
+                .unwrap_or(f64::MAX);
+            if ts >= f64::MAX {
+                0.0
+            } else {
+                1.0 / (ts + 1.0)
+            }
+        }
+        KeepCriterion::ShortestPath => {
+            if path.is_empty() {
+                0.0
+            } else {
+                1.0 / path.len() as f64
+            }
+        }
+        KeepCriterion::LongestPath => path.len() as f64,
+    }
+}
+
+/// Apply a `GroupPolicy` to a list of file paths.
+///
+/// Returns `None` if fewer than 2 files are provided.
+#[must_use]
+pub fn apply_group_policy(files: &[String], policy: &GroupPolicy) -> Option<GroupDecision> {
+    if files.len() < 2 {
+        return None;
+    }
+
+    let mut best_idx = 0;
+    let mut best_score = f64::NEG_INFINITY;
+
+    for (i, path) in files.iter().enumerate() {
+        let s = score_file(path, policy.keep);
+        if s > best_score {
+            best_score = s;
+            best_idx = i;
+        }
+    }
+
+    let duplicates: Vec<(usize, String)> = files
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != best_idx)
+        .map(|(i, p)| (i, p.clone()))
+        .collect();
+
+    Some(GroupDecision {
+        keep_index: best_idx,
+        keep_path: files[best_idx].clone(),
+        duplicates,
+        action: policy.action,
+        reason: format!(
+            "keep by {:?}, apply {:?} to {} duplicate(s)",
+            policy.keep,
+            policy.action,
+            files.len() - 1
+        ),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,5 +453,90 @@ mod tests {
         let mut cfg = DedupPolicyConfig::default();
         cfg.strict_mode = true;
         assert!(cfg.strict_mode());
+    }
+
+    // ---- GroupPolicy / KeepCriterion tests ----
+
+    #[test]
+    fn test_keep_criterion_shortest_path() {
+        let files = vec![
+            "/a/b/c/deep/path/file.mp4".to_string(),
+            "/short.mp4".to_string(),
+            "/medium/file.mp4".to_string(),
+        ];
+        let policy = GroupPolicy {
+            keep: KeepCriterion::ShortestPath,
+            action: DedupAction::Delete,
+            min_similarity: 0.95,
+        };
+        let decision = apply_group_policy(&files, &policy).expect("should produce a decision");
+        assert_eq!(decision.keep_path, "/short.mp4");
+        assert_eq!(decision.duplicates.len(), 2);
+        assert_eq!(decision.action, DedupAction::Delete);
+    }
+
+    #[test]
+    fn test_keep_criterion_longest_path() {
+        let files = vec![
+            "/short.mp4".to_string(),
+            "/a/b/c/deep/path/file.mp4".to_string(),
+        ];
+        let policy = GroupPolicy {
+            keep: KeepCriterion::LongestPath,
+            action: DedupAction::Quarantine,
+            min_similarity: 0.95,
+        };
+        let decision = apply_group_policy(&files, &policy).expect("should produce a decision");
+        assert_eq!(decision.keep_path, "/a/b/c/deep/path/file.mp4");
+    }
+
+    #[test]
+    fn test_group_policy_default() {
+        let policy = GroupPolicy::default();
+        assert_eq!(policy.keep, KeepCriterion::LargestFile);
+        assert_eq!(policy.action, DedupAction::Review);
+        assert!((policy.min_similarity - 0.95).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_group_policy_too_few_files() {
+        let files = vec!["only_one.mp4".to_string()];
+        let policy = GroupPolicy::default();
+        assert!(apply_group_policy(&files, &policy).is_none());
+    }
+
+    #[test]
+    fn test_group_decision_reason_contains_criterion() {
+        let files = vec!["a.mp4".to_string(), "b.mp4".to_string()];
+        let policy = GroupPolicy {
+            keep: KeepCriterion::Newest,
+            action: DedupAction::Symlink,
+            min_similarity: 0.9,
+        };
+        let decision = apply_group_policy(&files, &policy).expect("should produce a decision");
+        assert!(decision.reason.contains("Newest"));
+        assert!(decision.reason.contains("Symlink"));
+    }
+
+    #[test]
+    fn test_keep_criterion_all_variants_non_destructive() {
+        // Ensure all KeepCriterion variants can be used without panic
+        let files = vec!["a.mp4".to_string(), "b.mp4".to_string()];
+        for criterion in [
+            KeepCriterion::Newest,
+            KeepCriterion::Oldest,
+            KeepCriterion::LargestFile,
+            KeepCriterion::SmallestFile,
+            KeepCriterion::ShortestPath,
+            KeepCriterion::LongestPath,
+        ] {
+            let policy = GroupPolicy {
+                keep: criterion,
+                action: DedupAction::Skip,
+                min_similarity: 0.5,
+            };
+            let decision = apply_group_policy(&files, &policy);
+            assert!(decision.is_some());
+        }
     }
 }

@@ -430,6 +430,8 @@ impl TextSearchIndex {
                 mime_type,
                 duration_ms,
                 created_at,
+                modified_at: None,
+                file_size: None,
                 matched_fields: vec![],
                 thumbnail_url: None,
             });
@@ -493,6 +495,8 @@ mod tests {
             mime_type: Some("video/mp4".to_string()),
             duration_ms: Some(1000),
             created_at: 0,
+            modified_at: None,
+            file_size: None,
             matched_fields: vec![],
             thumbnail_url: None,
         };

@@ -77,22 +77,28 @@
 
 pub mod action_beat;
 pub mod activity;
+pub mod adaptive_scene;
 pub mod aesthetic;
 pub mod camera_motion;
 pub mod classification;
 pub mod classify;
 pub mod color_temperature;
+pub mod complexity_detector;
 pub mod composition;
+pub mod content_moderation;
 pub mod continuity_check;
 pub mod crowd_density;
 pub mod depth_of_field;
 pub mod detect;
+pub mod emotion_recognition;
 pub mod error;
 pub mod event;
 pub mod features;
 pub mod lighting_analysis;
 pub mod location;
 pub mod mood;
+pub mod motion_energy;
+pub mod object_tracker;
 pub mod pacing;
 pub mod saliency;
 pub mod scene_boundary;
@@ -105,6 +111,8 @@ pub mod segmentation;
 pub mod shot_type;
 pub mod storyboard;
 pub mod summarization;
+pub mod text_detect;
+pub mod thumbnail_selector;
 pub mod transition;
 pub mod visual_rhythm;
 

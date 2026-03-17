@@ -15,6 +15,7 @@ use std::path::Path;
 /// - Magic number verification
 /// - Basic structure integrity
 /// - File size consistency
+/// Extended issue with confidence score, returned by `detect_corruption_with_confidence`.
 pub fn detect_corruption(path: &Path) -> Result<Vec<Issue>> {
     let mut issues = Vec::new();
     let mut file = File::open(path)?;
@@ -28,6 +29,7 @@ pub fn detect_corruption(path: &Path) -> Result<Vec<Issue>> {
             description: "File is empty".to_string(),
             location: Some(0),
             fixable: false,
+            confidence: 1.0,
         });
         return Ok(issues);
     }
@@ -52,12 +54,14 @@ pub fn detect_corruption(path: &Path) -> Result<Vec<Issue>> {
             issues.extend(check_mpeg_corruption(&mut file)?);
         }
         None => {
+            // Unknown format — moderate confidence (file could simply be unsupported)
             issues.push(Issue {
                 issue_type: IssueType::CorruptedHeader,
                 severity: Severity::Critical,
                 description: "Unknown or corrupted file format".to_string(),
                 location: Some(0),
                 fixable: false,
+                confidence: 0.7,
             });
         }
     }
@@ -126,6 +130,7 @@ fn check_mp4_corruption(file: &mut File) -> Result<Vec<Issue>> {
             description: "Cannot read MP4 atom header".to_string(),
             location: Some(0),
             fixable: true,
+            confidence: 0.95,
         });
         return Ok(issues);
     }
@@ -146,6 +151,7 @@ fn check_mp4_corruption(file: &mut File) -> Result<Vec<Issue>> {
             description: "MP4 atom has zero size".to_string(),
             location: Some(0),
             fixable: true,
+            confidence: 0.85,
         });
     }
 
@@ -158,6 +164,7 @@ fn check_mp4_corruption(file: &mut File) -> Result<Vec<Issue>> {
             description: "MP4 file missing ftyp atom".to_string(),
             location: Some(0),
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -180,6 +187,7 @@ fn check_matroska_corruption(file: &mut File) -> Result<Vec<Issue>> {
             description: "Cannot read Matroska EBML header".to_string(),
             location: Some(0),
             fixable: true,
+            confidence: 0.95,
         });
         return Ok(issues);
     }
@@ -192,6 +200,7 @@ fn check_matroska_corruption(file: &mut File) -> Result<Vec<Issue>> {
             description: "Invalid Matroska EBML signature".to_string(),
             location: Some(0),
             fixable: true,
+            confidence: 0.95,
         });
     }
 
@@ -214,6 +223,7 @@ fn check_avi_corruption(file: &mut File) -> Result<Vec<Issue>> {
             description: "Cannot read AVI RIFF header".to_string(),
             location: Some(0),
             fixable: true,
+            confidence: 0.95,
         });
         return Ok(issues);
     }
@@ -226,6 +236,7 @@ fn check_avi_corruption(file: &mut File) -> Result<Vec<Issue>> {
             description: "Invalid AVI RIFF signature".to_string(),
             location: Some(0),
             fixable: true,
+            confidence: 0.95,
         });
     }
 
@@ -237,6 +248,7 @@ fn check_avi_corruption(file: &mut File) -> Result<Vec<Issue>> {
             description: "Invalid AVI type marker".to_string(),
             location: Some(8),
             fixable: true,
+            confidence: 0.90,
         });
     }
 
@@ -256,6 +268,13 @@ fn check_avi_corruption(file: &mut File) -> Result<Vec<Issue>> {
         } else {
             Severity::Medium
         };
+        // Confidence depends on how large the discrepancy is
+        let ratio = if stated_size > 0 {
+            (stated_size.abs_diff(actual_size) as f64) / (stated_size as f64)
+        } else {
+            1.0
+        };
+        let confidence = (ratio * 2.0).min(1.0).max(0.5);
 
         issues.push(Issue {
             issue_type: IssueType::Truncated,
@@ -266,6 +285,7 @@ fn check_avi_corruption(file: &mut File) -> Result<Vec<Issue>> {
             ),
             location: Some(4),
             fixable: true,
+            confidence,
         });
     }
 
@@ -288,6 +308,7 @@ fn check_mpeg_corruption(file: &mut File) -> Result<Vec<Issue>> {
             description: "Cannot read MPEG start code".to_string(),
             location: Some(0),
             fixable: false,
+            confidence: 0.95,
         });
         return Ok(issues);
     }
@@ -300,6 +321,7 @@ fn check_mpeg_corruption(file: &mut File) -> Result<Vec<Issue>> {
             description: "Invalid MPEG start code prefix".to_string(),
             location: Some(0),
             fixable: false,
+            confidence: 0.90,
         });
     }
 

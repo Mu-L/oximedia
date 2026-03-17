@@ -449,6 +449,220 @@ impl GazeEstimator {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Face Blur / Obscurity Detection
+// ─────────────────────────────────────────────────────────────
+
+/// Privacy compliance obscurity level of a detected face region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FaceObscurityLevel {
+    /// Face is clearly visible (no blur or occlusion).
+    Clear,
+    /// Face is slightly blurred or partially occluded.
+    PartiallyObscured,
+    /// Face is heavily blurred or mostly occluded — privacy-safe.
+    HeavilyObscured,
+    /// Face region could not be assessed (too small or out-of-bounds).
+    Indeterminate,
+}
+
+impl FaceObscurityLevel {
+    /// Returns `true` if the level is considered privacy-safe.
+    #[must_use]
+    pub fn is_privacy_safe(&self) -> bool {
+        matches!(self, Self::HeavilyObscured | Self::Indeterminate)
+    }
+
+    /// Human-readable label.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Clear => "Clear",
+            Self::PartiallyObscured => "PartiallyObscured",
+            Self::HeavilyObscured => "HeavilyObscured",
+            Self::Indeterminate => "Indeterminate",
+        }
+    }
+}
+
+/// Privacy assessment for a single face region.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FacePrivacyAssessment {
+    /// The face region being assessed.
+    pub region: FaceRegion,
+    /// Measured blur score within the face bounding box (Laplacian variance, lower = blurrier).
+    pub blur_score: f32,
+    /// Fraction of the face bounding box that is covered by near-uniform (obscuring) regions.
+    pub occlusion_ratio: f32,
+    /// Derived obscurity level.
+    pub obscurity_level: FaceObscurityLevel,
+}
+
+impl FacePrivacyAssessment {
+    /// Returns `true` if the face is considered privacy-compliant.
+    #[must_use]
+    pub fn is_compliant(&self) -> bool {
+        self.obscurity_level.is_privacy_safe()
+    }
+}
+
+/// Analyse the blur and obscurity level of detected face regions for privacy compliance.
+///
+/// * `luma` – grayscale luma plane (values 0–255), row-major.
+/// * `img_width` / `img_height` – image dimensions in pixels.
+/// * `faces` – list of detected face regions to assess.
+///
+/// Returns a privacy assessment for each face region (in the same order).
+#[must_use]
+pub fn assess_face_privacy(
+    luma: &[u8],
+    img_width: u32,
+    img_height: u32,
+    faces: &[FaceRegion],
+) -> Vec<FacePrivacyAssessment> {
+    faces
+        .iter()
+        .map(|face| assess_single_face(luma, img_width, img_height, face))
+        .collect()
+}
+
+/// Thresholds used by the face privacy assessor.
+pub struct FacePrivacyThresholds {
+    /// Laplacian variance below which a face is considered blurred.
+    pub blur_threshold: f32,
+    /// Laplacian variance below which a face is considered heavily blurred.
+    pub heavy_blur_threshold: f32,
+    /// Occlusion ratio above which a face is considered partially obscured.
+    pub partial_occlusion_threshold: f32,
+    /// Occlusion ratio above which a face is considered heavily obscured.
+    pub heavy_occlusion_threshold: f32,
+}
+
+impl Default for FacePrivacyThresholds {
+    fn default() -> Self {
+        Self {
+            blur_threshold: 200.0,
+            heavy_blur_threshold: 50.0,
+            partial_occlusion_threshold: 0.30,
+            heavy_occlusion_threshold: 0.70,
+        }
+    }
+}
+
+/// Assess a single face region for blur and obscurity.
+fn assess_single_face(
+    luma: &[u8],
+    img_width: u32,
+    img_height: u32,
+    face: &FaceRegion,
+) -> FacePrivacyAssessment {
+    let thresholds = FacePrivacyThresholds::default();
+
+    let x0 = face.x as usize;
+    let y0 = face.y as usize;
+    let x1 = (face.x + face.width).min(img_width) as usize;
+    let y1 = (face.y + face.height).min(img_height) as usize;
+    let w = img_width as usize;
+
+    let declared_area = (face.width as usize).saturating_mul(face.height as usize);
+    let clipped_area = (x1 - x0) * (y1 - y0);
+    if x1 <= x0 + 2
+        || y1 <= y0 + 2
+        || luma.len() < w * img_height as usize
+        || (declared_area > 0 && clipped_area * 2 < declared_area)
+    {
+        return FacePrivacyAssessment {
+            region: face.clone(),
+            blur_score: 0.0,
+            occlusion_ratio: 0.0,
+            obscurity_level: FaceObscurityLevel::Indeterminate,
+        };
+    }
+
+    // --- Blur score: Laplacian variance over the face ROI ---
+    let mut lap_sum = 0.0f64;
+    let mut lap_sq_sum = 0.0f64;
+    let mut count = 0u32;
+
+    for y in (y0 + 1)..(y1 - 1) {
+        for x in (x0 + 1)..(x1 - 1) {
+            let c = f64::from(luma[y * w + x]);
+            let n = f64::from(luma[(y - 1) * w + x]);
+            let s = f64::from(luma[(y + 1) * w + x]);
+            let l = f64::from(luma[y * w + (x - 1)]);
+            let r = f64::from(luma[y * w + (x + 1)]);
+            let lap = n + s + l + r - 4.0 * c;
+            lap_sum += lap;
+            lap_sq_sum += lap * lap;
+            count += 1;
+        }
+    }
+
+    let blur_score = if count > 0 {
+        let mean = lap_sum / f64::from(count);
+        let variance = lap_sq_sum / f64::from(count) - mean * mean;
+        variance.max(0.0) as f32
+    } else {
+        0.0
+    };
+
+    // --- Occlusion ratio: fraction of face pixels that are near-uniform (likely covered) ---
+    // We use a sliding 4×4 local standard-deviation check.  Regions with very low std-dev
+    // are likely covered by a solid overlay (mosaic, blur box, sticker, etc.).
+    const PATCH: usize = 4;
+    let mut uniform_patches = 0u32;
+    let mut total_patches = 0u32;
+
+    let ry = y0..y1.saturating_sub(PATCH);
+    for py in ry.step_by(PATCH) {
+        let rx = x0..x1.saturating_sub(PATCH);
+        for px in rx.step_by(PATCH) {
+            let mut psum = 0.0f64;
+            let mut psq = 0.0f64;
+            for dy in 0..PATCH {
+                for dx in 0..PATCH {
+                    let v = f64::from(luma[(py + dy) * w + (px + dx)]);
+                    psum += v;
+                    psq += v * v;
+                }
+            }
+            let n_p = (PATCH * PATCH) as f64;
+            let mean = psum / n_p;
+            let std_dev = ((psq / n_p - mean * mean).max(0.0)).sqrt();
+            if std_dev < 8.0 {
+                uniform_patches += 1;
+            }
+            total_patches += 1;
+        }
+    }
+
+    let occlusion_ratio = if total_patches > 0 {
+        uniform_patches as f32 / total_patches as f32
+    } else {
+        0.0
+    };
+
+    // --- Derive obscurity level ---
+    let obscurity_level = if blur_score < thresholds.heavy_blur_threshold
+        || occlusion_ratio > thresholds.heavy_occlusion_threshold
+    {
+        FaceObscurityLevel::HeavilyObscured
+    } else if blur_score < thresholds.blur_threshold
+        || occlusion_ratio > thresholds.partial_occlusion_threshold
+    {
+        FaceObscurityLevel::PartiallyObscured
+    } else {
+        FaceObscurityLevel::Clear
+    };
+
+    FacePrivacyAssessment {
+        region: face.clone(),
+        blur_score,
+        occlusion_ratio,
+        obscurity_level,
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Unit tests
 // ─────────────────────────────────────────────────────────────
 
@@ -660,6 +874,103 @@ mod tests {
         let regions = detector.detect_faces(&luma, w, h);
         // With threshold=0, we should get at least some regions back
         assert!(!regions.is_empty());
+    }
+
+    // ── Face Privacy Assessment ───────────────────────────────
+
+    fn make_face_region(x: u32, y: u32, w: u32, h: u32) -> FaceRegion {
+        FaceRegion {
+            x,
+            y,
+            width: w,
+            height: h,
+            confidence: 0.9,
+            face_id: None,
+        }
+    }
+
+    #[test]
+    fn test_clear_face_high_blur_score() {
+        // Sharp, high-contrast image → should be Clear
+        let w = 64u32;
+        let h = 64u32;
+        let mut luma = vec![0u8; (w * h) as usize];
+        // Checkerboard pattern → high Laplacian variance
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                // Use 2px blocks (smaller than 4x4 patch) so patches span both
+                // black and white areas and are NOT classified as uniform.
+                luma[y * w as usize + x] = if ((x / 2) + (y / 2)) % 2 == 0 {
+                    50
+                } else {
+                    200
+                };
+            }
+        }
+        let face = make_face_region(8, 8, 48, 48);
+        let results = assess_face_privacy(&luma, w, h, &[face]);
+        assert_eq!(results.len(), 1);
+        // High-frequency content → Clear
+        assert_eq!(
+            results[0].obscurity_level,
+            FaceObscurityLevel::Clear,
+            "blur_score={}",
+            results[0].blur_score
+        );
+        assert!(!results[0].is_compliant());
+    }
+
+    #[test]
+    fn test_blurred_face_heavily_obscured() {
+        // Near-uniform (blurred) region → HeavilyObscured
+        let w = 64u32;
+        let h = 64u32;
+        let luma = vec![128u8; (w * h) as usize];
+        let face = make_face_region(8, 8, 48, 48);
+        let results = assess_face_privacy(&luma, w, h, &[face]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].obscurity_level,
+            FaceObscurityLevel::HeavilyObscured,
+            "blur_score={}",
+            results[0].blur_score
+        );
+        assert!(results[0].is_compliant());
+    }
+
+    #[test]
+    fn test_indeterminate_when_out_of_bounds() {
+        let w = 32u32;
+        let h = 32u32;
+        let luma = vec![128u8; (w * h) as usize];
+        // Face region extends beyond image
+        let face = make_face_region(28, 28, 20, 20);
+        let results = assess_face_privacy(&luma, w, h, &[face]);
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].obscurity_level,
+            FaceObscurityLevel::Indeterminate
+        );
+        assert!(results[0].is_compliant());
+    }
+
+    #[test]
+    fn test_obscurity_label() {
+        assert_eq!(FaceObscurityLevel::Clear.label(), "Clear");
+        assert_eq!(
+            FaceObscurityLevel::HeavilyObscured.label(),
+            "HeavilyObscured"
+        );
+        assert!(!FaceObscurityLevel::Clear.is_privacy_safe());
+        assert!(FaceObscurityLevel::HeavilyObscured.is_privacy_safe());
+        assert!(FaceObscurityLevel::Indeterminate.is_privacy_safe());
+    }
+
+    #[test]
+    fn test_privacy_assessment_empty_face_list() {
+        let luma = vec![128u8; 64 * 64];
+        let results = assess_face_privacy(&luma, 64, 64, &[]);
+        assert!(results.is_empty());
     }
 
     // ── GazeEstimator ─────────────────────────────────────────

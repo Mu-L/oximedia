@@ -817,6 +817,518 @@ impl Clone for ProxyManager {
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Adaptive Bitrate Proxy Generation (HLS / DASH)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Streaming protocol for ABR proxy output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum StreamingProtocol {
+    /// HTTP Live Streaming (.m3u8 master + segment playlists)
+    Hls,
+    /// MPEG-DASH (.mpd manifest)
+    Dash,
+}
+
+impl StreamingProtocol {
+    /// Returns the conventional file extension for the manifest.
+    #[must_use]
+    pub fn manifest_extension(&self) -> &'static str {
+        match self {
+            Self::Hls => "m3u8",
+            Self::Dash => "mpd",
+        }
+    }
+}
+
+/// A single rendition (quality level) in an ABR ladder.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AbrRendition {
+    /// Human-readable label, e.g. "1080p".
+    pub label: String,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Target video bitrate in bits per second.
+    pub video_bitrate_bps: u64,
+    /// Target audio bitrate in bits per second.
+    pub audio_bitrate_bps: u64,
+    /// Codec to use for this rendition.
+    pub codec: ProxyCodec,
+}
+
+impl AbrRendition {
+    /// Total (video + audio) bitrate.
+    #[must_use]
+    pub fn total_bitrate_bps(&self) -> u64 {
+        self.video_bitrate_bps + self.audio_bitrate_bps
+    }
+
+    /// Bandwidth hint string used in HLS `#EXT-X-STREAM-INF`.
+    #[must_use]
+    pub fn bandwidth_hint(&self) -> String {
+        format!("{}", self.total_bitrate_bps())
+    }
+
+    /// Resolution string, e.g. `"1920x1080"`.
+    #[must_use]
+    pub fn resolution_str(&self) -> String {
+        format!("{}x{}", self.width, self.height)
+    }
+}
+
+/// Pre-defined ABR ladders for common delivery scenarios.
+#[derive(Debug, Clone)]
+pub struct AbrLadder {
+    /// Name of the ladder (for logging/display).
+    pub name: String,
+    /// Ordered renditions, from lowest to highest quality.
+    pub renditions: Vec<AbrRendition>,
+}
+
+impl AbrLadder {
+    /// Broadcast-quality H.264 ladder (360p → 1080p).
+    #[must_use]
+    pub fn broadcast() -> Self {
+        Self {
+            name: "broadcast".to_string(),
+            renditions: vec![
+                AbrRendition {
+                    label: "360p".to_string(),
+                    width: 640,
+                    height: 360,
+                    video_bitrate_bps: 800_000,
+                    audio_bitrate_bps: 96_000,
+                    codec: ProxyCodec::H264,
+                },
+                AbrRendition {
+                    label: "720p".to_string(),
+                    width: 1280,
+                    height: 720,
+                    video_bitrate_bps: 3_000_000,
+                    audio_bitrate_bps: 128_000,
+                    codec: ProxyCodec::H264,
+                },
+                AbrRendition {
+                    label: "1080p".to_string(),
+                    width: 1920,
+                    height: 1080,
+                    video_bitrate_bps: 8_000_000,
+                    audio_bitrate_bps: 192_000,
+                    codec: ProxyCodec::H264,
+                },
+            ],
+        }
+    }
+
+    /// Streaming-optimised H.264 ladder (240p → 1080p).
+    #[must_use]
+    pub fn streaming() -> Self {
+        Self {
+            name: "streaming".to_string(),
+            renditions: vec![
+                AbrRendition {
+                    label: "240p".to_string(),
+                    width: 426,
+                    height: 240,
+                    video_bitrate_bps: 400_000,
+                    audio_bitrate_bps: 64_000,
+                    codec: ProxyCodec::H264,
+                },
+                AbrRendition {
+                    label: "480p".to_string(),
+                    width: 854,
+                    height: 480,
+                    video_bitrate_bps: 1_200_000,
+                    audio_bitrate_bps: 96_000,
+                    codec: ProxyCodec::H264,
+                },
+                AbrRendition {
+                    label: "720p".to_string(),
+                    width: 1280,
+                    height: 720,
+                    video_bitrate_bps: 2_500_000,
+                    audio_bitrate_bps: 128_000,
+                    codec: ProxyCodec::H264,
+                },
+                AbrRendition {
+                    label: "1080p".to_string(),
+                    width: 1920,
+                    height: 1080,
+                    video_bitrate_bps: 5_000_000,
+                    audio_bitrate_bps: 192_000,
+                    codec: ProxyCodec::H264,
+                },
+            ],
+        }
+    }
+
+    /// Browser-preview VP9 ladder (360p → 720p).
+    #[must_use]
+    pub fn browser_vp9() -> Self {
+        Self {
+            name: "browser_vp9".to_string(),
+            renditions: vec![
+                AbrRendition {
+                    label: "360p".to_string(),
+                    width: 640,
+                    height: 360,
+                    video_bitrate_bps: 500_000,
+                    audio_bitrate_bps: 64_000,
+                    codec: ProxyCodec::VP9,
+                },
+                AbrRendition {
+                    label: "720p".to_string(),
+                    width: 1280,
+                    height: 720,
+                    video_bitrate_bps: 1_800_000,
+                    audio_bitrate_bps: 128_000,
+                    codec: ProxyCodec::VP9,
+                },
+            ],
+        }
+    }
+
+    /// Number of renditions in this ladder.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.renditions.len()
+    }
+
+    /// Returns `true` if the ladder has no renditions.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.renditions.is_empty()
+    }
+}
+
+/// Configuration for generating an ABR proxy set.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AbrProxyConfig {
+    /// Asset this proxy set is for.
+    pub asset_id: uuid::Uuid,
+    /// Target streaming protocol.
+    pub protocol: StreamingProtocol,
+    /// HLS/DASH segment duration in seconds.
+    pub segment_duration_secs: u32,
+    /// Base output directory (rendition sub-dirs will be created beneath it).
+    pub output_dir: String,
+    /// Rendition labels to include (empty = include all).
+    pub selected_labels: Vec<String>,
+}
+
+impl AbrProxyConfig {
+    /// Create a new config builder with sensible defaults.
+    #[must_use]
+    pub fn builder(asset_id: uuid::Uuid) -> AbrProxyConfigBuilder {
+        AbrProxyConfigBuilder::new(asset_id)
+    }
+}
+
+/// Builder for [`AbrProxyConfig`].
+pub struct AbrProxyConfigBuilder {
+    asset_id: uuid::Uuid,
+    protocol: StreamingProtocol,
+    segment_duration_secs: u32,
+    output_dir: String,
+    selected_labels: Vec<String>,
+}
+
+impl AbrProxyConfigBuilder {
+    fn new(asset_id: uuid::Uuid) -> Self {
+        Self {
+            asset_id,
+            protocol: StreamingProtocol::Hls,
+            segment_duration_secs: 6,
+            output_dir: String::new(),
+            selected_labels: Vec::new(),
+        }
+    }
+
+    /// Set the streaming protocol.
+    #[must_use]
+    pub fn protocol(mut self, p: StreamingProtocol) -> Self {
+        self.protocol = p;
+        self
+    }
+
+    /// Set the segment duration.
+    #[must_use]
+    pub fn segment_duration(mut self, secs: u32) -> Self {
+        self.segment_duration_secs = secs;
+        self
+    }
+
+    /// Set the output directory.
+    #[must_use]
+    pub fn output_dir(mut self, dir: impl Into<String>) -> Self {
+        self.output_dir = dir.into();
+        self
+    }
+
+    /// Restrict to specific rendition labels.
+    #[must_use]
+    pub fn select_labels(mut self, labels: Vec<String>) -> Self {
+        self.selected_labels = labels;
+        self
+    }
+
+    /// Build the config.
+    #[must_use]
+    pub fn build(self) -> AbrProxyConfig {
+        AbrProxyConfig {
+            asset_id: self.asset_id,
+            protocol: self.protocol,
+            segment_duration_secs: self.segment_duration_secs,
+            output_dir: self.output_dir,
+            selected_labels: self.selected_labels,
+        }
+    }
+}
+
+/// Status of a single rendition within an ABR proxy set.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AbrRenditionStatus {
+    /// Waiting in queue.
+    Pending,
+    /// Encoding in progress.
+    Encoding,
+    /// Encoding complete; segments available.
+    Ready,
+    /// Encoding failed.
+    Failed(String),
+}
+
+impl AbrRenditionStatus {
+    /// Returns `true` if this rendition is ready.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+/// Runtime information about one rendition in an ABR proxy set.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AbrRenditionInfo {
+    /// Rendition label.
+    pub label: String,
+    /// Width × height.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Current status.
+    pub status: AbrRenditionStatus,
+    /// Path to the per-rendition playlist/representation (relative to `output_dir`).
+    pub playlist_path: String,
+    /// Number of segments available so far.
+    pub segments_ready: u32,
+}
+
+/// A complete ABR proxy set for one asset.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AbrProxySet {
+    /// Unique identifier for this proxy set.
+    pub id: uuid::Uuid,
+    /// Asset the proxy is for.
+    pub asset_id: uuid::Uuid,
+    /// Protocol used.
+    pub protocol: StreamingProtocol,
+    /// Configuration that generated this set.
+    pub config: AbrProxyConfig,
+    /// Per-rendition status.
+    pub renditions: Vec<AbrRenditionInfo>,
+    /// Path to the master manifest (relative to `output_dir`).
+    pub master_manifest_path: String,
+    /// Timestamp when the set was created.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl AbrProxySet {
+    /// Creates a new [`AbrProxySet`] from a config and ladder.
+    #[must_use]
+    pub fn new(config: AbrProxyConfig, ladder: &AbrLadder) -> Self {
+        let protocol = config.protocol;
+        let output_dir = config.output_dir.clone();
+
+        let renditions_to_use: Vec<&AbrRendition> = if config.selected_labels.is_empty() {
+            ladder.renditions.iter().collect()
+        } else {
+            ladder
+                .renditions
+                .iter()
+                .filter(|r| config.selected_labels.contains(&r.label))
+                .collect()
+        };
+
+        let renditions = renditions_to_use
+            .iter()
+            .map(|r| {
+                let playlist_path = match protocol {
+                    StreamingProtocol::Hls => {
+                        format!("{}/{}/playlist.m3u8", output_dir, r.label)
+                    }
+                    StreamingProtocol::Dash => {
+                        format!("{}/{}", output_dir, r.label)
+                    }
+                };
+                AbrRenditionInfo {
+                    label: r.label.clone(),
+                    width: r.width,
+                    height: r.height,
+                    status: AbrRenditionStatus::Pending,
+                    playlist_path,
+                    segments_ready: 0,
+                }
+            })
+            .collect();
+
+        let master_manifest_path = match protocol {
+            StreamingProtocol::Hls => format!("{}/master.m3u8", output_dir),
+            StreamingProtocol::Dash => format!("{}/manifest.mpd", output_dir),
+        };
+
+        Self {
+            id: uuid::Uuid::new_v4(),
+            asset_id: config.asset_id,
+            protocol,
+            config,
+            renditions,
+            master_manifest_path,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// Returns `true` if every rendition is in the `Ready` state.
+    #[must_use]
+    pub fn is_fully_ready(&self) -> bool {
+        !self.renditions.is_empty() && self.renditions.iter().all(|r| r.status.is_ready())
+    }
+
+    /// Count of renditions that have finished encoding.
+    #[must_use]
+    pub fn ready_count(&self) -> usize {
+        self.renditions
+            .iter()
+            .filter(|r| r.status.is_ready())
+            .count()
+    }
+
+    /// Mark a rendition as ready (by label).  Returns `true` if found.
+    pub fn mark_ready(&mut self, label: &str) -> bool {
+        if let Some(r) = self.renditions.iter_mut().find(|r| r.label == label) {
+            r.status = AbrRenditionStatus::Ready;
+            return true;
+        }
+        false
+    }
+
+    /// Mark a rendition as failed (by label).  Returns `true` if found.
+    pub fn mark_failed(&mut self, label: &str, reason: impl Into<String>) -> bool {
+        if let Some(r) = self.renditions.iter_mut().find(|r| r.label == label) {
+            r.status = AbrRenditionStatus::Failed(reason.into());
+            return true;
+        }
+        false
+    }
+}
+
+/// Generates HLS and DASH manifests from an [`AbrProxySet`] and [`AbrLadder`].
+pub struct ManifestBuilder;
+
+impl ManifestBuilder {
+    /// Build an HLS master playlist (`.m3u8`).
+    ///
+    /// Each ready rendition gets an `#EXT-X-STREAM-INF` entry.  Renditions
+    /// that are still pending/encoding/failed are included as comments so the
+    /// playlist is useful even during progressive encoding.
+    #[must_use]
+    pub fn build_hls_master(set: &AbrProxySet, ladder: &AbrLadder) -> String {
+        let mut out = String::from("#EXTM3U\n#EXT-X-VERSION:3\n\n");
+
+        for info in &set.renditions {
+            // Find the matching rendition in the ladder for bitrate info.
+            if let Some(rend) = ladder.renditions.iter().find(|r| r.label == info.label) {
+                let codec_str = match rend.codec {
+                    ProxyCodec::H264 => "avc1.640028,mp4a.40.2",
+                    ProxyCodec::H265 => "hvc1.1.6.L123.B0,mp4a.40.2",
+                    ProxyCodec::VP9 => "vp09.00.50.08,opus",
+                    ProxyCodec::ProResProxy => "avc1.640028,mp4a.40.2",
+                };
+
+                out.push_str(&format!(
+                    "#EXT-X-STREAM-INF:BANDWIDTH={},RESOLUTION={},CODECS=\"{}\"\n{}\n\n",
+                    rend.bandwidth_hint(),
+                    rend.resolution_str(),
+                    codec_str,
+                    info.playlist_path,
+                ));
+            }
+        }
+
+        out
+    }
+
+    /// Build an MPEG-DASH MPD manifest.
+    ///
+    /// Generates an `AdaptationSet` with one `Representation` per ready
+    /// rendition in the ladder.
+    #[must_use]
+    pub fn build_dash_mpd(set: &AbrProxySet, ladder: &AbrLadder, duration_secs: f64) -> String {
+        let segment_duration = set.config.segment_duration_secs;
+        let mut representations = String::new();
+
+        for info in &set.renditions {
+            if let Some(rend) = ladder.renditions.iter().find(|r| r.label == info.label) {
+                let codec_str = match rend.codec {
+                    ProxyCodec::H264 => "avc1.640028",
+                    ProxyCodec::H265 => "hvc1.1.6.L123.B0",
+                    ProxyCodec::VP9 => "vp09.00.50.08",
+                    ProxyCodec::ProResProxy => "avc1.640028",
+                };
+
+                let repr = format!(
+                    concat!(
+                        "      <Representation id=\"{label}\" codecs=\"{codec}\"",
+                        " width=\"{w}\" height=\"{h}\" bandwidth=\"{bw}\">\n",
+                        "        <BaseURL>{path}/</BaseURL>\n",
+                        "        <SegmentTemplate duration=\"{seg}\"",
+                        " media=\"seg_$Number$.m4s\" initialization=\"init.mp4\"/>\n",
+                        "      </Representation>\n",
+                    ),
+                    label = info.label,
+                    codec = codec_str,
+                    w = rend.width,
+                    h = rend.height,
+                    bw = rend.total_bitrate_bps(),
+                    path = info.playlist_path,
+                    seg = segment_duration,
+                );
+                representations.push_str(&repr);
+            }
+        }
+
+        format!(
+            concat!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+                "<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\"",
+                " type=\"static\"",
+                " mediaPresentationDuration=\"PT{dur}S\"",
+                " minBufferTime=\"PT2S\"",
+                " profiles=\"urn:mpeg:dash:profile:isoff-on-demand:2011\">\n",
+                "  <Period>\n",
+                "    <AdaptationSet mimeType=\"video/mp4\" segmentAlignment=\"true\">\n",
+                "{reps}",
+                "    </AdaptationSet>\n",
+                "  </Period>\n",
+                "</MPD>",
+            ),
+            dur = duration_secs,
+            reps = representations,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -875,5 +1387,214 @@ mod tests {
 
         assert_eq!(deserialized.resolution, ProxyResolution::P720);
         assert_eq!(deserialized.codec, ProxyCodec::H264);
+    }
+
+    // ── ABR tests ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_streaming_protocol_manifest_extension() {
+        assert_eq!(StreamingProtocol::Hls.manifest_extension(), "m3u8");
+        assert_eq!(StreamingProtocol::Dash.manifest_extension(), "mpd");
+    }
+
+    #[test]
+    fn test_abr_rendition_total_bitrate() {
+        let r = AbrRendition {
+            label: "720p".to_string(),
+            width: 1280,
+            height: 720,
+            video_bitrate_bps: 3_000_000,
+            audio_bitrate_bps: 128_000,
+            codec: ProxyCodec::H264,
+        };
+        assert_eq!(r.total_bitrate_bps(), 3_128_000);
+        assert_eq!(r.resolution_str(), "1280x720");
+        assert_eq!(r.bandwidth_hint(), "3128000");
+    }
+
+    #[test]
+    fn test_abr_ladder_broadcast_has_three_renditions() {
+        let ladder = AbrLadder::broadcast();
+        assert_eq!(ladder.len(), 3);
+        assert!(!ladder.is_empty());
+        assert_eq!(ladder.renditions[0].label, "360p");
+        assert_eq!(ladder.renditions[2].label, "1080p");
+    }
+
+    #[test]
+    fn test_abr_ladder_streaming_has_four_renditions() {
+        let ladder = AbrLadder::streaming();
+        assert_eq!(ladder.len(), 4);
+    }
+
+    #[test]
+    fn test_abr_ladder_browser_vp9() {
+        let ladder = AbrLadder::browser_vp9();
+        assert_eq!(ladder.len(), 2);
+        assert!(ladder.renditions.iter().all(|r| r.codec == ProxyCodec::VP9));
+    }
+
+    #[test]
+    fn test_abr_proxy_config_builder() {
+        let asset_id = uuid::Uuid::new_v4();
+        let config = AbrProxyConfig::builder(asset_id)
+            .protocol(StreamingProtocol::Dash)
+            .segment_duration(4)
+            .output_dir("/tmp/abr_test")
+            .select_labels(vec!["720p".to_string()])
+            .build();
+
+        assert_eq!(config.asset_id, asset_id);
+        assert_eq!(config.protocol, StreamingProtocol::Dash);
+        assert_eq!(config.segment_duration_secs, 4);
+        assert_eq!(config.output_dir, "/tmp/abr_test");
+        assert_eq!(config.selected_labels, vec!["720p".to_string()]);
+    }
+
+    #[test]
+    fn test_abr_proxy_set_new_hls() {
+        let asset_id = uuid::Uuid::new_v4();
+        let config = AbrProxyConfig::builder(asset_id)
+            .protocol(StreamingProtocol::Hls)
+            .output_dir("/tmp/hls_out")
+            .build();
+        let ladder = AbrLadder::broadcast();
+        let set = AbrProxySet::new(config, &ladder);
+
+        assert_eq!(set.renditions.len(), 3);
+        assert_eq!(set.protocol, StreamingProtocol::Hls);
+        assert!(set.master_manifest_path.ends_with("master.m3u8"));
+        assert!(!set.is_fully_ready());
+    }
+
+    #[test]
+    fn test_abr_proxy_set_new_dash() {
+        let asset_id = uuid::Uuid::new_v4();
+        let config = AbrProxyConfig::builder(asset_id)
+            .protocol(StreamingProtocol::Dash)
+            .output_dir("/tmp/dash_out")
+            .build();
+        let ladder = AbrLadder::broadcast();
+        let set = AbrProxySet::new(config, &ladder);
+
+        assert!(set.master_manifest_path.ends_with("manifest.mpd"));
+    }
+
+    #[test]
+    fn test_abr_proxy_set_selected_labels() {
+        let asset_id = uuid::Uuid::new_v4();
+        let config = AbrProxyConfig::builder(asset_id)
+            .output_dir("/tmp/sel_out")
+            .select_labels(vec!["720p".to_string()])
+            .build();
+        let ladder = AbrLadder::broadcast();
+        let set = AbrProxySet::new(config, &ladder);
+
+        assert_eq!(set.renditions.len(), 1);
+        assert_eq!(set.renditions[0].label, "720p");
+    }
+
+    #[test]
+    fn test_abr_proxy_set_mark_ready() {
+        let asset_id = uuid::Uuid::new_v4();
+        let config = AbrProxyConfig::builder(asset_id)
+            .output_dir("/tmp/rdy_out")
+            .build();
+        let ladder = AbrLadder::broadcast();
+        let mut set = AbrProxySet::new(config, &ladder);
+
+        assert!(!set.is_fully_ready());
+        assert_eq!(set.ready_count(), 0);
+
+        assert!(set.mark_ready("360p"));
+        assert!(set.mark_ready("720p"));
+        assert!(set.mark_ready("1080p"));
+
+        assert!(set.is_fully_ready());
+        assert_eq!(set.ready_count(), 3);
+    }
+
+    #[test]
+    fn test_abr_proxy_set_mark_failed() {
+        let asset_id = uuid::Uuid::new_v4();
+        let config = AbrProxyConfig::builder(asset_id)
+            .output_dir("/tmp/fail_out")
+            .build();
+        let ladder = AbrLadder::broadcast();
+        let mut set = AbrProxySet::new(config, &ladder);
+
+        assert!(set.mark_failed("360p", "encoder crashed"));
+        assert!(!set.is_fully_ready());
+
+        let info = set
+            .renditions
+            .iter()
+            .find(|r| r.label == "360p")
+            .expect("360p rendition must exist in test");
+        assert!(matches!(info.status, AbrRenditionStatus::Failed(_)));
+    }
+
+    #[test]
+    fn test_abr_rendition_status_is_ready() {
+        assert!(AbrRenditionStatus::Ready.is_ready());
+        assert!(!AbrRenditionStatus::Pending.is_ready());
+        assert!(!AbrRenditionStatus::Encoding.is_ready());
+        assert!(!AbrRenditionStatus::Failed("x".to_string()).is_ready());
+    }
+
+    #[test]
+    fn test_manifest_builder_hls_master() {
+        let asset_id = uuid::Uuid::new_v4();
+        let config = AbrProxyConfig::builder(asset_id)
+            .output_dir("/srv/hls")
+            .build();
+        let ladder = AbrLadder::broadcast();
+        let mut set = AbrProxySet::new(config, &ladder);
+        set.mark_ready("360p");
+        set.mark_ready("720p");
+        set.mark_ready("1080p");
+
+        let manifest = ManifestBuilder::build_hls_master(&set, &ladder);
+        assert!(manifest.starts_with("#EXTM3U"));
+        assert!(manifest.contains("#EXT-X-STREAM-INF"));
+        assert!(manifest.contains("1280x720"));
+        assert!(manifest.contains("BANDWIDTH=3128000"));
+    }
+
+    #[test]
+    fn test_manifest_builder_dash_mpd() {
+        let asset_id = uuid::Uuid::new_v4();
+        let config = AbrProxyConfig::builder(asset_id)
+            .protocol(StreamingProtocol::Dash)
+            .segment_duration(4)
+            .output_dir("/srv/dash")
+            .build();
+        let ladder = AbrLadder::broadcast();
+        let mut set = AbrProxySet::new(config, &ladder);
+        set.mark_ready("360p");
+        set.mark_ready("720p");
+        set.mark_ready("1080p");
+
+        let mpd = ManifestBuilder::build_dash_mpd(&set, &ladder, 120.0);
+        assert!(mpd.contains("<?xml"));
+        assert!(mpd.contains("<MPD"));
+        assert!(mpd.contains("<Representation"));
+        assert!(mpd.contains("PT120S"));
+        assert!(mpd.contains("1920"));
+    }
+
+    #[test]
+    fn test_manifest_builder_dash_vp9() {
+        let asset_id = uuid::Uuid::new_v4();
+        let config = AbrProxyConfig::builder(asset_id)
+            .protocol(StreamingProtocol::Dash)
+            .output_dir("/srv/dash_vp9")
+            .build();
+        let ladder = AbrLadder::browser_vp9();
+        let set = AbrProxySet::new(config, &ladder);
+
+        let mpd = ManifestBuilder::build_dash_mpd(&set, &ladder, 60.0);
+        assert!(mpd.contains("vp09"));
+        assert!(mpd.contains("PT60S"));
     }
 }

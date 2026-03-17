@@ -166,6 +166,7 @@ pub fn estimate_noise_by_region(
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
 #[allow(clippy::cast_precision_loss)]
+#[allow(clippy::manual_checked_ops)]
 pub fn detect_splicing_impl(
     noise_map: &[f32],
     width: u32,

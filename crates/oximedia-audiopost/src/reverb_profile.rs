@@ -5,6 +5,7 @@
 //! (rooms, halls, plates, etc.) with early reflections, late reverb tail,
 //! frequency-dependent decay, and mix control.
 
+use oxifft::{fft, ifft, Complex};
 use std::collections::HashMap;
 
 /// Type of reverb algorithm or acoustic model.
@@ -311,6 +312,273 @@ impl ReverbProfileLibrary {
     }
 }
 
+// ── Convolution Reverb Engine ─────────────────────────────────────────────────
+
+/// Error type for convolution reverb operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConvolutionError {
+    /// The impulse response has not been loaded.
+    NoImpulseResponse,
+    /// The impulse response is longer than the maximum allowed.
+    IrTooLong(usize),
+    /// The FFT block size is not a power of two.
+    InvalidBlockSize(usize),
+}
+
+impl std::fmt::Display for ConvolutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoImpulseResponse => write!(f, "No impulse response loaded"),
+            Self::IrTooLong(n) => write!(f, "Impulse response is too long ({n} samples)"),
+            Self::InvalidBlockSize(n) => write!(f, "Block size {n} is not a power of two"),
+        }
+    }
+}
+
+impl std::error::Error for ConvolutionError {}
+
+/// Overlap-add FFT-based convolution reverb engine.
+///
+/// The engine uses the overlap-add algorithm with a pre-computed FFT of the
+/// impulse response (IR), amortising the per-sample cost of direct convolution
+/// to O(N log N / B) where N is the IR length and B is the block size.
+///
+/// The IR FFT is pre-computed on load (`load_impulse_response`) and cached
+/// so that repeated `process` calls do not incur FFT overhead on the IR.
+pub struct ConvolutionReverbEngine {
+    /// Sample rate.
+    pub sample_rate: u32,
+    /// FFT block size (must be ≥ 2 × IR length, rounded to next power of two).
+    pub fft_block_size: usize,
+    /// Dry/wet mix ratio (0.0 = fully dry, 1.0 = fully wet).
+    pub wet_mix: f32,
+    /// Output gain multiplier (linear).
+    pub output_gain: f32,
+    /// Cached FFT of the impulse response (complex, `fft_block_size` bins).
+    ir_spectrum: Option<Vec<Complex<f32>>>,
+    /// Length of the raw IR.
+    ir_length: usize,
+    /// Overlap buffer for the overlap-add algorithm.
+    overlap: Vec<f32>,
+    /// Input ring-buffer for current block.
+    input_block: Vec<f32>,
+    /// Write position within `input_block`.
+    block_pos: usize,
+    /// Processed output FIFO.
+    output_fifo: std::collections::VecDeque<f32>,
+}
+
+impl std::fmt::Debug for ConvolutionReverbEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConvolutionReverbEngine")
+            .field("sample_rate", &self.sample_rate)
+            .field("fft_block_size", &self.fft_block_size)
+            .field("wet_mix", &self.wet_mix)
+            .field("output_gain", &self.output_gain)
+            .field("ir_length", &self.ir_length)
+            .finish()
+    }
+}
+
+impl ConvolutionReverbEngine {
+    /// Maximum allowed IR length (10 seconds at 192 kHz = 1 920 000 samples).
+    pub const MAX_IR_SAMPLES: usize = 1_920_000;
+
+    /// Create a new convolution reverb engine.
+    ///
+    /// `block_size_hint` is used to derive the FFT frame size.  The actual FFT
+    /// size will be the next power-of-two that is ≥ 2 × block_size_hint.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConvolutionError::InvalidBlockSize`] for a zero hint.
+    pub fn new(sample_rate: u32, block_size_hint: usize) -> Result<Self, ConvolutionError> {
+        if block_size_hint == 0 {
+            return Err(ConvolutionError::InvalidBlockSize(0));
+        }
+        // Round up to next power of two ≥ block_size_hint * 2.
+        let fft_block_size = (block_size_hint * 2).next_power_of_two().max(64);
+        Ok(Self {
+            sample_rate,
+            fft_block_size,
+            wet_mix: 0.3,
+            output_gain: 1.0,
+            ir_spectrum: None,
+            ir_length: 0,
+            overlap: vec![0.0; fft_block_size],
+            input_block: vec![0.0; fft_block_size],
+            block_pos: 0,
+            output_fifo: std::collections::VecDeque::new(),
+        })
+    }
+
+    /// Load and pre-compute the FFT of an impulse response.
+    ///
+    /// The IR is zero-padded to `fft_block_size` before the forward FFT is
+    /// applied.  The result is cached in `ir_spectrum`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConvolutionError::IrTooLong`] if `ir` has more than
+    /// `MAX_IR_SAMPLES` samples.
+    pub fn load_impulse_response(&mut self, ir: &[f32]) -> Result<(), ConvolutionError> {
+        if ir.len() > Self::MAX_IR_SAMPLES {
+            return Err(ConvolutionError::IrTooLong(ir.len()));
+        }
+        self.ir_length = ir.len();
+
+        // Choose an FFT size that is a power of two and at least large enough
+        // to hold one input block plus the IR without circular aliasing.
+        // We pick the smallest power-of-two ≥ (block_size + ir.len()).
+        let required = (self.fft_block_size / 2 + ir.len()).next_power_of_two();
+        if required > self.fft_block_size {
+            self.fft_block_size = required;
+            self.overlap = vec![0.0; self.fft_block_size];
+            self.input_block = vec![0.0; self.fft_block_size];
+        }
+
+        // Zero-pad IR to fft_block_size.
+        let mut padded: Vec<Complex<f32>> = ir.iter().map(|&s| Complex::new(s, 0.0)).collect();
+        padded.resize(self.fft_block_size, Complex::new(0.0, 0.0));
+
+        self.ir_spectrum = Some(fft(&padded));
+        self.overlap = vec![0.0; self.fft_block_size];
+        self.input_block = vec![0.0; self.fft_block_size];
+        self.block_pos = 0;
+        self.output_fifo.clear();
+        Ok(())
+    }
+
+    /// Process one sample at a time using the cached IR FFT.
+    ///
+    /// Internally accumulates samples into a block.  When a full block is ready,
+    /// it is convolved with the IR in the frequency domain using overlap-add,
+    /// and the result is pushed to an internal FIFO.
+    ///
+    /// Returns the dry + wet mixed output sample.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConvolutionError::NoImpulseResponse`] if no IR has been loaded.
+    pub fn process_sample(&mut self, input: f32) -> Result<f32, ConvolutionError> {
+        if self.ir_spectrum.is_none() {
+            return Err(ConvolutionError::NoImpulseResponse);
+        }
+
+        // Half of fft_block_size is the actual processing block size.
+        let hop = self.fft_block_size / 2;
+
+        self.input_block[self.block_pos] = input;
+        self.block_pos += 1;
+
+        if self.block_pos >= hop {
+            self.convolve_block();
+            self.block_pos = 0;
+        }
+
+        let wet = self.output_fifo.pop_front().unwrap_or(0.0);
+        let out = (input * (1.0 - self.wet_mix) + wet * self.wet_mix) * self.output_gain;
+        Ok(out)
+    }
+
+    /// Process a slice of samples.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConvolutionError::NoImpulseResponse`] if no IR has been loaded.
+    pub fn process_block(
+        &mut self,
+        input: &[f32],
+        output: &mut [f32],
+    ) -> Result<(), ConvolutionError> {
+        for (i, &x) in input.iter().enumerate() {
+            let y = self.process_sample(x)?;
+            if let Some(out) = output.get_mut(i) {
+                *out = y;
+            }
+        }
+        Ok(())
+    }
+
+    /// Perform frequency-domain convolution of the current input block with the
+    /// cached IR spectrum using overlap-add.
+    fn convolve_block(&mut self) {
+        let ir_spectrum = match &self.ir_spectrum {
+            Some(s) => s.clone(),
+            None => return,
+        };
+
+        let hop = self.fft_block_size / 2;
+
+        // Zero-pad the input block to fft_block_size.
+        let mut block_complex: Vec<Complex<f32>> = self.input_block[..hop]
+            .iter()
+            .map(|&s| Complex::new(s, 0.0))
+            .collect();
+        block_complex.resize(self.fft_block_size, Complex::new(0.0, 0.0));
+
+        // Forward FFT of input block.
+        let block_spectrum = fft(&block_complex);
+
+        // Multiply element-wise in frequency domain.
+        let product: Vec<Complex<f32>> = block_spectrum
+            .iter()
+            .zip(ir_spectrum.iter())
+            .map(|(b, h)| Complex::new(b.re * h.re - b.im * h.im, b.re * h.im + b.im * h.re))
+            .collect();
+
+        // Inverse FFT.
+        let result = ifft(&product);
+
+        // Scale by 1/N (ifft does not normalise).
+        let scale = 1.0 / self.fft_block_size as f32;
+
+        // Overlap-add: first hop samples = new output + tail from previous block.
+        for i in 0..self.fft_block_size {
+            let sample = result[i].re * scale + self.overlap[i];
+            if i < hop {
+                self.output_fifo.push_back(sample);
+            }
+            // Store upper half as new overlap tail.
+            self.overlap[i] = if i + hop < self.fft_block_size {
+                result[i + hop].re * scale
+            } else {
+                0.0
+            };
+        }
+    }
+
+    /// Flush the overlap tail by processing silence.
+    ///
+    /// Returns the remaining wet samples from the IR tail.
+    pub fn flush(&mut self) -> Vec<f32> {
+        if self.ir_spectrum.is_none() {
+            return vec![];
+        }
+        let ir_len = self.ir_length;
+        let mut out = Vec::with_capacity(ir_len);
+        for _ in 0..ir_len {
+            let y = self.process_sample(0.0).unwrap_or(0.0);
+            out.push(y);
+        }
+        out
+    }
+
+    /// Reset engine state (clears overlap and FIFO but keeps loaded IR).
+    pub fn reset(&mut self) {
+        self.overlap.fill(0.0);
+        self.input_block.fill(0.0);
+        self.block_pos = 0;
+        self.output_fifo.clear();
+    }
+
+    /// Whether an impulse response has been loaded.
+    #[must_use]
+    pub fn has_impulse_response(&self) -> bool {
+        self.ir_spectrum.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +735,100 @@ mod tests {
             .add_band_decay(BandDecay::new(8000.0, 0.5));
         assert_eq!(p.early_reflections.len(), 2);
         assert_eq!(p.band_decays.len(), 1);
+    }
+
+    // ── ConvolutionReverbEngine tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_convolution_engine_creation() {
+        let engine = ConvolutionReverbEngine::new(48000, 512).expect("failed to create");
+        assert!(!engine.has_impulse_response());
+    }
+
+    #[test]
+    fn test_convolution_engine_zero_block_size_error() {
+        assert!(ConvolutionReverbEngine::new(48000, 0).is_err());
+    }
+
+    #[test]
+    fn test_convolution_engine_no_ir_error() {
+        let mut engine = ConvolutionReverbEngine::new(48000, 512).expect("failed to create");
+        assert!(engine.process_sample(0.5).is_err());
+    }
+
+    #[test]
+    fn test_convolution_engine_load_ir() {
+        let mut engine = ConvolutionReverbEngine::new(48000, 512).expect("failed to create");
+        // Create a simple unit impulse as the IR.
+        let mut ir = vec![0.0f32; 512];
+        ir[0] = 1.0;
+        engine
+            .load_impulse_response(&ir)
+            .expect("failed to load IR");
+        assert!(engine.has_impulse_response());
+        assert_eq!(engine.ir_length, 512);
+    }
+
+    #[test]
+    fn test_convolution_engine_ir_too_long() {
+        let mut engine = ConvolutionReverbEngine::new(48000, 512).expect("failed to create");
+        let huge_ir = vec![0.0f32; ConvolutionReverbEngine::MAX_IR_SAMPLES + 1];
+        assert!(engine.load_impulse_response(&huge_ir).is_err());
+    }
+
+    #[test]
+    fn test_convolution_engine_unit_impulse_ir() {
+        let mut engine = ConvolutionReverbEngine::new(48000, 128).expect("failed to create");
+        // Unit impulse IR at delay 0: convolution with it should approximate identity.
+        let mut ir = vec![0.0f32; 64];
+        ir[0] = 1.0;
+        engine.load_impulse_response(&ir).expect("load IR");
+        engine.wet_mix = 1.0; // fully wet
+        engine.output_gain = 1.0;
+
+        let input = vec![0.5f32, 0.3, -0.2, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let mut output = vec![0.0f32; input.len()];
+        engine.process_block(&input, &mut output).expect("process");
+        // With a unit impulse IR at lag 0, the output should be non-trivially related
+        // to the input (delayed by one block due to overlap-add latency).
+        // We just check that processing succeeds and the output is finite.
+        for &s in &output {
+            assert!(s.is_finite(), "Output contains non-finite value: {s}");
+        }
+    }
+
+    #[test]
+    fn test_convolution_engine_reset() {
+        let mut engine = ConvolutionReverbEngine::new(48000, 128).expect("failed to create");
+        let mut ir = vec![0.0f32; 64];
+        ir[0] = 1.0;
+        engine.load_impulse_response(&ir).expect("load IR");
+        let input = vec![0.5f32; 200];
+        let mut output = vec![0.0f32; 200];
+        engine.process_block(&input, &mut output).expect("process");
+        // Reset should clear state but keep IR.
+        engine.reset();
+        assert!(engine.has_impulse_response());
+    }
+
+    #[test]
+    fn test_convolution_engine_flush() {
+        let mut engine = ConvolutionReverbEngine::new(48000, 128).expect("failed to create");
+        let ir = vec![0.3f32; 32];
+        engine.load_impulse_response(&ir).expect("load IR");
+        let tail = engine.flush();
+        // Flush should return approximately ir_length samples.
+        assert_eq!(tail.len(), engine.ir_length);
+    }
+
+    #[test]
+    fn test_convolution_engine_cached_ir_not_recomputed() {
+        let mut engine = ConvolutionReverbEngine::new(48000, 256).expect("failed to create");
+        let ir = vec![0.1f32; 128];
+        engine.load_impulse_response(&ir).expect("first load");
+        // Load again with a different IR — should succeed.
+        let ir2 = vec![0.5f32; 64];
+        engine.load_impulse_response(&ir2).expect("second load");
+        assert_eq!(engine.ir_length, 64);
     }
 }

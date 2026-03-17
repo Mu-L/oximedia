@@ -89,6 +89,7 @@ pub mod export;
 pub mod formats;
 pub mod gamut;
 pub mod gamut_compress_lut;
+pub mod hald_clut;
 pub mod hdr_lut;
 pub mod hdr_metadata;
 pub mod hdr_pipeline;
@@ -98,8 +99,10 @@ pub mod lut1d;
 pub mod lut3d;
 pub mod lut_analysis;
 pub mod lut_chain;
+pub mod lut_chain_ops;
 pub mod lut_combine;
 pub mod lut_dither;
+pub mod lut_export;
 pub mod lut_fingerprint;
 pub mod lut_gradient;
 pub mod lut_interpolation;
@@ -111,7 +114,9 @@ pub mod lut_stats;
 pub mod lut_validate;
 pub mod lut_version;
 pub mod matrix;
+pub mod photographic_luts;
 pub mod preview;
+pub mod resolve_lut;
 pub mod temperature;
 pub mod tetrahedral;
 pub mod tonemap;
@@ -131,6 +136,8 @@ pub use hdr_pipeline::{
 pub use interpolation::LutInterpolation;
 pub use lut1d::Lut1d;
 pub use lut3d::Lut3d;
+pub use lut_export::LutExporter;
+pub use resolve_lut::{LutNode, ResolveLut, ResolveLutParser};
 
 /// RGB color value (normalized to 0.0-1.0 range).
 pub type Rgb = [f64; 3];

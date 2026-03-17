@@ -33,6 +33,10 @@ pub async fn migrate_database(pool: &SqlitePool) -> ClipResult<()> {
         apply_migration_v2(pool).await?;
     }
 
+    if current_version < 3 {
+        apply_migration_v3(pool).await?;
+    }
+
     Ok(())
 }
 
@@ -49,7 +53,33 @@ async fn get_current_version(pool: &SqlitePool) -> ClipResult<i32> {
 }
 
 async fn apply_migration_v1(pool: &SqlitePool) -> ClipResult<()> {
-    // Create clips table (already done in storage.rs migrate())
+    // Create the core clips table.  This must happen here (and not rely on
+    // storage.rs) so that the migration path is self-contained when invoked
+    // directly (e.g. in tests using an in-memory database).
+    sqlx::query(
+        r"
+        CREATE TABLE IF NOT EXISTS clips (
+            id TEXT PRIMARY KEY,
+            file_path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            duration INTEGER,
+            frame_rate_num INTEGER,
+            frame_rate_den INTEGER,
+            in_point INTEGER,
+            out_point INTEGER,
+            rating INTEGER NOT NULL DEFAULT 0,
+            is_favorite INTEGER NOT NULL DEFAULT 0,
+            is_rejected INTEGER NOT NULL DEFAULT 0,
+            keywords TEXT,
+            created_at TEXT NOT NULL,
+            modified_at TEXT NOT NULL,
+            custom_metadata TEXT
+        )
+        ",
+    )
+    .execute(pool)
+    .await?;
 
     // Record migration
     sqlx::query("INSERT INTO schema_version (version, applied_at) VALUES (1, datetime('now'))")
@@ -95,6 +125,50 @@ async fn apply_migration_v2(pool: &SqlitePool) -> ClipResult<()> {
 
     // Record migration
     sqlx::query("INSERT INTO schema_version (version, applied_at) VALUES (2, datetime('now'))")
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Migration v3: Add indexes on `keywords` and `rating` columns for faster
+/// filtered queries.
+async fn apply_migration_v3(pool: &SqlitePool) -> ClipResult<()> {
+    // Index on the `rating` column – used heavily by rating-based filters.
+    sqlx::query(
+        r"
+        CREATE INDEX IF NOT EXISTS idx_clips_rating
+            ON clips (rating)
+        ",
+    )
+    .execute(pool)
+    .await?;
+
+    // Index on the `keywords` column – SQLite FTS5 would be ideal, but a
+    // plain B-tree index on the JSON string still speeds up `LIKE '%keyword%'`
+    // scans for moderate-sized libraries.
+    sqlx::query(
+        r"
+        CREATE INDEX IF NOT EXISTS idx_clips_keywords
+            ON clips (keywords)
+        ",
+    )
+    .execute(pool)
+    .await?;
+
+    // Composite index on (is_favorite, rating) for common "show favorites
+    // above a threshold" queries.
+    sqlx::query(
+        r"
+        CREATE INDEX IF NOT EXISTS idx_clips_favorite_rating
+            ON clips (is_favorite, rating)
+        ",
+    )
+    .execute(pool)
+    .await?;
+
+    // Record migration
+    sqlx::query("INSERT INTO schema_version (version, applied_at) VALUES (3, datetime('now'))")
         .execute(pool)
         .await?;
 

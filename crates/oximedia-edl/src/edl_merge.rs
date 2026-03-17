@@ -244,6 +244,283 @@ fn merge_union(first: &Edl, second: &Edl, result: &mut MergeResult) {
     }
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Conflict resolution
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Strategy for resolving conflicts when events from two EDLs overlap
+/// on the record timeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictResolution {
+    /// Always prefer the event from source A (first EDL).
+    PreferA,
+    /// Always prefer the event from source B (second EDL).
+    PreferB,
+    /// Keep both events (may produce overlaps).
+    KeepBoth,
+    /// Prefer the longer event (greater duration).
+    PreferLonger,
+    /// Prefer the shorter event (smaller duration).
+    PreferShorter,
+}
+
+/// A detected conflict between two events from different EDLs.
+#[derive(Debug, Clone)]
+pub struct MergeConflict {
+    /// Event from source A.
+    pub event_a: EdlEvent,
+    /// Event from source B.
+    pub event_b: EdlEvent,
+    /// Which resolution was applied.
+    pub resolution: ConflictResolution,
+    /// The winning event number (or both if `KeepBoth`).
+    pub resolved_to: ConflictOutcome,
+}
+
+/// Outcome of resolving a single conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictOutcome {
+    /// The event from source A was chosen.
+    KeptA,
+    /// The event from source B was chosen.
+    KeptB,
+    /// Both events were kept.
+    KeptBoth,
+}
+
+/// Result of a conflict-aware merge.
+#[derive(Debug, Clone)]
+pub struct ConflictMergeResult {
+    /// The merged EDL.
+    pub edl: Edl,
+    /// Number of events contributed by source A.
+    pub from_a: usize,
+    /// Number of events contributed by source B.
+    pub from_b: usize,
+    /// Conflicts detected and how they were resolved.
+    pub conflicts: Vec<MergeConflict>,
+}
+
+impl ConflictMergeResult {
+    /// Total number of events in the merged EDL.
+    #[must_use]
+    pub fn total_events(&self) -> usize {
+        self.edl.events.len()
+    }
+
+    /// Number of conflicts that were detected.
+    #[must_use]
+    pub fn conflict_count(&self) -> usize {
+        self.conflicts.len()
+    }
+
+    /// Generate a human-readable conflict report.
+    #[must_use]
+    pub fn conflict_report(&self) -> String {
+        if self.conflicts.is_empty() {
+            return "No conflicts detected.".to_string();
+        }
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "Merge Conflict Report: {} conflict(s)",
+            self.conflicts.len()
+        ));
+        lines.push(String::new());
+        for (i, conflict) in self.conflicts.iter().enumerate() {
+            lines.push(format!(
+                "Conflict #{}: Event {} (A, reel={}) vs Event {} (B, reel={})",
+                i + 1,
+                conflict.event_a.number,
+                conflict.event_a.reel,
+                conflict.event_b.number,
+                conflict.event_b.reel,
+            ));
+            lines.push(format!(
+                "  A: {} - {} | B: {} - {}",
+                conflict.event_a.record_in,
+                conflict.event_a.record_out,
+                conflict.event_b.record_in,
+                conflict.event_b.record_out,
+            ));
+            let outcome = match &conflict.resolved_to {
+                ConflictOutcome::KeptA => "Kept event from source A",
+                ConflictOutcome::KeptB => "Kept event from source B",
+                ConflictOutcome::KeptBoth => "Kept both events",
+            };
+            lines.push(format!("  Resolution: {outcome}"));
+        }
+        lines.join("\n")
+    }
+}
+
+/// Merge two EDLs with conflict detection and resolution.
+///
+/// Unlike `merge_edls`, this function detects when events from two EDLs
+/// overlap on the record timeline and applies the specified conflict
+/// resolution strategy.
+///
+/// # Arguments
+///
+/// * `source_a` - First (primary) EDL.
+/// * `source_b` - Second (overlay) EDL.
+/// * `resolution` - How to resolve timeline conflicts.
+/// * `options` - Standard merge options (renumber, sort, etc.).
+#[must_use]
+pub fn merge_with_conflict_resolution(
+    source_a: &Edl,
+    source_b: &Edl,
+    resolution: ConflictResolution,
+    options: &MergeOptions,
+) -> ConflictMergeResult {
+    let frame_rate = options.frame_rate.unwrap_or(source_a.frame_rate);
+    let format = source_a.format;
+    let title = options.title.clone().or_else(|| {
+        let t1 = source_a.title.as_deref().unwrap_or("EDL_A");
+        let t2 = source_b.title.as_deref().unwrap_or("EDL_B");
+        Some(format!("{t1} + {t2}"))
+    });
+
+    let mut result_edl = Edl::new(format);
+    result_edl.set_frame_rate(frame_rate);
+    if let Some(t) = title {
+        result_edl.set_title(t);
+    }
+
+    let mut from_a = 0_usize;
+    let mut from_b = 0_usize;
+    let mut conflicts = Vec::new();
+
+    // Find overlapping pairs between A and B events
+    let mut b_handled: HashSet<usize> = HashSet::new();
+
+    for event_a in &source_a.events {
+        let mut conflicting_b_indices: Vec<usize> = Vec::new();
+
+        for (bi, event_b) in source_b.events.iter().enumerate() {
+            if event_a.overlaps_with(event_b) {
+                conflicting_b_indices.push(bi);
+            }
+        }
+
+        if conflicting_b_indices.is_empty() {
+            // No conflict, add event_a directly
+            result_edl.events.push(event_a.clone());
+            from_a += 1;
+        } else {
+            // Resolve each conflict
+            for &bi in &conflicting_b_indices {
+                b_handled.insert(bi);
+                let event_b = &source_b.events[bi];
+
+                let (outcome, events_to_add) = resolve_conflict(event_a, event_b, resolution);
+
+                let conflict = MergeConflict {
+                    event_a: event_a.clone(),
+                    event_b: event_b.clone(),
+                    resolution,
+                    resolved_to: outcome.clone(),
+                };
+                conflicts.push(conflict);
+
+                for (src, ev) in events_to_add {
+                    result_edl.events.push(ev);
+                    match src {
+                        ConflictSource::A => from_a += 1,
+                        ConflictSource::B => from_b += 1,
+                    }
+                }
+            }
+            // If we handled conflicts but still need to add event_a
+            // (it was already added in resolve_conflict if needed)
+        }
+    }
+
+    // Add non-conflicting events from B
+    for (bi, event_b) in source_b.events.iter().enumerate() {
+        if !b_handled.contains(&bi) {
+            result_edl.events.push(event_b.clone());
+            from_b += 1;
+        }
+    }
+
+    // Post-processing
+    if options.sort_by_record_in {
+        result_edl.events.sort_by_key(|e| e.record_in.to_frames());
+    }
+    if options.renumber {
+        result_edl.renumber_events();
+    }
+
+    ConflictMergeResult {
+        edl: result_edl,
+        from_a,
+        from_b,
+        conflicts,
+    }
+}
+
+/// Internal marker for which source an event came from.
+#[derive(Debug, Clone, Copy)]
+enum ConflictSource {
+    A,
+    B,
+}
+
+/// Resolve a single conflict between two overlapping events.
+fn resolve_conflict(
+    event_a: &EdlEvent,
+    event_b: &EdlEvent,
+    resolution: ConflictResolution,
+) -> (ConflictOutcome, Vec<(ConflictSource, EdlEvent)>) {
+    match resolution {
+        ConflictResolution::PreferA => (
+            ConflictOutcome::KeptA,
+            vec![(ConflictSource::A, event_a.clone())],
+        ),
+        ConflictResolution::PreferB => (
+            ConflictOutcome::KeptB,
+            vec![(ConflictSource::B, event_b.clone())],
+        ),
+        ConflictResolution::KeepBoth => (
+            ConflictOutcome::KeptBoth,
+            vec![
+                (ConflictSource::A, event_a.clone()),
+                (ConflictSource::B, event_b.clone()),
+            ],
+        ),
+        ConflictResolution::PreferLonger => {
+            let dur_a = event_a.duration_frames();
+            let dur_b = event_b.duration_frames();
+            if dur_a >= dur_b {
+                (
+                    ConflictOutcome::KeptA,
+                    vec![(ConflictSource::A, event_a.clone())],
+                )
+            } else {
+                (
+                    ConflictOutcome::KeptB,
+                    vec![(ConflictSource::B, event_b.clone())],
+                )
+            }
+        }
+        ConflictResolution::PreferShorter => {
+            let dur_a = event_a.duration_frames();
+            let dur_b = event_b.duration_frames();
+            if dur_a <= dur_b {
+                (
+                    ConflictOutcome::KeptA,
+                    vec![(ConflictSource::A, event_a.clone())],
+                )
+            } else {
+                (
+                    ConflictOutcome::KeptB,
+                    vec![(ConflictSource::B, event_b.clone())],
+                )
+            }
+        }
+    }
+}
+
 /// Convenience function: merge multiple EDLs sequentially using the Append strategy.
 #[must_use]
 pub fn merge_many(edls: &[&Edl], options: &MergeOptions) -> Edl {
@@ -419,5 +696,148 @@ mod tests {
         let result = merge_edls(&a, &b, &opts);
         // Without sorting, first EDL's event stays first
         assert_eq!(result.edl.events[0].number, 1);
+    }
+
+    // ── Conflict resolution tests ──
+
+    fn make_overlapping_event(num: u32, reel: &str, sec_in: u8, sec_out: u8) -> EdlEvent {
+        let fr = EdlFrameRate::Fps25;
+        EdlEvent::new(
+            num,
+            reel.to_string(),
+            TrackType::Video,
+            EditType::Cut,
+            EdlTimecode::new(1, 0, sec_in, 0, fr).expect("failed to create"),
+            EdlTimecode::new(1, 0, sec_out, 0, fr).expect("failed to create"),
+            EdlTimecode::new(1, 0, sec_in, 0, fr).expect("failed to create"),
+            EdlTimecode::new(1, 0, sec_out, 0, fr).expect("failed to create"),
+        )
+    }
+
+    #[test]
+    fn test_conflict_prefer_a() {
+        let a = make_edl("A", vec![make_overlapping_event(1, "R1", 0, 10)]);
+        let b = make_edl("B", vec![make_overlapping_event(1, "R2", 5, 15)]);
+        let opts = MergeOptions::default();
+        let result = merge_with_conflict_resolution(&a, &b, ConflictResolution::PreferA, &opts);
+        assert_eq!(result.conflict_count(), 1);
+        assert_eq!(result.conflicts[0].resolved_to, ConflictOutcome::KeptA);
+        // Only event from A should be in result (plus no non-conflicting B events)
+        assert_eq!(result.total_events(), 1);
+        assert_eq!(result.edl.events[0].reel, "R1");
+    }
+
+    #[test]
+    fn test_conflict_prefer_b() {
+        let a = make_edl("A", vec![make_overlapping_event(1, "R1", 0, 10)]);
+        let b = make_edl("B", vec![make_overlapping_event(1, "R2", 5, 15)]);
+        let opts = MergeOptions::default();
+        let result = merge_with_conflict_resolution(&a, &b, ConflictResolution::PreferB, &opts);
+        assert_eq!(result.conflict_count(), 1);
+        assert_eq!(result.conflicts[0].resolved_to, ConflictOutcome::KeptB);
+        assert_eq!(result.total_events(), 1);
+        assert_eq!(result.edl.events[0].reel, "R2");
+    }
+
+    #[test]
+    fn test_conflict_keep_both() {
+        let a = make_edl("A", vec![make_overlapping_event(1, "R1", 0, 10)]);
+        let b = make_edl("B", vec![make_overlapping_event(1, "R2", 5, 15)]);
+        let opts = MergeOptions::default();
+        let result = merge_with_conflict_resolution(&a, &b, ConflictResolution::KeepBoth, &opts);
+        assert_eq!(result.conflict_count(), 1);
+        assert_eq!(result.conflicts[0].resolved_to, ConflictOutcome::KeptBoth);
+        assert_eq!(result.total_events(), 2);
+    }
+
+    #[test]
+    fn test_conflict_prefer_longer() {
+        // A is 10 sec, B is 5 sec
+        let a = make_edl("A", vec![make_overlapping_event(1, "R1", 0, 10)]);
+        let b = make_edl("B", vec![make_overlapping_event(1, "R2", 5, 10)]);
+        let opts = MergeOptions::default();
+        let result =
+            merge_with_conflict_resolution(&a, &b, ConflictResolution::PreferLonger, &opts);
+        assert_eq!(result.conflict_count(), 1);
+        assert_eq!(result.conflicts[0].resolved_to, ConflictOutcome::KeptA);
+        assert_eq!(result.edl.events[0].reel, "R1");
+    }
+
+    #[test]
+    fn test_conflict_prefer_shorter() {
+        // A is 10 sec, B is 5 sec
+        let a = make_edl("A", vec![make_overlapping_event(1, "R1", 0, 10)]);
+        let b = make_edl("B", vec![make_overlapping_event(1, "R2", 5, 10)]);
+        let opts = MergeOptions::default();
+        let result =
+            merge_with_conflict_resolution(&a, &b, ConflictResolution::PreferShorter, &opts);
+        assert_eq!(result.conflict_count(), 1);
+        assert_eq!(result.conflicts[0].resolved_to, ConflictOutcome::KeptB);
+        assert_eq!(result.edl.events[0].reel, "R2");
+    }
+
+    #[test]
+    fn test_conflict_no_conflicts() {
+        let a = make_edl("A", vec![make_event(1, "R1", 0, 5)]);
+        let b = make_edl("B", vec![make_event(2, "R2", 10, 15)]);
+        let opts = MergeOptions::default();
+        let result = merge_with_conflict_resolution(&a, &b, ConflictResolution::PreferA, &opts);
+        assert_eq!(result.conflict_count(), 0);
+        assert_eq!(result.total_events(), 2);
+    }
+
+    #[test]
+    fn test_conflict_report_no_conflicts() {
+        let a = make_edl("A", vec![make_event(1, "R1", 0, 5)]);
+        let b = make_edl("B", vec![make_event(2, "R2", 10, 15)]);
+        let opts = MergeOptions::default();
+        let result = merge_with_conflict_resolution(&a, &b, ConflictResolution::PreferA, &opts);
+        let report = result.conflict_report();
+        assert!(report.contains("No conflicts"));
+    }
+
+    #[test]
+    fn test_conflict_report_with_conflicts() {
+        let a = make_edl("A", vec![make_overlapping_event(1, "R1", 0, 10)]);
+        let b = make_edl("B", vec![make_overlapping_event(1, "R2", 5, 15)]);
+        let opts = MergeOptions::default();
+        let result = merge_with_conflict_resolution(&a, &b, ConflictResolution::PreferA, &opts);
+        let report = result.conflict_report();
+        assert!(report.contains("Conflict #1"));
+        assert!(report.contains("Kept event from source A"));
+    }
+
+    #[test]
+    fn test_conflict_mixed_overlap_and_non_overlap() {
+        let a = make_edl(
+            "A",
+            vec![
+                make_overlapping_event(1, "R1", 0, 10),
+                make_event(2, "R3", 20, 25),
+            ],
+        );
+        let b = make_edl(
+            "B",
+            vec![
+                make_overlapping_event(1, "R2", 5, 15),
+                make_event(3, "R4", 30, 35),
+            ],
+        );
+        let opts = MergeOptions::default();
+        let result = merge_with_conflict_resolution(&a, &b, ConflictResolution::PreferA, &opts);
+        assert_eq!(result.conflict_count(), 1);
+        // R1 kept (A wins), R3 from A, R4 from B = 3 total
+        assert_eq!(result.total_events(), 3);
+    }
+
+    #[test]
+    fn test_conflict_prefer_longer_tie() {
+        // Equal duration: prefer A (tie-break)
+        let a = make_edl("A", vec![make_overlapping_event(1, "R1", 0, 10)]);
+        let b = make_edl("B", vec![make_overlapping_event(1, "R2", 0, 10)]);
+        let opts = MergeOptions::default();
+        let result =
+            merge_with_conflict_resolution(&a, &b, ConflictResolution::PreferLonger, &opts);
+        assert_eq!(result.conflicts[0].resolved_to, ConflictOutcome::KeptA);
     }
 }

@@ -18,6 +18,7 @@ pub fn lossless_vp9() -> PresetConfig {
         frame_rate: None, // Preserve source frame rate
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mkv".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -34,6 +35,7 @@ pub fn high_quality_vp9() -> PresetConfig {
         frame_rate: None, // Preserve source
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mkv".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -50,6 +52,7 @@ pub fn high_quality_av1() -> PresetConfig {
         frame_rate: None,
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mkv".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -66,6 +69,7 @@ pub fn master_archive() -> PresetConfig {
         frame_rate: None,
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mkv".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -82,6 +86,7 @@ pub fn intermediate_archive() -> PresetConfig {
         frame_rate: None,
         quality_mode: Some(QualityMode::High),
         container: Some("mkv".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -98,6 +103,7 @@ pub fn preservation_1080p() -> PresetConfig {
         frame_rate: Some((24, 1)), // Film standard
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mkv".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -114,6 +120,7 @@ pub fn preservation_4k() -> PresetConfig {
         frame_rate: Some((24, 1)),
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mkv".to_string()),
+        audio_channel_layout: None,
     }
 }
 

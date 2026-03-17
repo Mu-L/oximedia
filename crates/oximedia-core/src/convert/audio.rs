@@ -259,6 +259,16 @@ impl SampleConverter {
                 ];
                 f64::from_le_bytes(bytes)
             }
+            SampleFormat::S24 | SampleFormat::S24p => {
+                // 24-bit signed integer stored in 3 bytes, little-endian.
+                // Sign-extend from 24-bit to 32-bit.
+                let b0 = data[offset];
+                let b1 = data[offset + 1];
+                let b2 = data[offset + 2];
+                let sign_extend = if b2 & 0x80 != 0 { 0xFF } else { 0x00 };
+                let val = i32::from_le_bytes([b0, b1, b2, sign_extend]);
+                f64::from(val) / 8_388_608.0 // 2^23
+            }
         }
     }
 
@@ -291,6 +301,17 @@ impl SampleConverter {
             SampleFormat::F64 | SampleFormat::F64p => {
                 let bytes = clamped.to_le_bytes();
                 data[offset..offset + 8].copy_from_slice(&bytes);
+            }
+            SampleFormat::S24 | SampleFormat::S24p => {
+                // 24-bit signed integer stored in 3 bytes, little-endian.
+                let scaled = (clamped * 8_388_607.0)
+                    .round()
+                    .clamp(-8_388_608.0, 8_388_607.0);
+                let val = scaled as i32;
+                let bytes = val.to_le_bytes();
+                data[offset] = bytes[0];
+                data[offset + 1] = bytes[1];
+                data[offset + 2] = bytes[2];
             }
         }
     }

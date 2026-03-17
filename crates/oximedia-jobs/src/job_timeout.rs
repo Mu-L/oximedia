@@ -139,8 +139,7 @@ impl JobTimeoutState {
     /// Check whether the job appears stalled (no progress in stall_check_interval).
     #[allow(clippy::cast_precision_loss)]
     pub fn is_stalled(&self) -> bool {
-        self.time_since_progress() >= self.config.stall_check_interval
-            && self.last_progress < 1.0
+        self.time_since_progress() >= self.config.stall_check_interval && self.last_progress < 1.0
     }
 
     /// Remaining time before soft timeout, or zero if already exceeded.
@@ -207,8 +206,10 @@ impl TimeoutManager {
 
     /// Register a job with an explicit timeout config.
     pub fn register(&mut self, job_id: &str, config: TimeoutConfig) {
-        self.states
-            .insert(job_id.to_string(), JobTimeoutState::new(job_id.to_string(), config));
+        self.states.insert(
+            job_id.to_string(),
+            JobTimeoutState::new(job_id.to_string(), config),
+        );
     }
 
     /// Register a job using the default timeout config.
@@ -257,8 +258,16 @@ impl TimeoutManager {
     #[allow(clippy::cast_precision_loss)]
     pub fn stats(&self) -> TimeoutStats {
         let total = self.states.len() as u64;
-        let soft = self.states.values().filter(|s| s.soft_timeout_fired).count() as u64;
-        let hard = self.states.values().filter(|s| s.hard_timeout_fired).count() as u64;
+        let soft = self
+            .states
+            .values()
+            .filter(|s| s.soft_timeout_fired)
+            .count() as u64;
+        let hard = self
+            .states
+            .values()
+            .filter(|s| s.hard_timeout_fired)
+            .count() as u64;
         let stalled = self.states.values().filter(|s| s.is_stalled()).count() as u64;
         TimeoutStats {
             total_tracked: total,

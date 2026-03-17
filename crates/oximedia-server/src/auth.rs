@@ -17,7 +17,7 @@ use axum::{
     http::{header, request::Parts},
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-use rand::RngCore;
+use rand::Rng;
 
 /// Authentication manager.
 #[derive(Clone)]

@@ -4,7 +4,7 @@
 //! Provides utilities for building, iterating, and validating ordered sequences
 //! of timecodes that represent edit lists, playlists, or continuous recordings.
 
-use crate::{FrameRate, FrameRateInfo, Timecode, TimecodeError};
+use crate::{FrameRate, Timecode, TimecodeError};
 
 /// A contiguous run of timecodes sharing the same frame rate.
 #[derive(Debug, Clone, PartialEq)]
@@ -183,9 +183,7 @@ impl Default for TimecodeSequence {
 }
 
 /// Build a [`TimecodeSequence`] from an iterator of `(start_tc, frame_count)` pairs.
-pub fn build_sequence(
-    items: &[(Timecode, u64)],
-) -> Result<TimecodeSequence, TimecodeError> {
+pub fn build_sequence(items: &[(Timecode, u64)]) -> Result<TimecodeSequence, TimecodeError> {
     let mut seq = TimecodeSequence::new();
     for (tc, count) in items {
         let run = TimecodeRun::new(*tc, *count)?;
@@ -316,7 +314,9 @@ mod tests {
     #[test]
     fn test_end_timecode() {
         let run = TimecodeRun::new(tc(0, 0, 0, 0), 26).expect("valid timecode run");
-        let end = run.end_timecode(FrameRate::Fps25).expect("end timecode should succeed");
+        let end = run
+            .end_timecode(FrameRate::Fps25)
+            .expect("end timecode should succeed");
         assert_eq!(end.hours, 0);
         assert_eq!(end.minutes, 0);
         assert_eq!(end.seconds, 1);

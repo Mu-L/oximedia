@@ -205,6 +205,162 @@ impl ChannelRemapper {
         remapper
     }
 
+    /// Create 7.1.4 Atmos bed to 7.1 downmix.
+    ///
+    /// Atmos 7.1.4 channel order (12 ch):
+    ///   0=L, 1=R, 2=C, 3=LFE, 4=Ls, 5=Rs, 6=Lrs, 7=Rrs,
+    ///   8=Ltf, 9=Rtf, 10=Ltr, 11=Rtr
+    ///
+    /// 7.1 channel order (8 ch):
+    ///   0=L, 1=R, 2=C, 3=LFE, 4=Ls, 5=Rs, 6=Lrs, 7=Rrs
+    ///
+    /// Height channels are folded into the corresponding ear-level channels
+    /// using the ITU-R BS.2051 recommended coefficient of 0.707 (-3 dB).
+    #[must_use]
+    pub fn downmix_714_to_71() -> Self {
+        let mut remapper = Self::new(ChannelLayout::Atmos714, ChannelLayout::Surround71);
+        let h: f32 = 0.707; // height fold-down coefficient
+
+        // L  = L + h*Ltf
+        remapper.add_map(ChannelMap::mix(0, vec![(0, 1.0), (8, h)]));
+        // R  = R + h*Rtf
+        remapper.add_map(ChannelMap::mix(1, vec![(1, 1.0), (9, h)]));
+        // C  = C (no height center)
+        remapper.add_map(ChannelMap::direct(2, 2));
+        // LFE = LFE
+        remapper.add_map(ChannelMap::direct(3, 3));
+        // Ls  = Ls + h*Ltr
+        remapper.add_map(ChannelMap::mix(4, vec![(4, 1.0), (10, h)]));
+        // Rs  = Rs + h*Rtr
+        remapper.add_map(ChannelMap::mix(5, vec![(5, 1.0), (11, h)]));
+        // Lrs = Lrs
+        remapper.add_map(ChannelMap::direct(6, 6));
+        // Rrs = Rrs
+        remapper.add_map(ChannelMap::direct(7, 7));
+
+        remapper
+    }
+
+    /// Create 7.1.4 Atmos bed to 5.1 downmix.
+    ///
+    /// First folds height into ear-level (like `downmix_714_to_71`), then
+    /// folds rear surrounds into side surrounds with 0.707 coefficient.
+    #[must_use]
+    pub fn downmix_714_to_51() -> Self {
+        let mut remapper = Self::new(ChannelLayout::Atmos714, ChannelLayout::Surround51);
+        let h: f32 = 0.707;
+        let r: f32 = 0.707; // rear fold-down coefficient
+
+        // L  = L + h*Ltf
+        remapper.add_map(ChannelMap::mix(0, vec![(0, 1.0), (8, h)]));
+        // R  = R + h*Rtf
+        remapper.add_map(ChannelMap::mix(1, vec![(1, 1.0), (9, h)]));
+        // C  = C
+        remapper.add_map(ChannelMap::direct(2, 2));
+        // LFE = LFE
+        remapper.add_map(ChannelMap::direct(3, 3));
+        // Ls  = Ls + r*Lrs + h*Ltr
+        remapper.add_map(ChannelMap::mix(4, vec![(4, 1.0), (6, r), (10, h)]));
+        // Rs  = Rs + r*Rrs + h*Rtr
+        remapper.add_map(ChannelMap::mix(5, vec![(5, 1.0), (7, r), (11, h)]));
+
+        remapper
+    }
+
+    /// Create 7.1.4 Atmos bed to stereo downmix.
+    ///
+    /// Full fold-down from 12 channels to 2-channel stereo using
+    /// ITU-R BS.775 compatible coefficients.
+    #[must_use]
+    pub fn downmix_714_to_stereo() -> Self {
+        let mut remapper = Self::new(ChannelLayout::Atmos714, ChannelLayout::Stereo);
+        let c: f32 = 0.707; // center mix coefficient
+        let s: f32 = 0.707; // surround mix coefficient
+        let h: f32 = 0.5; // height mix coefficient (reduced for stereo)
+
+        // L = L + c*C + s*Ls + s*Lrs + h*Ltf + h*Ltr
+        remapper.add_map(ChannelMap::mix(
+            0,
+            vec![(0, 1.0), (2, c), (4, s), (6, s), (8, h), (10, h)],
+        ));
+        // R = R + c*C + s*Rs + s*Rrs + h*Rtf + h*Rtr
+        remapper.add_map(ChannelMap::mix(
+            1,
+            vec![(1, 1.0), (2, c), (5, s), (7, s), (9, h), (11, h)],
+        ));
+
+        remapper
+    }
+
+    /// Create 5.1 to 7.1.4 Atmos bed upmix.
+    ///
+    /// 5.1 channel order: 0=L, 1=R, 2=C, 3=LFE, 4=Ls, 5=Rs
+    ///
+    /// The ear-level channels are copied directly. Rear surrounds (Lrs/Rrs)
+    /// are derived from side surrounds. Height channels are derived from the
+    /// corresponding ear-level channel attenuated by 0.5 (-6 dB) to create
+    /// a subtle height impression.
+    #[must_use]
+    pub fn upmix_51_to_714() -> Self {
+        let mut remapper = Self::new(ChannelLayout::Surround51, ChannelLayout::Atmos714);
+        let s: f32 = 0.707; // surround → rear coefficient
+        let h: f32 = 0.5; // ear-level → height coefficient
+
+        // L = L
+        remapper.add_map(ChannelMap::direct(0, 0));
+        // R = R
+        remapper.add_map(ChannelMap::direct(1, 1));
+        // C = C
+        remapper.add_map(ChannelMap::direct(2, 2));
+        // LFE = LFE
+        remapper.add_map(ChannelMap::direct(3, 3));
+        // Ls = Ls
+        remapper.add_map(ChannelMap::direct(4, 4));
+        // Rs = Rs
+        remapper.add_map(ChannelMap::direct(5, 5));
+        // Lrs = s * Ls
+        remapper.add_map(ChannelMap::mix(6, vec![(4, s)]));
+        // Rrs = s * Rs
+        remapper.add_map(ChannelMap::mix(7, vec![(5, s)]));
+        // Ltf = h * L
+        remapper.add_map(ChannelMap::mix(8, vec![(0, h)]));
+        // Rtf = h * R
+        remapper.add_map(ChannelMap::mix(9, vec![(1, h)]));
+        // Ltr = h * Ls
+        remapper.add_map(ChannelMap::mix(10, vec![(4, h)]));
+        // Rtr = h * Rs
+        remapper.add_map(ChannelMap::mix(11, vec![(5, h)]));
+
+        remapper
+    }
+
+    /// Create 7.1 to 7.1.4 Atmos bed upmix.
+    ///
+    /// 7.1 channel order: 0=L, 1=R, 2=C, 3=LFE, 4=Ls, 5=Rs, 6=Lrs, 7=Rrs
+    ///
+    /// Height channels are derived from corresponding ear-level channels at
+    /// 0.5 (-6 dB).
+    #[must_use]
+    pub fn upmix_71_to_714() -> Self {
+        let mut remapper = Self::new(ChannelLayout::Surround71, ChannelLayout::Atmos714);
+        let h: f32 = 0.5;
+
+        // Direct copy of all 8 ear-level channels
+        for i in 0..8u8 {
+            remapper.add_map(ChannelMap::direct(i, i));
+        }
+        // Ltf = h * L
+        remapper.add_map(ChannelMap::mix(8, vec![(0, h)]));
+        // Rtf = h * R
+        remapper.add_map(ChannelMap::mix(9, vec![(1, h)]));
+        // Ltr = h * Lrs
+        remapper.add_map(ChannelMap::mix(10, vec![(6, h)]));
+        // Rtr = h * Rrs
+        remapper.add_map(ChannelMap::mix(11, vec![(7, h)]));
+
+        remapper
+    }
+
     /// Get mapping for a specific output channel
     #[must_use]
     pub fn get_map_for_output(&self, output_channel: u8) -> Option<&ChannelMap> {
@@ -430,5 +586,163 @@ mod tests {
         manager.add_remapper("my_51_passthrough".to_string(), custom);
 
         assert!(manager.get_remapper("my_51_passthrough").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // 7.1.4 Atmos downmix / upmix tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_downmix_714_to_71_layout() {
+        let remapper = ChannelRemapper::downmix_714_to_71();
+        assert_eq!(remapper.input_layout, ChannelLayout::Atmos714);
+        assert_eq!(remapper.output_layout, ChannelLayout::Surround71);
+        assert_eq!(remapper.maps.len(), 8);
+        assert!(remapper.validate().is_ok());
+    }
+
+    #[test]
+    fn test_downmix_714_to_71_height_fold() {
+        let remapper = ChannelRemapper::downmix_714_to_71();
+        // L channel (output 0) should mix from input 0 (L) and input 8 (Ltf)
+        let left = remapper.get_map_for_output(0).expect("left map");
+        assert_eq!(left.inputs.len(), 2);
+        assert_eq!(left.inputs[0].0, 0); // L
+        assert_eq!(left.inputs[1].0, 8); // Ltf
+        assert!((left.inputs[1].1 - 0.707).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_downmix_714_to_71_direct_channels() {
+        let remapper = ChannelRemapper::downmix_714_to_71();
+        // C (output 2) is direct from input 2
+        let center = remapper.get_map_for_output(2).expect("center map");
+        assert_eq!(center.inputs.len(), 1);
+        assert_eq!(center.inputs[0].0, 2);
+        assert!((center.inputs[0].1 - 1.0).abs() < f32::EPSILON);
+
+        // LFE (output 3) is direct from input 3
+        let lfe = remapper.get_map_for_output(3).expect("lfe map");
+        assert_eq!(lfe.inputs.len(), 1);
+        assert_eq!(lfe.inputs[0].0, 3);
+    }
+
+    #[test]
+    fn test_downmix_714_to_51_layout() {
+        let remapper = ChannelRemapper::downmix_714_to_51();
+        assert_eq!(remapper.input_layout, ChannelLayout::Atmos714);
+        assert_eq!(remapper.output_layout, ChannelLayout::Surround51);
+        assert_eq!(remapper.maps.len(), 6);
+        assert!(remapper.validate().is_ok());
+    }
+
+    #[test]
+    fn test_downmix_714_to_51_surround_fold() {
+        let remapper = ChannelRemapper::downmix_714_to_51();
+        // Ls (output 4) = Ls + 0.707*Lrs + 0.707*Ltr
+        let ls = remapper.get_map_for_output(4).expect("ls map");
+        assert_eq!(ls.inputs.len(), 3);
+        assert_eq!(ls.inputs[0].0, 4); // Ls
+        assert_eq!(ls.inputs[1].0, 6); // Lrs
+        assert_eq!(ls.inputs[2].0, 10); // Ltr
+    }
+
+    #[test]
+    fn test_downmix_714_to_stereo_layout() {
+        let remapper = ChannelRemapper::downmix_714_to_stereo();
+        assert_eq!(remapper.input_layout, ChannelLayout::Atmos714);
+        assert_eq!(remapper.output_layout, ChannelLayout::Stereo);
+        assert_eq!(remapper.maps.len(), 2);
+        assert!(remapper.validate().is_ok());
+    }
+
+    #[test]
+    fn test_downmix_714_to_stereo_left_channel_sources() {
+        let remapper = ChannelRemapper::downmix_714_to_stereo();
+        let left = remapper.get_map_for_output(0).expect("left map");
+        // L = L + c*C + s*Ls + s*Lrs + h*Ltf + h*Ltr
+        assert_eq!(left.inputs.len(), 6);
+        // Check that L is at 1.0
+        assert!((left.inputs[0].1 - 1.0).abs() < f32::EPSILON);
+        // Center at 0.707
+        assert!((left.inputs[1].1 - 0.707).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_upmix_51_to_714_layout() {
+        let remapper = ChannelRemapper::upmix_51_to_714();
+        assert_eq!(remapper.input_layout, ChannelLayout::Surround51);
+        assert_eq!(remapper.output_layout, ChannelLayout::Atmos714);
+        assert_eq!(remapper.maps.len(), 12);
+        assert!(remapper.validate().is_ok());
+    }
+
+    #[test]
+    fn test_upmix_51_to_714_direct_channels() {
+        let remapper = ChannelRemapper::upmix_51_to_714();
+        // First 6 channels should be direct copies
+        for i in 0..6u8 {
+            let map = remapper.get_map_for_output(i).expect("map exists");
+            assert_eq!(map.inputs.len(), 1);
+            assert_eq!(map.inputs[0].0, i);
+            assert!((map.inputs[0].1 - 1.0).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn test_upmix_51_to_714_height_derived() {
+        let remapper = ChannelRemapper::upmix_51_to_714();
+        // Ltf (output 8) = 0.5 * L (input 0)
+        let ltf = remapper.get_map_for_output(8).expect("ltf map");
+        assert_eq!(ltf.inputs.len(), 1);
+        assert_eq!(ltf.inputs[0].0, 0);
+        assert!((ltf.inputs[0].1 - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_upmix_51_to_714_rear_derived() {
+        let remapper = ChannelRemapper::upmix_51_to_714();
+        // Lrs (output 6) = 0.707 * Ls (input 4)
+        let lrs = remapper.get_map_for_output(6).expect("lrs map");
+        assert_eq!(lrs.inputs.len(), 1);
+        assert_eq!(lrs.inputs[0].0, 4);
+        assert!((lrs.inputs[0].1 - 0.707).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_upmix_71_to_714_layout() {
+        let remapper = ChannelRemapper::upmix_71_to_714();
+        assert_eq!(remapper.input_layout, ChannelLayout::Surround71);
+        assert_eq!(remapper.output_layout, ChannelLayout::Atmos714);
+        assert_eq!(remapper.maps.len(), 12);
+        assert!(remapper.validate().is_ok());
+    }
+
+    #[test]
+    fn test_upmix_71_to_714_direct_ear_level() {
+        let remapper = ChannelRemapper::upmix_71_to_714();
+        // All 8 ear-level channels are direct 1:1
+        for i in 0..8u8 {
+            let map = remapper.get_map_for_output(i).expect("map exists");
+            assert_eq!(map.inputs.len(), 1);
+            assert_eq!(map.inputs[0].0, i);
+            assert!((map.inputs[0].1 - 1.0).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn test_upmix_71_to_714_height_from_rears() {
+        let remapper = ChannelRemapper::upmix_71_to_714();
+        // Ltr (output 10) = 0.5 * Lrs (input 6)
+        let ltr = remapper.get_map_for_output(10).expect("ltr map");
+        assert_eq!(ltr.inputs.len(), 1);
+        assert_eq!(ltr.inputs[0].0, 6);
+        assert!((ltr.inputs[0].1 - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_atmos_714_channel_count() {
+        assert_eq!(ChannelLayout::Atmos714.channel_count(), 12);
+        assert!(ChannelLayout::Atmos714.has_lfe());
     }
 }

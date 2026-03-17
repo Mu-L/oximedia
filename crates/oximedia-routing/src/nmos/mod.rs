@@ -258,6 +258,10 @@ pub struct NmosRegistry {
     flows: HashMap<String, NmosFlow>,
     senders: HashMap<String, NmosSender>,
     receivers: HashMap<String, NmosReceiver>,
+    #[cfg(feature = "nmos-http")]
+    sender_constraints: HashMap<String, constraints::TransportConstraints>,
+    #[cfg(feature = "nmos-http")]
+    receiver_constraints: HashMap<String, constraints::TransportConstraints>,
 }
 
 impl NmosRegistry {
@@ -341,6 +345,94 @@ impl NmosRegistry {
     /// Return the total number of registered receivers.
     pub fn receiver_count(&self) -> usize {
         self.receivers.len()
+    }
+
+    /// Look up a device by ID.
+    pub fn get_device(&self, id: &str) -> Option<&NmosDevice> {
+        self.devices.get(id)
+    }
+
+    /// Look up a source by ID.
+    pub fn get_source(&self, id: &str) -> Option<&NmosSource> {
+        self.sources.get(id)
+    }
+
+    /// Look up a receiver by ID.
+    pub fn get_receiver(&self, id: &str) -> Option<&NmosReceiver> {
+        self.receivers.get(id)
+    }
+
+    /// Return all registered devices.
+    pub fn all_devices(&self) -> Vec<&NmosDevice> {
+        self.devices.values().collect()
+    }
+
+    /// Return all registered sources.
+    pub fn all_sources(&self) -> Vec<&NmosSource> {
+        self.sources.values().collect()
+    }
+
+    /// Return all registered flows.
+    pub fn all_flows(&self) -> Vec<&NmosFlow> {
+        self.flows.values().collect()
+    }
+
+    /// Return all registered senders.
+    pub fn all_senders(&self) -> Vec<&NmosSender> {
+        self.senders.values().collect()
+    }
+
+    /// Return all registered receivers.
+    pub fn all_receivers(&self) -> Vec<&NmosReceiver> {
+        self.receivers.values().collect()
+    }
+
+    /// Store transport constraints for a sender.
+    #[cfg(feature = "nmos-http")]
+    pub fn set_sender_constraints(
+        &mut self,
+        sender_id: &str,
+        constraints: constraints::TransportConstraints,
+    ) -> Result<(), NmosError> {
+        if !self.senders.contains_key(sender_id) {
+            return Err(NmosError::NotFound(format!("sender {sender_id}")));
+        }
+        self.sender_constraints
+            .insert(sender_id.to_string(), constraints);
+        Ok(())
+    }
+
+    /// Retrieve transport constraints for a sender, if set.
+    #[cfg(feature = "nmos-http")]
+    pub fn get_sender_constraints(
+        &self,
+        sender_id: &str,
+    ) -> Option<&constraints::TransportConstraints> {
+        self.sender_constraints.get(sender_id)
+    }
+
+    /// Store transport constraints for a receiver.
+    #[cfg(feature = "nmos-http")]
+    pub fn set_receiver_constraints(
+        &mut self,
+        receiver_id: &str,
+        constraints: constraints::TransportConstraints,
+    ) -> Result<(), NmosError> {
+        if !self.receivers.contains_key(receiver_id) {
+            return Err(NmosError::NotFound(format!("receiver {receiver_id}")));
+        }
+        self.receiver_constraints
+            .insert(receiver_id.to_string(), constraints);
+        Ok(())
+    }
+
+    /// Retrieve transport constraints for a receiver, if set.
+    #[cfg(feature = "nmos-http")]
+    pub fn get_receiver_constraints(
+        &self,
+        receiver_id: &str,
+    ) -> Option<&constraints::TransportConstraints> {
+        self.receiver_constraints.get(receiver_id)
     }
 }
 
@@ -694,6 +786,54 @@ impl Is07EventBus {
         self.next_sequence
     }
 }
+
+/// Errors that can occur in the NMOS registry.
+#[derive(Debug, thiserror::Error)]
+pub enum NmosError {
+    /// A referenced resource was not found in the registry.
+    #[error("not found: {0}")]
+    NotFound(String),
+}
+
+#[cfg(feature = "nmos-http")]
+pub mod constraints;
+#[cfg(feature = "nmos-http")]
+pub use constraints::{
+    ConstraintViolation, ParameterConstraint, RtpConstraintSet, RtpTransportParams,
+    TransportConstraints,
+};
+
+#[cfg(feature = "nmos-http")]
+pub mod channel_mapping;
+#[cfg(feature = "nmos-http")]
+pub use channel_mapping::{
+    ChannelMappingEntry, ChannelMappingError, ChannelMappingRegistry, ChannelMappingTable,
+    InputReference, OutputChannel,
+};
+
+#[cfg(feature = "nmos-http")]
+pub mod http;
+#[cfg(feature = "nmos-http")]
+mod http_handlers;
+#[cfg(feature = "nmos-http")]
+mod http_is05;
+
+#[cfg(feature = "nmos-http")]
+pub mod system;
+#[cfg(feature = "nmos-http")]
+pub use system::{ApiVersionMap, NmosSystemApi, NmosSystemConfig, SystemApiError, SystemHealth};
+
+#[cfg(feature = "nmos-http")]
+pub mod compatibility;
+#[cfg(feature = "nmos-http")]
+pub use compatibility::{
+    CompatibilityError, CompatibilityRegistry, CompatibilityState, MediaCapability,
+};
+
+#[cfg(feature = "nmos-discovery")]
+pub mod discovery;
+#[cfg(feature = "nmos-discovery")]
+pub use discovery::{NmosDiscovery, NmosDiscoveryBuilder, NmosDiscoveryError, NmosRegistryInfo};
 
 #[cfg(test)]
 mod tests {

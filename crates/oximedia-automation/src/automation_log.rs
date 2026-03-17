@@ -311,11 +311,8 @@ impl AutomationLog {
 
     /// Query log entries with a filter.
     pub fn query(&self, filter: &LogFilter) -> Vec<&AutomationLogEntry> {
-        let mut results: Vec<&AutomationLogEntry> = self
-            .entries
-            .iter()
-            .filter(|e| filter.matches(e))
-            .collect();
+        let mut results: Vec<&AutomationLogEntry> =
+            self.entries.iter().filter(|e| filter.matches(e)).collect();
         if let Some(limit) = filter.limit {
             results.truncate(limit);
         }
@@ -355,12 +352,18 @@ impl AutomationLog {
 
     /// Count entries matching a severity level.
     pub fn count_by_severity(&self, severity: LogSeverity) -> usize {
-        self.entries.iter().filter(|e| e.severity == severity).count()
+        self.entries
+            .iter()
+            .filter(|e| e.severity == severity)
+            .count()
     }
 
     /// Count entries matching a category.
     pub fn count_by_category(&self, category: LogCategory) -> usize {
-        self.entries.iter().filter(|e| e.category == category).count()
+        self.entries
+            .iter()
+            .filter(|e| e.category == category)
+            .count()
     }
 }
 
@@ -402,7 +405,13 @@ mod tests {
 
     #[test]
     fn test_log_entry_creation() {
-        let entry = AutomationLogEntry::new(1, 1000, LogSeverity::Info, LogCategory::Playout, "Test message");
+        let entry = AutomationLogEntry::new(
+            1,
+            1000,
+            LogSeverity::Info,
+            LogCategory::Playout,
+            "Test message",
+        );
         assert_eq!(entry.sequence, 1);
         assert_eq!(entry.timestamp_ms, 1000);
         assert_eq!(entry.severity, LogSeverity::Info);
@@ -412,10 +421,16 @@ mod tests {
 
     #[test]
     fn test_log_entry_builder() {
-        let entry = AutomationLogEntry::new(1, 2000, LogSeverity::Warning, LogCategory::Operator, "Override")
-            .with_channel("CH1")
-            .with_operator("admin")
-            .with_detail("source", "CAM1");
+        let entry = AutomationLogEntry::new(
+            1,
+            2000,
+            LogSeverity::Warning,
+            LogCategory::Operator,
+            "Override",
+        )
+        .with_channel("CH1")
+        .with_operator("admin")
+        .with_detail("source", "CAM1");
         assert_eq!(entry.channel_id.as_deref(), Some("CH1"));
         assert_eq!(entry.operator.as_deref(), Some("admin"));
         assert_eq!(entry.details.len(), 1);
@@ -424,8 +439,14 @@ mod tests {
 
     #[test]
     fn test_log_entry_format_line() {
-        let entry = AutomationLogEntry::new(42, 3000, LogSeverity::Error, LogCategory::Failover, "Primary down")
-            .with_channel("CH2");
+        let entry = AutomationLogEntry::new(
+            42,
+            3000,
+            LogSeverity::Error,
+            LogCategory::Failover,
+            "Primary down",
+        )
+        .with_channel("CH2");
         let line = entry.format_line();
         assert!(line.contains("[42]"));
         assert!(line.contains("ERROR"));
@@ -435,7 +456,8 @@ mod tests {
 
     #[test]
     fn test_log_entry_matches_severity() {
-        let entry = AutomationLogEntry::new(1, 1000, LogSeverity::Warning, LogCategory::General, "msg");
+        let entry =
+            AutomationLogEntry::new(1, 1000, LogSeverity::Warning, LogCategory::General, "msg");
         assert!(entry.matches_severity(LogSeverity::Warning));
         assert!(entry.matches_severity(LogSeverity::Info));
         assert!(!entry.matches_severity(LogSeverity::Error));
@@ -488,7 +510,12 @@ mod tests {
     fn test_automation_log_tail() {
         let mut log = AutomationLog::new(100);
         for i in 0..10 {
-            log.append(i, LogSeverity::Info, LogCategory::General, format!("msg {i}"));
+            log.append(
+                i,
+                LogSeverity::Info,
+                LogCategory::General,
+                format!("msg {i}"),
+            );
         }
         let tail = log.tail(3);
         assert_eq!(tail.len(), 3);

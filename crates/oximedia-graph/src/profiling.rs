@@ -131,11 +131,9 @@ impl PortThroughput {
         bytes_transferred: u64,
         frames_transferred: u64,
     ) -> Self {
-        let avg_frame_size = if frames_transferred > 0 {
-            bytes_transferred / frames_transferred
-        } else {
-            0
-        };
+        let avg_frame_size = bytes_transferred
+            .checked_div(frames_transferred)
+            .unwrap_or(0);
         Self {
             port_id: port_id.into(),
             bytes_transferred,
@@ -168,6 +166,7 @@ impl GraphProfilingReport {
     /// `port_throughputs` and `total_duration_us` are passed externally as the
     /// profiler itself does not measure wall time or port traffic.
     #[must_use]
+    #[allow(clippy::manual_checked_ops)]
     pub fn generate(profiler: &GraphProfiler) -> Self {
         let mut node_profiles: Vec<NodeProfile> = profiler.profiles.values().cloned().collect();
         node_profiles.sort_by(|a, b| b.total_us.cmp(&a.total_us));
@@ -192,6 +191,7 @@ impl GraphProfilingReport {
     /// Generate a full report with explicit port throughputs and wall-clock
     /// duration.
     #[must_use]
+    #[allow(clippy::manual_checked_ops)]
     pub fn generate_full(
         profiler: &GraphProfiler,
         port_throughputs: Vec<PortThroughput>,

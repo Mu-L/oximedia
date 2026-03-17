@@ -23,6 +23,7 @@
 pub mod corner;
 pub mod face;
 pub mod face_align;
+pub mod face_multiscale;
 pub mod motion;
 pub mod object;
 pub mod object_detect;
@@ -36,5 +37,5 @@ pub use face::{DetectionResult, FaceDetector, FaceRegion, HaarCascade, IntegralI
 pub use motion::{MotionDetector, MotionRegion, OpticalFlowLK};
 pub use object::{BoundingBox, Detection, ObjectDetector};
 #[cfg(feature = "onnx")]
-pub use yolo::{coco_class_names, YoloConfig, YoloDetector, YoloVersion};
+pub use yolo::{coco_class_names, InputResolution, YoloConfig, YoloDetector, YoloVersion};
 pub use yolo_utils::{letterbox_resize, LetterboxParams};

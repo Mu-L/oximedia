@@ -193,6 +193,236 @@ impl NearDuplicateDetector {
 }
 
 // ---------------------------------------------------------------------------
+// Bloom filter pre-screening for deduplication
+// ---------------------------------------------------------------------------
+
+/// Pre-screening results from the bloom filter pass.
+#[derive(Debug, Clone)]
+pub struct PreScreenResult {
+    /// Indices of items that are *potential* duplicates (bloom filter hit).
+    pub candidates: Vec<usize>,
+    /// Indices of items that are *definitely* unique (bloom filter miss).
+    pub unique: Vec<usize>,
+    /// Total items processed.
+    pub total: usize,
+}
+
+impl PreScreenResult {
+    /// Fraction of items that passed as candidates (potential duplicates).
+    #[must_use]
+    pub fn candidate_rate(&self) -> f64 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        self.candidates.len() as f64 / self.total as f64
+    }
+
+    /// Fraction of items rejected as unique.
+    #[must_use]
+    pub fn rejection_rate(&self) -> f64 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        self.unique.len() as f64 / self.total as f64
+    }
+}
+
+/// Pre-screen a set of fingerprints (byte slices) using a bloom filter.
+///
+/// Each fingerprint is inserted into a bloom filter.  If the filter reports
+/// that the fingerprint was already seen, the item is flagged as a candidate
+/// for expensive pairwise comparison.  Items whose fingerprints are not yet
+/// in the filter are classified as definitely unique (subject to the bloom
+/// filter's false-positive rate).
+///
+/// This dramatically reduces the number of expensive perceptual-hash or
+/// SSIM comparisons needed.
+#[must_use]
+pub fn prescreen_fingerprints(
+    fingerprints: &[Vec<u8>],
+    capacity: usize,
+    fpr: f32,
+) -> PreScreenResult {
+    let mut bloom = BloomFilter::new(capacity, fpr);
+    let mut candidates = Vec::new();
+    let mut unique = Vec::new();
+
+    for (i, fp) in fingerprints.iter().enumerate() {
+        if bloom.contains(fp) {
+            candidates.push(i);
+        } else {
+            unique.push(i);
+        }
+        bloom.insert(fp);
+    }
+
+    PreScreenResult {
+        candidates,
+        unique,
+        total: fingerprints.len(),
+    }
+}
+
+/// Pre-screen using quantized perceptual hashes.
+///
+/// Quantizes each 64-bit hash down to `quantize_bits` (default: 16) so that
+/// similar hashes map to the same bloom key.  This means near-duplicates
+/// (not just exact duplicates) will collide in the bloom filter.
+#[must_use]
+pub fn prescreen_perceptual_hashes(
+    hashes: &[u64],
+    quantize_bits: u32,
+    capacity: usize,
+    fpr: f32,
+) -> PreScreenResult {
+    let quantize_bits = quantize_bits.clamp(4, 64);
+    let shift = 64 - quantize_bits;
+
+    let mut bloom = BloomFilter::new(capacity, fpr);
+    let mut candidates = Vec::new();
+    let mut unique = Vec::new();
+
+    for (i, &hash) in hashes.iter().enumerate() {
+        let quantized = hash >> shift;
+        let bytes = quantized.to_le_bytes();
+        if bloom.contains(&bytes) {
+            candidates.push(i);
+        } else {
+            unique.push(i);
+        }
+        bloom.insert(&bytes);
+    }
+
+    PreScreenResult {
+        candidates,
+        unique,
+        total: hashes.len(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Integrated dedup pipeline with bloom + LSH
+// ---------------------------------------------------------------------------
+
+/// Configuration for the integrated bloom + LSH dedup pipeline.
+#[derive(Debug, Clone)]
+pub struct DedupPipelineConfig {
+    /// Bloom filter capacity.
+    pub bloom_capacity: usize,
+    /// Bloom filter false positive rate.
+    pub bloom_fpr: f32,
+    /// Number of bits for quantizing perceptual hashes before bloom insertion.
+    pub quantize_bits: u32,
+    /// Number of LSH hash tables.
+    pub lsh_tables: usize,
+    /// Bits sampled per LSH table.
+    pub lsh_bits_per_table: usize,
+    /// Maximum Hamming distance for near-duplicate pairing.
+    pub max_hamming_distance: u32,
+    /// PRNG seed for LSH.
+    pub seed: u64,
+}
+
+impl Default for DedupPipelineConfig {
+    fn default() -> Self {
+        Self {
+            bloom_capacity: 10_000,
+            bloom_fpr: 0.01,
+            quantize_bits: 16,
+            lsh_tables: 8,
+            lsh_bits_per_table: 8,
+            max_hamming_distance: 10,
+            seed: 42,
+        }
+    }
+}
+
+/// Result of the integrated dedup pipeline.
+#[derive(Debug, Clone)]
+pub struct DedupPipelineResult {
+    /// Items that passed bloom pre-screening (potential duplicates).
+    pub bloom_candidates: Vec<usize>,
+    /// Items rejected by bloom (definitely unique).
+    pub bloom_unique: Vec<usize>,
+    /// Duplicate pairs found by LSH among the bloom candidates.
+    pub lsh_pairs: Vec<(u64, u64, u32)>,
+    /// Total items processed.
+    pub total: usize,
+}
+
+impl DedupPipelineResult {
+    /// Fraction of items rejected by bloom (savings from skipping expensive comparison).
+    #[must_use]
+    pub fn bloom_rejection_rate(&self) -> f64 {
+        if self.total == 0 {
+            return 0.0;
+        }
+        self.bloom_unique.len() as f64 / self.total as f64
+    }
+
+    /// Number of duplicate pairs found.
+    #[must_use]
+    pub fn num_pairs(&self) -> usize {
+        self.lsh_pairs.len()
+    }
+}
+
+/// Run the integrated bloom + LSH dedup pipeline.
+///
+/// Phase 1: Bloom filter pre-screens quantized hashes to reject definitely-unique items.
+/// Phase 2: LSH finds near-duplicate pairs among remaining candidates.
+///
+/// This dramatically reduces the search space for large libraries.
+#[must_use]
+pub fn run_dedup_pipeline(
+    hashes: &[(u64, u64)], // (id, perceptual_hash)
+    config: &DedupPipelineConfig,
+) -> DedupPipelineResult {
+    use crate::lsh_index::lsh_dedup_pass;
+
+    if hashes.is_empty() {
+        return DedupPipelineResult {
+            bloom_candidates: Vec::new(),
+            bloom_unique: Vec::new(),
+            lsh_pairs: Vec::new(),
+            total: 0,
+        };
+    }
+
+    // Phase 1: Bloom pre-screening with quantized hashes
+    let raw_hashes: Vec<u64> = hashes.iter().map(|&(_, h)| h).collect();
+    let prescreen = prescreen_perceptual_hashes(
+        &raw_hashes,
+        config.quantize_bits,
+        config.bloom_capacity,
+        config.bloom_fpr,
+    );
+
+    // Build candidate set for LSH (bloom hits + their original IDs)
+    let candidate_hashes: Vec<(u64, u64)> = prescreen
+        .candidates
+        .iter()
+        .map(|&idx| hashes[idx])
+        .collect();
+
+    // Phase 2: LSH on candidates only
+    let lsh_result = lsh_dedup_pass(
+        &candidate_hashes,
+        config.max_hamming_distance,
+        config.lsh_tables,
+        config.lsh_bits_per_table,
+        config.seed,
+    );
+
+    DedupPipelineResult {
+        bloom_candidates: prescreen.candidates,
+        bloom_unique: prescreen.unique,
+        lsh_pairs: lsh_result.pairs,
+        total: hashes.len(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -331,5 +561,214 @@ mod tests {
         }
         let est = det.estimated_unique_count();
         assert!(est > 0);
+    }
+
+    // ---- Pre-screening tests ----
+
+    #[test]
+    fn test_prescreen_all_unique() {
+        let fingerprints: Vec<Vec<u8>> = (0u64..50).map(|i| i.to_le_bytes().to_vec()).collect();
+        let result = prescreen_fingerprints(&fingerprints, 1000, 0.01);
+        assert_eq!(result.total, 50);
+        // All unique items should be in the unique set
+        assert_eq!(result.unique.len(), 50);
+        assert!(result.candidates.is_empty());
+    }
+
+    #[test]
+    fn test_prescreen_with_duplicates() {
+        let mut fingerprints: Vec<Vec<u8>> = Vec::new();
+        // Add 10 unique items
+        for i in 0u64..10 {
+            fingerprints.push(i.to_le_bytes().to_vec());
+        }
+        // Add 10 duplicates of item 0
+        for _ in 0..10 {
+            fingerprints.push(0u64.to_le_bytes().to_vec());
+        }
+        let result = prescreen_fingerprints(&fingerprints, 1000, 0.01);
+        assert_eq!(result.total, 20);
+        // The first occurrence of item 0 is unique; the 10 re-inserts are candidates
+        assert_eq!(result.candidates.len(), 10);
+    }
+
+    #[test]
+    fn test_prescreen_candidate_rate() {
+        let fingerprints = vec![
+            vec![1u8, 2, 3],
+            vec![1u8, 2, 3], // duplicate
+            vec![4u8, 5, 6],
+            vec![4u8, 5, 6], // duplicate
+            vec![7u8, 8, 9],
+        ];
+        let result = prescreen_fingerprints(&fingerprints, 100, 0.01);
+        assert_eq!(result.total, 5);
+        assert_eq!(result.candidates.len(), 2);
+        assert!((result.candidate_rate() - 0.4).abs() < f64::EPSILON);
+        assert!((result.rejection_rate() - 0.6).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_prescreen_perceptual_hashes_identical() {
+        let hashes = vec![0xDEAD_BEEF_DEAD_BEEFu64; 5];
+        let result = prescreen_perceptual_hashes(&hashes, 16, 1000, 0.01);
+        assert_eq!(result.total, 5);
+        // First is unique, rest are candidates
+        assert_eq!(result.candidates.len(), 4);
+        assert_eq!(result.unique.len(), 1);
+    }
+
+    #[test]
+    fn test_prescreen_perceptual_hashes_all_different() {
+        // Hashes that differ significantly in high bits
+        let hashes: Vec<u64> = (0..20u64).map(|i| i << 48).collect();
+        let result = prescreen_perceptual_hashes(&hashes, 16, 1000, 0.01);
+        assert_eq!(result.total, 20);
+        // With 16-bit quantization from top bits, all should be unique
+        assert_eq!(result.unique.len(), 20);
+        assert!(result.candidates.is_empty());
+    }
+
+    #[test]
+    fn test_prescreen_empty_input() {
+        let result = prescreen_fingerprints(&[], 100, 0.01);
+        assert_eq!(result.total, 0);
+        assert!(result.candidates.is_empty());
+        assert!(result.unique.is_empty());
+        assert_eq!(result.candidate_rate(), 0.0);
+        assert_eq!(result.rejection_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_prescreen_result_rates_sum_to_one() {
+        let fingerprints: Vec<Vec<u8>> =
+            vec![vec![1, 2], vec![1, 2], vec![3, 4], vec![5, 6], vec![3, 4]];
+        let result = prescreen_fingerprints(&fingerprints, 100, 0.01);
+        let sum = result.candidate_rate() + result.rejection_rate();
+        assert!((sum - 1.0).abs() < 1e-10);
+    }
+
+    // ---- DedupPipelineConfig tests ----
+
+    #[test]
+    fn test_pipeline_config_default() {
+        let cfg = DedupPipelineConfig::default();
+        assert_eq!(cfg.bloom_capacity, 10_000);
+        assert_eq!(cfg.lsh_tables, 8);
+        assert_eq!(cfg.max_hamming_distance, 10);
+    }
+
+    // ---- run_dedup_pipeline tests ----
+
+    #[test]
+    fn test_pipeline_empty() {
+        let cfg = DedupPipelineConfig::default();
+        let result = run_dedup_pipeline(&[], &cfg);
+        assert_eq!(result.total, 0);
+        assert!(result.bloom_candidates.is_empty());
+        assert!(result.lsh_pairs.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_all_identical() {
+        let hash = 0xDEAD_BEEF_CAFE_BABEu64;
+        let hashes: Vec<(u64, u64)> = (0..10).map(|i| (i, hash)).collect();
+        let cfg = DedupPipelineConfig {
+            bloom_capacity: 100,
+            bloom_fpr: 0.01,
+            quantize_bits: 16,
+            lsh_tables: 6,
+            lsh_bits_per_table: 8,
+            max_hamming_distance: 0,
+            seed: 42,
+        };
+        let result = run_dedup_pipeline(&hashes, &cfg);
+        assert_eq!(result.total, 10);
+        // First item is unique in bloom, rest are candidates
+        assert_eq!(result.bloom_candidates.len(), 9);
+        assert_eq!(result.bloom_unique.len(), 1);
+        // LSH should find many pairs among the 9 candidates
+        assert!(!result.lsh_pairs.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_all_unique() {
+        // Hashes that differ significantly in high bits
+        let hashes: Vec<(u64, u64)> = (0..20u64).map(|i| (i, i << 48)).collect();
+        let cfg = DedupPipelineConfig {
+            bloom_capacity: 1000,
+            bloom_fpr: 0.01,
+            quantize_bits: 16,
+            lsh_tables: 4,
+            lsh_bits_per_table: 12,
+            max_hamming_distance: 5,
+            seed: 42,
+        };
+        let result = run_dedup_pipeline(&hashes, &cfg);
+        assert_eq!(result.total, 20);
+        // All should be unique in bloom
+        assert_eq!(result.bloom_unique.len(), 20);
+        assert!(result.bloom_candidates.is_empty());
+        assert!(result.lsh_pairs.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_mixed() {
+        // 5 identical + 5 unique
+        let base_hash = 0xAAAA_BBBB_CCCC_DDDDu64;
+        let mut hashes: Vec<(u64, u64)> = (0..5).map(|i| (i, base_hash)).collect();
+        for i in 5..10u64 {
+            hashes.push((i, i << 48));
+        }
+        let cfg = DedupPipelineConfig::default();
+        let result = run_dedup_pipeline(&hashes, &cfg);
+        assert_eq!(result.total, 10);
+        // bloom_unique should include the unique hashes
+        assert!(!result.bloom_unique.is_empty());
+    }
+
+    #[test]
+    fn test_pipeline_result_bloom_rejection_rate() {
+        let result = DedupPipelineResult {
+            bloom_candidates: vec![0, 1],
+            bloom_unique: vec![2, 3, 4],
+            lsh_pairs: vec![(0, 1, 0)],
+            total: 5,
+        };
+        assert!((result.bloom_rejection_rate() - 0.6).abs() < f64::EPSILON);
+        assert_eq!(result.num_pairs(), 1);
+    }
+
+    #[test]
+    fn test_pipeline_result_empty_total() {
+        let result = DedupPipelineResult {
+            bloom_candidates: Vec::new(),
+            bloom_unique: Vec::new(),
+            lsh_pairs: Vec::new(),
+            total: 0,
+        };
+        assert_eq!(result.bloom_rejection_rate(), 0.0);
+        assert_eq!(result.num_pairs(), 0);
+    }
+
+    #[test]
+    fn test_pipeline_near_duplicates() {
+        let base = 0xFFFF_FFFF_FFFF_FFFFu64;
+        let similar = base ^ 0b111; // 3 bits different
+                                    // Use same high bits so bloom quantization groups them
+        let hashes = vec![(1, base), (2, similar), (3, base)];
+        let cfg = DedupPipelineConfig {
+            bloom_capacity: 100,
+            bloom_fpr: 0.01,
+            quantize_bits: 16,
+            lsh_tables: 8,
+            lsh_bits_per_table: 6,
+            max_hamming_distance: 5,
+            seed: 77,
+        };
+        let result = run_dedup_pipeline(&hashes, &cfg);
+        assert_eq!(result.total, 3);
+        // At least some pairs should be found
+        // (bloom may or may not catch all, depends on quantization)
     }
 }

@@ -1,21 +1,36 @@
 //! Template rendering engine
 
-use crate::error::{BatchError, Result};
+use crate::error::Result;
 use crate::template::functions::TemplateFunctions;
 use crate::template::TemplateContext;
 use regex::Regex;
 
-/// Template engine for processing templates
+/// Template engine for processing templates.
+///
+/// Regex patterns are compiled once at construction time and reused across
+/// all calls to [`render`](Self::render), avoiding repeated compilation cost.
 pub struct TemplateEngine {
     functions: TemplateFunctions,
+    /// Pre-compiled pattern for simple `{variable}` substitution.
+    var_re: Regex,
+    /// Pre-compiled pattern for `{function(args)}` call recognition.
+    func_re: Regex,
 }
 
 impl TemplateEngine {
     /// Create a new template engine
     #[must_use]
     pub fn new() -> Self {
+        // These patterns are compile-time constants — the expect() calls are
+        // unreachable in practice and the panic message is intentionally clear.
+        let var_re = Regex::new(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+            .expect("var_re pattern is a compile-time constant and must be valid");
+        let func_re = Regex::new(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\(([^)]*)\)\}")
+            .expect("func_re pattern is a compile-time constant and must be valid");
         Self {
             functions: TemplateFunctions::new(),
+            var_re,
+            func_re,
         }
     }
 
@@ -30,27 +45,23 @@ impl TemplateEngine {
     ///
     /// Returns an error if rendering fails
     pub fn render(&self, template: &str, context: &TemplateContext) -> Result<String> {
-        let mut result = template.to_string();
-
         // Process simple variable substitution: {variable}
-        result = Self::substitute_variables(&result, context)?;
+        let result = self.substitute_variables(template, context);
 
         // Process function calls: {function(args)}
-        result = self.process_functions(&result, context)?;
+        let result = self.process_functions(&result, context)?;
 
         // Process conditionals: {if condition}...{else}...{endif}
-        result = Self::process_conditionals(&result, context)?;
+        let result = Self::process_conditionals(&result, context)?;
 
         Ok(result)
     }
 
-    fn substitute_variables(template: &str, context: &TemplateContext) -> Result<String> {
-        let re = Regex::new(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
-            .map_err(|e| BatchError::TemplateError(e.to_string()))?;
-
+    /// Substitute `{variable}` placeholders using the pre-compiled regex.
+    fn substitute_variables(&self, template: &str, context: &TemplateContext) -> String {
         let mut result = template.to_string();
 
-        for cap in re.captures_iter(template) {
+        for cap in self.var_re.captures_iter(template) {
             if let Some(var_name) = cap.get(1) {
                 let var_name_str = var_name.as_str();
                 if let Some(value) = context.get(var_name_str) {
@@ -63,16 +74,13 @@ impl TemplateEngine {
             }
         }
 
-        Ok(result)
+        result
     }
 
     fn process_functions(&self, template: &str, context: &TemplateContext) -> Result<String> {
-        let re = Regex::new(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\(([^)]*)\)\}")
-            .map_err(|e| BatchError::TemplateError(e.to_string()))?;
-
         let mut result = template.to_string();
 
-        for cap in re.captures_iter(template) {
+        for cap in self.func_re.captures_iter(template) {
             if let (Some(func_name), Some(args)) = (cap.get(1), cap.get(2)) {
                 let func_name_str = func_name.as_str();
                 let args_str = args.as_str();
@@ -193,6 +201,24 @@ mod tests {
     fn test_engine_creation() {
         let engine = TemplateEngine::new();
         let _ = engine; // engine created successfully
+    }
+
+    #[test]
+    fn test_engine_has_cached_regexes() {
+        // Creating two engines and rendering the same template exercises the
+        // cached-regex path: no per-render compilation should occur.
+        let engine1 = TemplateEngine::new();
+        let engine2 = TemplateEngine::new();
+        let mut ctx = TemplateContext::new();
+        ctx.set("key".to_string(), "val".to_string());
+        let r1 = engine1
+            .render("{key}", &ctx)
+            .expect("render 1 must succeed");
+        let r2 = engine2
+            .render("{key}", &ctx)
+            .expect("render 2 must succeed");
+        assert_eq!(r1, r2);
+        assert_eq!(r1, "val");
     }
 
     #[test]

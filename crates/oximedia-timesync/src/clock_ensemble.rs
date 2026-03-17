@@ -508,3 +508,299 @@ mod tests {
         assert!(result.offset_ns < 200.0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Bayesian clock ensemble
+// ---------------------------------------------------------------------------
+
+/// Gaussian prior / posterior state for a single Bayesian clock estimate.
+///
+/// The Bayesian estimator models each observation as a Gaussian with mean μ
+/// and variance σ² drawn from the source's `accuracy_ns`.  The posterior is
+/// obtained by combining the prior with each likelihood in closed form
+/// (conjugate Gaussian update):
+///
+/// ```text
+/// σ_post² = 1 / (1/σ_prior² + 1/σ_like²)
+/// μ_post   = σ_post² × (μ_prior/σ_prior² + μ_like/σ_like²)
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct GaussianState {
+    /// Mean offset estimate (nanoseconds).
+    pub mean_ns: f64,
+    /// Variance of the estimate (nanoseconds²).
+    pub variance_ns2: f64,
+}
+
+impl GaussianState {
+    /// Creates a state with the given mean and variance.
+    #[must_use]
+    pub fn new(mean_ns: f64, variance_ns2: f64) -> Self {
+        Self {
+            mean_ns,
+            variance_ns2: variance_ns2.max(f64::MIN_POSITIVE),
+        }
+    }
+
+    /// Returns the standard deviation (nanoseconds).
+    #[must_use]
+    pub fn std_dev_ns(&self) -> f64 {
+        self.variance_ns2.sqrt()
+    }
+
+    /// Performs a Bayesian (conjugate Gaussian) update given a likelihood with
+    /// the specified mean and variance.
+    ///
+    /// Returns the posterior [`GaussianState`].
+    #[must_use]
+    pub fn update(&self, likelihood_mean_ns: f64, likelihood_variance_ns2: f64) -> Self {
+        let like_var = likelihood_variance_ns2.max(f64::MIN_POSITIVE);
+        let prior_precision = 1.0 / self.variance_ns2;
+        let like_precision = 1.0 / like_var;
+        let post_precision = prior_precision + like_precision;
+        let post_variance = 1.0 / post_precision;
+        let post_mean =
+            post_variance * (prior_precision * self.mean_ns + like_precision * likelihood_mean_ns);
+        Self {
+            mean_ns: post_mean,
+            variance_ns2: post_variance,
+        }
+    }
+}
+
+/// Result from a [`BayesianEnsemble`] computation.
+#[derive(Debug, Clone, Copy)]
+pub struct BayesianEnsembleResult {
+    /// Posterior mean offset (nanoseconds).
+    pub mean_ns: f64,
+    /// Posterior standard deviation (nanoseconds).
+    pub std_dev_ns: f64,
+    /// Number of sources fused into this estimate.
+    pub fused_sources: usize,
+}
+
+/// Multi-source Bayesian clock ensemble.
+///
+/// Maintains a running Gaussian posterior and fuses each new observation via
+/// conjugate Gaussian update.  This is equivalent to optimal minimum-variance
+/// linear estimation (Kalman filter measurement step) when noise is Gaussian.
+///
+/// # Usage
+/// ```rust,ignore
+/// let mut ensemble = BayesianEnsemble::new(0.0, 1e12);  // diffuse prior
+/// ensemble.fuse(100.0, 500.0_f64.powi(2));   // PTP, σ=500ns
+/// ensemble.fuse(200_000.0, 5e6_f64.powi(2)); // NTP, σ=5ms
+/// let result = ensemble.result();
+/// ```
+#[derive(Debug)]
+pub struct BayesianEnsemble {
+    /// Current posterior state.
+    state: GaussianState,
+    /// Number of observations fused so far.
+    fused_count: usize,
+}
+
+impl BayesianEnsemble {
+    /// Creates a new ensemble with a Gaussian prior specified by
+    /// `prior_mean_ns` and `prior_variance_ns2`.
+    ///
+    /// Use a large `prior_variance_ns2` (e.g. `1e18`) for a diffuse
+    /// (uninformative) prior.
+    #[must_use]
+    pub fn new(prior_mean_ns: f64, prior_variance_ns2: f64) -> Self {
+        Self {
+            state: GaussianState::new(prior_mean_ns, prior_variance_ns2),
+            fused_count: 0,
+        }
+    }
+
+    /// Creates a new ensemble with a diffuse prior centred at zero.
+    #[must_use]
+    pub fn with_diffuse_prior() -> Self {
+        Self::new(0.0, 1e18)
+    }
+
+    /// Fuses a new Gaussian observation into the posterior.
+    ///
+    /// `measurement_ns`       — measured offset in nanoseconds.
+    /// `measurement_var_ns2`  — measurement variance in nanoseconds² (= σ²).
+    ///
+    /// Use `accuracy_ns.powi(2)` when you have a one-sigma accuracy figure.
+    pub fn fuse(&mut self, measurement_ns: f64, measurement_var_ns2: f64) {
+        self.state = self.state.update(measurement_ns, measurement_var_ns2);
+        self.fused_count += 1;
+    }
+
+    /// Returns the current posterior estimate.
+    #[must_use]
+    pub fn result(&self) -> BayesianEnsembleResult {
+        BayesianEnsembleResult {
+            mean_ns: self.state.mean_ns,
+            std_dev_ns: self.state.std_dev_ns(),
+            fused_sources: self.fused_count,
+        }
+    }
+
+    /// Returns the current posterior [`GaussianState`].
+    #[must_use]
+    pub fn state(&self) -> GaussianState {
+        self.state
+    }
+
+    /// Resets the posterior to a new prior.
+    pub fn reset(&mut self, prior_mean_ns: f64, prior_variance_ns2: f64) {
+        self.state = GaussianState::new(prior_mean_ns, prior_variance_ns2);
+        self.fused_count = 0;
+    }
+
+    /// Convenience: fuse all active measurements from a [`ClockEnsemble`]
+    /// using Bayesian estimation.
+    ///
+    /// Each source's `accuracy_ns` is used as the Gaussian σ.  Unreachable
+    /// or zero-accuracy sources are skipped.
+    ///
+    /// Returns the final [`BayesianEnsembleResult`], or `None` if no sources
+    /// were fused.
+    #[must_use]
+    pub fn from_clock_ensemble(
+        ensemble: &ClockEnsemble,
+        prior_mean_ns: f64,
+        prior_variance_ns2: f64,
+    ) -> Option<BayesianEnsembleResult> {
+        let mut bay = BayesianEnsemble::new(prior_mean_ns, prior_variance_ns2);
+
+        for (id, measurement) in &ensemble.measurements {
+            if let Some(quality) = ensemble.sources.get(id) {
+                if !quality.reachable || quality.accuracy_ns <= 0.0 {
+                    continue;
+                }
+                let var = quality.accuracy_ns * quality.accuracy_ns;
+                bay.fuse(measurement.offset_ns as f64, var);
+            }
+        }
+
+        if bay.fused_count == 0 {
+            return None;
+        }
+        Some(bay.result())
+    }
+}
+
+#[cfg(test)]
+mod bayesian_tests {
+    use super::*;
+
+    #[test]
+    fn test_gaussian_state_update_single_measurement() {
+        // With a very diffuse prior, the posterior should be close to the
+        // measurement.
+        let prior = GaussianState::new(0.0, 1e18);
+        let posterior = prior.update(500.0, 100.0_f64.powi(2));
+        // posterior mean ≈ 500 ns (measurement dominates diffuse prior).
+        assert!(
+            (posterior.mean_ns - 500.0).abs() < 1.0,
+            "posterior mean should be near measurement: got {}",
+            posterior.mean_ns
+        );
+    }
+
+    #[test]
+    fn test_gaussian_state_update_two_equal_measurements() {
+        // Two equal measurements with equal variance and a diffuse (uninformative)
+        // prior → posterior mean should converge to the measurement value.
+        // A finite prior at mean=0 would bias the result toward 0; use a
+        // very large prior variance so the prior is essentially non-informative.
+        let prior = GaussianState::new(0.0, 1e18);
+        let m = 300.0_f64;
+        let var = 200.0_f64.powi(2);
+        let post1 = prior.update(m, var);
+        let post2 = post1.update(m, var);
+        assert!(
+            (post2.mean_ns - m).abs() < 1.0,
+            "two equal measurements → posterior mean ≈ measurement: {}",
+            post2.mean_ns
+        );
+        // Variance should shrink with each update.
+        assert!(
+            post2.variance_ns2 < prior.variance_ns2,
+            "variance must shrink after updates"
+        );
+    }
+
+    #[test]
+    fn test_bayesian_ensemble_diffuse_prior() {
+        let mut bay = BayesianEnsemble::with_diffuse_prior();
+        // Fuse a very precise measurement.
+        bay.fuse(100.0, 50.0_f64.powi(2));
+        let r = bay.result();
+        assert!((r.mean_ns - 100.0).abs() < 5.0, "mean should be near 100ns");
+        assert_eq!(r.fused_sources, 1);
+    }
+
+    #[test]
+    fn test_bayesian_ensemble_two_sources_weighted_by_precision() {
+        // Source A: accurate (σ = 100 ns)
+        // Source B: noisy   (σ = 10_000 ns)
+        // Posterior should be much closer to A's measurement.
+        let mut bay = BayesianEnsemble::with_diffuse_prior();
+        bay.fuse(100.0, 100.0_f64.powi(2)); // A
+        bay.fuse(200_000.0, 10_000.0_f64.powi(2)); // B (NTP-like)
+        let r = bay.result();
+        // Result must be closer to 100 than to 200_000.
+        assert!(
+            (r.mean_ns - 100.0).abs() < (r.mean_ns - 200_000.0).abs(),
+            "precise source A should dominate: mean = {}",
+            r.mean_ns
+        );
+        assert_eq!(r.fused_sources, 2);
+    }
+
+    #[test]
+    fn test_bayesian_ensemble_reset() {
+        let mut bay = BayesianEnsemble::with_diffuse_prior();
+        bay.fuse(500.0, 100.0_f64.powi(2));
+        bay.reset(0.0, 1e18);
+        let r = bay.result();
+        assert_eq!(r.fused_sources, 0);
+        assert!((r.mean_ns - 0.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_from_clock_ensemble_no_sources() {
+        let mut ens = ClockEnsemble::new();
+        let id = ClockSourceId::new("s1");
+        ens.add_source(id.clone(), ClockQuality::default().unreachable());
+        ens.record_measurement(id, ClockMeasurement::new(100, 50, 1000));
+
+        let result = BayesianEnsemble::from_clock_ensemble(&ens, 0.0, 1e18);
+        assert!(
+            result.is_none(),
+            "all sources unreachable → no Bayesian result"
+        );
+    }
+
+    #[test]
+    fn test_from_clock_ensemble_single_source() {
+        let mut ens = ClockEnsemble::new();
+        let id = ClockSourceId::new("ptp");
+        let quality = ClockQuality::with_accuracy_ns(500.0);
+        ens.add_source(id.clone(), quality);
+        ens.record_measurement(id, ClockMeasurement::new(1000, 50, 1000));
+
+        let result = BayesianEnsemble::from_clock_ensemble(&ens, 0.0, 1e18)
+            .expect("should produce Bayesian result");
+        assert_eq!(result.fused_sources, 1);
+        assert!(
+            (result.mean_ns - 1000.0).abs() < 10.0,
+            "mean should be near 1000ns: got {}",
+            result.mean_ns
+        );
+    }
+
+    #[test]
+    fn test_gaussian_std_dev() {
+        let state = GaussianState::new(0.0, 10_000.0);
+        let sd = state.std_dev_ns();
+        assert!((sd - 100.0).abs() < 0.01, "sqrt(10000) = 100");
+    }
+}

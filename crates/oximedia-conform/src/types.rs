@@ -293,6 +293,41 @@ impl std::fmt::Display for MatchMethod {
     }
 }
 
+/// A clip parsed from an NLE project file (FCPXML, AAF, etc.).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConformClip {
+    /// Clip name.
+    pub name: String,
+    /// Offset in the timeline (seconds from timeline start).
+    pub offset_s: f64,
+    /// Duration of the clip in the timeline (seconds).
+    pub duration_s: f64,
+    /// Source in-point (seconds from source start).
+    pub src_in_s: f64,
+    /// Source out-point (seconds from source start).
+    pub src_out_s: f64,
+}
+
+/// A sequence (timeline) within an NLE project.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConformSequence {
+    /// Sequence name.
+    pub name: String,
+    /// Frame rate of the sequence.
+    pub frame_rate: f32,
+    /// Ordered list of clips in the sequence.
+    pub clips: Vec<ConformClip>,
+}
+
+/// A project parsed from an NLE project file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConformProject {
+    /// Project name.
+    pub name: String,
+    /// Sequences / timelines in this project.
+    pub sequences: Vec<ConformSequence>,
+}
+
 /// Output format for conformed sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputFormat {

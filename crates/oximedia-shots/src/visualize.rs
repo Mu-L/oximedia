@@ -308,11 +308,7 @@ impl DistributionAnalyzer {
         let bar_width = 50;
 
         for (bin_start, count) in histogram {
-            let bar_len = if max_count > 0 {
-                (count * bar_width) / max_count
-            } else {
-                0
-            };
+            let bar_len = (count * bar_width).checked_div(max_count).unwrap_or(0);
 
             chart.push_str(&format!(
                 "{:5.2}s: {} ({})\n",

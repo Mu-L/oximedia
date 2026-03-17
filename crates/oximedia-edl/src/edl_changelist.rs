@@ -88,10 +88,7 @@ impl Changelist {
     #[must_use]
     pub fn to_report(&self) -> String {
         let mut lines = Vec::new();
-        lines.push(format!(
-            "EDL Changelist: {} change(s)",
-            self.entries.len()
-        ));
+        lines.push(format!("EDL Changelist: {} change(s)", self.entries.len()));
         lines.push(format!(
             "  Added: {}, Removed: {}, Modified: {}",
             self.added_count(),
@@ -135,10 +132,7 @@ pub fn diff_events(old: &[EdlEvent], new: &[EdlEvent]) -> Changelist {
                     kind: ChangeKind::Removed,
                     old_event_number: Some(old_ev.number),
                     new_event_number: None,
-                    description: format!(
-                        "Event {} removed (reel: {})",
-                        old_ev.number, old_ev.reel
-                    ),
+                    description: format!("Event {} removed (reel: {})", old_ev.number, old_ev.reel),
                 });
             }
             Some(new_ev) => {
@@ -162,10 +156,7 @@ pub fn diff_events(old: &[EdlEvent], new: &[EdlEvent]) -> Changelist {
                 kind: ChangeKind::Added,
                 old_event_number: None,
                 new_event_number: Some(new_ev.number),
-                description: format!(
-                    "Event {} added (reel: {})",
-                    new_ev.number, new_ev.reel
-                ),
+                description: format!("Event {} added (reel: {})", new_ev.number, new_ev.reel),
             });
         }
     }

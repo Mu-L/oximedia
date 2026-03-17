@@ -38,6 +38,8 @@ impl ProfilePresets {
                 audio_bitrate: Some(192_000),
                 resolution: Some((1920, 1080)),
                 frame_rate: Some(30.0),
+                audio_sample_rate: None,
+
                 parameters: vec![
                     ("preset".to_string(), "medium".to_string()),
                     ("crf".to_string(), "23".to_string()),
@@ -60,6 +62,8 @@ impl ProfilePresets {
                 audio_bitrate: Some(128_000),
                 resolution: Some((854, 480)),
                 frame_rate: Some(30.0),
+                audio_sample_rate: None,
+
                 parameters: vec![
                     ("preset".to_string(), "medium".to_string()),
                     ("crf".to_string(), "25".to_string()),
@@ -82,6 +86,8 @@ impl ProfilePresets {
                 audio_bitrate: Some(64_000),
                 resolution: None,
                 frame_rate: None,
+                audio_sample_rate: None,
+
                 parameters: vec![
                     ("ac".to_string(), "1".to_string()), // mono
                 ],
@@ -103,6 +109,8 @@ impl ProfilePresets {
                 audio_bitrate: Some(320_000),
                 resolution: None,
                 frame_rate: None,
+                audio_sample_rate: None,
+
                 parameters: vec![],
             },
         }
@@ -122,6 +130,8 @@ impl ProfilePresets {
                 audio_bitrate: Some(96_000),
                 resolution: Some((640, 360)),
                 frame_rate: Some(24.0),
+                audio_sample_rate: None,
+
                 parameters: vec![
                     ("preset".to_string(), "ultrafast".to_string()),
                     ("crf".to_string(), "30".to_string()),
@@ -144,6 +154,8 @@ impl ProfilePresets {
                 audio_bitrate: None,
                 resolution: Some((480, 270)),
                 frame_rate: Some(15.0),
+                audio_sample_rate: None,
+
                 parameters: vec![],
             },
         }

@@ -242,6 +242,242 @@ pub fn compute_drift(start_offset_ms: i64, end_offset_ms: i64, duration_ms: u64)
     (delta_ms / duration_ms as f64) * 1_000_000.0
 }
 
+// ── Spectral (phase-correlation) audio alignment ──────────────────────────────
+
+/// Configuration for spectral audio alignment.
+#[derive(Debug, Clone)]
+pub struct SpectralAlignConfig {
+    /// FFT size (should be a power of two for efficiency). The input signals
+    /// will be zero-padded to at least this length.
+    pub fft_size: usize,
+    /// Maximum lag to search (in samples). If `None`, the full FFT range is
+    /// searched.
+    pub max_lag: Option<usize>,
+}
+
+impl Default for SpectralAlignConfig {
+    fn default() -> Self {
+        Self {
+            fft_size: 8192,
+            max_lag: None,
+        }
+    }
+}
+
+/// Result of spectral alignment.
+#[derive(Debug, Clone)]
+pub struct SpectralAlignResult {
+    /// The detected offset in samples.  Positive means `b` should be shifted
+    /// *later* (it starts before `a`).
+    pub offset_samples: i32,
+    /// Peak normalised cross-power spectrum value (higher = more confident).
+    pub peak_value: f64,
+    /// Confidence score in [0, 1].
+    pub confidence: f64,
+}
+
+/// Find the alignment offset between two audio signals using phase correlation
+/// in the frequency domain.
+///
+/// This is the spectral equivalent of time-domain cross-correlation: we compute
+/// the normalised cross-power spectrum and inverse-FFT it to get the
+/// generalised cross-correlation (GCC-PHAT), then pick the lag with the
+/// largest peak.
+///
+/// Phase correlation is more robust than plain cross-correlation for signals
+/// with different amplitude envelopes (e.g. different microphone gains)
+/// because it whitens the magnitude spectrum.
+///
+/// # Arguments
+///
+/// * `a` -- First audio signal (normalised f32 samples).
+/// * `b` -- Second audio signal (normalised f32 samples).
+/// * `config` -- Spectral alignment configuration.
+///
+/// # Returns
+///
+/// A [`SpectralAlignResult`] with the detected offset.  Returns offset 0 with
+/// confidence 0 if either signal is empty.
+#[must_use]
+pub fn spectral_align(a: &[f32], b: &[f32], config: &SpectralAlignConfig) -> SpectralAlignResult {
+    if a.is_empty() || b.is_empty() {
+        return SpectralAlignResult {
+            offset_samples: 0,
+            peak_value: 0.0,
+            confidence: 0.0,
+        };
+    }
+
+    // Determine FFT size: next power-of-two >= max(len_a, len_b, config.fft_size)
+    let min_len = a.len().max(b.len()).max(config.fft_size);
+    let n = min_len.next_power_of_two();
+
+    // Zero-pad both signals to length n
+    let mut ra = vec![0.0_f64; n];
+    let mut ia = vec![0.0_f64; n];
+    for (i, &v) in a.iter().enumerate() {
+        ra[i] = f64::from(v);
+    }
+
+    let mut rb = vec![0.0_f64; n];
+    let mut ib = vec![0.0_f64; n];
+    for (i, &v) in b.iter().enumerate() {
+        rb[i] = f64::from(v);
+    }
+
+    // Forward FFT of both signals
+    fft_in_place(&mut ra, &mut ia, false);
+    fft_in_place(&mut rb, &mut ib, false);
+
+    // Compute cross-power spectrum with smoothed phase normalisation.
+    // We use a regularised version: R(k) = A(k) * conj(B(k)) / (|A(k)*conj(B(k))| + eps)
+    // where eps prevents division by zero for zero-padded regions.
+    // This is a mild form of GCC-PHAT that retains some magnitude weighting
+    // for better performance with zero-padded signals.
+    let mut cr = vec![0.0_f64; n];
+    let mut ci = vec![0.0_f64; n];
+
+    // Compute a regularisation threshold based on average magnitude
+    let mut sum_mag = 0.0_f64;
+    for k in 0..n {
+        let xr = ra[k] * rb[k] + ia[k] * ib[k];
+        let xi = ia[k] * rb[k] - ra[k] * ib[k];
+        sum_mag += (xr * xr + xi * xi).sqrt();
+    }
+    let eps = (sum_mag / n as f64) * 0.01 + 1e-15;
+
+    for k in 0..n {
+        // A * conj(B) = (ra+j*ia)*(rb-j*ib) = (ra*rb+ia*ib) + j*(ia*rb-ra*ib)
+        let xr = ra[k] * rb[k] + ia[k] * ib[k];
+        let xi = ia[k] * rb[k] - ra[k] * ib[k];
+        let mag = (xr * xr + xi * xi).sqrt();
+        let denom = mag + eps;
+        cr[k] = xr / denom;
+        ci[k] = xi / denom;
+    }
+
+    // Inverse FFT to get generalised cross-correlation
+    fft_in_place(&mut cr, &mut ci, true);
+
+    // Search for peak within the allowed lag range
+    let max_lag = config.max_lag.unwrap_or(n / 2);
+    let max_lag = max_lag.min(n / 2);
+
+    let mut best_idx = 0usize;
+    let mut best_val = f64::NEG_INFINITY;
+
+    // Positive lags: indices 0..max_lag
+    for i in 0..max_lag.min(n) {
+        if cr[i] > best_val {
+            best_val = cr[i];
+            best_idx = i;
+        }
+    }
+    // Negative lags: indices n-max_lag..n
+    let start = if max_lag < n { n - max_lag } else { 0 };
+    for i in start..n {
+        if cr[i] > best_val {
+            best_val = cr[i];
+            best_idx = i;
+        }
+    }
+
+    // Convert index to signed lag
+    let offset = if best_idx <= n / 2 {
+        best_idx as i32
+    } else {
+        best_idx as i32 - n as i32
+    };
+
+    // Compute confidence as the peak value relative to the RMS of the
+    // correlation (a sharp peak means high confidence).
+    let rms = (cr.iter().map(|v| v * v).sum::<f64>() / n as f64).sqrt();
+    let confidence = if rms > 1e-15 {
+        (best_val / (rms * (n as f64).sqrt())).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    // Negate so that a positive result means "b is delayed (should be shifted
+    // later)" which matches the documented convention.
+    SpectralAlignResult {
+        offset_samples: -offset,
+        peak_value: best_val,
+        confidence,
+    }
+}
+
+// ── Radix-2 Cooley-Tukey FFT ─────────────────────────────────────────────────
+
+/// In-place radix-2 Cooley-Tukey FFT (or inverse FFT when `inverse` is true).
+///
+/// `re` and `im` must have the same length, which must be a power of two.
+fn fft_in_place(re: &mut [f64], im: &mut [f64], inverse: bool) {
+    let n = re.len();
+    debug_assert_eq!(n, im.len());
+    if n <= 1 {
+        return;
+    }
+    debug_assert!(n.is_power_of_two());
+
+    // Bit-reversal permutation
+    let mut j = 0usize;
+    for i in 0..n {
+        if i < j {
+            re.swap(i, j);
+            im.swap(i, j);
+        }
+        let mut m = n >> 1;
+        while m >= 1 && j >= m {
+            j -= m;
+            m >>= 1;
+        }
+        j += m;
+    }
+
+    // Butterfly stages
+    let sign: f64 = if inverse { 1.0 } else { -1.0 };
+    let mut len = 2;
+    while len <= n {
+        let half = len / 2;
+        let angle = sign * std::f64::consts::PI * 2.0 / len as f64;
+        let wn_r = angle.cos();
+        let wn_i = angle.sin();
+
+        let mut start = 0;
+        while start < n {
+            let mut wr = 1.0_f64;
+            let mut wi = 0.0_f64;
+            for k in 0..half {
+                let even = start + k;
+                let odd = start + k + half;
+                let tr = wr * re[odd] - wi * im[odd];
+                let ti = wr * im[odd] + wi * re[odd];
+                re[odd] = re[even] - tr;
+                im[odd] = im[even] - ti;
+                re[even] += tr;
+                im[even] += ti;
+                let new_wr = wr * wn_r - wi * wn_i;
+                wi = wr * wn_i + wi * wn_r;
+                wr = new_wr;
+            }
+            start += len;
+        }
+        len <<= 1;
+    }
+
+    // For inverse FFT, divide by n
+    if inverse {
+        let inv_n = 1.0 / n as f64;
+        for v in re.iter_mut() {
+            *v *= inv_n;
+        }
+        for v in im.iter_mut() {
+            *v *= inv_n;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +644,150 @@ mod tests {
     fn test_compute_drift_negative() {
         let ppm = compute_drift(100, 0, 100_000);
         assert!((ppm + 1000.0).abs() < 1e-6, "ppm={ppm}");
+    }
+
+    // ── FFT ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_fft_roundtrip() {
+        let n = 16;
+        let mut re: Vec<f64> = (0..n).map(|i| (i as f64 * 0.3).sin()).collect();
+        let mut im = vec![0.0_f64; n];
+        let original = re.clone();
+
+        fft_in_place(&mut re, &mut im, false);
+        fft_in_place(&mut re, &mut im, true);
+
+        for (i, (&orig, &recovered)) in original.iter().zip(re.iter()).enumerate() {
+            assert!(
+                (orig - recovered).abs() < 1e-10,
+                "FFT roundtrip mismatch at {i}: {orig} vs {recovered}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fft_dc_component() {
+        let n = 8;
+        let mut re = vec![1.0_f64; n];
+        let mut im = vec![0.0_f64; n];
+
+        fft_in_place(&mut re, &mut im, false);
+
+        // DC component should be n, all others zero
+        assert!((re[0] - n as f64).abs() < 1e-10);
+        for i in 1..n {
+            assert!(re[i].abs() < 1e-10, "bin {i} should be zero: {}", re[i]);
+        }
+    }
+
+    // ── Spectral alignment ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_spectral_align_empty() {
+        let config = SpectralAlignConfig::default();
+        let result = spectral_align(&[], &[1.0], &config);
+        assert_eq!(result.offset_samples, 0);
+        assert_eq!(result.confidence, 0.0);
+    }
+
+    #[test]
+    fn test_spectral_align_identical_signals() {
+        let n = 256;
+        let signal: Vec<f32> = (0..n).map(|i| (i as f32 * 0.1).sin()).collect();
+
+        let config = SpectralAlignConfig {
+            fft_size: 512,
+            max_lag: Some(64),
+        };
+        let result = spectral_align(&signal, &signal, &config);
+        assert_eq!(
+            result.offset_samples, 0,
+            "identical signals should have zero offset"
+        );
+        assert!(result.peak_value > 0.0, "peak should be positive");
+    }
+
+    #[test]
+    fn test_spectral_align_known_shift() {
+        let n = 1024;
+        let shift = 10;
+        // Generate a rich signal with many frequency components
+        let signal: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32;
+                (t * 0.05).sin()
+                    + 0.5 * (t * 0.13).sin()
+                    + 0.3 * (t * 0.21).cos()
+                    + 0.2 * (t * 0.37).sin()
+            })
+            .collect();
+
+        // Create b as a delayed copy of signal (a leads, b is delayed)
+        let mut a_sig = vec![0.0_f32; n];
+        let mut b_sig = vec![0.0_f32; n];
+        for i in 0..n {
+            a_sig[i] = signal[i];
+        }
+        for i in shift..n {
+            b_sig[i] = signal[i - shift];
+        }
+
+        let config = SpectralAlignConfig {
+            fft_size: 2048,
+            max_lag: Some(64),
+        };
+        let result = spectral_align(&a_sig, &b_sig, &config);
+        // b is delayed by `shift` relative to a, so offset should be positive
+        assert!(
+            (result.offset_samples - shift as i32).abs() <= 2,
+            "expected offset ~{shift}, got {}",
+            result.offset_samples
+        );
+    }
+
+    #[test]
+    fn test_spectral_align_negative_shift() {
+        let n = 2048;
+        let shift = 8;
+        let signal: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32;
+                (t * 0.07).sin()
+                    + 0.5 * (t * 0.19).cos()
+                    + 0.3 * (t * 0.31).sin()
+                    + 0.2 * (t * 0.47).cos()
+            })
+            .collect();
+
+        // Construct both signals with shared interior; avoid edge artefacts
+        // by copying the full overlap region into both a and b.
+        let mut a_sig = vec![0.0_f32; n];
+        let mut b_sig = vec![0.0_f32; n];
+        for i in 0..n {
+            b_sig[i] = signal[i];
+        }
+        for i in shift..n {
+            a_sig[i] = signal[i - shift];
+        }
+
+        let config = SpectralAlignConfig {
+            fft_size: 4096,
+            max_lag: Some(64),
+        };
+        let result = spectral_align(&a_sig, &b_sig, &config);
+        // a is delayed by shift => offset should be negative
+        assert!(
+            (result.offset_samples + shift as i32).abs() <= 2,
+            "expected offset ~-{shift}, got {}",
+            result.offset_samples
+        );
+    }
+
+    #[test]
+    fn test_spectral_align_config_default() {
+        let config = SpectralAlignConfig::default();
+        assert_eq!(config.fft_size, 8192);
+        assert!(config.max_lag.is_none());
     }
 }

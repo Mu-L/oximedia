@@ -239,6 +239,145 @@ pub enum TranslationError {
     Other(#[from] anyhow::Error),
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Fuzzy "did you mean?" codec suggestion engine
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Well-known codec names used as candidates for "did you mean?" suggestions.
+static KNOWN_CODEC_NAMES: &[&str] = &[
+    "libaom-av1",
+    "libsvtav1",
+    "librav1e",
+    "av1",
+    "av1_nvenc",
+    "av1_vaapi",
+    "av1_amf",
+    "libvpx-vp9",
+    "vp9",
+    "libvpx",
+    "vp8",
+    "libx264",
+    "h264",
+    "h264_nvenc",
+    "h264_vaapi",
+    "h264_qsv",
+    "libx265",
+    "hevc",
+    "hevc_nvenc",
+    "hevc_vaapi",
+    "hevc_qsv",
+    "prores",
+    "dnxhd",
+    "dnxhr",
+    "ffv1",
+    "huffyuv",
+    "libopus",
+    "opus",
+    "aac",
+    "libfdk_aac",
+    "mp3",
+    "libmp3lame",
+    "flac",
+    "alac",
+    "vorbis",
+    "libvorbis",
+    "pcm_s16le",
+    "pcm_s24le",
+    "pcm_s32le",
+    "pcm_f32le",
+    "ac3",
+    "eac3",
+    "dts",
+    "truehd",
+    "copy",
+];
+
+/// Compute the Levenshtein edit distance between two strings (case-insensitive).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a_lower = a.to_lowercase();
+    let b_lower = b.to_lowercase();
+    let a_chars: Vec<char> = a_lower.chars().collect();
+    let b_chars: Vec<char> = b_lower.chars().collect();
+    let m = a_chars.len();
+    let n = b_chars.len();
+
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
+
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr = vec![0usize; n + 1];
+
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[n]
+}
+
+/// Find the best "did you mean?" suggestion for a mistyped codec name.
+///
+/// Returns `Some(suggestion)` if a known codec name is within edit distance 3,
+/// or if the input is a substring of (or contains) a known name.
+/// Returns `None` if no close match is found.
+pub fn suggest_codec(mistyped: &str) -> Option<&'static str> {
+    let mistyped_lower = mistyped.to_lowercase();
+
+    // First pass: exact substring containment (e.g., "x264" -> "libx264")
+    for &candidate in KNOWN_CODEC_NAMES {
+        let candidate_lower = candidate.to_lowercase();
+        if candidate_lower.contains(&mistyped_lower) || mistyped_lower.contains(&candidate_lower) {
+            return Some(candidate);
+        }
+    }
+
+    // Second pass: edit distance with threshold
+    let max_distance = if mistyped.len() <= 3 { 1 } else { 3 };
+    let mut best_dist = usize::MAX;
+    let mut best_match: Option<&'static str> = None;
+
+    for &candidate in KNOWN_CODEC_NAMES {
+        let dist = edit_distance(mistyped, candidate);
+        if dist < best_dist && dist <= max_distance {
+            best_dist = dist;
+            best_match = Some(candidate);
+        }
+    }
+
+    best_match
+}
+
+/// Create a diagnostic for an unknown codec with an automatic "did you mean?" suggestion.
+pub fn unknown_codec_diagnostic(codec_name: &str) -> Diagnostic {
+    let mut diag = Diagnostic {
+        kind: DiagnosticKind::UnknownOptionIgnored {
+            option: codec_name.to_string(),
+        },
+        suggestion: Some("Use a patent-free codec: av1, vp9, vp8, opus, vorbis, flac".to_string()),
+    };
+
+    if let Some(suggestion) = suggest_codec(codec_name) {
+        diag.suggestion = Some(format!(
+            "Did you mean '{}'? Patent-free alternatives: av1, vp9, opus, vorbis, flac",
+            suggestion
+        ));
+    }
+
+    diag
+}
+
 /// Collect diagnostics produced during a translation pass.
 #[derive(Debug, Default)]
 pub struct DiagnosticSink {
@@ -462,6 +601,103 @@ mod tests {
 
         let e4 = TranslationError::FilterParseError("bad filter".into());
         assert!(e4.to_string().contains("bad filter"));
+    }
+
+    // ── "did you mean?" suggestion engine tests ─────────────────────────────
+
+    #[test]
+    fn test_suggest_codec_exact_substring() {
+        // "x264" is a substring of "libx264"
+        let s = suggest_codec("x264");
+        assert!(s.is_some(), "x264 should match a known codec");
+        assert_eq!(s, Some("libx264"));
+    }
+
+    #[test]
+    fn test_suggest_codec_close_typo() {
+        // "libaom_av1" vs "libaom-av1" (close edit distance)
+        let s = suggest_codec("libaom_av1");
+        assert!(s.is_some(), "libaom_av1 should match");
+    }
+
+    #[test]
+    fn test_suggest_codec_opus_typo() {
+        let s = suggest_codec("opsu");
+        assert!(s.is_some(), "opsu should suggest opus");
+        assert_eq!(s, Some("opus"));
+    }
+
+    #[test]
+    fn test_suggest_codec_no_match() {
+        let s = suggest_codec("zzzzzzzzzzzzz");
+        assert!(s.is_none(), "gibberish should not match");
+    }
+
+    #[test]
+    fn test_suggest_codec_partial_hevc() {
+        let s = suggest_codec("hev");
+        assert!(s.is_some(), "hev should suggest hevc");
+        // Should match something containing "hev"
+        let suggestion = s.expect("already checked");
+        assert!(
+            suggestion.contains("hevc") || suggestion.contains("hev"),
+            "suggestion should be related to hevc, got {}",
+            suggestion
+        );
+    }
+
+    #[test]
+    fn test_suggest_codec_vp9_typo() {
+        let s = suggest_codec("vp0");
+        // Close edit distance to vp8 or vp9
+        assert!(s.is_some(), "vp0 should suggest vp8 or vp9");
+    }
+
+    #[test]
+    fn test_unknown_codec_diagnostic_with_suggestion() {
+        let d = unknown_codec_diagnostic("libx26");
+        assert!(d.suggestion.is_some());
+        let hint = d.suggestion.as_deref().unwrap_or("");
+        assert!(
+            hint.contains("Did you mean"),
+            "should contain 'Did you mean', got: {}",
+            hint
+        );
+    }
+
+    #[test]
+    fn test_unknown_codec_diagnostic_no_suggestion() {
+        let d = unknown_codec_diagnostic("completely_made_up_zzzzz");
+        // Should still have a suggestion, but the generic one
+        assert!(d.suggestion.is_some());
+        let hint = d.suggestion.as_deref().unwrap_or("");
+        assert!(
+            hint.contains("patent-free") || hint.contains("Patent-free"),
+            "should contain patent-free suggestion, got: {}",
+            hint
+        );
+    }
+
+    #[test]
+    fn test_edit_distance_identical() {
+        assert_eq!(edit_distance("opus", "opus"), 0);
+    }
+
+    #[test]
+    fn test_edit_distance_one_char() {
+        assert_eq!(edit_distance("opus", "opsu"), 2);
+    }
+
+    #[test]
+    fn test_edit_distance_different() {
+        assert!(edit_distance("av1", "zzz") > 0);
+    }
+
+    #[test]
+    fn test_edit_distance_empty() {
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("abc", ""), 3);
+        assert_eq!(edit_distance("", ""), 0);
     }
 
     #[test]

@@ -2,13 +2,16 @@
 //!
 //! `RepairLog` records every action applied during a repair session and
 //! provides aggregate statistics such as overall success rate.
+//!
+//! Logs can be exported as structured JSON for machine-parseable repair history.
 
 #![allow(dead_code)]
 
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 /// Category of action taken during a repair pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepairAction {
     /// A corrupted header field was overwritten with a valid value.
     HeaderRewrite {
@@ -50,7 +53,7 @@ pub enum RepairAction {
 }
 
 /// Outcome of a single repair action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ActionOutcome {
     /// The action succeeded.
     Success,
@@ -63,7 +66,7 @@ pub enum ActionOutcome {
 }
 
 /// A single entry in the repair log.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepairLogEntry {
     /// The repair action that was taken.
     pub action: RepairAction,

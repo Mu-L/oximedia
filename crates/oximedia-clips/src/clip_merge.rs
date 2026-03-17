@@ -175,8 +175,7 @@ impl ClipMerger {
 
     /// Adds keywords associated with a source clip.
     pub fn add_keywords(&mut self, clip_name: &str, keywords: Vec<String>) {
-        self.source_keywords
-            .insert(clip_name.to_string(), keywords);
+        self.source_keywords.insert(clip_name.to_string(), keywords);
     }
 
     /// Returns the number of entries queued.

@@ -1,8 +1,11 @@
 //! Rights owner management
 
-use crate::{database::RightsDatabase, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::database::RightsDatabase;
+use crate::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -40,6 +43,7 @@ impl RightsOwner {
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save owner to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
         sqlx::query(
@@ -63,6 +67,7 @@ impl RightsOwner {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Load owner from database by ID
     pub async fn load(db: &RightsDatabase, id: &str) -> Result<Option<Self>> {
         let row = sqlx::query(
@@ -97,6 +102,7 @@ impl RightsOwner {
         .transpose()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// List all owners
     pub async fn list(db: &RightsDatabase) -> Result<Vec<Self>> {
         let rows = sqlx::query(
@@ -132,6 +138,7 @@ impl RightsOwner {
             .collect()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Delete owner from database
     pub async fn delete(db: &RightsDatabase, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM rights_owners WHERE id = ?")

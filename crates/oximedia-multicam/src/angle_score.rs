@@ -69,6 +69,157 @@ impl AngleScore {
     }
 }
 
+// ── Rule-of-thirds composition scoring ───────────────────────────────────────
+
+/// Score a frame's composition quality using the rule-of-thirds principle.
+///
+/// The rule of thirds divides the frame into a 3×3 grid.  Interesting content
+/// placed at any of the four intersection points (1/3 and 2/3 of width/height)
+/// produces a more compelling composition than content centred on the frame.
+///
+/// # Algorithm
+///
+/// The function computes a simple edge-density metric (Sobel-like gradient
+/// magnitude) sampled in small patches centred on each of the four
+/// rule-of-thirds intersections and normalises it against the global frame
+/// edge density.
+///
+/// A frame whose interesting edges are concentrated at those four points will
+/// score close to `1.0`.  A uniform or featureless frame will score close to
+/// `0.5`.
+///
+/// # Arguments
+///
+/// * `frame` – Raw pixel data in **grayscale** format (one byte per pixel) or
+///   any interleaved format; only luminance is used.  For RGBA data pass the
+///   raw bytes and set `bytes_per_pixel = 4`; for grayscale use
+///   `bytes_per_pixel = 1`.
+/// * `width`  – Frame width in pixels.
+/// * `height` – Frame height in pixels.
+///
+/// # Returns
+///
+/// A normalised score in `[0.0, 1.0]`.  Returns `0.5` when the frame is
+/// empty or contains insufficient data.
+///
+/// # Note on input format
+///
+/// This implementation treats every `bytes_per_pixel`-th byte as a luminance
+/// sample.  Pass a grayscale frame (1 byte/pixel) for the most accurate
+/// result; RGBA is supported by extracting every 4th byte as the red channel.
+/// Strictly speaking the function signature takes raw `u8` bytes and assumes
+/// 1 byte per pixel.  Callers with multi-channel data should convert to
+/// grayscale first or pass a pre-extracted luma plane.
+#[allow(clippy::cast_precision_loss)]
+#[must_use]
+pub fn score_rule_of_thirds(frame: &[u8], width: u32, height: u32) -> f32 {
+    let w = width as usize;
+    let h = height as usize;
+
+    if frame.is_empty() || w < 6 || h < 6 || frame.len() < w * h {
+        return 0.5;
+    }
+
+    // Patch half-side in pixels.  Use ~3% of the smaller dimension, min 2.
+    let patch_r = ((w.min(h) as f32 * 0.03) as usize).max(2);
+
+    // Rule-of-thirds intersection points (column, row) in pixel coordinates.
+    let thirds_x = [w / 3, 2 * w / 3];
+    let thirds_y = [h / 3, 2 * h / 3];
+
+    // Helper: compute mean absolute gradient magnitude in a patch centred at (cx, cy).
+    let patch_gradient = |cx: usize, cy: usize| -> f32 {
+        let x0 = cx.saturating_sub(patch_r);
+        let x1 = (cx + patch_r).min(w.saturating_sub(2));
+        let y0 = cy.saturating_sub(patch_r);
+        let y1 = (cy + patch_r).min(h.saturating_sub(2));
+
+        if x0 >= x1 || y0 >= y1 {
+            return 0.0;
+        }
+
+        let mut sum = 0.0f64;
+        let mut count = 0usize;
+
+        for row in y0..y1 {
+            for col in x0..x1 {
+                // Horizontal gradient (central difference, clamped)
+                let left = frame[row * w + col.saturating_sub(1)] as f64;
+                let right = frame[row * w + (col + 1).min(w - 1)] as f64;
+                let gx = (right - left).abs();
+
+                // Vertical gradient
+                let up = frame[row.saturating_sub(1) * w + col] as f64;
+                let down = frame[(row + 1).min(h - 1) * w + col] as f64;
+                let gy = (down - up).abs();
+
+                sum += (gx * gx + gy * gy).sqrt();
+                count += 1;
+            }
+        }
+        if count == 0 {
+            0.0
+        } else {
+            (sum / count as f64) as f32
+        }
+    };
+
+    // Sum gradient energy at the four rule-of-thirds intersection points.
+    let mut thirds_energy = 0.0f32;
+    for &cx in &thirds_x {
+        for &cy in &thirds_y {
+            thirds_energy += patch_gradient(cx, cy);
+        }
+    }
+    let mean_thirds = thirds_energy / 4.0;
+
+    // Global mean gradient (sampled on a coarse 8×8 grid to avoid O(w*h) cost).
+    let step_x = (w / 8).max(1);
+    let step_y = (h / 8).max(1);
+    let mut global_sum = 0.0f64;
+    let mut global_count = 0usize;
+
+    let mut row = 1usize;
+    while row < h.saturating_sub(1) {
+        let mut col = 1usize;
+        while col < w.saturating_sub(1) {
+            let left = frame[row * w + col - 1] as f64;
+            let right = frame[row * w + col + 1] as f64;
+            let gx = (right - left).abs();
+            let up = frame[(row - 1) * w + col] as f64;
+            let down = frame[(row + 1) * w + col] as f64;
+            let gy = (down - up).abs();
+            global_sum += (gx * gx + gy * gy).sqrt();
+            global_count += 1;
+            col += step_x;
+        }
+        row += step_y;
+    }
+
+    let mean_global = if global_count == 0 {
+        1.0f32
+    } else {
+        (global_sum / global_count as f64) as f32
+    };
+
+    if mean_global < f32::EPSILON {
+        // Featureless frame – no edges anywhere; return neutral score.
+        return 0.5;
+    }
+
+    // Ratio of thirds-intersection energy to global energy, normalised to [0,1].
+    // A ratio of 1.0 means thirds-energy equals the global average → score 0.5.
+    // A ratio > 1.0 (interesting content at intersections) → score > 0.5.
+    // A ratio of 0.0 → score 0.0.
+    let ratio = mean_thirds / mean_global;
+    // Map ratio through a sigmoid-like ramp so that the neutral point (1.0)
+    // maps to ~0.5 and values grow/shrink smoothly.
+    let score = ratio / (1.0 + ratio);
+    score.clamp(0.0, 1.0)
+}
+
+// ── AngleScorer ───────────────────────────────────────────────────────────────
+
 /// Accumulates per-metric data and produces `AngleScore` results.
 #[derive(Debug, Default)]
 pub struct AngleScorer {

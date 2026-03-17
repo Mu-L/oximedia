@@ -434,8 +434,7 @@ fn find_best_match(
                 }
             }
 
-            if count > 0 {
-                let avg_sad = sad / count;
+            if let Some(avg_sad) = sad.checked_div(count) {
                 if avg_sad < best_sad {
                     best_sad = avg_sad;
                     best_dx = dx;
@@ -497,7 +496,7 @@ fn downsample(img: &[u8], width: u32, height: u32) -> Vec<u8> {
                 }
             }
 
-            result[(y * new_w + x) as usize] = if count > 0 { (sum / count) as u8 } else { 0 };
+            result[(y * new_w + x) as usize] = sum.checked_div(count).unwrap_or(0) as u8;
         }
     }
 

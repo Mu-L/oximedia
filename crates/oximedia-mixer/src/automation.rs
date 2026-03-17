@@ -449,11 +449,11 @@ impl AutomationData {
             let lane = AutomationLane::new(parameter.clone(), default_value);
             self.lanes.push(lane);
         }
-        // Safety: we just ensured the lane exists above.
+        // The lane was just inserted above, so `find` will always succeed.
         self.lanes
             .iter_mut()
             .find(|lane| &lane.parameter == parameter)
-            .expect("lane was just inserted")
+            .unwrap_or_else(|| unreachable!("lane was just inserted"))
     }
 
     /// Remove lane by parameter.
@@ -850,5 +850,399 @@ mod tests {
         // Middle point is redundant (linear interpolation)
         lane.thin_automation(0.01);
         assert_eq!(lane.point_count(), 2); // Should remove middle point
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DAW-style parameter automation lane with recorder
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// DAW-style parameter automation with interpolating curve types and a
+/// decimating recorder.
+pub mod lane {
+    use std::f32::consts::PI;
+
+    // ──────────────────────────────────────────────────── AutomationCurve ───
+
+    /// Interpolation curve between two automation points.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum AutomationCurve {
+        /// Straight-line interpolation.
+        Linear,
+        /// Power-function interpolation: `alpha.powf(exponent)`.
+        Exponential(f32),
+        /// Hold the previous value until the next point.
+        Step,
+        /// Smooth S-curve: `0.5 − 0.5·cos(alpha·π)`.
+        Sine,
+    }
+
+    // ─────────────────────────────────────────────────── AutomationPoint ───
+
+    /// Single keyframe on an `AutomationLane`.
+    #[derive(Debug, Clone)]
+    pub struct AutomationPoint {
+        /// Position in samples.
+        pub time_samples: u64,
+        /// Parameter value at this point.
+        pub value: f32,
+        /// Curve to use when interpolating to the *next* point.
+        pub curve_type: AutomationCurve,
+    }
+
+    impl AutomationPoint {
+        /// Create a new point with [`AutomationCurve::Linear`].
+        #[must_use]
+        pub fn new(time_samples: u64, value: f32) -> Self {
+            Self {
+                time_samples,
+                value,
+                curve_type: AutomationCurve::Linear,
+            }
+        }
+
+        /// Create a new point with an explicit curve type.
+        #[must_use]
+        pub fn with_curve(time_samples: u64, value: f32, curve_type: AutomationCurve) -> Self {
+            Self {
+                time_samples,
+                value,
+                curve_type,
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────── AutomationLane ───
+
+    /// A single parameter automation lane.
+    ///
+    /// Stores a sorted list of [`AutomationPoint`]s and provides interpolated
+    /// value queries and block rendering.
+    #[derive(Debug, Clone)]
+    pub struct AutomationLane {
+        /// Logical parameter name (e.g. `"filter.cutoff"`).
+        pub parameter: String,
+        /// Minimum clamping value.
+        pub min_value: f32,
+        /// Maximum clamping value.
+        pub max_value: f32,
+        /// Value returned when no points are present.
+        pub default_value: f32,
+        /// Sorted list of keyframes.
+        points: Vec<AutomationPoint>,
+    }
+
+    impl AutomationLane {
+        /// Create a new automation lane.
+        #[must_use]
+        pub fn new(param: &str, min: f32, max: f32, default: f32) -> Self {
+            Self {
+                parameter: param.to_string(),
+                min_value: min,
+                max_value: max,
+                default_value: default.clamp(min, max),
+                points: Vec::new(),
+            }
+        }
+
+        /// Insert a point, keeping the list sorted by `time_samples`.
+        ///
+        /// If a point already exists at the same time it is replaced.
+        pub fn add_point(&mut self, point: AutomationPoint) {
+            // Remove any existing point at this time
+            self.points.retain(|p| p.time_samples != point.time_samples);
+            // Binary-search insert to keep order
+            let idx = self
+                .points
+                .partition_point(|p| p.time_samples < point.time_samples);
+            self.points.insert(idx, point);
+        }
+
+        /// Remove the point at exactly `time_samples`.
+        ///
+        /// Returns `true` if a point was found and removed.
+        pub fn remove_point(&mut self, time_samples: u64) -> bool {
+            let before = self.points.len();
+            self.points.retain(|p| p.time_samples != time_samples);
+            self.points.len() < before
+        }
+
+        /// Return the interpolated value at `time_samples`.
+        ///
+        /// - Before the first point → first point's value.
+        /// - After the last point → last point's value.
+        /// - Between two points → interpolated using the *left* point's curve.
+        #[must_use]
+        pub fn value_at(&self, time_samples: u64) -> f32 {
+            if self.points.is_empty() {
+                return self.default_value;
+            }
+
+            // Edge cases: before first or after last
+            let first = &self.points[0];
+            let last = &self.points[self.points.len() - 1];
+
+            if time_samples <= first.time_samples {
+                return first.value.clamp(self.min_value, self.max_value);
+            }
+            if time_samples >= last.time_samples {
+                return last.value.clamp(self.min_value, self.max_value);
+            }
+
+            // Find surrounding pair via binary search
+            let idx = self
+                .points
+                .partition_point(|p| p.time_samples <= time_samples)
+                .saturating_sub(1);
+
+            let p0 = &self.points[idx];
+            let p1 = &self.points[idx + 1];
+
+            #[allow(clippy::cast_precision_loss)]
+            let alpha = (time_samples - p0.time_samples) as f32
+                / (p1.time_samples - p0.time_samples) as f32;
+
+            let t = match &p0.curve_type {
+                AutomationCurve::Linear => alpha,
+                AutomationCurve::Exponential(exp) => alpha.powf(*exp),
+                AutomationCurve::Step => 0.0, // hold p0 value
+                AutomationCurve::Sine => 0.5 - 0.5 * (alpha * PI).cos(),
+            };
+
+            (p0.value + (p1.value - p0.value) * t).clamp(self.min_value, self.max_value)
+        }
+
+        /// Fill a buffer with interpolated values starting at `start` for
+        /// `count` samples.
+        #[must_use]
+        pub fn render_block(&self, start: u64, count: usize) -> Vec<f32> {
+            (0..count)
+                .map(|i| {
+                    #[allow(clippy::cast_possible_truncation)]
+                    self.value_at(start + i as u64)
+                })
+                .collect()
+        }
+
+        /// Number of keyframes.
+        #[must_use]
+        pub fn point_count(&self) -> usize {
+            self.points.len()
+        }
+
+        /// Immutable slice of all keyframes (sorted by time).
+        #[must_use]
+        pub fn points(&self) -> &[AutomationPoint] {
+            &self.points
+        }
+    }
+
+    // ──────────────────────────────────────────────── AutomationRecorder ───
+
+    /// Real-time automation recorder that decimates input to ≈ 1 point per
+    /// 100 ms to avoid unbounded memory growth.
+    #[derive(Debug, Clone)]
+    pub struct AutomationRecorder {
+        /// Whether recording is currently active.
+        pub recording: bool,
+        /// Recorded points (unsorted during recording; sorted on stop).
+        points: Vec<AutomationPoint>,
+        /// Sample rate used for decimation.
+        sample_rate: u32,
+        /// Time of the last recorded point.
+        last_recorded_time: Option<u64>,
+    }
+
+    impl AutomationRecorder {
+        /// Create a new recorder for the given sample rate.
+        #[must_use]
+        pub fn new(sample_rate: u32) -> Self {
+            Self {
+                recording: false,
+                points: Vec::new(),
+                sample_rate,
+                last_recorded_time: None,
+            }
+        }
+
+        /// Begin recording.
+        pub fn start_recording(&mut self) {
+            self.recording = true;
+            self.points.clear();
+            self.last_recorded_time = None;
+        }
+
+        /// Stop recording and return the collected points, sorted by time.
+        ///
+        /// The recorder is reset after this call; `recording` is set to `false`.
+        pub fn stop_recording(&mut self) -> Vec<AutomationPoint> {
+            self.recording = false;
+            self.last_recorded_time = None;
+            let mut captured = std::mem::take(&mut self.points);
+            captured.sort_by_key(|p| p.time_samples);
+            captured
+        }
+
+        /// Record a value at `time_samples`.
+        ///
+        /// Decimates to one point per 100 ms; call is a no-op if not recording
+        /// or if the 100 ms interval has not elapsed since the last capture.
+        pub fn record_value(&mut self, time_samples: u64, value: f32) {
+            if !self.recording {
+                return;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let interval_samples = (self.sample_rate as f32 * 0.1) as u64; // 100 ms
+            let should_record = match self.last_recorded_time {
+                None => true,
+                Some(last) => time_samples >= last + interval_samples,
+            };
+            if should_record {
+                self.points.push(AutomationPoint::new(time_samples, value));
+                self.last_recorded_time = Some(time_samples);
+            }
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────── tests ───
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_lane_new() {
+            let lane = AutomationLane::new("gain", 0.0, 1.0, 0.5);
+            assert_eq!(lane.parameter, "gain");
+            assert!((lane.default_value - 0.5).abs() < f32::EPSILON);
+            assert_eq!(lane.point_count(), 0);
+        }
+
+        #[test]
+        fn test_lane_default_value_when_empty() {
+            let lane = AutomationLane::new("pan", -1.0, 1.0, 0.0);
+            assert!((lane.value_at(0) - 0.0).abs() < f32::EPSILON);
+            assert!((lane.value_at(99_999) - 0.0).abs() < f32::EPSILON);
+        }
+
+        #[test]
+        fn test_lane_add_and_remove_point() {
+            let mut lane = AutomationLane::new("gain", 0.0, 1.0, 0.5);
+            lane.add_point(AutomationPoint::new(1_000, 0.8));
+            assert_eq!(lane.point_count(), 1);
+            assert!(lane.remove_point(1_000));
+            assert_eq!(lane.point_count(), 0);
+        }
+
+        #[test]
+        fn test_lane_remove_nonexistent() {
+            let mut lane = AutomationLane::new("gain", 0.0, 1.0, 0.5);
+            assert!(!lane.remove_point(999));
+        }
+
+        #[test]
+        fn test_lane_linear_interpolation() {
+            let mut lane = AutomationLane::new("gain", 0.0, 1.0, 0.0);
+            lane.add_point(AutomationPoint::new(0, 0.0));
+            lane.add_point(AutomationPoint::new(1_000, 1.0));
+            let v = lane.value_at(500);
+            assert!((v - 0.5).abs() < 0.001, "expected 0.5 got {v}");
+        }
+
+        #[test]
+        fn test_lane_step_curve() {
+            let mut lane = AutomationLane::new("gain", 0.0, 1.0, 0.0);
+            lane.add_point(AutomationPoint::with_curve(0, 0.2, AutomationCurve::Step));
+            lane.add_point(AutomationPoint::new(1_000, 0.8));
+            // Step: midpoint should equal first value
+            let v = lane.value_at(500);
+            assert!((v - 0.2).abs() < 0.001, "expected 0.2 got {v}");
+        }
+
+        #[test]
+        fn test_lane_exponential_curve() {
+            let mut lane = AutomationLane::new("gain", 0.0, 1.0, 0.0);
+            lane.add_point(AutomationPoint::with_curve(
+                0,
+                0.0,
+                AutomationCurve::Exponential(2.0),
+            ));
+            lane.add_point(AutomationPoint::new(1_000, 1.0));
+            // alpha = 0.5, exponent = 2 → t = 0.25
+            let v = lane.value_at(500);
+            assert!((v - 0.25).abs() < 0.001, "expected 0.25 got {v}");
+        }
+
+        #[test]
+        fn test_lane_sine_curve_midpoint() {
+            let mut lane = AutomationLane::new("gain", 0.0, 1.0, 0.0);
+            lane.add_point(AutomationPoint::with_curve(0, 0.0, AutomationCurve::Sine));
+            lane.add_point(AutomationPoint::new(1_000, 1.0));
+            // alpha = 0.5 → t = 0.5 - 0.5*cos(π/2) = 0.5
+            let v = lane.value_at(500);
+            assert!((v - 0.5).abs() < 0.01, "expected ~0.5 got {v}");
+        }
+
+        #[test]
+        fn test_lane_render_block() {
+            let mut lane = AutomationLane::new("gain", 0.0, 1.0, 0.0);
+            lane.add_point(AutomationPoint::new(0, 0.0));
+            lane.add_point(AutomationPoint::new(4, 1.0));
+            let block = lane.render_block(0, 5);
+            assert_eq!(block.len(), 5);
+            assert!((block[0] - 0.0).abs() < 0.001);
+            assert!((block[4] - 1.0).abs() < 0.001);
+        }
+
+        #[test]
+        fn test_lane_sorted_insertion() {
+            let mut lane = AutomationLane::new("gain", 0.0, 1.0, 0.0);
+            lane.add_point(AutomationPoint::new(2_000, 0.9));
+            lane.add_point(AutomationPoint::new(500, 0.3));
+            lane.add_point(AutomationPoint::new(1_000, 0.6));
+            let pts = lane.points();
+            assert_eq!(pts[0].time_samples, 500);
+            assert_eq!(pts[1].time_samples, 1_000);
+            assert_eq!(pts[2].time_samples, 2_000);
+        }
+
+        #[test]
+        fn test_recorder_start_stop() {
+            let mut rec = AutomationRecorder::new(48_000);
+            rec.start_recording();
+            assert!(rec.recording);
+            rec.record_value(0, 0.5);
+            let pts = rec.stop_recording();
+            assert!(!rec.recording);
+            assert_eq!(pts.len(), 1);
+        }
+
+        #[test]
+        fn test_recorder_decimation() {
+            let mut rec = AutomationRecorder::new(48_000);
+            rec.start_recording();
+            // Record at 0, 100 ms = 4800 samples, 200 ms = 9600, 250 ms (within 100ms interval)
+            rec.record_value(0, 0.0);
+            rec.record_value(4_800, 0.5); // +100 ms → should record
+            rec.record_value(7_200, 0.7); // +50 ms from last → should NOT record
+            rec.record_value(9_600, 1.0); // +100 ms from 4800 → should record
+            let pts = rec.stop_recording();
+            // Expect 3 points: 0, 4800, 9600
+            assert_eq!(
+                pts.len(),
+                3,
+                "got {:?}",
+                pts.iter().map(|p| p.time_samples).collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn test_recorder_no_record_when_stopped() {
+            let mut rec = AutomationRecorder::new(48_000);
+            rec.record_value(0, 0.5); // recording=false, should be ignored
+            rec.start_recording();
+            let pts = rec.stop_recording();
+            assert_eq!(pts.len(), 0);
+        }
     }
 }

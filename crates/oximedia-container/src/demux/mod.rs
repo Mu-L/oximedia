@@ -24,8 +24,11 @@
 pub mod buffer;
 pub mod flac;
 pub mod matroska;
+#[cfg(all(feature = "mmap", not(target_arch = "wasm32")))]
+pub mod mmap;
 pub mod mp4;
 pub mod mpegts;
+pub mod mpegts_enhanced;
 pub mod ogg;
 pub mod srt;
 mod traits;
@@ -37,6 +40,10 @@ pub use flac::FlacDemuxer;
 pub use matroska::MatroskaDemuxer;
 pub use mp4::Mp4Demuxer;
 pub use mpegts::MpegTsDemuxer;
+pub use mpegts_enhanced::{
+    parse_pat, parse_pmt, parse_ts_packet, Pat, PatEntry, PidInfo, Pmt, PmtStream, TsDemuxer,
+    TsPacket, TsStreamInfo,
+};
 pub use ogg::OggDemuxer;
 pub use srt::SrtDemuxer;
 pub use traits::Demuxer;

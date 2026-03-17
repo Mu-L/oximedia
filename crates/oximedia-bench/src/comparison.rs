@@ -1,8 +1,34 @@
 //! Cross-codec comparison tools for analyzing benchmark results.
 
+use crate::bd_rate::{BdPoint, BdRateCalculator};
 use crate::CodecBenchmarkResult;
 use oximedia_core::types::CodecId;
 use serde::{Deserialize, Serialize};
+
+/// Compute the Bjontegaard Delta Rate (BD-Rate) between two rate-distortion curves.
+///
+/// Each element of the input slices is `(bitrate_kbps, psnr_db)`.
+/// A **negative** result means the test codec achieves the same quality at lower bitrate.
+/// Returns `0.0` when the curves are identical or computation fails (e.g., insufficient points).
+///
+/// # Reference
+/// G. Bjontegaard, ITU-T SG16 VCEG-M33, Austin TX, Apr. 2001.
+#[must_use]
+pub fn compute_bd_rate(rd_points_a: &[(f64, f64)], rd_points_b: &[(f64, f64)]) -> f64 {
+    let ref_pts: Vec<BdPoint> = rd_points_a
+        .iter()
+        .map(|&(bitrate, quality)| BdPoint::new(bitrate, quality))
+        .collect();
+    let tst_pts: Vec<BdPoint> = rd_points_b
+        .iter()
+        .map(|&(bitrate, quality)| BdPoint::new(bitrate, quality))
+        .collect();
+
+    match BdRateCalculator::compute(&ref_pts, &tst_pts) {
+        Ok(result) => result.bd_rate,
+        Err(_) => 0.0,
+    }
+}
 
 /// Result of comparing two codecs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +219,22 @@ mod tests {
         assert_eq!(comparison.encoding_speed_ratio, 0.5);
         assert_eq!(comparison.decoding_speed_ratio, 0.5);
         assert_eq!(comparison.psnr_difference, Some(2.0));
+    }
+
+    #[test]
+    fn test_bd_rate_equal_curves() {
+        // Two identical RD curves must yield BD-Rate ≈ 0.
+        let pts = [
+            (500.0_f64, 32.0_f64),
+            (1000.0, 35.0),
+            (2000.0, 38.0),
+            (4000.0, 41.0),
+        ];
+        let bd = compute_bd_rate(&pts, &pts);
+        assert!(
+            bd.abs() < 1e-6,
+            "BD-Rate for identical curves should be ~0, got {bd:.8}"
+        );
     }
 }
 

@@ -72,13 +72,16 @@ pub mod burn_in;
 pub mod error;
 pub mod font;
 pub mod format_convert;
+pub mod format_converter;
 pub mod overlay;
 pub mod parser;
 pub mod renderer;
+pub mod soft_shadow;
 pub mod style;
 pub mod sub_style;
 pub mod text;
 pub mod timing;
+pub mod timing_adjuster;
 
 // CEA-608/708 encoding and embedding
 pub mod cea;
@@ -119,13 +122,27 @@ pub mod subtitle_sanitize;
 pub mod subtitle_search;
 pub mod subtitle_stats;
 
+// Forced subtitle detection
+pub mod forced_subtitle;
+
+// Automatic subtitle timing alignment between two tracks
+pub mod subtitle_alignment;
+
+// IMSC1/TTML2 enhanced parser with regions, styles, and spans
+pub mod ttml_v2;
+
+// CEA-708 DTVCC decoder
+pub mod cea708;
+
 // Re-export main types
+pub use cea708::{CaptionWindow, Dtvcc708Command, Dtvcc708Decoder, Dtvcc708Packet};
 pub use error::{SubtitleError, SubtitleResult};
 pub use font::{Font, GlyphCache};
 pub use overlay::overlay_subtitle;
-pub use renderer::SubtitleRenderer;
+pub use renderer::{DirtyRect, IncrementalSubtitleRenderer, SubtitleRenderer};
 pub use style::{Alignment, Animation, Color, OutlineStyle, Position, ShadowStyle, SubtitleStyle};
 pub use text::{BidiLevel, TextLayout, TextLayoutEngine};
+pub use ttml_v2::{SubtitleEntry, TtmlParser, TtmlRegion, TtmlSpan, TtmlStyle};
 
 /// A single subtitle cue with timing and content.
 #[derive(Clone, Debug)]

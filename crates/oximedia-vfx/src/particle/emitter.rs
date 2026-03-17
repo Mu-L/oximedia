@@ -8,7 +8,7 @@
 
 #![allow(dead_code)]
 
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 
 // ── Color ──────────────────────────────────────────────────────────────────────

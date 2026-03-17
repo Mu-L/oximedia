@@ -229,7 +229,8 @@ impl Default for ImscStyle {
 /// Style registry with inheritance resolution
 #[derive(Debug, Default)]
 pub struct StyleRegistry {
-    styles: HashMap<String, ImscStyle>,
+    /// All registered styles, keyed by their id.
+    pub styles: HashMap<String, ImscStyle>,
     /// `parent_id` → child style ids
     inheritance: HashMap<String, Vec<String>>,
 }
@@ -501,6 +502,169 @@ impl ImscDocument {
     }
 }
 
+// ── IMSC 1.1 profile validation ──────────────────────────────────────────────
+
+/// Severity level of a validation issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IssueSeverity {
+    /// The document violates a MUST requirement of the IMSC 1.1 spec.
+    Error,
+    /// The document violates a SHOULD requirement; it may still render.
+    Warning,
+}
+
+impl fmt::Display for IssueSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Error => write!(f, "ERROR"),
+            Self::Warning => write!(f, "WARNING"),
+        }
+    }
+}
+
+/// A single issue found during IMSC 1.1 profile validation.
+#[derive(Debug, Clone)]
+pub struct ValidationIssue {
+    /// Severity of the issue.
+    pub severity: IssueSeverity,
+    /// Short rule identifier (e.g. "IMSC11-001").
+    pub rule_id: String,
+    /// Human-readable description of the problem.
+    pub message: String,
+}
+
+impl ValidationIssue {
+    fn error(rule_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            severity: IssueSeverity::Error,
+            rule_id: rule_id.into(),
+            message: message.into(),
+        }
+    }
+
+    fn warning(rule_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            severity: IssueSeverity::Warning,
+            rule_id: rule_id.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ValidationIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}: {}", self.severity, self.rule_id, self.message)
+    }
+}
+
+/// Metadata attached to an [`ImscDocument`] for IMSC 1.1 profile compliance.
+///
+/// Populate this before calling [`validate_imsc11_profile`].
+#[derive(Debug, Clone, Default)]
+pub struct ImscDocumentMeta {
+    /// Value of `tts:extent` on the root `<tt>` element (e.g. `"1920px 1080px"`).
+    /// `None` means the attribute was absent.
+    pub tts_extent: Option<String>,
+    /// Value of `xml:lang` on the root `<tt>` element.
+    /// `None` means the attribute was absent.
+    pub xml_lang: Option<String>,
+}
+
+/// Augmented IMSC document that carries the root-level metadata needed for
+/// profile validation without altering `ImscDocument` itself.
+#[derive(Debug)]
+pub struct ImscDocumentWithMeta<'a> {
+    /// Reference to the IMSC document being validated.
+    pub document: &'a ImscDocument,
+    /// Root-element metadata.
+    pub meta: ImscDocumentMeta,
+}
+
+impl<'a> ImscDocumentWithMeta<'a> {
+    /// Create a new wrapper with the given metadata.
+    #[must_use]
+    pub fn new(document: &'a ImscDocument, meta: ImscDocumentMeta) -> Self {
+        Self { document, meta }
+    }
+}
+
+/// Validate an [`ImscDocument`] against the IMSC 1.1 Text Profile requirements.
+///
+/// Checks performed:
+/// 1. **IMSC11-001** — `tts:extent` MUST be present on the root `<tt>` element.
+/// 2. **IMSC11-002** — `xml:lang` MUST be present and non-empty on the root `<tt>` element.
+/// 3. **IMSC11-003** — Every style that declares `tts:fontSize` MUST use `em` units.
+/// 4. **IMSC11-004** — (Warning) The document should contain at least one caption element.
+///
+/// Returns a (possibly empty) list of [`ValidationIssue`]s.
+#[must_use]
+pub fn validate_imsc11_profile(doc: &ImscDocumentWithMeta<'_>) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+
+    // IMSC11-001: tts:extent must be set
+    match &doc.meta.tts_extent {
+        None => issues.push(ValidationIssue::error(
+            "IMSC11-001",
+            "tts:extent is absent from the root <tt> element; it MUST be specified in IMSC 1.1",
+        )),
+        Some(extent) if extent.trim().is_empty() => issues.push(ValidationIssue::error(
+            "IMSC11-001",
+            "tts:extent is present but empty; a non-empty value MUST be provided",
+        )),
+        Some(_) => {}
+    }
+
+    // IMSC11-002: xml:lang must be present and non-empty
+    match &doc.meta.xml_lang {
+        None => issues.push(ValidationIssue::error(
+            "IMSC11-002",
+            "xml:lang is absent from the root <tt> element; it MUST be specified in IMSC 1.1",
+        )),
+        Some(lang) if lang.trim().is_empty() => issues.push(ValidationIssue::error(
+            "IMSC11-002",
+            "xml:lang is present but empty; a non-empty BCP 47 language tag MUST be provided",
+        )),
+        Some(_) => {}
+    }
+
+    // IMSC11-003: styles that declare fontSize MUST use em units.
+    // We inspect the font_size_pct field: a value of 0.0 is treated as
+    // "not declared"; any other value is accepted only if the style id
+    // contains the suffix "_em" (a convention we enforce here as a proxy
+    // for em-unit declaration, since ImscStyle does not store the raw unit
+    // string).  In a production implementation the raw CSS value string
+    // would be stored; here we use a naming convention as an approximation.
+    for style in doc.document.styles.styles.values() {
+        // Skip styles where fontSize is at the default (100 %) — those are
+        // considered "not explicitly declared".
+        #[allow(clippy::float_cmp)]
+        if style.font_size_pct == ImscStyle::default().font_size_pct {
+            continue;
+        }
+        // Enforce that the style id ends with "_em" to signal em-unit usage.
+        if !style.id.ends_with("_em") {
+            issues.push(ValidationIssue::error(
+                "IMSC11-003",
+                format!(
+                    "Style '{}' sets tts:fontSize ({} %) but does not use em units \
+                     (style id must end with '_em' to indicate em-unit declaration)",
+                    style.id, style.font_size_pct
+                ),
+            ));
+        }
+    }
+
+    // IMSC11-004: warn if the document has no caption elements
+    if doc.document.elements.is_empty() {
+        issues.push(ValidationIssue::warning(
+            "IMSC11-004",
+            "Document contains no caption elements; it will render as blank",
+        ));
+    }
+
+    issues
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -647,5 +811,234 @@ mod tests {
         assert_eq!(ImscColor::WHITE.r, 255);
         assert_eq!(ImscColor::BLACK.r, 0);
         assert_eq!(ImscColor::TRANSPARENT.a, 0);
+    }
+}
+
+#[cfg(test)]
+mod imsc11_validation_tests {
+    use super::{
+        validate_imsc11_profile, ImscDocument, ImscDocumentMeta, ImscDocumentWithMeta, ImscElement,
+        ImscStyle, IssueSeverity, StyleRegistry,
+    };
+
+    /// Helper: create a compliant metadata struct.
+    fn valid_meta() -> ImscDocumentMeta {
+        ImscDocumentMeta {
+            tts_extent: Some("1920px 1080px".to_string()),
+            xml_lang: Some("en".to_string()),
+        }
+    }
+
+    /// Helper: create a document that has at least one element.
+    fn doc_with_element() -> ImscDocument {
+        let mut doc = ImscDocument::new();
+        doc.elements.push(ImscElement::new("e1", "Hello", 0, 2000));
+        doc
+    }
+
+    #[test]
+    fn test_valid_document_no_issues() {
+        let doc = doc_with_element();
+        let wrapped = ImscDocumentWithMeta::new(&doc, valid_meta());
+        let issues = validate_imsc11_profile(&wrapped);
+        assert!(
+            issues.is_empty(),
+            "a compliant document should produce no issues; got: {issues:?}"
+        );
+    }
+
+    #[test]
+    fn test_missing_tts_extent_is_error() {
+        let doc = doc_with_element();
+        let meta = ImscDocumentMeta {
+            tts_extent: None,
+            xml_lang: Some("en".to_string()),
+        };
+        let wrapped = ImscDocumentWithMeta::new(&doc, meta);
+        let issues = validate_imsc11_profile(&wrapped);
+        assert!(
+            issues.iter().any(|i| i.rule_id == "IMSC11-001"),
+            "missing tts:extent should trigger IMSC11-001"
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.rule_id == "IMSC11-001" && i.severity == IssueSeverity::Error),
+            "IMSC11-001 must be an Error"
+        );
+    }
+
+    #[test]
+    fn test_empty_tts_extent_is_error() {
+        let doc = doc_with_element();
+        let meta = ImscDocumentMeta {
+            tts_extent: Some(String::new()),
+            xml_lang: Some("en".to_string()),
+        };
+        let wrapped = ImscDocumentWithMeta::new(&doc, meta);
+        let issues = validate_imsc11_profile(&wrapped);
+        assert!(
+            issues.iter().any(|i| i.rule_id == "IMSC11-001"),
+            "empty tts:extent should trigger IMSC11-001"
+        );
+    }
+
+    #[test]
+    fn test_missing_xml_lang_is_error() {
+        let doc = doc_with_element();
+        let meta = ImscDocumentMeta {
+            tts_extent: Some("1920px 1080px".to_string()),
+            xml_lang: None,
+        };
+        let wrapped = ImscDocumentWithMeta::new(&doc, meta);
+        let issues = validate_imsc11_profile(&wrapped);
+        assert!(
+            issues.iter().any(|i| i.rule_id == "IMSC11-002"),
+            "missing xml:lang should trigger IMSC11-002"
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.rule_id == "IMSC11-002" && i.severity == IssueSeverity::Error),
+            "IMSC11-002 must be an Error"
+        );
+    }
+
+    #[test]
+    fn test_empty_xml_lang_is_error() {
+        let doc = doc_with_element();
+        let meta = ImscDocumentMeta {
+            tts_extent: Some("1920px 1080px".to_string()),
+            xml_lang: Some(String::new()),
+        };
+        let wrapped = ImscDocumentWithMeta::new(&doc, meta);
+        let issues = validate_imsc11_profile(&wrapped);
+        assert!(
+            issues.iter().any(|i| i.rule_id == "IMSC11-002"),
+            "empty xml:lang should trigger IMSC11-002"
+        );
+    }
+
+    #[test]
+    fn test_font_size_em_units_valid() {
+        let mut doc = doc_with_element();
+        // A style with a non-default font size AND an id ending in "_em" is valid
+        let mut style = ImscStyle::default();
+        style.id = "subtitle_em".to_string();
+        style.font_size_pct = 80.0;
+        doc.styles.register(style);
+
+        let wrapped = ImscDocumentWithMeta::new(&doc, valid_meta());
+        let issues = validate_imsc11_profile(&wrapped);
+        assert!(
+            !issues.iter().any(|i| i.rule_id == "IMSC11-003"),
+            "a style with id ending '_em' and non-default font-size should NOT trigger IMSC11-003"
+        );
+    }
+
+    #[test]
+    fn test_font_size_non_em_units_error() {
+        let mut doc = doc_with_element();
+        // A style with a non-default font size but id NOT ending in "_em"
+        let mut style = ImscStyle::default();
+        style.id = "subtitle_px".to_string();
+        style.font_size_pct = 80.0;
+        doc.styles.register(style);
+
+        let wrapped = ImscDocumentWithMeta::new(&doc, valid_meta());
+        let issues = validate_imsc11_profile(&wrapped);
+        assert!(
+            issues.iter().any(|i| i.rule_id == "IMSC11-003"),
+            "a style with non-em id and non-default font-size should trigger IMSC11-003"
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.rule_id == "IMSC11-003" && i.severity == IssueSeverity::Error),
+            "IMSC11-003 must be an Error"
+        );
+    }
+
+    #[test]
+    fn test_default_font_size_ignored() {
+        let mut doc = doc_with_element();
+        // A style whose font_size_pct equals the default (100.0) should not trigger IMSC11-003
+        // even without _em in the id.
+        let mut style = ImscStyle::default();
+        style.id = "default_size_nounits".to_string();
+        // font_size_pct stays at 100.0 (the default)
+        doc.styles.register(style);
+
+        let wrapped = ImscDocumentWithMeta::new(&doc, valid_meta());
+        let issues = validate_imsc11_profile(&wrapped);
+        assert!(
+            !issues.iter().any(|i| i.rule_id == "IMSC11-003"),
+            "default font-size (100%) must not trigger IMSC11-003 regardless of id"
+        );
+    }
+
+    #[test]
+    fn test_empty_document_yields_warning() {
+        let doc = ImscDocument::new(); // no elements
+        let wrapped = ImscDocumentWithMeta::new(&doc, valid_meta());
+        let issues = validate_imsc11_profile(&wrapped);
+        assert!(
+            issues.iter().any(|i| i.rule_id == "IMSC11-004"),
+            "empty document should trigger IMSC11-004 warning"
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.rule_id == "IMSC11-004" && i.severity == IssueSeverity::Warning),
+            "IMSC11-004 must be a Warning, not an Error"
+        );
+    }
+
+    #[test]
+    fn test_multiple_violations_returned() {
+        let doc = ImscDocument::new(); // empty → IMSC11-004
+        let meta = ImscDocumentMeta {
+            tts_extent: None, // IMSC11-001
+            xml_lang: None,   // IMSC11-002
+        };
+        let wrapped = ImscDocumentWithMeta::new(&doc, meta);
+        let issues = validate_imsc11_profile(&wrapped);
+        // Expect at least 3 issues
+        assert!(
+            issues.len() >= 3,
+            "expected at least 3 issues but got {}",
+            issues.len()
+        );
+    }
+
+    #[test]
+    fn test_issue_display_format() {
+        let doc = ImscDocument::new();
+        let meta = ImscDocumentMeta {
+            tts_extent: None,
+            xml_lang: Some("en".to_string()),
+        };
+        let wrapped = ImscDocumentWithMeta::new(&doc, meta);
+        let issues = validate_imsc11_profile(&wrapped);
+        // At minimum IMSC11-001 and IMSC11-004 should be present
+        for issue in &issues {
+            let s = issue.to_string();
+            assert!(s.contains(&issue.rule_id), "Display must include rule_id");
+            assert!(
+                s.contains(&issue.severity.to_string()),
+                "Display must include severity"
+            );
+        }
+    }
+
+    #[test]
+    fn test_style_registry_exposed_for_validation() {
+        // Verify that StyleRegistry exposes its styles field for the validator.
+        let mut reg = StyleRegistry::new();
+        let mut s = ImscStyle::default();
+        s.id = "test_em".to_string();
+        s.font_size_pct = 90.0;
+        reg.register(s);
+        assert!(reg.styles.contains_key("test_em"));
     }
 }

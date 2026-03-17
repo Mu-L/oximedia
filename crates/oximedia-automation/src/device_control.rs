@@ -3,6 +3,143 @@
 //! Provides types for tracking broadcast devices and issuing commands to them.
 //! Note: The lower-level protocol-specific controllers live in `device::control`.
 
+use std::collections::HashMap;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GPI Debounce logic
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Debounce configuration for a GPI pin.
+#[derive(Debug, Clone)]
+pub struct GpiDebounceConfig {
+    /// Debounce window in milliseconds.  A second transition on the same pin
+    /// within this window is ignored to suppress false triggers caused by
+    /// contact bounce on physical relay closures.
+    pub window_ms: u64,
+}
+
+impl Default for GpiDebounceConfig {
+    fn default() -> Self {
+        Self {
+            // 50 ms is a common hardware debounce target for broadcast GPI
+            window_ms: 50,
+        }
+    }
+}
+
+/// State for a single GPI pin used by the debounce logic.
+#[derive(Debug, Clone)]
+struct PinState {
+    /// Last accepted (non-debounced) value: `true` = HIGH, `false` = LOW.
+    last_value: bool,
+    /// Timestamp (ms) when the last transition was accepted.
+    last_accepted_ms: u64,
+}
+
+/// GPI debouncer that filters rapid toggling on physical GPI pins.
+///
+/// On every incoming raw event, call [`GpiDebouncer::accept`].  The method
+/// returns `true` only when the transition falls outside the debounce window,
+/// meaning the caller should propagate the event; `false` indicates the event
+/// should be dropped.
+///
+/// # Example
+///
+/// ```rust
+/// use oximedia_automation::device_control::{GpiDebouncer, GpiDebounceConfig};
+///
+/// let mut debouncer = GpiDebouncer::new(GpiDebounceConfig { window_ms: 50 });
+///
+/// // First HIGH transition at t=0 ms — accepted.
+/// assert!(debouncer.accept(0, true, 0));
+///
+/// // Second HIGH transition at t=20 ms — within the 50 ms window, rejected.
+/// assert!(!debouncer.accept(0, true, 20));
+///
+/// // Transition at t=60 ms — outside the window, accepted.
+/// assert!(debouncer.accept(0, true, 60));
+/// ```
+#[derive(Debug, Default)]
+pub struct GpiDebouncer {
+    config: GpiDebounceConfig,
+    /// Per-pin debounce state keyed by pin number.
+    pin_states: HashMap<u8, PinState>,
+}
+
+impl GpiDebouncer {
+    /// Create a new GPI debouncer with the supplied configuration.
+    pub fn new(config: GpiDebounceConfig) -> Self {
+        Self {
+            config,
+            pin_states: HashMap::new(),
+        }
+    }
+
+    /// Evaluate whether the incoming event on `pin` at `now_ms` should be
+    /// accepted or dropped.
+    ///
+    /// # Arguments
+    ///
+    /// * `pin`      — Pin number (0–255).
+    /// * `value`    — New pin value (`true` = HIGH, `false` = LOW).
+    /// * `now_ms`   — Current timestamp in milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the caller should propagate the event; `false` if the event
+    /// is within the debounce window and should be discarded.
+    pub fn accept(&mut self, pin: u8, value: bool, now_ms: u64) -> bool {
+        match self.pin_states.get(&pin) {
+            None => {
+                // First-ever event on this pin — always accepted.
+                self.pin_states.insert(
+                    pin,
+                    PinState {
+                        last_value: value,
+                        last_accepted_ms: now_ms,
+                    },
+                );
+                true
+            }
+            Some(state) => {
+                let elapsed = now_ms.saturating_sub(state.last_accepted_ms);
+                let same_value = state.last_value == value;
+
+                // Accept if:
+                //   (a) the value changed (regardless of timing), OR
+                //   (b) the debounce window has expired for a repeated value.
+                if !same_value || elapsed >= self.config.window_ms {
+                    self.pin_states.insert(
+                        pin,
+                        PinState {
+                            last_value: value,
+                            last_accepted_ms: now_ms,
+                        },
+                    );
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
+    /// Reset debounce state for a single pin.
+    pub fn reset_pin(&mut self, pin: u8) {
+        self.pin_states.remove(&pin);
+    }
+
+    /// Reset all pin states.
+    pub fn reset_all(&mut self) {
+        self.pin_states.clear();
+    }
+
+    /// Return the number of pins currently tracked.
+    pub fn tracked_pins(&self) -> usize {
+        self.pin_states.len()
+    }
+}
+
 /// Category of a broadcast device.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -263,5 +400,88 @@ mod tests {
         let online = ctrl.online_devices();
         assert_eq!(online.len(), 1);
         assert_eq!(online[0].0, "cam1");
+    }
+
+    // ── GPI Debouncer Tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_gpi_debouncer_first_event_accepted() {
+        let mut debouncer = GpiDebouncer::new(GpiDebounceConfig { window_ms: 50 });
+        assert!(debouncer.accept(0, true, 0), "First event must be accepted");
+        assert_eq!(debouncer.tracked_pins(), 1);
+    }
+
+    #[test]
+    fn test_gpi_debouncer_rapid_same_value_rejected() {
+        let mut debouncer = GpiDebouncer::new(GpiDebounceConfig { window_ms: 50 });
+        assert!(debouncer.accept(1, true, 0));
+        // Same value within window → debounce, reject
+        assert!(
+            !debouncer.accept(1, true, 20),
+            "Rapid repeat should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_gpi_debouncer_after_window_accepted() {
+        let mut debouncer = GpiDebouncer::new(GpiDebounceConfig { window_ms: 50 });
+        assert!(debouncer.accept(2, true, 0));
+        // Outside the debounce window → accept
+        assert!(
+            debouncer.accept(2, true, 60),
+            "After window should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_gpi_debouncer_value_change_always_accepted() {
+        let mut debouncer = GpiDebouncer::new(GpiDebounceConfig { window_ms: 50 });
+        assert!(debouncer.accept(3, true, 0));
+        // Value changed → always accepted regardless of timing
+        assert!(
+            debouncer.accept(3, false, 10),
+            "Value change should always be accepted"
+        );
+    }
+
+    #[test]
+    fn test_gpi_debouncer_multiple_pins_independent() {
+        let mut debouncer = GpiDebouncer::new(GpiDebounceConfig { window_ms: 50 });
+        assert!(debouncer.accept(0, true, 0));
+        assert!(debouncer.accept(1, true, 0)); // Different pin — independent state
+        assert_eq!(debouncer.tracked_pins(), 2);
+    }
+
+    #[test]
+    fn test_gpi_debouncer_reset_pin() {
+        let mut debouncer = GpiDebouncer::new(GpiDebounceConfig { window_ms: 50 });
+        debouncer.accept(5, true, 0);
+        debouncer.reset_pin(5);
+        // After reset, the next event on pin 5 should be accepted as first-ever
+        assert!(
+            debouncer.accept(5, true, 10),
+            "After reset, first event should be accepted"
+        );
+    }
+
+    #[test]
+    fn test_gpi_debouncer_reset_all() {
+        let mut debouncer = GpiDebouncer::new(GpiDebounceConfig { window_ms: 50 });
+        debouncer.accept(0, true, 0);
+        debouncer.accept(1, false, 0);
+        assert_eq!(debouncer.tracked_pins(), 2);
+        debouncer.reset_all();
+        assert_eq!(debouncer.tracked_pins(), 0);
+    }
+
+    #[test]
+    fn test_gpi_debouncer_exact_boundary_accepted() {
+        let mut debouncer = GpiDebouncer::new(GpiDebounceConfig { window_ms: 50 });
+        assert!(debouncer.accept(7, true, 0));
+        // Exactly at the boundary (elapsed == window_ms) → accepted
+        assert!(
+            debouncer.accept(7, true, 50),
+            "Event at exact window boundary should be accepted"
+        );
     }
 }

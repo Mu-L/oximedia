@@ -37,11 +37,7 @@ impl CallNode {
 
     /// Average call duration in nanoseconds.
     pub fn avg_ns(&self) -> u64 {
-        if self.call_count == 0 {
-            0
-        } else {
-            self.inclusive_ns / self.call_count
-        }
+        self.inclusive_ns.checked_div(self.call_count).unwrap_or(0)
     }
 }
 

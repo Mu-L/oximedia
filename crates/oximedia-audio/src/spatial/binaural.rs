@@ -9,7 +9,6 @@
 
 use super::hrtf_data::{HrirMeasurement, HrtfDatabase, HrtfManager, MAX_HRIR_LENGTH};
 use crate::{AudioError, AudioResult};
-use rustfft::FftPlanner;
 use std::f32::consts::PI;
 use std::sync::Arc;
 
@@ -130,8 +129,6 @@ pub struct HrtfConvolver {
     hrir_left: Vec<f32>,
     /// Current HRIR (right)
     hrir_right: Vec<f32>,
-    /// FFT planner
-    fft_planner: FftPlanner<f32>,
     /// Sample counter
     sample_counter: usize,
 }
@@ -149,7 +146,6 @@ impl HrtfConvolver {
             output_buffer_right: vec![0.0; fft_size * 2],
             hrir_left: vec![0.0; MAX_HRIR_LENGTH],
             hrir_right: vec![0.0; MAX_HRIR_LENGTH],
-            fft_planner: FftPlanner::new(),
             sample_counter: 0,
         }
     }

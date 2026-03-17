@@ -96,11 +96,7 @@ pub fn full_search_mv(
     search_range: usize,
     stride: usize,
 ) -> MotionVector {
-    let height = if stride > 0 {
-        current.len() / stride
-    } else {
-        0
-    };
+    let height = current.len().checked_div(stride).unwrap_or(0);
     let Some(cur_block) = extract_block(current, stride, height, bx, by, block_size) else {
         return MotionVector::default();
     };
@@ -119,11 +115,7 @@ pub fn full_search_mv(
             if rx < 0 || ry < 0 {
                 continue;
             }
-            let ref_height = if stride > 0 {
-                reference.len() / stride
-            } else {
-                0
-            };
+            let ref_height = reference.len().checked_div(stride).unwrap_or(0);
             let Some(ref_block) = extract_block(
                 reference,
                 stride,

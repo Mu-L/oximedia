@@ -77,6 +77,136 @@ pub struct PathConstraint {
     pub roi_center: Option<Point2D>,
 }
 
+/// Per-axis motion stabilization constraints for user-defined lock/allow policy.
+///
+/// These constraints let the user specify which motion axes should be smoothed
+/// and which should be passed through without correction.  For example, a
+/// broadcaster may want to lock pan (X-axis) while allowing intentional tilt
+/// (Y-axis) adjustments to remain visible in the output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionAxisConstraints {
+    /// When `true`, horizontal (pan) motion is fully locked to the smoothed
+    /// trajectory — no lateral jitter is passed through.
+    /// When `false`, the X component is smoothed normally.
+    pub lock_pan: bool,
+    /// When `true`, vertical (tilt) motion is fully locked.
+    /// When `false`, the Y component is smoothed normally.
+    pub lock_tilt: bool,
+    /// Blending factor applied to the *unlocked* axis (0.0 = original,
+    /// 1.0 = fully smoothed).  Locked axes always use 1.0.
+    pub unlock_blend: f64,
+    /// Maximum allowed correction on the pan axis (pixels).
+    /// Ignored when `lock_pan` is true (full lock always applies).
+    pub pan_max_correction: f64,
+    /// Maximum allowed correction on the tilt axis (pixels).
+    pub tilt_max_correction: f64,
+}
+
+impl Default for MotionAxisConstraints {
+    fn default() -> Self {
+        Self {
+            lock_pan: false,
+            lock_tilt: false,
+            unlock_blend: 0.8,
+            pan_max_correction: f64::MAX,
+            tilt_max_correction: f64::MAX,
+        }
+    }
+}
+
+impl MotionAxisConstraints {
+    /// Create constraints with both axes freely smoothed (no lock).
+    #[must_use]
+    pub fn unconstrained() -> Self {
+        Self::default()
+    }
+
+    /// Create constraints that lock the pan (X) axis while allowing tilt (Y).
+    #[must_use]
+    pub fn lock_pan_only() -> Self {
+        Self {
+            lock_pan: true,
+            lock_tilt: false,
+            ..Self::default()
+        }
+    }
+
+    /// Create constraints that lock the tilt (Y) axis while allowing pan (X).
+    #[must_use]
+    pub fn lock_tilt_only() -> Self {
+        Self {
+            lock_pan: false,
+            lock_tilt: true,
+            ..Self::default()
+        }
+    }
+
+    /// Lock both axes (full 2-D lock).
+    #[must_use]
+    pub fn lock_both() -> Self {
+        Self {
+            lock_pan: true,
+            lock_tilt: true,
+            ..Self::default()
+        }
+    }
+
+    /// Set the blending factor for unlocked axes.
+    #[must_use]
+    pub fn with_unlock_blend(mut self, blend: f64) -> Self {
+        self.unlock_blend = blend.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Set the maximum pan correction in pixels.
+    #[must_use]
+    pub fn with_pan_max_correction(mut self, px: f64) -> Self {
+        self.pan_max_correction = px.max(0.0);
+        self
+    }
+
+    /// Set the maximum tilt correction in pixels.
+    #[must_use]
+    pub fn with_tilt_max_correction(mut self, px: f64) -> Self {
+        self.tilt_max_correction = px.max(0.0);
+        self
+    }
+
+    /// Apply these axis constraints to a pair of (original, smoothed) positions
+    /// and return the constrained smoothed position.
+    ///
+    /// The returned point is what will be used as the stabilized output position
+    /// for this frame.
+    #[must_use]
+    pub fn apply(&self, original: Point2D, smoothed: Point2D) -> Point2D {
+        let x = if self.lock_pan {
+            // Full lock: use the smoothed X directly, but still clamp correction
+            let raw_correction = smoothed.x - original.x;
+            let clamped = raw_correction.clamp(-self.pan_max_correction, self.pan_max_correction);
+            original.x + clamped
+        } else {
+            // Partial blend on X
+            let blended = original.x + (smoothed.x - original.x) * self.unlock_blend;
+            let correction = blended - original.x;
+            let clamped = correction.clamp(-self.pan_max_correction, self.pan_max_correction);
+            original.x + clamped
+        };
+
+        let y = if self.lock_tilt {
+            let raw_correction = smoothed.y - original.y;
+            let clamped = raw_correction.clamp(-self.tilt_max_correction, self.tilt_max_correction);
+            original.y + clamped
+        } else {
+            let blended = original.y + (smoothed.y - original.y) * self.unlock_blend;
+            let correction = blended - original.y;
+            let clamped = correction.clamp(-self.tilt_max_correction, self.tilt_max_correction);
+            original.y + clamped
+        };
+
+        Point2D::new(x, y)
+    }
+}
+
 /// Result of path planning.
 #[derive(Debug, Clone)]
 pub struct PlannedPath {
@@ -169,6 +299,73 @@ impl PathPlanner {
         };
 
         self.build_planned_path(positions, &smoothed)
+    }
+
+    /// Plan a path with per-axis motion constraints (lock pan / allow tilt, etc.)
+    ///
+    /// This is the primary entry point for user-defined stabilization policies.
+    /// The `axis` constraints control how much freedom the stabilized output has
+    /// on each axis independently from the global `max_deviation` clamping.
+    ///
+    /// # Example — lock horizontal pan while allowing tilt
+    ///
+    /// ```
+    /// use oximedia_stabilize::path_planner::{
+    ///     PathPlanner, PlanStrategy, Point2D, MotionAxisConstraints,
+    /// };
+    ///
+    /// let planner = PathPlanner::new(PlanStrategy::MinLength);
+    /// let positions: Vec<Point2D> = (0..20)
+    ///     .map(|i| Point2D::new(i as f64 * 5.0 + (i as f64 * 0.3).sin() * 8.0, 100.0))
+    ///     .collect();
+    /// let constraints = MotionAxisConstraints::lock_pan_only();
+    /// let path = planner.plan_with_axis_constraints(&positions, constraints);
+    /// assert_eq!(path.waypoints.len(), 20);
+    /// ```
+    #[must_use]
+    pub fn plan_with_axis_constraints(
+        &self,
+        positions: &[Point2D],
+        axis: MotionAxisConstraints,
+    ) -> PlannedPath {
+        if positions.is_empty() {
+            return PlannedPath {
+                waypoints: Vec::new(),
+                total_length: 0.0,
+                smoothness_score: 0.0,
+                max_deviation: 0.0,
+            };
+        }
+        if positions.len() == 1 {
+            return PlannedPath {
+                waypoints: vec![Waypoint {
+                    position: positions[0],
+                    velocity: Point2D::new(0.0, 0.0),
+                    frame_index: 0,
+                    confidence: 1.0,
+                }],
+                total_length: 0.0,
+                smoothness_score: 0.0,
+                max_deviation: 0.0,
+            };
+        }
+
+        // Smooth each axis using the base strategy
+        let smoothed_unconstrained = match self.strategy {
+            PlanStrategy::MinLength => self.smooth_min_length(positions),
+            PlanStrategy::MinJerk => self.smooth_min_jerk(positions),
+            PlanStrategy::RoiCenter => self.smooth_roi_center(positions),
+            PlanStrategy::Hybrid => self.smooth_hybrid(positions),
+        };
+
+        // Apply per-axis constraints to each smoothed position
+        let constrained: Vec<Point2D> = positions
+            .iter()
+            .zip(smoothed_unconstrained.iter())
+            .map(|(&orig, &sm)| axis.apply(orig, sm))
+            .collect();
+
+        self.build_planned_path(positions, &constrained)
     }
 
     /// Plan a path with constraints.
@@ -568,6 +765,141 @@ mod tests {
             smoother.push(Point2D::new(i as f64, 0.0));
         }
         assert_eq!(smoother.len(), 3);
+    }
+
+    // ── MotionAxisConstraints ────────────────────────────────────────
+
+    #[test]
+    fn test_axis_constraints_unconstrained_identity() {
+        let c = MotionAxisConstraints::unconstrained().with_unlock_blend(0.0);
+        let orig = Point2D::new(10.0, 20.0);
+        let smoothed = Point2D::new(15.0, 25.0);
+        let result = c.apply(orig, smoothed);
+        // blend = 0 → no change
+        assert!((result.x - 10.0).abs() < 1e-9);
+        assert!((result.y - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_axis_constraints_full_blend_unconstrained() {
+        let c = MotionAxisConstraints::unconstrained().with_unlock_blend(1.0);
+        let orig = Point2D::new(10.0, 20.0);
+        let smoothed = Point2D::new(15.0, 25.0);
+        let result = c.apply(orig, smoothed);
+        // blend = 1 → follow smoothed fully
+        assert!((result.x - 15.0).abs() < 1e-9);
+        assert!((result.y - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_axis_constraints_lock_pan_x_follows_smooth() {
+        let c = MotionAxisConstraints::lock_pan_only();
+        let orig = Point2D::new(0.0, 0.0);
+        let smoothed = Point2D::new(8.0, 5.0);
+        let result = c.apply(orig, smoothed);
+        // X (pan) locked → correction applied in full
+        assert!((result.x - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_axis_constraints_lock_pan_y_partial() {
+        let c = MotionAxisConstraints::lock_pan_only().with_unlock_blend(0.5);
+        let orig = Point2D::new(0.0, 0.0);
+        let smoothed = Point2D::new(8.0, 10.0);
+        let result = c.apply(orig, smoothed);
+        // Y (tilt) unlocked with blend=0.5 → 5.0
+        assert!((result.y - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_axis_constraints_lock_tilt_y_follows_smooth() {
+        let c = MotionAxisConstraints::lock_tilt_only();
+        let orig = Point2D::new(0.0, 0.0);
+        let smoothed = Point2D::new(6.0, 12.0);
+        let result = c.apply(orig, smoothed);
+        assert!((result.y - 12.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_axis_constraints_pan_max_correction_clamps() {
+        let c = MotionAxisConstraints::lock_pan_only().with_pan_max_correction(3.0);
+        let orig = Point2D::new(0.0, 0.0);
+        let smoothed = Point2D::new(10.0, 0.0);
+        let result = c.apply(orig, smoothed);
+        // correction clamped to 3.0
+        assert!((result.x - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_axis_constraints_lock_both() {
+        let c = MotionAxisConstraints::lock_both();
+        let orig = Point2D::new(5.0, 7.0);
+        let smoothed = Point2D::new(10.0, 14.0);
+        let result = c.apply(orig, smoothed);
+        // Both axes locked → follow smoothed
+        assert!((result.x - 10.0).abs() < 1e-9);
+        assert!((result.y - 14.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_plan_with_axis_constraints_lock_pan_length() {
+        let planner = PathPlanner::new(PlanStrategy::MinLength).with_window_size(5);
+        let positions: Vec<Point2D> = (0..20)
+            .map(|i| {
+                let noise = if i % 2 == 0 { 5.0 } else { -5.0 };
+                Point2D::new(i as f64 * 10.0 + noise, 100.0 + noise)
+            })
+            .collect();
+        let constraints = MotionAxisConstraints::lock_pan_only();
+        let path = planner.plan_with_axis_constraints(&positions, constraints);
+        assert_eq!(path.waypoints.len(), 20);
+    }
+
+    #[test]
+    fn test_plan_with_axis_constraints_empty() {
+        let planner = PathPlanner::new(PlanStrategy::MinLength);
+        let path = planner.plan_with_axis_constraints(&[], MotionAxisConstraints::default());
+        assert!(path.waypoints.is_empty());
+    }
+
+    #[test]
+    fn test_plan_with_axis_constraints_single() {
+        let planner = PathPlanner::new(PlanStrategy::MinLength);
+        let path = planner.plan_with_axis_constraints(
+            &[Point2D::new(3.0, 7.0)],
+            MotionAxisConstraints::lock_pan_only(),
+        );
+        assert_eq!(path.waypoints.len(), 1);
+    }
+
+    #[test]
+    fn test_plan_axis_constraints_lock_pan_x_smoother() {
+        // With lock_pan, X corrections should track smoothed trajectory closely
+        let planner = PathPlanner::new(PlanStrategy::MinLength).with_window_size(9);
+        let positions: Vec<Point2D> = (0..30)
+            .map(|i| {
+                let noise = if i % 2 == 0 { 10.0 } else { -10.0 };
+                Point2D::new(noise, i as f64) // pure noise in X, linear in Y
+            })
+            .collect();
+        let constraints = MotionAxisConstraints::lock_pan_only();
+        let path = planner.plan_with_axis_constraints(&positions, constraints);
+        // The smoothed X should vary less than original
+        let x_var_orig: f64 = positions
+            .windows(2)
+            .map(|w| (w[1].x - w[0].x).abs())
+            .sum::<f64>()
+            / positions.len() as f64;
+        let x_var_smooth: f64 = path
+            .waypoints
+            .windows(2)
+            .map(|w| (w[1].position.x - w[0].position.x).abs())
+            .sum::<f64>()
+            / path.waypoints.len() as f64;
+        assert!(
+            x_var_smooth <= x_var_orig + 1e-6,
+            "X should be smoother with lock_pan"
+        );
     }
 
     #[test]

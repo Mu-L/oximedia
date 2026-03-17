@@ -314,6 +314,198 @@ pub fn validate_cpl(cpl: &CplDocument) -> CplValidationReport {
     report
 }
 
+/// Validate a CPL document with full SMPTE ST 2067-2:2020 constraint checks.
+///
+/// In addition to basic structural validation, this performs:
+/// - Edit-rate allowlist check (§6.1 of SMPTE ST 2067-2:2020)
+/// - UUID format check (urn:uuid: prefix, §6.1.1)
+/// - Minimum one main image sequence per segment (§6.4)
+/// - Repeat-count range check (§6.6)
+/// - Resource entry-point alignment (§6.6)
+/// - At most one marker sequence per segment (§6.4.6)
+pub fn validate_cpl_st2067_2(cpl: &CplDocument) -> CplValidationReport {
+    let mut report = validate_cpl(cpl);
+
+    validate_allowed_edit_rates(cpl, &mut report);
+    validate_uuid_format(cpl, &mut report);
+    validate_main_image_sequence_required(cpl, &mut report);
+    validate_repeat_count_range(cpl, &mut report);
+    validate_marker_sequence_count(cpl, &mut report);
+
+    report
+}
+
+/// SMPTE ST 2067-2:2020 §6.1 — allowed edit rates.
+///
+/// Legal rates are: 24, 25, 30, 48, 50, 60 fps and their NTSC drop-frame
+/// equivalents (24000/1001, 30000/1001, 60000/1001).
+fn validate_allowed_edit_rates(cpl: &CplDocument, report: &mut CplValidationReport) {
+    let allowed: &[(u32, u32)] = &[
+        (24, 1),
+        (25, 1),
+        (30, 1),
+        (48, 1),
+        (50, 1),
+        (60, 1),
+        (24000, 1001),
+        (30000, 1001),
+        (60000, 1001),
+    ];
+    let rate = cpl.edit_rate;
+    if rate.is_valid()
+        && !allowed
+            .iter()
+            .any(|&(n, d)| rate.numerator == n && rate.denominator == d)
+    {
+        report.add_issue(CplIssue::new(
+            Severity::Warning,
+            IssueCategory::EditRateMismatch,
+            format!(
+                "CPL edit rate {} is not in the SMPTE ST 2067-2:2020 §6.1 allowlist \
+                 (24, 25, 30, 48, 50, 60 fps and NTSC variants)",
+                rate,
+            ),
+        ));
+    }
+
+    // Check per-resource edit rates too
+    for (seg_idx, segment) in cpl.segments.iter().enumerate() {
+        for track in &segment.virtual_tracks {
+            for (res_idx, resource) in track.resources.iter().enumerate() {
+                let rr = resource.edit_rate;
+                if rr.is_valid()
+                    && !allowed
+                        .iter()
+                        .any(|&(n, d)| rr.numerator == n && rr.denominator == d)
+                {
+                    report.add_issue(
+                        CplIssue::new(
+                            Severity::Warning,
+                            IssueCategory::EditRateMismatch,
+                            format!(
+                                "Resource edit rate {} is not in the SMPTE ST 2067-2:2020 \
+                                 §6.1 allowlist",
+                                rr
+                            ),
+                        )
+                        .with_location(format!(
+                            "Segment[{seg_idx}]/Track[{}]/Resource[{res_idx}]",
+                            track.id
+                        )),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// SMPTE ST 2067-2:2020 §6.1.1 — UUIDs should use the `urn:uuid:` prefix.
+fn validate_uuid_format(cpl: &CplDocument, report: &mut CplValidationReport) {
+    let check_id = |id: &str, location: &str, report: &mut CplValidationReport| {
+        if !id.is_empty() && !id.starts_with("urn:uuid:") && !id.starts_with("urn:smpte:") {
+            report.add_issue(
+                CplIssue::new(
+                    Severity::Warning,
+                    IssueCategory::InvalidUuid,
+                    format!("Identifier '{id}' does not use the required 'urn:uuid:' prefix"),
+                )
+                .with_location(location.to_string()),
+            );
+        }
+    };
+
+    check_id(&cpl.id, "CPL/Id", report);
+    for (seg_idx, segment) in cpl.segments.iter().enumerate() {
+        check_id(&segment.id, &format!("Segment[{seg_idx}]/Id"), report);
+        for track in &segment.virtual_tracks {
+            check_id(&track.id, &format!("Segment[{seg_idx}]/Track/Id"), report);
+            for (res_idx, resource) in track.resources.iter().enumerate() {
+                check_id(
+                    &resource.id,
+                    &format!(
+                        "Segment[{seg_idx}]/Track[{}]/Resource[{res_idx}]/Id",
+                        track.id
+                    ),
+                    report,
+                );
+            }
+        }
+    }
+}
+
+/// SMPTE ST 2067-2:2020 §6.4 — every segment must contain at least one main
+/// image sequence (track type "MainImageSequence" or "MainImageVirtualTrack").
+fn validate_main_image_sequence_required(cpl: &CplDocument, report: &mut CplValidationReport) {
+    for (seg_idx, segment) in cpl.segments.iter().enumerate() {
+        let has_image = segment.virtual_tracks.iter().any(|t| {
+            t.track_type.contains("MainImage")
+                || t.track_type.contains("main_image")
+                || t.track_type == "MainImageSequence"
+        });
+        if !has_image && !segment.virtual_tracks.is_empty() {
+            report.add_issue(
+                CplIssue::new(
+                    Severity::Warning,
+                    IssueCategory::StructuralError,
+                    "Segment contains no MainImageSequence; \
+                     SMPTE ST 2067-2:2020 §6.4 requires at least one",
+                )
+                .with_location(format!("Segment[{seg_idx}]")),
+            );
+        }
+    }
+}
+
+/// SMPTE ST 2067-2:2020 §6.6 — repeat count must be ≥ 1 and ≤ 65535.
+fn validate_repeat_count_range(cpl: &CplDocument, report: &mut CplValidationReport) {
+    for (seg_idx, segment) in cpl.segments.iter().enumerate() {
+        for track in &segment.virtual_tracks {
+            for (res_idx, resource) in track.resources.iter().enumerate() {
+                if resource.repeat_count > 65535 {
+                    report.add_issue(
+                        CplIssue::new(
+                            Severity::Error,
+                            IssueCategory::ConstraintViolation,
+                            format!(
+                                "RepeatCount {} exceeds SMPTE ST 2067-2:2020 §6.6 maximum of 65535",
+                                resource.repeat_count
+                            ),
+                        )
+                        .with_location(format!(
+                            "Segment[{seg_idx}]/Track[{}]/Resource[{res_idx}]",
+                            track.id
+                        )),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// SMPTE ST 2067-2:2020 §6.4.6 — at most one marker sequence per segment.
+fn validate_marker_sequence_count(cpl: &CplDocument, report: &mut CplValidationReport) {
+    for (seg_idx, segment) in cpl.segments.iter().enumerate() {
+        let marker_count = segment
+            .virtual_tracks
+            .iter()
+            .filter(|t| t.track_type.contains("Marker") || t.track_type.contains("marker"))
+            .count();
+        if marker_count > 1 {
+            report.add_issue(
+                CplIssue::new(
+                    Severity::Error,
+                    IssueCategory::ConstraintViolation,
+                    format!(
+                        "Segment has {marker_count} marker sequences; \
+                         SMPTE ST 2067-2:2020 §6.4.6 allows at most 1"
+                    ),
+                )
+                .with_location(format!("Segment[{seg_idx}]")),
+            );
+        }
+    }
+}
+
 /// Validate the CPL ID is a valid UUID-like string.
 fn validate_cpl_id(cpl: &CplDocument, report: &mut CplValidationReport) {
     if cpl.id.is_empty() {

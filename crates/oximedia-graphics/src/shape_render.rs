@@ -808,6 +808,361 @@ impl RegularPolygon {
     }
 }
 
+// ===========================================================================
+// Anti-aliased rendering
+// ===========================================================================
+
+/// Anti-aliased rendering quality level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AntiAliasQuality {
+    /// No anti-aliasing (alias/jagged edges).
+    None,
+    /// 2x2 MSAA (4 sub-samples per pixel).
+    Low,
+    /// 4x4 MSAA (16 sub-samples per pixel).
+    Medium,
+    /// 8x8 MSAA (64 sub-samples per pixel).
+    High,
+}
+
+impl AntiAliasQuality {
+    /// Number of sub-samples per axis.
+    fn samples_per_axis(self) -> u32 {
+        match self {
+            Self::None => 1,
+            Self::Low => 2,
+            Self::Medium => 4,
+            Self::High => 8,
+        }
+    }
+
+    /// Total sub-samples per pixel.
+    pub fn total_samples(self) -> u32 {
+        let s = self.samples_per_axis();
+        s * s
+    }
+}
+
+impl Default for AntiAliasQuality {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+/// An anti-aliased software rasterizer for shapes.
+///
+/// Renders shapes into an RGBA pixel buffer using multi-sample anti-aliasing.
+/// Each pixel is sampled at multiple sub-pixel locations to determine coverage,
+/// producing smooth edges at broadcast resolution.
+pub struct AntiAliasedRenderer {
+    /// Width of the render buffer.
+    pub width: u32,
+    /// Height of the render buffer.
+    pub height: u32,
+    /// AA quality level.
+    pub quality: AntiAliasQuality,
+}
+
+impl AntiAliasedRenderer {
+    /// Create a new anti-aliased renderer.
+    pub fn new(width: u32, height: u32, quality: AntiAliasQuality) -> Self {
+        Self {
+            width,
+            height,
+            quality,
+        }
+    }
+
+    /// Render a filled circle with anti-aliasing into an RGBA buffer.
+    ///
+    /// The buffer must be `width * height * 4` bytes.
+    pub fn render_circle(
+        &self,
+        buffer: &mut [u8],
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        color: &ShapeColor,
+    ) {
+        let samples = self.quality.samples_per_axis();
+        let _total = self.quality.total_samples() as f32;
+        let r2 = radius * radius;
+
+        let bb = BoundingBox::from_xywh(cx - radius, cy - radius, radius * 2.0, radius * 2.0);
+        let x_start = (bb.min_x.floor() as i32).max(0) as u32;
+        let y_start = (bb.min_y.floor() as i32).max(0) as u32;
+        let x_end = (bb.max_x.ceil() as u32 + 1).min(self.width);
+        let y_end = (bb.max_y.ceil() as u32 + 1).min(self.height);
+
+        for py in y_start..y_end {
+            for px in x_start..x_end {
+                let coverage = self.compute_circle_coverage(px, py, cx, cy, r2, samples);
+
+                if coverage > 0.0 {
+                    let alpha = color.a * coverage;
+                    self.blend_pixel(buffer, px, py, color, alpha);
+                }
+            }
+        }
+    }
+
+    /// Render a filled rectangle with anti-aliased edges.
+    pub fn render_rect(
+        &self,
+        buffer: &mut [u8],
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: &ShapeColor,
+    ) {
+        let samples = self.quality.samples_per_axis();
+
+        let x_start = (x.floor() as i32).max(0) as u32;
+        let y_start = (y.floor() as i32).max(0) as u32;
+        let x_end = ((x + w).ceil() as u32 + 1).min(self.width);
+        let y_end = ((y + h).ceil() as u32 + 1).min(self.height);
+
+        for py in y_start..y_end {
+            for px in x_start..x_end {
+                let coverage = self.compute_rect_coverage(px, py, x, y, w, h, samples);
+
+                if coverage > 0.0 {
+                    let alpha = color.a * coverage;
+                    self.blend_pixel(buffer, px, py, color, alpha);
+                }
+            }
+        }
+    }
+
+    /// Render a filled polygon with anti-aliased edges.
+    pub fn render_polygon(&self, buffer: &mut [u8], points: &[Point2D], color: &ShapeColor) {
+        if points.len() < 3 {
+            return;
+        }
+
+        let samples = self.quality.samples_per_axis();
+
+        // Compute bounding box
+        let mut min_x = f32::MAX;
+        let mut min_y = f32::MAX;
+        let mut max_x = f32::MIN;
+        let mut max_y = f32::MIN;
+        for p in points {
+            min_x = min_x.min(p.x);
+            min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x);
+            max_y = max_y.max(p.y);
+        }
+
+        let x_start = (min_x.floor() as i32).max(0) as u32;
+        let y_start = (min_y.floor() as i32).max(0) as u32;
+        let x_end = (max_x.ceil() as u32 + 1).min(self.width);
+        let y_end = (max_y.ceil() as u32 + 1).min(self.height);
+
+        for py in y_start..y_end {
+            for px in x_start..x_end {
+                let coverage = self.compute_polygon_coverage(px, py, points, samples);
+
+                if coverage > 0.0 {
+                    let alpha = color.a * coverage;
+                    self.blend_pixel(buffer, px, py, color, alpha);
+                }
+            }
+        }
+    }
+
+    /// Render an anti-aliased line (Xiaolin Wu style).
+    pub fn render_line(
+        &self,
+        buffer: &mut [u8],
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        color: &ShapeColor,
+        width: f32,
+    ) {
+        // Use MSAA sampling along the line's perpendicular
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let length = (dx * dx + dy * dy).sqrt();
+        if length < f32::EPSILON {
+            return;
+        }
+
+        // Normal to the line
+        let _nx = -dy / length;
+        let _ny = dx / length;
+        let half_w = width / 2.0;
+
+        let samples = self.quality.samples_per_axis();
+
+        // Bounding box
+        let expand = half_w + 1.0;
+        let min_x = x1.min(x2) - expand;
+        let min_y = y1.min(y2) - expand;
+        let max_x = x1.max(x2) + expand;
+        let max_y = y1.max(y2) + expand;
+
+        let px_start = (min_x.floor() as i32).max(0) as u32;
+        let py_start = (min_y.floor() as i32).max(0) as u32;
+        let px_end = (max_x.ceil() as u32 + 1).min(self.width);
+        let py_end = (max_y.ceil() as u32 + 1).min(self.height);
+
+        for py in py_start..py_end {
+            for px in px_start..px_end {
+                let mut hit = 0u32;
+                let total = self.quality.total_samples() as f32;
+
+                for sy in 0..samples {
+                    for sx in 0..samples {
+                        let sub_x = px as f32 + (sx as f32 + 0.5) / samples as f32;
+                        let sub_y = py as f32 + (sy as f32 + 0.5) / samples as f32;
+
+                        // Project onto line
+                        let ax = sub_x - x1;
+                        let ay = sub_y - y1;
+                        let t = (ax * dx + ay * dy) / (length * length);
+                        let t_clamped = t.clamp(0.0, 1.0);
+
+                        let closest_x = x1 + t_clamped * dx;
+                        let closest_y = y1 + t_clamped * dy;
+
+                        let dist =
+                            ((sub_x - closest_x).powi(2) + (sub_y - closest_y).powi(2)).sqrt();
+                        if dist <= half_w {
+                            hit += 1;
+                        }
+                    }
+                }
+
+                if hit > 0 {
+                    let coverage = hit as f32 / total;
+                    let alpha = color.a * coverage;
+                    self.blend_pixel(buffer, px, py, color, alpha);
+                }
+            }
+        }
+    }
+
+    /// Compute circle coverage for a pixel via MSAA.
+    fn compute_circle_coverage(
+        &self,
+        px: u32,
+        py: u32,
+        cx: f32,
+        cy: f32,
+        r2: f32,
+        samples: u32,
+    ) -> f32 {
+        let mut hit = 0u32;
+        let total = (samples * samples) as f32;
+
+        for sy in 0..samples {
+            for sx in 0..samples {
+                let sub_x = px as f32 + (sx as f32 + 0.5) / samples as f32;
+                let sub_y = py as f32 + (sy as f32 + 0.5) / samples as f32;
+                let dx = sub_x - cx;
+                let dy = sub_y - cy;
+                if dx * dx + dy * dy <= r2 {
+                    hit += 1;
+                }
+            }
+        }
+
+        hit as f32 / total
+    }
+
+    /// Compute rectangle coverage for a pixel via MSAA.
+    fn compute_rect_coverage(
+        &self,
+        px: u32,
+        py: u32,
+        rx: f32,
+        ry: f32,
+        rw: f32,
+        rh: f32,
+        samples: u32,
+    ) -> f32 {
+        let mut hit = 0u32;
+        let total = (samples * samples) as f32;
+
+        for sy in 0..samples {
+            for sx in 0..samples {
+                let sub_x = px as f32 + (sx as f32 + 0.5) / samples as f32;
+                let sub_y = py as f32 + (sy as f32 + 0.5) / samples as f32;
+                if sub_x >= rx && sub_x <= rx + rw && sub_y >= ry && sub_y <= ry + rh {
+                    hit += 1;
+                }
+            }
+        }
+
+        hit as f32 / total
+    }
+
+    /// Compute polygon coverage via MSAA using ray-casting point-in-polygon.
+    fn compute_polygon_coverage(&self, px: u32, py: u32, points: &[Point2D], samples: u32) -> f32 {
+        let mut hit = 0u32;
+        let total = (samples * samples) as f32;
+
+        for sy in 0..samples {
+            for sx in 0..samples {
+                let sub_x = px as f32 + (sx as f32 + 0.5) / samples as f32;
+                let sub_y = py as f32 + (sy as f32 + 0.5) / samples as f32;
+                if point_in_polygon(sub_x, sub_y, points) {
+                    hit += 1;
+                }
+            }
+        }
+
+        hit as f32 / total
+    }
+
+    /// Alpha-blend a pixel into the buffer.
+    fn blend_pixel(&self, buffer: &mut [u8], px: u32, py: u32, color: &ShapeColor, alpha: f32) {
+        if px >= self.width || py >= self.height {
+            return;
+        }
+        let idx = ((py * self.width + px) * 4) as usize;
+        if idx + 3 >= buffer.len() {
+            return;
+        }
+
+        let inv = 1.0 - alpha;
+        buffer[idx] =
+            (color.r * alpha * 255.0 + f32::from(buffer[idx]) * inv).clamp(0.0, 255.0) as u8;
+        buffer[idx + 1] =
+            (color.g * alpha * 255.0 + f32::from(buffer[idx + 1]) * inv).clamp(0.0, 255.0) as u8;
+        buffer[idx + 2] =
+            (color.b * alpha * 255.0 + f32::from(buffer[idx + 2]) * inv).clamp(0.0, 255.0) as u8;
+        buffer[idx + 3] =
+            ((alpha * 255.0) + f32::from(buffer[idx + 3]) * inv).clamp(0.0, 255.0) as u8;
+    }
+}
+
+/// Ray-casting point-in-polygon test.
+fn point_in_polygon(px: f32, py: f32, polygon: &[Point2D]) -> bool {
+    let n = polygon.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let yi = polygon[i].y;
+        let yj = polygon[j].y;
+        let xi = polygon[i].x;
+        let xj = polygon[j].x;
+
+        if ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1054,5 +1409,171 @@ mod tests {
         };
         assert!(e.contains_point(&Point2D::new(50.0, 50.0)));
         assert!(!e.contains_point(&Point2D::new(0.0, 0.0)));
+    }
+
+    // --- Anti-aliased rendering tests ---
+
+    #[test]
+    fn test_aa_quality_samples() {
+        assert_eq!(AntiAliasQuality::None.total_samples(), 1);
+        assert_eq!(AntiAliasQuality::Low.total_samples(), 4);
+        assert_eq!(AntiAliasQuality::Medium.total_samples(), 16);
+        assert_eq!(AntiAliasQuality::High.total_samples(), 64);
+    }
+
+    #[test]
+    fn test_aa_renderer_creation() {
+        let r = AntiAliasedRenderer::new(100, 100, AntiAliasQuality::Medium);
+        assert_eq!(r.width, 100);
+        assert_eq!(r.height, 100);
+    }
+
+    #[test]
+    fn test_aa_render_circle_center_pixel() {
+        let renderer = AntiAliasedRenderer::new(20, 20, AntiAliasQuality::Medium);
+        let mut buffer = vec![0u8; 20 * 20 * 4];
+        let color = ShapeColor::rgb(1.0, 0.0, 0.0);
+        renderer.render_circle(&mut buffer, 10.0, 10.0, 5.0, &color);
+        let idx = (10 * 20 + 10) * 4;
+        assert!(
+            buffer[idx] > 200,
+            "Center R should be high: {}",
+            buffer[idx]
+        );
+        assert!(
+            buffer[idx + 3] > 200,
+            "Center A should be high: {}",
+            buffer[idx + 3]
+        );
+    }
+
+    #[test]
+    fn test_aa_render_circle_outside_empty() {
+        let renderer = AntiAliasedRenderer::new(20, 20, AntiAliasQuality::Medium);
+        let mut buffer = vec![0u8; 20 * 20 * 4];
+        let color = ShapeColor::rgb(1.0, 1.0, 1.0);
+        renderer.render_circle(&mut buffer, 10.0, 10.0, 3.0, &color);
+        assert_eq!(buffer[3], 0, "Far corner should be empty");
+    }
+
+    #[test]
+    fn test_aa_render_rect() {
+        let renderer = AntiAliasedRenderer::new(20, 20, AntiAliasQuality::Medium);
+        let mut buffer = vec![0u8; 20 * 20 * 4];
+        let color = ShapeColor::rgb(0.0, 0.0, 1.0);
+        renderer.render_rect(&mut buffer, 5.0, 5.0, 10.0, 10.0, &color);
+        let idx = (10 * 20 + 10) * 4;
+        assert!(buffer[idx + 2] > 200, "Center should be blue");
+        assert_eq!(buffer[3], 0, "Top-left should be empty");
+    }
+
+    #[test]
+    fn test_aa_render_rect_fractional() {
+        let renderer = AntiAliasedRenderer::new(10, 10, AntiAliasQuality::High);
+        let mut buffer = vec![0u8; 10 * 10 * 4];
+        let color = ShapeColor::rgb(1.0, 1.0, 0.0);
+        renderer.render_rect(&mut buffer, 2.3, 2.7, 5.0, 5.0, &color);
+        let idx = (3 * 10 + 2) * 4;
+        let alpha = buffer[idx + 3];
+        assert!(
+            alpha > 0 && alpha < 255,
+            "Edge should be partial, got {alpha}"
+        );
+    }
+
+    #[test]
+    fn test_aa_render_polygon() {
+        let renderer = AntiAliasedRenderer::new(20, 20, AntiAliasQuality::Medium);
+        let mut buffer = vec![0u8; 20 * 20 * 4];
+        let color = ShapeColor::rgb(1.0, 0.5, 0.0);
+        let triangle = vec![
+            Point2D::new(10.0, 2.0),
+            Point2D::new(18.0, 18.0),
+            Point2D::new(2.0, 18.0),
+        ];
+        renderer.render_polygon(&mut buffer, &triangle, &color);
+        let idx = (12 * 20 + 10) * 4;
+        assert!(
+            buffer[idx + 3] > 100,
+            "Triangle center should have coverage"
+        );
+    }
+
+    #[test]
+    fn test_aa_render_line() {
+        let renderer = AntiAliasedRenderer::new(20, 20, AntiAliasQuality::Medium);
+        let mut buffer = vec![0u8; 20 * 20 * 4];
+        let color = ShapeColor::rgb(1.0, 1.0, 1.0);
+        renderer.render_line(&mut buffer, 2.0, 2.0, 18.0, 18.0, &color, 2.0);
+        let idx = (10 * 20 + 10) * 4;
+        assert!(buffer[idx + 3] > 0, "Line midpoint should have coverage");
+    }
+
+    #[test]
+    fn test_aa_render_line_zero_length() {
+        let renderer = AntiAliasedRenderer::new(10, 10, AntiAliasQuality::Medium);
+        let mut buffer = vec![0u8; 10 * 10 * 4];
+        let color = ShapeColor::rgb(1.0, 0.0, 0.0);
+        renderer.render_line(&mut buffer, 5.0, 5.0, 5.0, 5.0, &color, 1.0);
+    }
+
+    #[test]
+    fn test_point_in_polygon_triangle() {
+        let tri = vec![
+            Point2D::new(0.0, 0.0),
+            Point2D::new(10.0, 0.0),
+            Point2D::new(5.0, 10.0),
+        ];
+        assert!(point_in_polygon(5.0, 3.0, &tri));
+        assert!(!point_in_polygon(20.0, 20.0, &tri));
+    }
+
+    #[test]
+    fn test_point_in_polygon_square() {
+        let sq = vec![
+            Point2D::new(0.0, 0.0),
+            Point2D::new(10.0, 0.0),
+            Point2D::new(10.0, 10.0),
+            Point2D::new(0.0, 10.0),
+        ];
+        assert!(point_in_polygon(5.0, 5.0, &sq));
+        assert!(!point_in_polygon(-1.0, 5.0, &sq));
+    }
+
+    #[test]
+    fn test_point_in_polygon_degenerate() {
+        let line = vec![Point2D::new(0.0, 0.0), Point2D::new(10.0, 0.0)];
+        assert!(!point_in_polygon(5.0, 0.0, &line));
+    }
+
+    #[test]
+    fn test_aa_none_no_smoothing() {
+        let renderer = AntiAliasedRenderer::new(20, 20, AntiAliasQuality::None);
+        let mut buffer = vec![0u8; 20 * 20 * 4];
+        let color = ShapeColor::rgb(1.0, 0.0, 0.0);
+        renderer.render_circle(&mut buffer, 10.0, 10.0, 5.0, &color);
+        let mut has_partial = false;
+        for pixel in buffer.chunks_exact(4) {
+            if pixel[3] > 0 && pixel[3] < 255 {
+                has_partial = true;
+            }
+        }
+        assert!(!has_partial, "None quality should produce binary edges");
+    }
+
+    #[test]
+    fn test_aa_medium_has_smoothing() {
+        let renderer = AntiAliasedRenderer::new(30, 30, AntiAliasQuality::Medium);
+        let mut buffer = vec![0u8; 30 * 30 * 4];
+        let color = ShapeColor::rgb(1.0, 0.0, 0.0);
+        renderer.render_circle(&mut buffer, 15.0, 15.0, 10.0, &color);
+        let mut has_partial = false;
+        for pixel in buffer.chunks_exact(4) {
+            if pixel[3] > 0 && pixel[3] < 250 {
+                has_partial = true;
+                break;
+            }
+        }
+        assert!(has_partial, "Medium quality should produce smooth edges");
     }
 }

@@ -14,6 +14,7 @@
 //! - s(x,y) is the structure comparison
 //! - α, β, γ are parameters to adjust the relative importance (typically all 1)
 
+use crate::psnr::extract_plane_roi;
 use crate::{Frame, MetricType, QualityScore};
 use oximedia_core::OxiResult;
 use rayon::prelude::*;
@@ -140,6 +141,72 @@ impl SsimCalculator {
         }
 
         score.score = weighted_ssim;
+        Ok(score)
+    }
+
+    /// Calculates SSIM for a specific region-of-interest (ROI) within the frames.
+    ///
+    /// `roi` is `(x, y, width, height)` in luma pixels.  Chroma planes are
+    /// cropped proportionally.  The extracted sub-planes are treated as
+    /// independent, stride-free images for the SSIM computation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ROI extends outside the frame or frame sizes differ.
+    pub fn calculate_region(
+        &self,
+        reference: &Frame,
+        distorted: &Frame,
+        roi: (usize, usize, usize, usize),
+    ) -> OxiResult<QualityScore> {
+        let (rx, ry, rw, rh) = roi;
+        if reference.width != distorted.width || reference.height != distorted.height {
+            return Err(oximedia_core::OxiError::InvalidData(
+                "Frame dimensions must match for region SSIM".to_string(),
+            ));
+        }
+        if rx + rw > reference.width || ry + rh > reference.height {
+            return Err(oximedia_core::OxiError::InvalidData(format!(
+                "ROI ({rx},{ry},{rw},{rh}) exceeds frame bounds {}×{}",
+                reference.width, reference.height
+            )));
+        }
+
+        let mut score = QualityScore::new(MetricType::Ssim, 0.0);
+
+        // Extract luma ROI (packed, stride = rw)
+        let ref_y = extract_plane_roi(&reference.planes[0], reference.strides[0], rx, ry, rw, rh);
+        let dist_y = extract_plane_roi(&distorted.planes[0], distorted.strides[0], rx, ry, rw, rh);
+
+        let y_ssim = self.calculate_plane(&ref_y, &dist_y, rw, rh, rw, rw)?;
+        score.add_component("Y", y_ssim);
+        let mut weighted = self.luma_weight * y_ssim;
+
+        // Chroma ROI
+        if reference.planes.len() >= 3 && distorted.planes.len() >= 3 {
+            let (h_sub, v_sub) = reference.format.chroma_subsampling();
+            let cx = rx / h_sub as usize;
+            let cy = ry / v_sub as usize;
+            let cw = (rw / h_sub as usize).max(1);
+            let ch = (rh / v_sub as usize).max(1);
+
+            let ref_cb =
+                extract_plane_roi(&reference.planes[1], reference.strides[1], cx, cy, cw, ch);
+            let dist_cb =
+                extract_plane_roi(&distorted.planes[1], distorted.strides[1], cx, cy, cw, ch);
+            let ref_cr =
+                extract_plane_roi(&reference.planes[2], reference.strides[2], cx, cy, cw, ch);
+            let dist_cr =
+                extract_plane_roi(&distorted.planes[2], distorted.strides[2], cx, cy, cw, ch);
+
+            let cb_ssim = self.calculate_plane(&ref_cb, &dist_cb, cw, ch, cw, cw)?;
+            let cr_ssim = self.calculate_plane(&ref_cr, &dist_cr, cw, ch, cw, cw)?;
+            score.add_component("Cb", cb_ssim);
+            score.add_component("Cr", cr_ssim);
+            weighted += self.chroma_weight * (cb_ssim + cr_ssim);
+        }
+
+        score.score = weighted;
         Ok(score)
     }
 
@@ -340,5 +407,51 @@ mod tests {
             .calculate(&frame3, &frame4)
             .expect("should succeed in test");
         assert!(result2.score < 0.5);
+    }
+
+    // ── Region (ROI) SSIM tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_ssim_region_identical() {
+        let calc = SsimCalculator::new();
+        let f = create_test_frame(64, 64, 128);
+        let result = calc
+            .calculate_region(&f, &f, (8, 8, 32, 32))
+            .expect("region SSIM should succeed");
+        assert!(
+            (result.score - 1.0).abs() < 0.02,
+            "SSIM of identical region must be ~1.0, got {}",
+            result.score
+        );
+    }
+
+    #[test]
+    fn test_ssim_region_oob_errors() {
+        let calc = SsimCalculator::new();
+        let f = create_test_frame(64, 64, 128);
+        let result = calc.calculate_region(&f, &f, (50, 50, 32, 32));
+        assert!(result.is_err(), "out-of-bounds ROI must return error");
+    }
+
+    #[test]
+    fn test_ssim_region_has_chroma_components() {
+        let calc = SsimCalculator::new();
+        let f1 = create_test_frame(64, 64, 100);
+        let f2 = create_test_frame(64, 64, 110);
+        let result = calc
+            .calculate_region(&f1, &f2, (0, 0, 32, 32))
+            .expect("region should succeed");
+        assert!(result.components.contains_key("Y"));
+        assert!(result.components.contains_key("Cb"));
+        assert!(result.components.contains_key("Cr"));
+    }
+
+    #[test]
+    fn test_ssim_region_mismatched_dims_errors() {
+        let calc = SsimCalculator::new();
+        let f1 = create_test_frame(64, 64, 128);
+        let f2 = create_test_frame(32, 32, 128);
+        let result = calc.calculate_region(&f1, &f2, (0, 0, 16, 16));
+        assert!(result.is_err());
     }
 }

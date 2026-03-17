@@ -123,6 +123,8 @@ struct Worker {
     config: WorkerConfig,
     /// Current job cancellation flag
     current_job_cancelled: Arc<RwLock<Option<Arc<RwLock<bool>>>>>,
+    /// Shared active-job counter (shared with the owning WorkerPool).
+    active_job_count: Arc<tokio::sync::Mutex<usize>>,
 }
 
 impl Worker {
@@ -133,6 +135,7 @@ impl Worker {
         executor: Arc<dyn JobExecutor>,
         metrics: Arc<MetricsCollector>,
         config: WorkerConfig,
+        active_job_count: Arc<tokio::sync::Mutex<usize>>,
     ) -> Self {
         Self {
             id,
@@ -141,6 +144,7 @@ impl Worker {
             metrics,
             config,
             current_job_cancelled: Arc::new(RwLock::new(None)),
+            active_job_count,
         }
     }
 
@@ -182,6 +186,9 @@ impl Worker {
     async fn execute_job(&mut self, job: &mut Job) {
         if !self.executor.can_handle(job) {
             error!("Worker {} cannot handle job {}", self.id, job.id);
+            // Decrement active counter: we counted this job in submit() already.
+            let mut count = self.active_job_count.lock().await;
+            *count = count.saturating_sub(1);
             return;
         }
 
@@ -240,6 +247,11 @@ impl Worker {
                     .await;
             }
         }
+
+        // Decrement the active job counter so drain() knows when it is safe
+        // to declare the pool idle.
+        let mut count = self.active_job_count.lock().await;
+        *count = count.saturating_sub(1);
     }
 
     /// Cancel a job
@@ -263,8 +275,13 @@ pub struct WorkerPool {
     config: WorkerConfig,
     /// Shutdown flag
     shutdown: Arc<RwLock<bool>>,
+    /// Drain flag — when set, the pool stops accepting new jobs but finishes
+    /// already-dispatched ones before shutting down.
+    draining: Arc<RwLock<bool>>,
     /// Load balancing semaphore
     semaphore: Arc<Semaphore>,
+    /// Counter of jobs currently being executed across all workers.
+    active_job_count: Arc<tokio::sync::Mutex<usize>>,
 }
 
 impl WorkerPool {
@@ -283,7 +300,9 @@ impl WorkerPool {
             metrics,
             config,
             shutdown: Arc::new(RwLock::new(false)),
+            draining: Arc::new(RwLock::new(false)),
             semaphore,
+            active_job_count: Arc::new(tokio::sync::Mutex::new(0)),
         }
     }
 
@@ -305,6 +324,7 @@ impl WorkerPool {
                 self.executor.clone(),
                 self.metrics.clone(),
                 self.config.clone(),
+                self.active_job_count.clone(),
             );
 
             tokio::spawn(worker.run());
@@ -316,13 +336,19 @@ impl WorkerPool {
         }
     }
 
-    /// Submit a job for execution
+    /// Submit a job for execution.
+    ///
+    /// Returns [`WorkerError::Shutdown`] when the pool is shutting down or in
+    /// drain mode (drain mode blocks new submissions while in-flight jobs finish).
     ///
     /// # Errors
     ///
     /// Returns an error if no workers are available or if the job cannot be submitted
     pub async fn submit(&self, job: Job) -> Result<()> {
         if *self.shutdown.read().await {
+            return Err(WorkerError::Shutdown);
+        }
+        if *self.draining.read().await {
             return Err(WorkerError::Shutdown);
         }
 
@@ -346,7 +372,35 @@ impl WorkerPool {
 
         drop(permit);
 
+        // Increment the active job counter so drain() can wait for completion.
+        *self.active_job_count.lock().await += 1;
+
         Ok(())
+    }
+
+    /// Enter drain mode: stop accepting new jobs and wait for all currently
+    /// in-flight jobs to finish before returning.
+    ///
+    /// After `drain()` returns the pool is idle and can be safely shut down.
+    pub async fn drain(&self) {
+        info!("WorkerPool entering drain mode");
+        *self.draining.write().await = true;
+
+        // Wait until no active jobs remain.
+        let poll_interval = Duration::from_millis(100);
+        loop {
+            if *self.active_job_count.lock().await == 0 {
+                break;
+            }
+            sleep(poll_interval).await;
+        }
+
+        info!("WorkerPool drain complete — all jobs finished");
+    }
+
+    /// Returns `true` when the pool is in drain mode.
+    pub async fn is_draining(&self) -> bool {
+        *self.draining.read().await
     }
 
     /// Cancel a job
@@ -384,6 +438,7 @@ impl WorkerPool {
         let config = self.config.clone();
         let executor = self.executor.clone();
         let shutdown = self.shutdown.clone();
+        let active_job_count = self.active_job_count.clone();
 
         tokio::spawn(async move {
             let mut check_interval = tokio::time::interval(Duration::from_secs(60));
@@ -418,6 +473,7 @@ impl WorkerPool {
                         executor.clone(),
                         metrics.clone(),
                         config.clone(),
+                        active_job_count.clone(),
                     );
 
                     tokio::spawn(worker.run());

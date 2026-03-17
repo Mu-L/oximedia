@@ -163,11 +163,7 @@ pub fn offset_events(
 }
 
 /// Helper: apply a signed frame offset to a timecode.
-fn offset_tc(
-    tc: EdlTimecode,
-    delta: i64,
-    fps: EdlFrameRate,
-) -> EdlResult<EdlTimecode> {
+fn offset_tc(tc: EdlTimecode, delta: i64, fps: EdlFrameRate) -> EdlResult<EdlTimecode> {
     let frames = tc.to_frames() as i64 + delta;
     if frames < 0 {
         return Err(EdlError::TimecodeOutOfRange(
@@ -255,29 +251,35 @@ mod tests {
 
     #[test]
     fn test_time_range_contains() {
-        let r = TimeRange::new(make_tc(0, 0, 0, 0), make_tc(0, 0, 10, 0)).expect("failed to create");
+        let r =
+            TimeRange::new(make_tc(0, 0, 0, 0), make_tc(0, 0, 10, 0)).expect("failed to create");
         assert!(r.contains(&make_tc(0, 0, 5, 0)));
         assert!(!r.contains(&make_tc(0, 0, 10, 0)));
     }
 
     #[test]
     fn test_time_range_overlaps() {
-        let a = TimeRange::new(make_tc(0, 0, 0, 0), make_tc(0, 0, 10, 0)).expect("failed to create");
-        let b = TimeRange::new(make_tc(0, 0, 5, 0), make_tc(0, 0, 15, 0)).expect("failed to create");
+        let a =
+            TimeRange::new(make_tc(0, 0, 0, 0), make_tc(0, 0, 10, 0)).expect("failed to create");
+        let b =
+            TimeRange::new(make_tc(0, 0, 5, 0), make_tc(0, 0, 15, 0)).expect("failed to create");
         assert!(a.overlaps(&b));
     }
 
     #[test]
     fn test_time_range_no_overlap() {
         let a = TimeRange::new(make_tc(0, 0, 0, 0), make_tc(0, 0, 5, 0)).expect("failed to create");
-        let b = TimeRange::new(make_tc(0, 0, 10, 0), make_tc(0, 0, 15, 0)).expect("failed to create");
+        let b =
+            TimeRange::new(make_tc(0, 0, 10, 0), make_tc(0, 0, 15, 0)).expect("failed to create");
         assert!(!a.overlaps(&b));
     }
 
     #[test]
     fn test_time_range_intersection() {
-        let a = TimeRange::new(make_tc(0, 0, 0, 0), make_tc(0, 0, 10, 0)).expect("failed to create");
-        let b = TimeRange::new(make_tc(0, 0, 5, 0), make_tc(0, 0, 15, 0)).expect("failed to create");
+        let a =
+            TimeRange::new(make_tc(0, 0, 0, 0), make_tc(0, 0, 10, 0)).expect("failed to create");
+        let b =
+            TimeRange::new(make_tc(0, 0, 5, 0), make_tc(0, 0, 15, 0)).expect("failed to create");
         let i = a.intersection(&b).expect("intersection should succeed");
         assert_eq!(i.tc_in, make_tc(0, 0, 5, 0));
         assert_eq!(i.tc_out, make_tc(0, 0, 10, 0));
@@ -286,7 +288,8 @@ mod tests {
     #[test]
     fn test_time_range_gap_frames() {
         let a = TimeRange::new(make_tc(0, 0, 0, 0), make_tc(0, 0, 5, 0)).expect("failed to create");
-        let b = TimeRange::new(make_tc(0, 0, 10, 0), make_tc(0, 0, 15, 0)).expect("failed to create");
+        let b =
+            TimeRange::new(make_tc(0, 0, 10, 0), make_tc(0, 0, 15, 0)).expect("failed to create");
         assert_eq!(a.gap_frames(&b), 125); // 5 sec * 25
     }
 
@@ -309,8 +312,12 @@ mod tests {
     #[test]
     fn test_offset_events() {
         let events = vec![make_event(1, 0, 5)];
-        let shifted = offset_events(&events, 25, EdlFrameRate::Fps25).expect("operation should succeed");
-        assert_eq!(shifted[0].record_in.to_frames(), events[0].record_in.to_frames() + 25);
+        let shifted =
+            offset_events(&events, 25, EdlFrameRate::Fps25).expect("operation should succeed");
+        assert_eq!(
+            shifted[0].record_in.to_frames(),
+            events[0].record_in.to_frames() + 25
+        );
     }
 
     #[test]

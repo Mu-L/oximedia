@@ -30,31 +30,44 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use thiserror::Error;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::{mpsc, RwLock};
 
 /// SCTE-35 ad insertion and splice point management.
 pub mod ad_insertion;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod api;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod asrun;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod automation;
 pub mod branding;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod bxf;
 pub mod catchup;
 pub mod cg;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod channel;
 /// Channel format and configuration registry (SD/HD/UHD, frame rate, audio).
 pub mod channel_config;
 pub mod clip_store;
 pub mod compliance_ingest;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod content;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod device;
 pub mod event_log;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod failover;
 /// Frame ring buffer with pre-roll gating and overflow/underrun detection.
 pub mod frame_buffer;
+/// Frame-accurate trim engine with SMPTE timecode support.
+pub mod frame_trim;
 /// Automatic gap detection and filler content insertion.
 pub mod gap_filler;
 pub mod graphics;
@@ -63,8 +76,10 @@ pub mod ingest;
 /// Signal routing from programme sources to SDI/IP/RTMP/file targets.
 pub mod media_router_playout;
 pub mod monitoring;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod output;
 pub mod output_router;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod playback;
 pub mod playlist;
 /// Playlist ingest session: format detection, item validation, clip trimming.
@@ -73,6 +88,11 @@ pub mod playlist_ingest;
 pub mod playout_log;
 /// 24-hour playout schedule grid with conflict detection and gap finding.
 pub mod playout_schedule;
+/// Pre-decode manager: background thread pool for gapless playlist transitions.
+pub mod predecode;
+pub mod preflight;
+/// PTP (Precision Time Protocol) clock source for sub-microsecond synchronisation.
+pub mod ptp_clock;
 pub mod rundown;
 /// Time-blocked schedule management for broadcast playout.
 pub mod schedule_block;
@@ -82,9 +102,12 @@ pub mod scheduler;
 pub mod secondary_events;
 /// Ordered processing chain (input -> process -> output) with bypass support.
 pub mod signal_chain;
+pub mod simulcast;
+pub mod subtitle_inserter;
 pub mod tally_system;
 /// Timecode burn-in overlay for monitoring outputs.
 pub mod timecode_overlay;
+pub mod transitions;
 
 /// Result type for playout operations
 pub type Result<T> = std::result::Result<T, PlayoutError>;
@@ -127,6 +150,15 @@ pub enum PlayoutError {
 
     #[error("Emergency fallback activated: {0}")]
     EmergencyFallback(String),
+
+    #[error("Checksum error: {0}")]
+    Checksum(String),
+
+    #[error("PTP error: {0}")]
+    Ptp(String),
+
+    #[error("Integrity error: {0}")]
+    Integrity(String),
 }
 
 /// Video format configuration
@@ -307,6 +339,7 @@ pub enum PlayoutState {
 }
 
 /// Internal server state
+#[cfg(not(target_arch = "wasm32"))]
 struct ServerState {
     state: PlayoutState,
     scheduler: Option<Arc<scheduler::Scheduler>>,
@@ -316,10 +349,33 @@ struct ServerState {
     monitor: Option<Arc<monitoring::Monitor>>,
 }
 
+/// Configuration for graceful shutdown behaviour.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShutdownConfig {
+    /// Maximum time to wait for in-flight frames to drain (milliseconds).
+    pub drain_timeout_ms: u64,
+    /// Whether to flush the frame buffer on shutdown.
+    pub flush_buffers: bool,
+    /// Whether to wait for current playlist item to finish before stopping.
+    pub wait_for_current_item: bool,
+}
+
+impl Default for ShutdownConfig {
+    fn default() -> Self {
+        Self {
+            drain_timeout_ms: 5000,
+            flush_buffers: true,
+            wait_for_current_item: false,
+        }
+    }
+}
+
 /// Professional broadcast playout server
+#[cfg(not(target_arch = "wasm32"))]
 pub struct PlayoutServer {
-    config: PlayoutConfig,
+    config: Arc<RwLock<PlayoutConfig>>,
     state: Arc<RwLock<ServerState>>,
+    shutdown_config: ShutdownConfig,
     #[allow(dead_code)]
     control_tx: mpsc::Sender<ControlCommand>,
     #[allow(dead_code)]
@@ -327,6 +383,7 @@ pub struct PlayoutServer {
 }
 
 /// Control commands for the playout server
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum ControlCommand {
@@ -337,8 +394,11 @@ enum ControlCommand {
     LoadPlaylist(PathBuf),
     EmergencyFallback,
     Shutdown,
+    /// Hot-swap configuration without stopping.
+    Reconfigure(PlayoutConfig),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PlayoutServer {
     /// Create a new playout server with the given configuration
     pub async fn new(config: PlayoutConfig) -> Result<Self> {
@@ -354,8 +414,34 @@ impl PlayoutServer {
         };
 
         Ok(Self {
-            config,
+            config: Arc::new(RwLock::new(config)),
             state: Arc::new(RwLock::new(state)),
+            shutdown_config: ShutdownConfig::default(),
+            control_tx,
+            control_rx: Arc::new(RwLock::new(control_rx)),
+        })
+    }
+
+    /// Create a new playout server with custom shutdown configuration.
+    pub async fn with_shutdown_config(
+        config: PlayoutConfig,
+        shutdown_config: ShutdownConfig,
+    ) -> Result<Self> {
+        let (control_tx, control_rx) = mpsc::channel(100);
+
+        let state = ServerState {
+            state: PlayoutState::Stopped,
+            scheduler: None,
+            playback: None,
+            outputs: Vec::new(),
+            graphics: None,
+            monitor: None,
+        };
+
+        Ok(Self {
+            config: Arc::new(RwLock::new(config)),
+            state: Arc::new(RwLock::new(state)),
+            shutdown_config,
             control_tx,
             control_rx: Arc::new(RwLock::new(control_rx)),
         })
@@ -363,6 +449,7 @@ impl PlayoutServer {
 
     /// Start the playout server
     pub async fn start(&self) -> Result<()> {
+        let config = self.config.read().await.clone();
         let mut state = self.state.write().await;
 
         if state.state != PlayoutState::Stopped {
@@ -378,7 +465,7 @@ impl PlayoutServer {
         state.scheduler = Some(Arc::new(scheduler::Scheduler::new(scheduler_config)));
 
         // Initialize playback engine
-        let playback_config = playback::PlaybackConfig::from_playout_config(&self.config);
+        let playback_config = playback::PlaybackConfig::from_playout_config(&config);
         state.playback = Some(Arc::new(playback::PlaybackEngine::new(playback_config)?));
 
         // Initialize graphics engine
@@ -386,9 +473,9 @@ impl PlayoutServer {
         state.graphics = Some(Arc::new(graphics::GraphicsEngine::new(graphics_config)?));
 
         // Initialize monitor
-        if self.config.monitoring_enabled {
+        if config.monitoring_enabled {
             let monitor_config = monitoring::MonitorConfig {
-                port: self.config.monitoring_port,
+                port: config.monitoring_port,
                 audio_meters: true,
                 waveform: false,
                 vectorscope: false,
@@ -403,15 +490,52 @@ impl PlayoutServer {
         Ok(())
     }
 
-    /// Stop the playout server
+    /// Stop the playout server with graceful shutdown.
+    ///
+    /// Drains in-flight frames from the playback buffer up to the configured
+    /// `drain_timeout_ms`. Outputs are flushed before being torn down.
     pub async fn stop(&self) -> Result<()> {
         let mut state = self.state.write().await;
+
+        if state.state == PlayoutState::Stopped {
+            return Ok(());
+        }
+
         state.state = PlayoutState::Stopping;
 
-        // Clean up resources
+        // --- Graceful drain of in-flight frames ---
+        if self.shutdown_config.flush_buffers {
+            if let Some(playback) = &state.playback {
+                let deadline = tokio::time::Instant::now()
+                    + Duration::from_millis(self.shutdown_config.drain_timeout_ms);
+
+                // Drain frames from the playback buffer until empty or timeout.
+                loop {
+                    let level = playback.buffer_level();
+                    if level == 0 {
+                        break;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        // Timed out — force-stop.
+                        break;
+                    }
+                    // Consume a frame (simulates output delivery).
+                    let _ = playback.get_next_frame();
+                    // Yield to avoid busy-spin.
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+
+        // --- Tear down resources ---
         state.monitor = None;
         state.graphics = None;
-        state.playback = None;
+
+        // Stop playback engine cleanly.
+        if let Some(playback) = state.playback.take() {
+            let _ = playback.stop().await;
+        }
+
         state.scheduler = None;
         state.outputs.clear();
 
@@ -459,9 +583,58 @@ impl PlayoutServer {
         Ok(())
     }
 
-    /// Get playout configuration
-    pub fn config(&self) -> &PlayoutConfig {
-        &self.config
+    /// Get a snapshot of the current playout configuration.
+    pub async fn config(&self) -> PlayoutConfig {
+        self.config.read().await.clone()
+    }
+
+    /// Hot-swap the playout configuration without stopping the server.
+    ///
+    /// Only safe-to-change fields are applied while the server is running:
+    /// - `monitoring_enabled` / `monitoring_port`
+    /// - `max_latency_ms`
+    /// - `detect_frame_drops`
+    /// - `buffer_size`
+    /// - `fallback_content`
+    /// - `genlock_enabled`
+    /// - `clock_source`
+    ///
+    /// Fields that require a restart (`video_format`, `audio_format`) are
+    /// stored but only take effect after a stop/start cycle.
+    pub async fn reconfigure(&self, new_config: PlayoutConfig) -> Result<()> {
+        let old_config = self.config.read().await.clone();
+
+        // Validate the new configuration before applying.
+        if new_config.buffer_size == 0 {
+            return Err(PlayoutError::Config("buffer_size must be > 0".to_string()));
+        }
+
+        // Determine what changed.
+        let monitoring_changed = old_config.monitoring_enabled != new_config.monitoring_enabled
+            || old_config.monitoring_port != new_config.monitoring_port;
+
+        // Apply monitoring changes while running.
+        if monitoring_changed {
+            let mut state = self.state.write().await;
+            if new_config.monitoring_enabled && state.monitor.is_none() {
+                let monitor_config = monitoring::MonitorConfig {
+                    port: new_config.monitoring_port,
+                    audio_meters: true,
+                    waveform: false,
+                    vectorscope: false,
+                    alert_history_size: 100,
+                    metrics_retention_seconds: 3600,
+                };
+                state.monitor = Some(Arc::new(monitoring::Monitor::new(monitor_config)?));
+            } else if !new_config.monitoring_enabled {
+                state.monitor = None;
+            }
+        }
+
+        // Store the full new config (format changes take effect on next start).
+        *self.config.write().await = new_config;
+
+        Ok(())
     }
 
     /// Wait for server to finish (blocks until shutdown)
@@ -504,5 +677,197 @@ mod tests {
             .await
             .expect("should succeed in test");
         assert_eq!(server.state().await, PlayoutState::Stopped);
+    }
+
+    // --- Graceful shutdown tests ---
+
+    #[tokio::test]
+    async fn test_graceful_shutdown_stopped_server() {
+        let config = PlayoutConfig::default();
+        let server = PlayoutServer::new(config)
+            .await
+            .expect("should succeed in test");
+        // Stopping an already-stopped server should be a no-op.
+        server.stop().await.expect("should succeed");
+        assert_eq!(server.state().await, PlayoutState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_graceful_shutdown_running_server() {
+        let config = PlayoutConfig::default();
+        let server = PlayoutServer::new(config)
+            .await
+            .expect("should succeed in test");
+        server.start().await.expect("should start");
+        assert_eq!(server.state().await, PlayoutState::Running);
+
+        server.stop().await.expect("should stop gracefully");
+        assert_eq!(server.state().await, PlayoutState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_graceful_shutdown_with_custom_config() {
+        let config = PlayoutConfig::default();
+        let shutdown_cfg = ShutdownConfig {
+            drain_timeout_ms: 100,
+            flush_buffers: true,
+            wait_for_current_item: false,
+        };
+        let server = PlayoutServer::with_shutdown_config(config, shutdown_cfg)
+            .await
+            .expect("should succeed in test");
+        server.start().await.expect("should start");
+        server.stop().await.expect("should stop");
+        assert_eq!(server.state().await, PlayoutState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn test_graceful_shutdown_no_flush() {
+        let config = PlayoutConfig::default();
+        let shutdown_cfg = ShutdownConfig {
+            drain_timeout_ms: 100,
+            flush_buffers: false,
+            wait_for_current_item: false,
+        };
+        let server = PlayoutServer::with_shutdown_config(config, shutdown_cfg)
+            .await
+            .expect("should succeed in test");
+        server.start().await.expect("should start");
+        server.stop().await.expect("should stop immediately");
+        assert_eq!(server.state().await, PlayoutState::Stopped);
+    }
+
+    #[test]
+    fn test_shutdown_config_default() {
+        let cfg = ShutdownConfig::default();
+        assert_eq!(cfg.drain_timeout_ms, 5000);
+        assert!(cfg.flush_buffers);
+        assert!(!cfg.wait_for_current_item);
+    }
+
+    // --- Hot-swap configuration tests ---
+
+    #[tokio::test]
+    async fn test_hot_swap_config_while_stopped() {
+        let config = PlayoutConfig::default();
+        let server = PlayoutServer::new(config)
+            .await
+            .expect("should succeed in test");
+
+        let mut new_config = PlayoutConfig::default();
+        new_config.max_latency_ms = 200;
+        new_config.buffer_size = 20;
+
+        server
+            .reconfigure(new_config)
+            .await
+            .expect("should reconfigure");
+
+        let current = server.config().await;
+        assert_eq!(current.max_latency_ms, 200);
+        assert_eq!(current.buffer_size, 20);
+    }
+
+    #[tokio::test]
+    async fn test_hot_swap_config_while_running() {
+        let config = PlayoutConfig::default();
+        let server = PlayoutServer::new(config)
+            .await
+            .expect("should succeed in test");
+        server.start().await.expect("should start");
+
+        let mut new_config = PlayoutConfig::default();
+        new_config.max_latency_ms = 50;
+        new_config.detect_frame_drops = false;
+
+        server
+            .reconfigure(new_config)
+            .await
+            .expect("should reconfigure while running");
+
+        let current = server.config().await;
+        assert_eq!(current.max_latency_ms, 50);
+        assert!(!current.detect_frame_drops);
+
+        server.stop().await.expect("should stop");
+    }
+
+    #[tokio::test]
+    async fn test_hot_swap_invalid_config() {
+        let config = PlayoutConfig::default();
+        let server = PlayoutServer::new(config)
+            .await
+            .expect("should succeed in test");
+
+        let mut bad_config = PlayoutConfig::default();
+        bad_config.buffer_size = 0;
+
+        let result = server.reconfigure(bad_config).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_hot_swap_enable_monitoring() {
+        let mut config = PlayoutConfig::default();
+        config.monitoring_enabled = false;
+        let server = PlayoutServer::new(config)
+            .await
+            .expect("should succeed in test");
+        server.start().await.expect("should start");
+
+        // Enable monitoring via hot-swap
+        let mut new_config = server.config().await;
+        new_config.monitoring_enabled = true;
+        new_config.monitoring_port = 19090;
+        server
+            .reconfigure(new_config)
+            .await
+            .expect("should enable monitoring");
+
+        let current = server.config().await;
+        assert!(current.monitoring_enabled);
+        assert_eq!(current.monitoring_port, 19090);
+
+        server.stop().await.expect("should stop");
+    }
+
+    #[tokio::test]
+    async fn test_hot_swap_disable_monitoring() {
+        let config = PlayoutConfig::default();
+        let server = PlayoutServer::new(config)
+            .await
+            .expect("should succeed in test");
+        server.start().await.expect("should start");
+
+        // Disable monitoring
+        let mut new_config = server.config().await;
+        new_config.monitoring_enabled = false;
+        server
+            .reconfigure(new_config)
+            .await
+            .expect("should disable monitoring");
+
+        let current = server.config().await;
+        assert!(!current.monitoring_enabled);
+
+        server.stop().await.expect("should stop");
+    }
+
+    #[tokio::test]
+    async fn test_hot_swap_video_format_stored() {
+        let config = PlayoutConfig::default();
+        let server = PlayoutServer::new(config)
+            .await
+            .expect("should succeed in test");
+
+        let mut new_config = PlayoutConfig::default();
+        new_config.video_format = VideoFormat::UHD2160p50;
+        server
+            .reconfigure(new_config)
+            .await
+            .expect("should store format change");
+
+        let current = server.config().await;
+        assert_eq!(current.video_format, VideoFormat::UHD2160p50);
     }
 }

@@ -1,9 +1,52 @@
 //! Hard cut detection using histogram difference and edge change.
+//!
+//! Includes adaptive threshold tuning based on content complexity and an
+//! interior-mutability histogram cache that avoids recomputing per-channel
+//! normalised histograms when the same frame appears in consecutive pairs.
 
 use crate::error::{ShotError, ShotResult};
 use crate::frame_buffer::{FrameBuffer, GrayImage};
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+/// Content complexity category for adaptive threshold tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ContentComplexity {
+    /// Dialogue scenes: low motion, stable framing.
+    Dialogue,
+    /// Documentary: moderate motion, varied compositions.
+    Documentary,
+    /// Action: high motion, rapid visual changes.
+    Action,
+    /// Interview: very low motion, single-camera style.
+    Interview,
+    /// Music video: very high motion, aggressive editing.
+    MusicVideo,
+    /// Auto-detect complexity from frame content.
+    Auto,
+}
+
+/// Adaptive threshold parameters computed from content analysis.
+#[derive(Debug, Clone, Copy)]
+pub struct AdaptiveThresholds {
+    /// Adjusted histogram threshold.
+    pub histogram_threshold: f32,
+    /// Adjusted edge threshold.
+    pub edge_threshold: f32,
+    /// Measured content motion level (0.0 = static, 1.0 = extreme motion).
+    pub motion_level: f32,
+    /// Measured edge density (0.0 = smooth, 1.0 = highly textured).
+    pub edge_density: f32,
+    /// Measured color variance (0.0 = uniform, 1.0 = high variance).
+    pub color_variance: f32,
+}
 
 /// Cut detection using multiple algorithms.
+///
+/// The detector caches per-channel normalised histograms using an FNV-1a
+/// fingerprint of each frame's pixel data.  When the same frame appears as
+/// both the second frame of one pair and the first frame of the next pair,
+/// the histogram is returned from cache rather than being recomputed.
 pub struct CutDetector {
     /// Histogram difference threshold.
     histogram_threshold: f32,
@@ -11,6 +54,13 @@ pub struct CutDetector {
     edge_threshold: f32,
     /// Minimum frames between cuts.
     min_frames_between: usize,
+    /// Content complexity mode for adaptive thresholds.
+    complexity_mode: ContentComplexity,
+    /// Whether adaptive thresholds are active.
+    adaptive_enabled: bool,
+    /// Interior-mutability cache: FNV-1a fingerprint → [channel0_hist, channel1_hist, channel2_hist].
+    /// Each per-channel histogram is a `Vec<f32>` of `NUM_BINS` normalised counts.
+    histogram_cache: Mutex<HashMap<u64, Vec<Vec<f32>>>>,
 }
 
 impl CutDetector {
@@ -21,12 +71,15 @@ impl CutDetector {
             histogram_threshold: 0.3,
             edge_threshold: 0.4,
             min_frames_between: 5,
+            complexity_mode: ContentComplexity::Auto,
+            adaptive_enabled: false,
+            histogram_cache: Mutex::new(HashMap::new()),
         }
     }
 
     /// Create a new cut detector with custom parameters.
     #[must_use]
-    pub const fn with_params(
+    pub fn with_params(
         histogram_threshold: f32,
         edge_threshold: f32,
         min_frames_between: usize,
@@ -35,7 +88,188 @@ impl CutDetector {
             histogram_threshold,
             edge_threshold,
             min_frames_between,
+            complexity_mode: ContentComplexity::Auto,
+            adaptive_enabled: false,
+            histogram_cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Create an adaptive cut detector that tunes thresholds based on content complexity.
+    ///
+    /// When `complexity` is `ContentComplexity::Auto`, the detector analyses the
+    /// first frame pair to estimate motion level, edge density, and color variance,
+    /// then derives appropriate thresholds.
+    #[must_use]
+    pub fn adaptive(complexity: ContentComplexity) -> Self {
+        let (hist_t, edge_t) = match complexity {
+            ContentComplexity::Dialogue => (0.25, 0.35),
+            ContentComplexity::Documentary => (0.30, 0.40),
+            ContentComplexity::Action => (0.45, 0.55),
+            ContentComplexity::Interview => (0.20, 0.30),
+            ContentComplexity::MusicVideo => (0.50, 0.60),
+            ContentComplexity::Auto => (0.30, 0.40), // will be overridden
+        };
+        Self {
+            histogram_threshold: hist_t,
+            edge_threshold: edge_t,
+            min_frames_between: 5,
+            complexity_mode: complexity,
+            adaptive_enabled: true,
+            histogram_cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Clear the histogram cache.
+    ///
+    /// Call this when the detector is reused for a new video to reclaim memory.
+    pub fn clear_cache(&self) {
+        if let Ok(mut cache) = self.histogram_cache.lock() {
+            cache.clear();
+        }
+    }
+
+    /// Return the number of entries currently in the histogram cache.
+    #[must_use]
+    pub fn cache_size(&self) -> usize {
+        self.histogram_cache.lock().map(|c| c.len()).unwrap_or(0)
+    }
+
+    /// Analyse a pair of frames and return adaptive thresholds based on content.
+    ///
+    /// The returned `AdaptiveThresholds` contain the recommended histogram and
+    /// edge thresholds plus the measured content metrics.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if frame dimensions mismatch or frames are invalid.
+    pub fn compute_adaptive_thresholds(
+        &self,
+        frame1: &FrameBuffer,
+        frame2: &FrameBuffer,
+    ) -> ShotResult<AdaptiveThresholds> {
+        if frame1.dim() != frame2.dim() {
+            return Err(ShotError::InvalidFrame(
+                "Frame dimensions do not match".to_string(),
+            ));
+        }
+        let shape = frame1.dim();
+        if shape.2 < 3 {
+            return Err(ShotError::InvalidFrame(
+                "Frame must have at least 3 channels".to_string(),
+            ));
+        }
+
+        // 1. Motion level: mean absolute pixel difference
+        let total_pixels = (shape.0 * shape.1 * 3) as f64;
+        let mut abs_diff_sum = 0.0_f64;
+        for y in 0..shape.0 {
+            for x in 0..shape.1 {
+                for c in 0..3 {
+                    let v1 = f64::from(frame1.get(y, x, c));
+                    let v2 = f64::from(frame2.get(y, x, c));
+                    abs_diff_sum += (v1 - v2).abs();
+                }
+            }
+        }
+        let motion_level = (abs_diff_sum / total_pixels / 255.0).min(1.0) as f32;
+
+        // 2. Edge density: proportion of edge pixels in frame1
+        let gray1 = self.to_grayscale(frame1);
+        let edges1 = self.detect_edges(&gray1);
+        let edge_shape = edges1.dim();
+        let mut edge_count = 0u64;
+        for y in 0..edge_shape.0 {
+            for x in 0..edge_shape.1 {
+                if edges1.get(y, x) > 50 {
+                    edge_count += 1;
+                }
+            }
+        }
+        let edge_density =
+            (edge_count as f32 / (edge_shape.0 * edge_shape.1).max(1) as f32).min(1.0);
+
+        // 3. Color variance: channel variance averaged over frame1
+        let pixel_count = (shape.0 * shape.1) as f64;
+        let mut channel_var_sum = 0.0_f64;
+        for c in 0..3 {
+            let mut sum = 0.0_f64;
+            let mut sum_sq = 0.0_f64;
+            for y in 0..shape.0 {
+                for x in 0..shape.1 {
+                    let v = f64::from(frame1.get(y, x, c));
+                    sum += v;
+                    sum_sq += v * v;
+                }
+            }
+            let mean = sum / pixel_count;
+            let var = (sum_sq / pixel_count) - (mean * mean);
+            channel_var_sum += var;
+        }
+        let color_variance = ((channel_var_sum / 3.0) / (255.0 * 255.0)).min(1.0) as f32;
+
+        // Derive thresholds from metrics
+        // High motion => raise thresholds (avoid false positives from motion)
+        // High edge density => raise edge threshold
+        // High color variance => raise histogram threshold
+        let base_hist = 0.25_f32;
+        let base_edge = 0.35_f32;
+        let hist_threshold =
+            (base_hist + motion_level * 0.20 + color_variance * 0.15).clamp(0.10, 0.70);
+        let edge_threshold =
+            (base_edge + motion_level * 0.20 + edge_density * 0.15).clamp(0.15, 0.75);
+
+        Ok(AdaptiveThresholds {
+            histogram_threshold: hist_threshold,
+            edge_threshold: edge_threshold,
+            motion_level,
+            edge_density,
+            color_variance,
+        })
+    }
+
+    /// Detect cut with adaptive thresholds.
+    ///
+    /// When adaptive mode is enabled and complexity is `Auto`, thresholds are
+    /// computed from the frame pair content. Otherwise the preset complexity
+    /// thresholds are used.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if frame dimensions mismatch or frames are invalid.
+    pub fn detect_cut_adaptive(
+        &self,
+        frame1: &FrameBuffer,
+        frame2: &FrameBuffer,
+    ) -> ShotResult<(bool, f32, AdaptiveThresholds)> {
+        let thresholds = if self.adaptive_enabled && self.complexity_mode == ContentComplexity::Auto
+        {
+            self.compute_adaptive_thresholds(frame1, frame2)?
+        } else if self.adaptive_enabled {
+            // Use preset complexity thresholds
+            AdaptiveThresholds {
+                histogram_threshold: self.histogram_threshold,
+                edge_threshold: self.edge_threshold,
+                motion_level: 0.0,
+                edge_density: 0.0,
+                color_variance: 0.0,
+            }
+        } else {
+            AdaptiveThresholds {
+                histogram_threshold: self.histogram_threshold,
+                edge_threshold: self.edge_threshold,
+                motion_level: 0.0,
+                edge_density: 0.0,
+                color_variance: 0.0,
+            }
+        };
+
+        let hist_diff = self.histogram_difference(frame1, frame2)?;
+        let edge_diff = self.edge_change_ratio(frame1, frame2)?;
+        let combined_score = (hist_diff * 0.6) + (edge_diff * 0.4);
+        let is_cut =
+            hist_diff > thresholds.histogram_threshold || edge_diff > thresholds.edge_threshold;
+
+        Ok((is_cut, combined_score, thresholds))
     }
 
     /// Detect cuts between two frames.
@@ -69,48 +303,94 @@ impl CutDetector {
         Ok((is_cut, combined_score))
     }
 
-    /// Calculate histogram difference between two frames.
-    fn histogram_difference(&self, frame1: &FrameBuffer, frame2: &FrameBuffer) -> ShotResult<f32> {
-        let shape = frame1.dim();
+    /// Compute a lightweight FNV-1a fingerprint over a frame's raw bytes.
+    ///
+    /// This is used as the cache key for the histogram cache.  FNV-1a is
+    /// fast and has negligible collision probability for the frame sizes
+    /// encountered in video processing.
+    fn frame_fingerprint(frame: &FrameBuffer) -> u64 {
+        const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
+        const FNV_PRIME: u64 = 1_099_511_628_211;
+        let mut hash = FNV_OFFSET;
+        for &byte in frame.as_slice() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        // Mix in dimensions to avoid collisions between frames with same data
+        // but different shapes (edge case in tests).
+        let (h, w, ch) = frame.dim();
+        hash ^= (h as u64).wrapping_mul(FNV_PRIME);
+        hash ^= (w as u64).wrapping_mul(FNV_PRIME.wrapping_add(1));
+        hash ^= (ch as u64).wrapping_mul(FNV_PRIME.wrapping_add(2));
+        hash
+    }
+
+    /// Compute or retrieve the normalised 3-channel histogram for `frame`.
+    ///
+    /// Returns `Vec<Vec<f32>>` with three inner vectors (one per channel), each
+    /// containing `NUM_BINS` normalised bin counts.  Results are stored in the
+    /// internal cache keyed by the frame's FNV-1a fingerprint.
+    fn get_or_compute_histogram(&self, frame: &FrameBuffer) -> ShotResult<Vec<Vec<f32>>> {
+        const NUM_BINS: usize = 16;
+
+        let shape = frame.dim();
         if shape.2 < 3 {
             return Err(ShotError::InvalidFrame(
                 "Frame must have at least 3 channels".to_string(),
             ));
         }
 
-        let mut total_diff = 0.0;
-        let num_bins = 16;
-        let bin_size = 256.0 / num_bins as f32;
+        let fingerprint = Self::frame_fingerprint(frame);
 
-        // Calculate histograms for each channel
-        for channel in 0..3 {
-            let mut hist1 = vec![0u32; num_bins as usize];
-            let mut hist2 = vec![0u32; num_bins as usize];
-
-            // Build histograms
-            for y in 0..shape.0 {
-                for x in 0..shape.1 {
-                    let val1 = frame1.get(y, x, channel);
-                    let val2 = frame2.get(y, x, channel);
-
-                    let bin1 = (f32::from(val1) / bin_size).min((num_bins - 1) as f32) as usize;
-                    let bin2 = (f32::from(val2) / bin_size).min((num_bins - 1) as f32) as usize;
-
-                    hist1[bin1] += 1;
-                    hist2[bin2] += 1;
+        // Fast path: return cached result (lock released immediately after clone).
+        {
+            if let Ok(cache) = self.histogram_cache.lock() {
+                if let Some(cached) = cache.get(&fingerprint) {
+                    return Ok(cached.clone());
                 }
             }
+        }
 
-            // Normalize histograms
-            let total_pixels = (shape.0 * shape.1) as f32;
-            let hist1_norm: Vec<f32> = hist1.iter().map(|&v| v as f32 / total_pixels).collect();
-            let hist2_norm: Vec<f32> = hist2.iter().map(|&v| v as f32 / total_pixels).collect();
+        // Slow path: compute outside the lock to avoid holding it during pixel iteration.
+        let bin_size = 256.0_f32 / NUM_BINS as f32;
+        let total_pixels = (shape.0 * shape.1) as f32;
+        let mut all_hists = Vec::with_capacity(3);
 
-            // Calculate chi-square distance
-            for i in 0..num_bins as usize {
-                let sum = hist1_norm[i] + hist2_norm[i];
+        for channel in 0..3 {
+            let mut hist = vec![0u32; NUM_BINS];
+            for y in 0..shape.0 {
+                for x in 0..shape.1 {
+                    let val = frame.get(y, x, channel);
+                    let bin = (f32::from(val) / bin_size).min((NUM_BINS - 1) as f32) as usize;
+                    hist[bin] += 1;
+                }
+            }
+            let hist_norm: Vec<f32> = hist.iter().map(|&v| v as f32 / total_pixels).collect();
+            all_hists.push(hist_norm);
+        }
+
+        // Insert computed histogram into cache.
+        if let Ok(mut cache) = self.histogram_cache.lock() {
+            cache.insert(fingerprint, all_hists.clone());
+        }
+
+        Ok(all_hists)
+    }
+
+    /// Calculate histogram difference between two frames (cache-aware).
+    fn histogram_difference(&self, frame1: &FrameBuffer, frame2: &FrameBuffer) -> ShotResult<f32> {
+        const NUM_BINS: usize = 16;
+
+        let hists1 = self.get_or_compute_histogram(frame1)?;
+        let hists2 = self.get_or_compute_histogram(frame2)?;
+
+        let mut total_diff = 0.0_f32;
+
+        for channel in 0..3 {
+            for i in 0..NUM_BINS {
+                let sum = hists1[channel][i] + hists2[channel][i];
                 if sum > 0.0 {
-                    let diff = hist1_norm[i] - hist2_norm[i];
+                    let diff = hists1[channel][i] - hists2[channel][i];
                     total_diff += (diff * diff) / sum;
                 }
             }
@@ -256,5 +536,260 @@ mod tests {
         let frame2 = FrameBuffer::zeros(50, 50, 3);
         let result = detector.detect_cut(&frame1, &frame2);
         assert!(result.is_err());
+    }
+
+    // ---- Adaptive threshold tests ----
+
+    #[test]
+    fn test_adaptive_dialogue_lower_thresholds() {
+        let detector = CutDetector::adaptive(ContentComplexity::Dialogue);
+        assert!(detector.adaptive_enabled);
+        assert!(detector.histogram_threshold < 0.30);
+        assert!(detector.edge_threshold < 0.40);
+    }
+
+    #[test]
+    fn test_adaptive_action_higher_thresholds() {
+        let detector = CutDetector::adaptive(ContentComplexity::Action);
+        assert!(detector.histogram_threshold > 0.40);
+        assert!(detector.edge_threshold > 0.50);
+    }
+
+    #[test]
+    fn test_adaptive_interview_lowest_thresholds() {
+        let detector = CutDetector::adaptive(ContentComplexity::Interview);
+        assert!(detector.histogram_threshold <= 0.25);
+        assert!(detector.edge_threshold <= 0.35);
+    }
+
+    #[test]
+    fn test_adaptive_music_video_highest_thresholds() {
+        let detector = CutDetector::adaptive(ContentComplexity::MusicVideo);
+        assert!(detector.histogram_threshold >= 0.50);
+        assert!(detector.edge_threshold >= 0.60);
+    }
+
+    #[test]
+    fn test_compute_adaptive_thresholds_identical_frames() {
+        let detector = CutDetector::adaptive(ContentComplexity::Auto);
+        let frame = FrameBuffer::from_elem(50, 50, 3, 128);
+        let t = detector
+            .compute_adaptive_thresholds(&frame, &frame)
+            .expect("should succeed in test");
+        assert!(
+            t.motion_level < 0.01,
+            "identical frames should have ~zero motion"
+        );
+        assert!(t.histogram_threshold >= 0.10);
+        assert!(t.edge_threshold >= 0.15);
+    }
+
+    #[test]
+    fn test_compute_adaptive_thresholds_very_different_frames() {
+        let detector = CutDetector::adaptive(ContentComplexity::Auto);
+        let frame1 = FrameBuffer::zeros(50, 50, 3);
+        let mut frame2 = FrameBuffer::zeros(50, 50, 3);
+        frame2.fill(255);
+        let t = detector
+            .compute_adaptive_thresholds(&frame1, &frame2)
+            .expect("should succeed in test");
+        assert!(
+            t.motion_level > 0.5,
+            "black vs white should show high motion"
+        );
+        // Thresholds should be higher for high-motion content
+        assert!(t.histogram_threshold > 0.30);
+    }
+
+    #[test]
+    fn test_compute_adaptive_thresholds_dimension_mismatch() {
+        let detector = CutDetector::adaptive(ContentComplexity::Auto);
+        let f1 = FrameBuffer::zeros(50, 50, 3);
+        let f2 = FrameBuffer::zeros(30, 30, 3);
+        assert!(detector.compute_adaptive_thresholds(&f1, &f2).is_err());
+    }
+
+    #[test]
+    fn test_compute_adaptive_thresholds_edge_density() {
+        let detector = CutDetector::adaptive(ContentComplexity::Auto);
+        // Create a frame with a clear horizontal edge: top half black, bottom half white.
+        // Sobel detects strong gradients at the boundary row, giving non-zero edge density.
+        let mut frame = FrameBuffer::zeros(50, 50, 3);
+        for y in 25..50 {
+            for x in 0..50 {
+                for c in 0..3 {
+                    frame.set(y, x, c, 255);
+                }
+            }
+        }
+        let t = detector
+            .compute_adaptive_thresholds(&frame, &frame)
+            .expect("should succeed in test");
+        assert!(
+            t.edge_density > 0.0,
+            "frame with clear horizontal edge should have non-zero edge density"
+        );
+    }
+
+    #[test]
+    fn test_compute_adaptive_thresholds_color_variance() {
+        let detector = CutDetector::adaptive(ContentComplexity::Auto);
+        // Create frame with high color variance (random-ish pattern)
+        let mut frame = FrameBuffer::zeros(50, 50, 3);
+        for y in 0..50 {
+            for x in 0..50 {
+                let val = ((y * 7 + x * 13) % 256) as u8;
+                frame.set(y, x, 0, val);
+                frame.set(y, x, 1, ((val as u16 + 85) % 256) as u8);
+                frame.set(y, x, 2, ((val as u16 + 170) % 256) as u8);
+            }
+        }
+        let t = detector
+            .compute_adaptive_thresholds(&frame, &frame)
+            .expect("should succeed in test");
+        assert!(
+            t.color_variance > 0.0,
+            "varied frame should have non-zero color variance"
+        );
+    }
+
+    #[test]
+    fn test_detect_cut_adaptive_no_cut_identical() {
+        let detector = CutDetector::adaptive(ContentComplexity::Auto);
+        let frame = FrameBuffer::from_elem(50, 50, 3, 100);
+        let (is_cut, score, _thresholds) = detector
+            .detect_cut_adaptive(&frame, &frame)
+            .expect("should succeed in test");
+        assert!(!is_cut);
+        assert!(score < 0.1);
+    }
+
+    #[test]
+    fn test_detect_cut_adaptive_real_cut() {
+        let detector = CutDetector::adaptive(ContentComplexity::Dialogue);
+        let frame1 = FrameBuffer::zeros(50, 50, 3);
+        let mut frame2 = FrameBuffer::zeros(50, 50, 3);
+        frame2.fill(255);
+        let (is_cut, score, _thresholds) = detector
+            .detect_cut_adaptive(&frame1, &frame2)
+            .expect("should succeed in test");
+        assert!(is_cut);
+        assert!(score > 0.3);
+    }
+
+    #[test]
+    fn test_adaptive_preset_returns_preset_thresholds() {
+        let detector = CutDetector::adaptive(ContentComplexity::Action);
+        let frame = FrameBuffer::from_elem(50, 50, 3, 128);
+        let (_, _, thresholds) = detector
+            .detect_cut_adaptive(&frame, &frame)
+            .expect("should succeed in test");
+        // For non-Auto presets, thresholds come from the preset
+        assert!((thresholds.histogram_threshold - 0.45).abs() < f32::EPSILON);
+        assert!((thresholds.edge_threshold - 0.55).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_adaptive_thresholds_clamped() {
+        let detector = CutDetector::adaptive(ContentComplexity::Auto);
+        let frame = FrameBuffer::from_elem(50, 50, 3, 128);
+        let t = detector
+            .compute_adaptive_thresholds(&frame, &frame)
+            .expect("should succeed in test");
+        assert!(t.histogram_threshold >= 0.10);
+        assert!(t.histogram_threshold <= 0.70);
+        assert!(t.edge_threshold >= 0.15);
+        assert!(t.edge_threshold <= 0.75);
+    }
+
+    #[test]
+    fn test_content_complexity_variants() {
+        let variants = [
+            ContentComplexity::Dialogue,
+            ContentComplexity::Documentary,
+            ContentComplexity::Action,
+            ContentComplexity::Interview,
+            ContentComplexity::MusicVideo,
+            ContentComplexity::Auto,
+        ];
+        for complexity in variants {
+            let d = CutDetector::adaptive(complexity);
+            assert!(d.adaptive_enabled);
+            assert_eq!(d.complexity_mode, complexity);
+        }
+    }
+
+    #[test]
+    fn test_non_adaptive_detector_detect_cut_adaptive() {
+        // Even non-adaptive detectors can use detect_cut_adaptive; they just
+        // use their fixed thresholds.
+        let detector = CutDetector::new();
+        assert!(!detector.adaptive_enabled);
+        let frame = FrameBuffer::from_elem(50, 50, 3, 128);
+        let (is_cut, _, thresholds) = detector
+            .detect_cut_adaptive(&frame, &frame)
+            .expect("should succeed in test");
+        assert!(!is_cut);
+        assert!((thresholds.histogram_threshold - 0.3).abs() < f32::EPSILON);
+    }
+
+    // ---- Histogram cache tests ----
+
+    #[test]
+    fn test_histogram_cache_populated_after_detect_cut() {
+        let detector = CutDetector::new();
+        assert_eq!(detector.cache_size(), 0);
+        let frame1 = FrameBuffer::from_elem(40, 40, 3, 60);
+        let frame2 = FrameBuffer::from_elem(40, 40, 3, 180);
+        detector
+            .detect_cut(&frame1, &frame2)
+            .expect("should succeed in test");
+        // After one call, both frames should be cached
+        assert_eq!(detector.cache_size(), 2);
+    }
+
+    #[test]
+    fn test_histogram_cache_reuse() {
+        let detector = CutDetector::new();
+        let frame1 = FrameBuffer::from_elem(40, 40, 3, 60);
+        let frame2 = FrameBuffer::from_elem(40, 40, 3, 180);
+        // First call: both frames computed and cached
+        let r1 = detector
+            .detect_cut(&frame1, &frame2)
+            .expect("should succeed in test");
+        // Second call with same frames: served from cache, results identical
+        let r2 = detector
+            .detect_cut(&frame1, &frame2)
+            .expect("should succeed in test");
+        assert_eq!(r1.0, r2.0);
+        assert!((r1.1 - r2.1).abs() < f32::EPSILON);
+        // Cache still has only 2 entries (not 4)
+        assert_eq!(detector.cache_size(), 2);
+    }
+
+    #[test]
+    fn test_histogram_cache_clear() {
+        let detector = CutDetector::new();
+        let frame1 = FrameBuffer::from_elem(40, 40, 3, 60);
+        let frame2 = FrameBuffer::from_elem(40, 40, 3, 180);
+        detector
+            .detect_cut(&frame1, &frame2)
+            .expect("should succeed in test");
+        assert!(detector.cache_size() > 0);
+        detector.clear_cache();
+        assert_eq!(detector.cache_size(), 0);
+    }
+
+    #[test]
+    fn test_histogram_cache_same_result_as_uncached() {
+        // Verify cached result == fresh computation
+        let detector = CutDetector::new();
+        let frame1 = FrameBuffer::zeros(50, 50, 3);
+        let mut frame2 = FrameBuffer::zeros(50, 50, 3);
+        frame2.fill(200);
+        let (cut1, score1) = detector.detect_cut(&frame1, &frame2).expect("first call");
+        let (cut2, score2) = detector.detect_cut(&frame1, &frame2).expect("second call");
+        assert_eq!(cut1, cut2);
+        assert!((score1 - score2).abs() < f32::EPSILON);
     }
 }

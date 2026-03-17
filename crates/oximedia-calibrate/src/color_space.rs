@@ -181,6 +181,82 @@ pub fn rgb_to_xyz(rgb: [f64; 3], matrix: &ColorMatrix3x3) -> [f64; 3] {
 }
 
 // ---------------------------------------------------------------------------
+// ColorSpace enum
+// ---------------------------------------------------------------------------
+
+/// Named working colour space with associated primaries and white point.
+///
+/// Each variant exposes its [`Primaries`] (CIE xy chromaticities) and a
+/// reference-white XYZ triplet via [`ColorSpace::primaries`] and
+/// [`ColorSpace::white_point_xyz`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ColorSpace {
+    /// ITU-R BT.709 / sRGB (D65 white).
+    Rec709,
+    /// ITU-R BT.2020 (D65 white).
+    Rec2020,
+    /// DCI-P3 digital cinema (DCI white ~6300 K).
+    DciP3,
+    /// DCI-P3 with D65 white point (Display P3 used by Apple/HDR monitors).
+    DciP3D65,
+    /// CIE equal-energy illuminant E.
+    EqualEnergy,
+}
+
+impl ColorSpace {
+    /// Return the [`Primaries`] for this colour space.
+    #[must_use]
+    pub fn primaries(self) -> Primaries {
+        match self {
+            Self::Rec709 => Primaries::rec709(),
+            Self::Rec2020 => Primaries::rec2020(),
+            Self::DciP3 => Primaries::dci_p3(),
+            Self::DciP3D65 => Primaries {
+                rx: 0.680,
+                ry: 0.320,
+                gx: 0.265,
+                gy: 0.690,
+                bx: 0.150,
+                by: 0.060,
+                wx: 0.3127,
+                wy: 0.3290, // D65
+            },
+            Self::EqualEnergy => Primaries {
+                rx: 0.700,
+                ry: 0.300,
+                gx: 0.200,
+                gy: 0.600,
+                bx: 0.150,
+                by: 0.060,
+                wx: 1.0 / 3.0,
+                wy: 1.0 / 3.0, // equal energy E
+            },
+        }
+    }
+
+    /// Return the approximate D65-normalised XYZ white point `[X, Y, Z]`.
+    ///
+    /// All Rec.709, Rec.2020, and Display-P3 spaces use D65; original DCI-P3
+    /// uses the DCI white (approximately D63).
+    #[must_use]
+    pub fn white_point_xyz(self) -> [f64; 3] {
+        match self {
+            Self::Rec709 | Self::Rec2020 | Self::DciP3D65 => {
+                [0.950_47, 1.000_00, 1.088_83] // D65
+            }
+            Self::DciP3 => {
+                // DCI white point: x=0.3140, y=0.3510
+                // XYZ from xyY with Y=1: X=x/y, Z=(1-x-y)/y
+                let x = 0.3140_f64;
+                let y = 0.3510_f64;
+                [x / y, 1.0, (1.0 - x - y) / y]
+            }
+            Self::EqualEnergy => [1.0, 1.0, 1.0],
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -343,5 +419,50 @@ mod tests {
         let lab = xyz_to_lab(xyz);
         // L* of [0, Y, 0] with Y=1 and Yn=1 → L* ≈ 100
         assert!(lab[0] > 90.0, "L* should be high for Y=1, got {}", lab[0]);
+    }
+
+    // ── ColorSpace ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_color_space_rec709_white_point_d65() {
+        let cs = ColorSpace::Rec709;
+        let p = cs.primaries();
+        assert!((p.wx - 0.3127).abs() < 1e-4);
+        assert!((p.wy - 0.3290).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_color_space_rec2020_wider_red_primary() {
+        let p709 = ColorSpace::Rec709.primaries();
+        let p2020 = ColorSpace::Rec2020.primaries();
+        assert!(
+            p2020.rx > p709.rx,
+            "Rec.2020 red x should exceed Rec.709: {} vs {}",
+            p2020.rx,
+            p709.rx
+        );
+    }
+
+    #[test]
+    fn test_color_space_dci_p3_primaries() {
+        let p = ColorSpace::DciP3.primaries();
+        assert!((p.rx - 0.680).abs() < 1e-4, "rx={}", p.rx);
+        assert!((p.gy - 0.690).abs() < 1e-4, "gy={}", p.gy);
+    }
+
+    #[test]
+    fn test_color_space_white_point_xyz_d65_rec709() {
+        let wp = ColorSpace::Rec709.white_point_xyz();
+        // D65: X≈0.9505, Y=1, Z≈1.0888
+        assert!((wp[0] - 0.9505).abs() < 0.001, "X={}", wp[0]);
+        assert!((wp[1] - 1.000).abs() < 0.001, "Y={}", wp[1]);
+    }
+
+    #[test]
+    fn test_color_space_equal_energy_white_point() {
+        let wp = ColorSpace::EqualEnergy.white_point_xyz();
+        assert!((wp[0] - 1.0).abs() < 1e-9);
+        assert!((wp[1] - 1.0).abs() < 1e-9);
+        assert!((wp[2] - 1.0).abs() < 1e-9);
     }
 }

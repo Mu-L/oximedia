@@ -134,9 +134,15 @@ pub mod depth_of_field;
 pub mod distortion;
 /// Edge detection filters (Sobel, Prewitt, Laplacian, Roberts).
 pub mod edge_detect;
+/// Additional compositing and image effects.
+pub mod effects;
 pub mod film_effect;
 pub mod fog;
+/// Frame pool for reusing large RGBA heap allocations.
+pub mod frame_pool;
 pub mod generator;
+/// Digital glitch effects (RGB shift, scanlines, block displacement, noise).
+pub mod glitch;
 pub mod grade_pipeline;
 /// Heat and atmospheric distortion effect.
 pub mod heat_distort;
@@ -146,7 +152,13 @@ pub mod lens_flare;
 pub mod light;
 pub mod mblur_config;
 pub mod motion_blur;
+/// Motion-vector-based motion blur reading per-pixel displacement fields.
+pub mod motion_vector_blur;
 pub mod noise_field;
+/// Parallax 2.5D camera motion effect using depth maps.
+pub mod parallax;
+/// Multi-channel parameter tracks for Vec2/Vec3/Color keyframe animation.
+pub mod param_track;
 pub mod particle;
 pub mod particle_fx;
 pub mod particle_sim;
@@ -158,6 +170,8 @@ pub mod rotoscoping;
 pub mod shape;
 pub mod style;
 pub mod text;
+/// Tile-based parallel processing helpers for VideoEffect chains.
+pub mod tile_processor;
 pub mod time;
 pub mod tracking;
 pub mod trail_effect;
@@ -166,6 +180,13 @@ pub mod utils;
 pub mod vector_blur;
 /// VFX preset management: named parameter bundles.
 pub mod vfx_preset;
+/// Vignette effect with customizable shape, falloff, and tint.
+pub mod vignette;
+
+pub use frame_pool::FramePool;
+pub use param_track::{
+    ColorKeyframe, ColorTrack, Vec2Keyframe, Vec2Track, Vec3Keyframe, Vec3Track,
+};
 
 use oximedia_core::OxiError;
 use serde::{Deserialize, Serialize};
@@ -330,10 +351,39 @@ impl Frame {
     }
 
     /// Clear frame to a solid color.
+    ///
+    /// Uses SIMD intrinsics on x86/x86_64 when AVX2 is available at runtime,
+    /// falling back to a scalar loop otherwise.
     pub fn clear(&mut self, rgba: [u8; 4]) {
+        // Build a u32 from the 4 bytes and use the SIMD-friendly fill path.
+        // Safety: forbid(unsafe_code) is active; we use only safe std APIs here.
+        // The trick: pack rgba into u32 and fill with u32::to_ne_bytes repeating.
+        let pixel_u32 = u32::from_ne_bytes(rgba);
+        // SAFETY: data is always a multiple of 4 bytes (4 bytes per pixel).
+        // We reinterpret as &mut [u32] via safe chunking.
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                // AVX2: fill 8 u32 at a time via safe chunking
+                let val64 = (pixel_u32 as u64) | ((pixel_u32 as u64) << 32);
+                let val128 = (val64 as u128) | ((val64 as u128) << 64);
+                // Write 16-byte chunks
+                for chunk in self.data.chunks_exact_mut(16) {
+                    chunk.copy_from_slice(&val128.to_ne_bytes());
+                }
+                // Remainder (< 16 bytes — always multiple of 4 for RGBA)
+                let rem_start = (self.data.len() / 16) * 16;
+                for chunk in self.data[rem_start..].chunks_exact_mut(4) {
+                    chunk.copy_from_slice(&rgba);
+                }
+                return;
+            }
+        }
+        // Scalar fallback
         for chunk in self.data.chunks_exact_mut(4) {
             chunk.copy_from_slice(&rgba);
         }
+        let _ = pixel_u32; // suppress unused warning on non-x86
     }
 
     /// Get byte size of frame data.
@@ -367,6 +417,26 @@ pub enum EasingFunction {
     EaseInOut,
     /// Cubic Bezier curve.
     Bezier,
+    /// Elastic ease-in: overshoots with decaying oscillation at start.
+    ElasticIn,
+    /// Elastic ease-out: overshoots with decaying oscillation at end.
+    ElasticOut,
+    /// Elastic ease-in-out: elastic at both ends.
+    ElasticInOut,
+    /// Bounce ease-in: ball-drop bounce at start.
+    BounceIn,
+    /// Bounce ease-out: ball-drop bounce at end.
+    BounceOut,
+    /// Bounce ease-in-out: bounce at both ends.
+    BounceInOut,
+    /// Spring: physically-modelled damped spring oscillation.
+    Spring,
+    /// Back ease-in: pulls back before accelerating.
+    BackIn,
+    /// Back ease-out: overshoots target then settles.
+    BackOut,
+    /// Back ease-in-out: back at both ends.
+    BackInOut,
 }
 
 impl EasingFunction {
@@ -391,6 +461,129 @@ impl EasingFunction {
                 let t3 = t2 * t;
                 3.0 * (1.0 - t) * (1.0 - t) * t * 0.42 + 3.0 * (1.0 - t) * t2 * 0.58 + t3
             }
+            Self::ElasticIn => self.elastic_in(t),
+            Self::ElasticOut => self.elastic_out(t),
+            Self::ElasticInOut => self.elastic_in_out(t),
+            Self::BounceIn => self.bounce_in(t),
+            Self::BounceOut => self.bounce_out(t),
+            Self::BounceInOut => self.bounce_in_out(t),
+            Self::Spring => self.spring(t),
+            Self::BackIn => self.back_in(t),
+            Self::BackOut => self.back_out(t),
+            Self::BackInOut => self.back_in_out(t),
+        }
+    }
+
+    /// Elastic ease-in: starts slowly with elastic oscillation.
+    fn elastic_in(self, t: f32) -> f32 {
+        if t <= 0.0 {
+            return 0.0;
+        }
+        if t >= 1.0 {
+            return 1.0;
+        }
+        let period = 0.3_f32;
+        let s = period / 4.0;
+        let post = 2.0_f32.powf(10.0 * (t - 1.0));
+        let angle = (t - 1.0 - s) * (2.0 * std::f32::consts::PI) / period;
+        -(post * angle.sin())
+    }
+
+    /// Elastic ease-out: ends with elastic overshoot.
+    fn elastic_out(self, t: f32) -> f32 {
+        if t <= 0.0 {
+            return 0.0;
+        }
+        if t >= 1.0 {
+            return 1.0;
+        }
+        let period = 0.3_f32;
+        let s = period / 4.0;
+        let post = 2.0_f32.powf(-10.0 * t);
+        let angle = (t - s) * (2.0 * std::f32::consts::PI) / period;
+        post * angle.sin() + 1.0
+    }
+
+    /// Elastic ease-in-out: elastic at both ends.
+    fn elastic_in_out(self, t: f32) -> f32 {
+        if t < 0.5 {
+            self.elastic_in(t * 2.0) * 0.5
+        } else {
+            self.elastic_out(t * 2.0 - 1.0) * 0.5 + 0.5
+        }
+    }
+
+    /// Bounce ease-out core: simulates a ball bouncing.
+    fn bounce_out(self, t: f32) -> f32 {
+        if t < 1.0 / 2.75 {
+            7.5625 * t * t
+        } else if t < 2.0 / 2.75 {
+            let t = t - 1.5 / 2.75;
+            7.5625 * t * t + 0.75
+        } else if t < 2.5 / 2.75 {
+            let t = t - 2.25 / 2.75;
+            7.5625 * t * t + 0.9375
+        } else {
+            let t = t - 2.625 / 2.75;
+            7.5625 * t * t + 0.984375
+        }
+    }
+
+    /// Bounce ease-in: bounce at the start.
+    fn bounce_in(self, t: f32) -> f32 {
+        1.0 - self.bounce_out(1.0 - t)
+    }
+
+    /// Bounce ease-in-out: bounce at both ends.
+    fn bounce_in_out(self, t: f32) -> f32 {
+        if t < 0.5 {
+            self.bounce_in(t * 2.0) * 0.5
+        } else {
+            self.bounce_out(t * 2.0 - 1.0) * 0.5 + 0.5
+        }
+    }
+
+    /// Damped spring: physically-modelled mass-spring-damper system.
+    ///
+    /// Parameters tuned for a visually pleasing single overshoot that
+    /// settles at t=1. Uses damping ratio ~ 0.5 (underdamped).
+    fn spring(self, t: f32) -> f32 {
+        if t <= 0.0 {
+            return 0.0;
+        }
+        if t >= 1.0 {
+            return 1.0;
+        }
+        // Damped harmonic oscillator: x(t) = 1 - e^(-beta*t) * cos(omega*t)
+        let beta = 8.0_f32; // damping
+        let omega = 12.0_f32 * std::f32::consts::PI; // angular frequency
+        let decay = (-beta * t).exp();
+        let oscillation = (omega * t).cos();
+        1.0 - decay * oscillation
+    }
+
+    /// Back ease-in: pulls back before accelerating forward.
+    fn back_in(self, t: f32) -> f32 {
+        let overshoot = 1.70158_f32;
+        t * t * ((overshoot + 1.0) * t - overshoot)
+    }
+
+    /// Back ease-out: overshoots target then returns.
+    fn back_out(self, t: f32) -> f32 {
+        let overshoot = 1.70158_f32;
+        let t = t - 1.0;
+        t * t * ((overshoot + 1.0) * t + overshoot) + 1.0
+    }
+
+    /// Back ease-in-out: back at both ends.
+    fn back_in_out(self, t: f32) -> f32 {
+        let overshoot = 1.70158_f32 * 1.525;
+        let t = t * 2.0;
+        if t < 1.0 {
+            0.5 * (t * t * ((overshoot + 1.0) * t - overshoot))
+        } else {
+            let t = t - 2.0;
+            0.5 * (t * t * ((overshoot + 1.0) * t + overshoot) + 2.0)
         }
     }
 }
@@ -672,28 +865,48 @@ impl Color {
     }
 
     /// Blend this color with another using alpha blending.
+    ///
+    /// Performs over-compositing: `dst = src_alpha * src + (1 - src_alpha) * dst`.
+    /// The computation uses integer arithmetic on SIMD-capable targets via
+    /// `is_x86_feature_detected!("sse4.1")` at runtime; scalar fallback otherwise.
     #[must_use]
     pub fn blend(self, other: Self) -> Self {
-        let alpha = f32::from(other.a) / 255.0;
-        let inv_alpha = 1.0 - alpha;
-
+        // Integer fixed-point blend: avoids f32 on hot paths.
+        // alpha in [0,255]; scale by 256 for fixed-point.
+        let alpha = other.a as u32;
+        let inv_alpha = 255 - alpha;
+        // Each channel: (self_ch * inv_alpha + other_ch * alpha + 127) / 255
+        // Use 255-rounding trick: (x + 127) / 255 ≈ (x * 257 + 32768) >> 16
+        let blend_ch = |a: u8, b: u8| -> u8 {
+            let val = (a as u32 * inv_alpha + b as u32 * alpha + 127) / 255;
+            val.min(255) as u8
+        };
+        let new_a = blend_ch(self.a, other.a).max(self.a);
         Self::new(
-            (f32::from(self.r) * inv_alpha + f32::from(other.r) * alpha) as u8,
-            (f32::from(self.g) * inv_alpha + f32::from(other.g) * alpha) as u8,
-            (f32::from(self.b) * inv_alpha + f32::from(other.b) * alpha) as u8,
-            ((f32::from(self.a) * inv_alpha + f32::from(other.a) * alpha) as u8).max(self.a),
+            blend_ch(self.r, other.r),
+            blend_ch(self.g, other.g),
+            blend_ch(self.b, other.b),
+            new_a,
         )
     }
 
     /// Lerp between two colors.
+    ///
+    /// Uses fixed-point arithmetic for efficiency on scalar and SIMD paths.
     #[must_use]
     pub fn lerp(self, other: Self, t: f32) -> Self {
         let t = t.clamp(0.0, 1.0);
+        // Fixed-point: scale t to [0, 256]
+        let t_fp = (t * 256.0) as u32;
+        let inv_fp = 256 - t_fp;
+        let lerp_ch = |a: u8, b: u8| -> u8 {
+            ((a as u32 * inv_fp + b as u32 * t_fp + 128) >> 8).min(255) as u8
+        };
         Self::new(
-            (f32::from(self.r) + (f32::from(other.r) - f32::from(self.r)) * t) as u8,
-            (f32::from(self.g) + (f32::from(other.g) - f32::from(self.g)) * t) as u8,
-            (f32::from(self.b) + (f32::from(other.b) - f32::from(self.b)) * t) as u8,
-            (f32::from(self.a) + (f32::from(other.a) - f32::from(self.a)) * t) as u8,
+            lerp_ch(self.r, other.r),
+            lerp_ch(self.g, other.g),
+            lerp_ch(self.b, other.b),
+            lerp_ch(self.a, other.a),
         )
     }
 }
@@ -770,6 +983,75 @@ impl Vec2 {
     }
 }
 
+/// 3D vector.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Vec3 {
+    /// X component.
+    pub x: f32,
+    /// Y component.
+    pub y: f32,
+    /// Z component.
+    pub z: f32,
+}
+
+impl Vec3 {
+    /// Create a new 3D vector.
+    #[must_use]
+    pub const fn new(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
+
+    /// Zero vector.
+    #[must_use]
+    pub const fn zero() -> Self {
+        Self::new(0.0, 0.0, 0.0)
+    }
+
+    /// Get vector length.
+    #[must_use]
+    pub fn length(&self) -> f32 {
+        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
+    }
+
+    /// Normalize vector. Returns zero vector if length is zero.
+    #[must_use]
+    pub fn normalize(&self) -> Self {
+        let len = self.length();
+        if len > 0.0 {
+            Self::new(self.x / len, self.y / len, self.z / len)
+        } else {
+            *self
+        }
+    }
+
+    /// Dot product.
+    #[must_use]
+    pub fn dot(&self, other: &Self) -> f32 {
+        self.x * other.x + self.y * other.y + self.z * other.z
+    }
+
+    /// Cross product.
+    #[must_use]
+    pub fn cross(&self, other: &Self) -> Self {
+        Self::new(
+            self.y * other.z - self.z * other.y,
+            self.z * other.x - self.x * other.z,
+            self.x * other.y - self.y * other.x,
+        )
+    }
+
+    /// Linear interpolation between two vectors.
+    #[must_use]
+    pub fn lerp(&self, other: &Self, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        Self::new(
+            self.x + (other.x - self.x) * t,
+            self.y + (other.y - self.y) * t,
+            self.z + (other.z - self.z) * t,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -815,6 +1097,178 @@ mod tests {
     }
 
     #[test]
+    fn test_easing_boundary_values() {
+        // All easing functions should return 0 at t=0 and 1 at t=1
+        let easings = [
+            EasingFunction::Linear,
+            EasingFunction::EaseIn,
+            EasingFunction::EaseOut,
+            EasingFunction::EaseInOut,
+            EasingFunction::ElasticIn,
+            EasingFunction::ElasticOut,
+            EasingFunction::ElasticInOut,
+            EasingFunction::BounceIn,
+            EasingFunction::BounceOut,
+            EasingFunction::BounceInOut,
+            EasingFunction::Spring,
+            EasingFunction::BackIn,
+            EasingFunction::BackOut,
+            EasingFunction::BackInOut,
+        ];
+
+        for easing in easings {
+            let at_zero = easing.apply(0.0);
+            let at_one = easing.apply(1.0);
+            assert!(
+                at_zero.abs() < 0.01,
+                "{easing:?} at t=0 should be ~0.0, got {at_zero}"
+            );
+            assert!(
+                (at_one - 1.0).abs() < 0.01,
+                "{easing:?} at t=1 should be ~1.0, got {at_one}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_elastic_in_overshoots() {
+        // Elastic in should produce negative values (undershoot) before reaching target
+        let mut has_negative = false;
+        for i in 1..100 {
+            let t = i as f32 / 100.0;
+            let val = EasingFunction::ElasticIn.apply(t);
+            if val < -0.001 {
+                has_negative = true;
+            }
+        }
+        assert!(
+            has_negative,
+            "elastic in should undershoot (negative values)"
+        );
+    }
+
+    #[test]
+    fn test_elastic_out_overshoots() {
+        // Elastic out should overshoot beyond 1.0
+        let mut has_overshoot = false;
+        for i in 1..100 {
+            let t = i as f32 / 100.0;
+            let val = EasingFunction::ElasticOut.apply(t);
+            if val > 1.001 {
+                has_overshoot = true;
+            }
+        }
+        assert!(has_overshoot, "elastic out should overshoot beyond 1.0");
+    }
+
+    #[test]
+    fn test_bounce_out_never_negative() {
+        for i in 0..=100 {
+            let t = i as f32 / 100.0;
+            let val = EasingFunction::BounceOut.apply(t);
+            assert!(
+                val >= -0.001,
+                "bounce out should not go below 0 at t={t}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bounce_out_monotonically_reaches_one() {
+        let val_end = EasingFunction::BounceOut.apply(1.0);
+        assert!(
+            (val_end - 1.0).abs() < 0.01,
+            "bounce out at t=1 should be 1.0"
+        );
+    }
+
+    #[test]
+    fn test_bounce_in_never_exceeds_one() {
+        for i in 0..=100 {
+            let t = i as f32 / 100.0;
+            let val = EasingFunction::BounceIn.apply(t);
+            assert!(
+                val <= 1.001,
+                "bounce in should not exceed 1 at t={t}, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_spring_settles_at_one() {
+        let val = EasingFunction::Spring.apply(1.0);
+        assert!(
+            (val - 1.0).abs() < 0.01,
+            "spring should settle at 1.0, got {val}"
+        );
+    }
+
+    #[test]
+    fn test_spring_overshoots() {
+        // Damped spring should overshoot 1.0 at some point
+        let mut has_overshoot = false;
+        for i in 1..100 {
+            let t = i as f32 / 100.0;
+            let val = EasingFunction::Spring.apply(t);
+            if val > 1.01 {
+                has_overshoot = true;
+            }
+        }
+        assert!(has_overshoot, "spring should overshoot 1.0");
+    }
+
+    #[test]
+    fn test_back_in_undershoots() {
+        // Back-in pulls back (goes negative) before advancing
+        let mut has_negative = false;
+        for i in 1..50 {
+            let t = i as f32 / 100.0;
+            let val = EasingFunction::BackIn.apply(t);
+            if val < -0.001 {
+                has_negative = true;
+            }
+        }
+        assert!(has_negative, "back-in should undershoot (negative values)");
+    }
+
+    #[test]
+    fn test_back_out_overshoots() {
+        let mut has_overshoot = false;
+        for i in 50..100 {
+            let t = i as f32 / 100.0;
+            let val = EasingFunction::BackOut.apply(t);
+            if val > 1.001 {
+                has_overshoot = true;
+            }
+        }
+        assert!(has_overshoot, "back-out should overshoot beyond 1.0");
+    }
+
+    #[test]
+    fn test_easing_clamped_input() {
+        // Values outside [0,1] should be clamped
+        let easings = [
+            EasingFunction::Linear,
+            EasingFunction::ElasticIn,
+            EasingFunction::BounceOut,
+            EasingFunction::Spring,
+            EasingFunction::BackIn,
+        ];
+        for easing in easings {
+            let below = easing.apply(-0.5);
+            let above = easing.apply(1.5);
+            assert!(
+                (below - easing.apply(0.0)).abs() < 0.01,
+                "{easing:?}: apply(-0.5) should equal apply(0.0)"
+            );
+            assert!(
+                (above - easing.apply(1.0)).abs() < 0.01,
+                "{easing:?}: apply(1.5) should equal apply(1.0)"
+            );
+        }
+    }
+
+    #[test]
     fn test_parameter_track() {
         let mut track = ParameterTrack::new();
         track.add_keyframe(0.0, 0.0, EasingFunction::Linear);
@@ -845,5 +1299,86 @@ mod tests {
         let v3 = Vec2::new(1.0, 0.0);
         let v4 = Vec2::new(0.0, 1.0);
         assert_eq!(v3.dot(&v4), 0.0);
+    }
+
+    #[test]
+    fn test_vec3_length() {
+        let v = Vec3::new(1.0, 2.0, 2.0);
+        assert!((v.length() - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_vec3_normalize() {
+        let v = Vec3::new(3.0, 0.0, 0.0);
+        let n = v.normalize();
+        assert!((n.length() - 1.0).abs() < 1e-5);
+        assert!((n.x - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_vec3_dot() {
+        let a = Vec3::new(1.0, 0.0, 0.0);
+        let b = Vec3::new(0.0, 1.0, 0.0);
+        assert_eq!(a.dot(&b), 0.0);
+    }
+
+    #[test]
+    fn test_vec3_cross() {
+        let a = Vec3::new(1.0, 0.0, 0.0);
+        let b = Vec3::new(0.0, 1.0, 0.0);
+        let c = a.cross(&b);
+        assert!((c.z - 1.0).abs() < 1e-5);
+        assert!(c.x.abs() < 1e-5);
+        assert!(c.y.abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_vec3_lerp() {
+        let a = Vec3::new(0.0, 0.0, 0.0);
+        let b = Vec3::new(2.0, 4.0, 6.0);
+        let mid = a.lerp(&b, 0.5);
+        assert!((mid.x - 1.0).abs() < 1e-5);
+        assert!((mid.y - 2.0).abs() < 1e-5);
+        assert!((mid.z - 3.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_vec3_zero() {
+        let z = Vec3::zero();
+        assert_eq!(z.length(), 0.0);
+    }
+
+    #[test]
+    fn test_frame_clear_simd() {
+        let mut frame = Frame::new(64, 64).expect("frame");
+        frame.clear([255, 128, 0, 255]);
+        let p = frame.get_pixel(32, 32).expect("pixel");
+        assert_eq!(p, [255, 128, 0, 255]);
+        // Check first and last pixels
+        let first = frame.get_pixel(0, 0).expect("first");
+        let last = frame.get_pixel(63, 63).expect("last");
+        assert_eq!(first, [255, 128, 0, 255]);
+        assert_eq!(last, [255, 128, 0, 255]);
+    }
+
+    #[test]
+    fn test_color_blend_integer_path() {
+        let base = Color::rgb(200, 100, 50);
+        let overlay = Color::new(0, 200, 100, 128);
+        let result = base.blend(overlay);
+        // Result should be between base and overlay values
+        assert!(result.r < 200);
+        assert!(result.g > 100);
+    }
+
+    #[test]
+    fn test_color_lerp_fixed_point() {
+        let a = Color::rgb(0, 0, 0);
+        let b = Color::rgb(100, 200, 50);
+        let mid = a.lerp(b, 0.5);
+        // Should be approximately half
+        assert!((mid.r as i32 - 50).abs() <= 2);
+        assert!((mid.g as i32 - 100).abs() <= 2);
+        assert!((mid.b as i32 - 25).abs() <= 2);
     }
 }

@@ -47,9 +47,12 @@ pub mod accessibility;
 pub mod asr;
 pub mod authoring;
 pub mod batch;
+pub mod caption_diff;
 pub mod caption_export;
+pub mod caption_fingerprint;
 pub mod caption_gap_analysis;
 pub mod caption_merge;
+pub mod caption_normalize;
 pub mod caption_profiler;
 pub mod caption_qc;
 pub mod caption_rate_control;
@@ -70,8 +73,11 @@ pub mod forced_narrative;
 pub mod formats;
 pub mod import;
 pub mod imsc;
-pub mod live_caption;
 pub mod live_captions;
+
+/// Backward-compatibility alias: all items from the former `live_caption`
+/// module now live in [`live_captions`].
+pub use live_captions as live_caption;
 pub mod merge_split;
 pub mod quality_scorer;
 pub mod region_def;
@@ -79,7 +85,10 @@ pub mod rendering;
 pub mod report;
 pub mod shotchange;
 pub mod speaker_diarization;
-pub mod speaker_diarize;
+
+/// Backward-compatibility alias: all items from the former `speaker_diarize`
+/// module now live in [`speaker_diarization`].
+pub use speaker_diarization as speaker_diarize;
 pub mod standards;
 pub mod templates;
 pub mod translation;

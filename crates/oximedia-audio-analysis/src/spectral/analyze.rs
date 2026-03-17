@@ -1,13 +1,11 @@
 //! Main spectral analysis implementation.
 
 use crate::{generate_window, AnalysisConfig, AnalysisError, Result};
-use rustfft::{num_complex::Complex, FftPlanner};
-use std::sync::Arc;
+use oxifft::Complex;
 
 /// Spectral analyzer for frequency-domain analysis.
 pub struct SpectralAnalyzer {
     config: AnalysisConfig,
-    fft: Arc<dyn rustfft::Fft<f32>>,
     window: Vec<f32>,
 }
 
@@ -15,15 +13,9 @@ impl SpectralAnalyzer {
     /// Create a new spectral analyzer with the given configuration.
     #[must_use]
     pub fn new(config: AnalysisConfig) -> Self {
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(config.fft_size);
         let window = generate_window(config.window_type, config.fft_size);
 
-        Self {
-            config,
-            fft,
-            window,
-        }
+        Self { config, window }
     }
 
     /// Perform spectral analysis on audio samples.
@@ -125,19 +117,19 @@ impl SpectralAnalyzer {
         }
 
         // Apply window and convert to complex
-        let mut buffer: Vec<Complex<f32>> = samples
+        let buffer: Vec<Complex<f64>> = samples
             .iter()
             .zip(&self.window)
-            .map(|(&s, &w)| Complex::new(s * w, 0.0))
+            .map(|(&s, &w)| Complex::new(f64::from(s * w), 0.0))
             .collect();
 
         // Perform FFT
-        self.fft.process(&mut buffer);
+        let fft_result = oxifft::fft(&buffer);
 
         // Compute magnitude spectrum (only positive frequencies)
-        let magnitude: Vec<f32> = buffer[..=(self.config.fft_size / 2)]
+        let magnitude: Vec<f32> = fft_result[..=(self.config.fft_size / 2)]
             .iter()
-            .map(|c| c.norm())
+            .map(|c| c.norm() as f32)
             .collect();
 
         Ok(magnitude)

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::arg_parser::{FfmpegArgs, MapSpec, OutputSpec, StreamOptions, StreamType};
 use crate::codec_map::{CodecCategory, CodecMap};
-use crate::diagnostics::{Diagnostic, DiagnosticSink};
+use crate::diagnostics::{unknown_codec_diagnostic, Diagnostic, DiagnosticSink};
 use crate::filter_lex::{parse_filter_graph, parse_filters, ParsedFilter};
 
 /// A single transcode job derived from one FFmpeg output specification.
@@ -50,6 +50,57 @@ pub struct TranscodeJob {
     pub metadata: HashMap<String, String>,
     /// Container format, if explicitly set.
     pub format: Option<String>,
+    /// Encoding preset (translated to OxiMedia speed level).
+    pub preset: Option<String>,
+    /// Encoding tune setting.
+    pub tune: Option<String>,
+    /// Encoding profile.
+    pub profile: Option<String>,
+    /// Two-pass encoding pass number (1 or 2), if set.
+    pub pass: Option<u8>,
+    /// Passlogfile prefix for two-pass encoding.
+    pub passlogfile: Option<String>,
+    /// Translated muxer options.
+    pub muxer_options: Vec<MuxerOption>,
+}
+
+/// A translated muxer option with OxiMedia semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MuxerOption {
+    /// The original FFmpeg option name (e.g. `"movflags"`).
+    pub ffmpeg_name: String,
+    /// The original FFmpeg value (e.g. `"+faststart"`).
+    pub ffmpeg_value: String,
+    /// The OxiMedia-equivalent operation description.
+    pub oxi_action: MuxerAction,
+}
+
+/// Semantic action for a muxer option in OxiMedia.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MuxerAction {
+    /// Move the moov atom to the beginning for streaming (`+faststart`).
+    FastStart,
+    /// Enable fragmented MP4 output.
+    FragmentedMp4,
+    /// Enable DASH-compatible fragmented output.
+    DashCompat,
+    /// Disable audio in muxer.
+    DisableAudio,
+    /// Enable global header for all streams.
+    GlobalHeader,
+    /// Enable pts generation (`+genpts`).
+    GeneratePts,
+    /// Enable discarding corrupt packets (`+discardcorrupt`).
+    DiscardCorrupt,
+    /// Enable shortest output mode.
+    Shortest,
+    /// An unrecognised muxer option (kept for diagnostics).
+    Unknown {
+        /// The original option key.
+        key: String,
+        /// The original option value.
+        value: String,
+    },
 }
 
 /// The result of a full parse + translate pass.
@@ -226,6 +277,9 @@ fn translate_output(
     // ── Seek: prefer output-side seek; fall back to pre-input seek ─────────────
     let seek = output.seek.clone().or_else(|| pre_seek.map(str::to_string));
 
+    // ── Muxer options ────────────────────────────────────────────────────────
+    let muxer_options = translate_muxer_options(&output.muxer_options, sink);
+
     TranscodeJob {
         input_path: input_path.to_string(),
         output_path: output.path.clone(),
@@ -244,6 +298,96 @@ fn translate_output(
         no_audio: output.no_audio,
         metadata: output.metadata.clone(),
         format: output.format.clone(),
+        preset: output.preset.clone(),
+        tune: output.tune.clone(),
+        profile: output.profile.clone(),
+        pass: output.pass,
+        passlogfile: output.passlogfile.clone(),
+        muxer_options,
+    }
+}
+
+/// Translate raw muxer option key/value pairs from the output spec into
+/// semantic [`MuxerOption`] records.
+fn translate_muxer_options(
+    raw: &[(String, String)],
+    sink: &mut DiagnosticSink,
+) -> Vec<MuxerOption> {
+    let mut result = Vec::with_capacity(raw.len());
+    for (key, value) in raw {
+        let action = translate_single_muxer_option(key, value);
+        if let MuxerAction::Unknown { .. } = &action {
+            sink.push(Diagnostic::unknown_option(format!("-{} {}", key, value)));
+        }
+        result.push(MuxerOption {
+            ffmpeg_name: key.clone(),
+            ffmpeg_value: value.clone(),
+            oxi_action: action,
+        });
+    }
+    result
+}
+
+/// Map a single muxer option to a semantic [`MuxerAction`].
+fn translate_single_muxer_option(key: &str, value: &str) -> MuxerAction {
+    match key {
+        "movflags" => translate_movflags(value),
+        "fflags" => translate_fflags(value),
+        "shortest" => MuxerAction::Shortest,
+        _ => MuxerAction::Unknown {
+            key: key.to_string(),
+            value: value.to_string(),
+        },
+    }
+}
+
+/// Translate `-movflags` values into OxiMedia muxer actions.
+///
+/// Multiple flags can be combined with `+` (e.g. `frag_keyframe+empty_moov`).
+fn translate_movflags(value: &str) -> MuxerAction {
+    // Check for +faststart (most common single-flag case).
+    if value.eq_ignore_ascii_case("+faststart") || value.eq_ignore_ascii_case("faststart") {
+        return MuxerAction::FastStart;
+    }
+    // DASH-compatible fragmented output.
+    if value.to_lowercase().contains("dash") {
+        return MuxerAction::DashCompat;
+    }
+    // Fragmented MP4: frag_keyframe or frag_every_frame, optionally +empty_moov.
+    if value.to_lowercase().contains("frag_keyframe")
+        || value.to_lowercase().contains("frag_every_frame")
+    {
+        return MuxerAction::FragmentedMp4;
+    }
+    // Generate PTS.
+    if value.eq_ignore_ascii_case("+genpts") || value.eq_ignore_ascii_case("genpts") {
+        return MuxerAction::GeneratePts;
+    }
+    // Discard corrupt packets.
+    if value.to_lowercase().contains("discardcorrupt") {
+        return MuxerAction::DiscardCorrupt;
+    }
+    // Global header (needed for some muxers).
+    if value.to_lowercase().contains("global_header") {
+        return MuxerAction::GlobalHeader;
+    }
+    MuxerAction::Unknown {
+        key: "movflags".to_string(),
+        value: value.to_string(),
+    }
+}
+
+/// Translate `-fflags` values into OxiMedia muxer actions.
+fn translate_fflags(value: &str) -> MuxerAction {
+    if value.to_lowercase().contains("genpts") {
+        return MuxerAction::GeneratePts;
+    }
+    if value.to_lowercase().contains("discardcorrupt") {
+        return MuxerAction::DiscardCorrupt;
+    }
+    MuxerAction::Unknown {
+        key: "fflags".to_string(),
+        value: value.to_string(),
     }
 }
 
@@ -274,10 +418,7 @@ fn find_codec_for_type(
             Some(entry.oxi_name.to_string())
         }
         None => {
-            sink.push(
-                Diagnostic::unknown_option(raw_name)
-                    .with_suggestion("Use a patent-free codec: av1, vp9, vp8, opus, vorbis, flac"),
-            );
+            sink.push(unknown_codec_diagnostic(raw_name));
             Some(raw_name.to_string())
         }
     }

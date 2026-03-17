@@ -63,19 +63,33 @@
 //! Use the [`declare_plugin!`] macro to generate these exports.
 
 pub mod error;
+pub mod hot_reload;
 pub mod manifest;
 pub mod registry;
+pub mod sandbox;
 pub mod static_plugin;
 pub mod traits;
+pub mod version_resolver;
 
 #[cfg(feature = "dynamic-loading")]
 pub mod loader;
 
 pub use error::{PluginError, PluginResult};
+pub use hot_reload::{
+    compute_hash, GracefulReload, HotReloadManager, PluginLifecycle, PluginVersion, ReloadPolicy,
+    WatchEntry,
+};
 pub use manifest::{
     resolve_dependencies, DependencyResolution, ManifestCodec, PluginManifest, SemVer, SemVerOp,
     SemVerReq,
 };
 pub use registry::PluginRegistry;
+pub use sandbox::{
+    PermissionSet, PluginSandbox, SandboxConfig, SandboxContext, SandboxError, PERM_AUDIO,
+    PERM_FILESYSTEM, PERM_GPU, PERM_MEMORY_LARGE, PERM_NETWORK, PERM_VIDEO,
+};
 pub use static_plugin::StaticPlugin;
 pub use traits::{CodecPlugin, CodecPluginInfo, PluginCapability, PLUGIN_API_VERSION};
+pub use version_resolver::{
+    DependencyResolver, PluginDependency, ResolveError, SemVer as ResolverSemVer, VersionConstraint,
+};

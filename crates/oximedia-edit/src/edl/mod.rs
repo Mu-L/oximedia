@@ -52,8 +52,8 @@
 //! # }
 //! ```
 
-pub mod ale;
 pub mod aaf_edl;
+pub mod ale;
 pub mod cmx3600;
 pub mod converter;
 pub mod fcpxml;
@@ -194,9 +194,8 @@ impl Timecode {
     #[must_use]
     pub fn to_frames(&self) -> i64 {
         let fps = self.frame_rate.to_f64() as i64;
-        let total_seconds = i64::from(self.hours) * 3600
-            + i64::from(self.minutes) * 60
-            + i64::from(self.seconds);
+        let total_seconds =
+            i64::from(self.hours) * 3600 + i64::from(self.minutes) * 60 + i64::from(self.seconds);
         total_seconds * fps + i64::from(self.frames)
     }
 
@@ -222,19 +221,14 @@ impl Timecode {
         let drop_frame = s.contains(';');
 
         Ok(Self::new(
-            hours,
-            minutes,
-            seconds,
-            frames,
-            drop_frame,
-            frame_rate,
+            hours, minutes, seconds, frames, drop_frame, frame_rate,
         ))
     }
 
     /// Format timecode as string.
     #[must_use]
     pub fn format(&self) -> String {
-        let separator = if self.drop_frame { ';' } : { ':' };
+        let separator = if self.drop_frame { ';' } else { ':' };
         format!(
             "{:02}:{:02}:{:02}{}{:02}",
             self.hours, self.minutes, self.seconds, separator, self.frames

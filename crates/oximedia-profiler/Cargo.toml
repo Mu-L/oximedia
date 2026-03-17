@@ -1,8 +1,9 @@
 [package]
 name = "oximedia-profiler"
 version.workspace = true
-edition = "2021"
-license = "Apache-2.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Performance profiling and optimization tools for OxiMedia"
 readme = "README.md"
 homepage.workspace = true

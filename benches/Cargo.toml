@@ -2,6 +2,7 @@
 name = "oximedia-benchmarks"
 description = "Benchmarks for OxiMedia ecosystem"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -47,6 +48,26 @@ name = "compat_ffmpeg_bench"
 path = "compat_ffmpeg_bench.rs"
 harness = false
 
+[[bench]]
+name = "quality_metrics"
+path = "quality_metrics.rs"
+harness = false
+
+[[bench]]
+name = "audio_metering"
+path = "audio_metering.rs"
+harness = false
+
+[[bench]]
+name = "format_probe"
+path = "format_probe.rs"
+harness = false
+
+[[bench]]
+name = "dedup_hash"
+path = "dedup_hash.rs"
+harness = false
+
 [dependencies]
 oximedia-core = { workspace = true }
 oximedia-io = { workspace = true }
@@ -56,9 +77,14 @@ oximedia-audio = { workspace = true }
 oximedia-graph = { workspace = true }
 oximedia-cv = { workspace = true, optional = true }
 oximedia-compat-ffmpeg = { workspace = true }
-criterion = { version = "0.5", features = ["html_reports"] }
+oximedia-quality = { workspace = true }
+oximedia-metering = { workspace = true }
+oximedia-dedup = { workspace = true }
+criterion = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 bytes = { workspace = true }
+sha2 = { workspace = true }
+xxhash-rust = { workspace = true }
 
 [features]
 default = []

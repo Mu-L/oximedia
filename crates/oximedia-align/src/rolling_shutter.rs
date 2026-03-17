@@ -510,6 +510,215 @@ impl GlobalShutterSimulator {
     }
 }
 
+/// Temporal smoother for rolling shutter motion vectors.
+///
+/// Applies an exponentially weighted moving average (EWMA) across consecutive
+/// frames to suppress frame-to-frame jitter in the per-scanline motion
+/// estimates. This is critical for preventing flickering artifacts that occur
+/// when raw per-frame motion vectors vary erratically.
+///
+/// # Algorithm
+///
+/// For each block index `i`, the smoother maintains a running estimate:
+///
+/// ```text
+/// mv_smoothed[i] = alpha * mv_new[i] + (1 - alpha) * mv_prev[i]
+/// ```
+///
+/// A lower `alpha` produces more temporal smoothing (more lag), while a higher
+/// `alpha` responds faster to genuine motion changes.
+pub struct TemporalSmoother {
+    /// Smoothing factor in (0, 1].  Lower = smoother.
+    alpha: f64,
+    /// Previous smoothed motion vectors (one per block).
+    state: Vec<MotionVector>,
+}
+
+impl TemporalSmoother {
+    /// Create a new temporal smoother.
+    ///
+    /// `alpha` is clamped to `[0.01, 1.0]`.
+    #[must_use]
+    pub fn new(alpha: f64) -> Self {
+        Self {
+            alpha: alpha.clamp(0.01, 1.0),
+            state: Vec::new(),
+        }
+    }
+
+    /// Smooth a new frame's motion vectors against the running average.
+    ///
+    /// On the first call the input is returned as-is (there is no history).
+    /// Subsequent calls blend the new vectors with the accumulated state.
+    ///
+    /// If the number of blocks changes between calls (e.g. resolution change)
+    /// the state is reset.
+    pub fn smooth(&mut self, motion_vectors: &[MotionVector]) -> Vec<MotionVector> {
+        if self.state.len() != motion_vectors.len() {
+            // First frame or resolution change: initialise state
+            self.state = motion_vectors.to_vec();
+            return motion_vectors.to_vec();
+        }
+
+        let alpha = self.alpha as f32;
+        let one_minus = 1.0 - alpha;
+
+        let mut result = Vec::with_capacity(motion_vectors.len());
+        for (prev, new) in self.state.iter_mut().zip(motion_vectors.iter()) {
+            let dx = alpha * new.dx + one_minus * prev.dx;
+            let dy = alpha * new.dy + one_minus * prev.dy;
+            let conf = alpha * new.confidence + one_minus * prev.confidence;
+
+            prev.dx = dx;
+            prev.dy = dy;
+            prev.confidence = conf;
+
+            result.push(MotionVector::new(dx, dy, conf));
+        }
+
+        result
+    }
+
+    /// Reset the internal state so the next call starts fresh.
+    pub fn reset(&mut self) {
+        self.state.clear();
+    }
+
+    /// Current smoothing factor.
+    #[must_use]
+    pub fn alpha(&self) -> f64 {
+        self.alpha
+    }
+
+    /// Number of blocks tracked.
+    #[must_use]
+    pub fn num_blocks(&self) -> usize {
+        self.state.len()
+    }
+}
+
+/// Gaussian temporal smoother that keeps a window of past frames and applies
+/// a weighted average across time.
+///
+/// This is more expensive than EWMA but produces less phase lag because the
+/// kernel is symmetric (it uses future context when available via lookahead).
+pub struct GaussianTemporalSmoother {
+    /// Kernel half-size (total window = 2 * radius + 1).
+    radius: usize,
+    /// Precomputed 1-D Gaussian kernel weights.
+    kernel: Vec<f64>,
+    /// Ring buffer of recent motion vector frames.
+    history: Vec<Vec<MotionVector>>,
+    /// Maximum number of frames to store (= 2 * radius + 1).
+    capacity: usize,
+}
+
+impl GaussianTemporalSmoother {
+    /// Create a new Gaussian temporal smoother.
+    ///
+    /// * `radius` -- half-size of the Gaussian kernel.
+    /// * `sigma` -- standard deviation (in frames).
+    #[must_use]
+    pub fn new(radius: usize, sigma: f64) -> Self {
+        let sigma = sigma.max(0.1);
+        let cap = 2 * radius + 1;
+        let mut kernel = Vec::with_capacity(cap);
+        for i in 0..cap {
+            let x = i as f64 - radius as f64;
+            kernel.push((-0.5 * x * x / (sigma * sigma)).exp());
+        }
+        // Normalise
+        let sum: f64 = kernel.iter().sum();
+        if sum > 1e-15 {
+            for v in &mut kernel {
+                *v /= sum;
+            }
+        }
+
+        Self {
+            radius,
+            kernel,
+            history: Vec::with_capacity(cap),
+            capacity: cap,
+        }
+    }
+
+    /// Push a new frame of motion vectors and return the smoothed result for
+    /// the centre frame (i.e. with `radius` frames of look-ahead/look-behind
+    /// when available).
+    ///
+    /// Until the buffer is full the result uses whatever history is available.
+    pub fn push(&mut self, motion_vectors: &[MotionVector]) -> Vec<MotionVector> {
+        self.history.push(motion_vectors.to_vec());
+        if self.history.len() > self.capacity {
+            self.history.remove(0);
+        }
+
+        let num_blocks = motion_vectors.len();
+        let num_frames = self.history.len();
+
+        // The "centre" index in the available history
+        let centre = if num_frames > self.radius {
+            num_frames - 1 - self.radius.min(num_frames - 1)
+        } else {
+            0
+        };
+
+        let mut result = Vec::with_capacity(num_blocks);
+        for block_idx in 0..num_blocks {
+            let mut sum_dx = 0.0_f64;
+            let mut sum_dy = 0.0_f64;
+            let mut sum_conf = 0.0_f64;
+            let mut weight_total = 0.0_f64;
+
+            for (frame_offset, frame) in self.history.iter().enumerate() {
+                if block_idx >= frame.len() {
+                    continue;
+                }
+                // Map frame_offset to kernel index relative to centre
+                let ki = frame_offset as isize - centre as isize + self.radius as isize;
+                if ki < 0 || ki >= self.kernel.len() as isize {
+                    continue;
+                }
+                let w = self.kernel[ki as usize];
+                let mv = &frame[block_idx];
+                sum_dx += f64::from(mv.dx) * w;
+                sum_dy += f64::from(mv.dy) * w;
+                sum_conf += f64::from(mv.confidence) * w;
+                weight_total += w;
+            }
+
+            if weight_total > 1e-15 {
+                result.push(MotionVector::new(
+                    (sum_dx / weight_total) as f32,
+                    (sum_dy / weight_total) as f32,
+                    (sum_conf / weight_total) as f32,
+                ));
+            } else {
+                result.push(
+                    motion_vectors
+                        .get(block_idx)
+                        .copied()
+                        .unwrap_or(MotionVector::zero()),
+                );
+            }
+        }
+
+        result
+    }
+
+    /// Reset the history buffer.
+    pub fn reset(&mut self) {
+        self.history.clear();
+    }
+
+    /// Number of frames currently in the history buffer.
+    #[must_use]
+    pub fn history_len(&self) -> usize {
+        self.history.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,5 +792,133 @@ mod tests {
     fn test_readout_direction() {
         assert_eq!(ReadoutDirection::TopToBottom, ReadoutDirection::TopToBottom);
         assert_ne!(ReadoutDirection::TopToBottom, ReadoutDirection::BottomToTop);
+    }
+
+    // ── TemporalSmoother (EWMA) ─────────────────────────────────────────────
+
+    #[test]
+    fn test_temporal_smoother_first_frame_passthrough() {
+        let mut smoother = TemporalSmoother::new(0.5);
+        let mvs = vec![
+            MotionVector::new(10.0, 5.0, 0.9),
+            MotionVector::new(-3.0, 2.0, 0.8),
+        ];
+        let result = smoother.smooth(&mvs);
+        assert_eq!(result.len(), 2);
+        assert!((result[0].dx - 10.0).abs() < 1e-5);
+        assert!((result[1].dy - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_temporal_smoother_convergence() {
+        let mut smoother = TemporalSmoother::new(0.3);
+        // Feed constant motion: smoother should converge to it
+        let mvs = vec![MotionVector::new(4.0, -2.0, 1.0)];
+        for _ in 0..50 {
+            let _ = smoother.smooth(&mvs);
+        }
+        let result = smoother.smooth(&mvs);
+        assert!(
+            (result[0].dx - 4.0).abs() < 0.01,
+            "should converge to 4.0, got {}",
+            result[0].dx
+        );
+        assert!(
+            (result[0].dy + 2.0).abs() < 0.01,
+            "should converge to -2.0, got {}",
+            result[0].dy
+        );
+    }
+
+    #[test]
+    fn test_temporal_smoother_dampens_jitter() {
+        let mut smoother = TemporalSmoother::new(0.2);
+        // Alternate between +10 and -10 (high-frequency jitter)
+        let _ = smoother.smooth(&[MotionVector::new(10.0, 0.0, 1.0)]);
+        for _ in 0..20 {
+            let _ = smoother.smooth(&[MotionVector::new(-10.0, 0.0, 1.0)]);
+            let _ = smoother.smooth(&[MotionVector::new(10.0, 0.0, 1.0)]);
+        }
+        let result = smoother.smooth(&[MotionVector::new(-10.0, 0.0, 1.0)]);
+        // After many oscillations, the smoothed result should be near zero
+        assert!(
+            result[0].dx.abs() < 5.0,
+            "jitter should be dampened, got {}",
+            result[0].dx
+        );
+    }
+
+    #[test]
+    fn test_temporal_smoother_alpha_clamping() {
+        let s1 = TemporalSmoother::new(0.0);
+        assert!((s1.alpha() - 0.01).abs() < 1e-10);
+
+        let s2 = TemporalSmoother::new(2.0);
+        assert!((s2.alpha() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_temporal_smoother_reset() {
+        let mut smoother = TemporalSmoother::new(0.5);
+        let _ = smoother.smooth(&[MotionVector::new(5.0, 5.0, 1.0)]);
+        assert_eq!(smoother.num_blocks(), 1);
+        smoother.reset();
+        assert_eq!(smoother.num_blocks(), 0);
+    }
+
+    // ── GaussianTemporalSmoother ────────────────────────────────────────────
+
+    #[test]
+    fn test_gaussian_smoother_constant_input() {
+        let mut smoother = GaussianTemporalSmoother::new(2, 1.0);
+        let mvs = vec![MotionVector::new(3.0, -1.0, 0.9)];
+        for _ in 0..10 {
+            let result = smoother.push(&mvs);
+            assert_eq!(result.len(), 1);
+            // With constant input, output should converge to input
+            assert!((result[0].dx - 3.0).abs() < 0.5, "dx={}", result[0].dx);
+        }
+    }
+
+    #[test]
+    fn test_gaussian_smoother_dampens_spike() {
+        let mut smoother = GaussianTemporalSmoother::new(2, 1.0);
+        let normal = vec![MotionVector::new(0.0, 0.0, 1.0)];
+        let spike = vec![MotionVector::new(100.0, 0.0, 1.0)];
+
+        let _ = smoother.push(&normal);
+        let _ = smoother.push(&normal);
+        let result = smoother.push(&spike); // spike at the most recent frame
+                                            // The spike should be attenuated because it's averaged with past zeros
+        assert!(
+            result[0].dx < 100.0,
+            "spike should be dampened: dx={}",
+            result[0].dx
+        );
+    }
+
+    #[test]
+    fn test_gaussian_smoother_history_len() {
+        let mut smoother = GaussianTemporalSmoother::new(1, 0.5);
+        assert_eq!(smoother.history_len(), 0);
+        let mvs = vec![MotionVector::zero()];
+        let _ = smoother.push(&mvs);
+        assert_eq!(smoother.history_len(), 1);
+        let _ = smoother.push(&mvs);
+        let _ = smoother.push(&mvs);
+        // Capacity is 2*1+1 = 3
+        assert_eq!(smoother.history_len(), 3);
+        let _ = smoother.push(&mvs);
+        // Should evict oldest
+        assert_eq!(smoother.history_len(), 3);
+    }
+
+    #[test]
+    fn test_gaussian_smoother_reset() {
+        let mut smoother = GaussianTemporalSmoother::new(2, 1.0);
+        let _ = smoother.push(&[MotionVector::zero()]);
+        assert_eq!(smoother.history_len(), 1);
+        smoother.reset();
+        assert_eq!(smoother.history_len(), 0);
     }
 }

@@ -19,6 +19,7 @@
 //! ```
 //! use oximedia_edl::{parse_edl, Edl};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let edl_text = r#"
 //! TITLE: Example EDL
 //! FCM: DROP FRAME
@@ -30,6 +31,8 @@
 //! let edl = parse_edl(edl_text)?;
 //! assert_eq!(edl.title, Some("Example EDL".to_string()));
 //! assert_eq!(edl.events.len(), 1);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Example: Generating an EDL
@@ -39,6 +42,7 @@
 //! use oximedia_edl::event::{EdlEvent, EditType, TrackType};
 //! use oximedia_edl::timecode::{EdlFrameRate, EdlTimecode};
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut edl = Edl::new(EdlFormat::Cmx3600);
 //! edl.set_title("My EDL".to_string());
 //! edl.set_frame_rate(EdlFrameRate::Fps25);
@@ -62,6 +66,8 @@
 //! let generator = EdlGenerator::new();
 //! let output = generator.generate(&edl)?;
 //! assert!(output.contains("TITLE: My EDL"));
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Example: Validating an EDL
@@ -70,9 +76,12 @@
 //! use oximedia_edl::{Edl, EdlFormat, EdlValidator};
 //! use oximedia_edl::validator::ValidationLevel;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let edl = Edl::new(EdlFormat::Cmx3600);
 //! let validator = EdlValidator::strict();
 //! let report = validator.validate(&edl)?;
+//! # Ok(())
+//! # }
 //! ```
 
 #![warn(missing_docs)]
@@ -85,37 +94,52 @@
     clippy::pedantic
 )]
 
+pub mod aaf;
+pub mod ale;
 pub mod audio;
 pub mod batch_export;
 pub mod cmx3600;
 pub mod conform_report;
 pub mod consolidate;
 pub mod converter;
+pub mod edl_ascii_timeline;
+pub mod edl_changelist;
 pub mod edl_comments;
 pub mod edl_compare;
+pub mod edl_duration;
 pub mod edl_event;
 pub mod edl_filter;
 pub mod edl_merge;
+pub mod edl_sanitize;
 pub mod edl_statistics;
 pub mod edl_timeline;
 pub mod edl_validator;
 pub mod error;
 pub mod event;
 pub mod event_list;
+pub mod fcpxml;
 pub mod frame_count;
+pub mod fuzz_tests;
 pub mod generator;
+pub mod lazy_parser;
 pub mod metadata;
 pub mod motion;
+pub mod multicam;
 pub mod optimizer;
+pub mod otio;
 pub mod parser;
 pub mod reel;
 pub mod reel_map;
 pub mod reel_registry;
 pub mod roundtrip;
+pub mod subframe;
 pub mod timecode;
 pub mod transition_events;
 pub mod validator;
+pub mod version_history;
 
+pub use ale::{parse_ale_records, AleRecord};
+pub use batch_export::BatchEdlExporter;
 pub use error::{EdlError, EdlResult};
 pub use generator::EdlGenerator;
 pub use parser::{parse_edl, EdlParser};
@@ -527,5 +551,67 @@ FCM: NON-DROP FRAME
         assert_eq!(edl.title, edl2.title);
         assert_eq!(edl.events.len(), edl2.events.len());
         assert_eq!(edl.events[0].number, edl2.events[0].number);
+    }
+
+    /// Requirement: test_cmx3600_roundtrip — creates an Edl with 3 events,
+    /// serialises to CMX-3600 format, re-parses, and verifies event count and
+    /// reel names are preserved.
+    #[test]
+    fn test_cmx3600_roundtrip() {
+        let mut edl = Edl::new(EdlFormat::Cmx3600);
+        edl.set_title("Roundtrip Test EDL".to_string());
+        edl.set_frame_rate(EdlFrameRate::Fps25);
+
+        let reels = ["ALPHA", "BETA", "GAMMA"];
+        for (i, reel) in reels.iter().enumerate() {
+            let n = i as u8;
+            let tc_in = EdlTimecode::new(1, 0, n * 5, 0, EdlFrameRate::Fps25).expect("valid tc_in");
+            let tc_out =
+                EdlTimecode::new(1, 0, n * 5 + 5, 0, EdlFrameRate::Fps25).expect("valid tc_out");
+            let event = EdlEvent::new(
+                (i + 1) as u32,
+                reel.to_string(),
+                TrackType::Video,
+                EditType::Cut,
+                tc_in,
+                tc_out,
+                tc_in,
+                tc_out,
+            );
+            edl.add_event(event).expect("add_event should succeed");
+        }
+
+        assert_eq!(
+            edl.events.len(),
+            3,
+            "EDL should have 3 events before serialisation"
+        );
+
+        // Serialise to CMX-3600 format string.
+        let cmx_string = edl
+            .to_string_format()
+            .expect("serialisation should succeed");
+        assert!(
+            cmx_string.contains("TITLE: Roundtrip Test EDL"),
+            "generated text should contain the title"
+        );
+
+        // Re-parse the generated string.
+        let edl2 = parse_edl(&cmx_string).expect("re-parse should succeed");
+
+        // Verify event count.
+        assert_eq!(
+            edl2.events.len(),
+            3,
+            "re-parsed EDL should have 3 events; generated text:\n{cmx_string}"
+        );
+
+        // Verify reel names are preserved in order.
+        for (orig_event, reparsed_event) in edl.events.iter().zip(edl2.events.iter()) {
+            assert_eq!(
+                orig_event.reel, reparsed_event.reel,
+                "reel name should survive the roundtrip"
+            );
+        }
     }
 }

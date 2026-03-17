@@ -329,6 +329,187 @@ pub fn hamming_similarity(a: &[u8], b: &[u8]) -> Option<FuzzyScore> {
     Some(FuzzyScore::new(1.0 - dist as f64 / len as f64))
 }
 
+// ---------------------------------------------------------------------------
+// Filename / title matching for media deduplication
+// ---------------------------------------------------------------------------
+
+/// Normalized filename / title matcher for media deduplication.
+///
+/// Strips common media-file noise (resolution tags, codec names, release-group
+/// markers, punctuation) and computes a combined similarity from Levenshtein
+/// edit distance, token Jaccard, and bigram Dice coefficient.
+pub struct FilenameMatcher {
+    /// Weight for edit-distance similarity (0.0–1.0).
+    edit_weight: f64,
+    /// Weight for token Jaccard similarity (0.0–1.0).
+    token_weight: f64,
+    /// Weight for bigram Dice similarity (0.0–1.0).
+    bigram_weight: f64,
+    /// Minimum combined score to consider a match.
+    threshold: f64,
+}
+
+impl FilenameMatcher {
+    /// Create a new matcher with default weights.
+    #[must_use]
+    pub fn new(threshold: f64) -> Self {
+        Self {
+            edit_weight: 0.4,
+            token_weight: 0.35,
+            bigram_weight: 0.25,
+            threshold: threshold.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Create with custom weights.  Weights are normalized internally.
+    #[must_use]
+    pub fn with_weights(threshold: f64, edit_w: f64, token_w: f64, bigram_w: f64) -> Self {
+        let total = edit_w + token_w + bigram_w;
+        let (ew, tw, bw) = if total <= 0.0 {
+            (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)
+        } else {
+            (edit_w / total, token_w / total, bigram_w / total)
+        };
+        Self {
+            edit_weight: ew,
+            token_weight: tw,
+            bigram_weight: bw,
+            threshold: threshold.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Normalize a filename/title for comparison.
+    ///
+    /// Strips extension, converts to lowercase, removes common noise tokens
+    /// (resolution tags, codec names, quality markers), and collapses whitespace.
+    #[must_use]
+    pub fn normalize(name: &str) -> String {
+        // Strip directory components – keep only the filename.
+        let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+
+        // Strip extension
+        let stem = base.rsplit_once('.').map_or(base, |(s, _)| s);
+
+        let lower = stem.to_lowercase();
+
+        // Remove common noise tokens (resolution, codec, quality, release)
+        let noise: &[&str] = &[
+            "1080p", "720p", "480p", "2160p", "4k", "uhd", "hdr", "hdr10", "x264", "x265", "h264",
+            "h265", "hevc", "avc", "vp9", "av1", "aac", "ac3", "dts", "flac", "opus", "mp3",
+            "bluray", "bdrip", "brrip", "webrip", "web-dl", "webdl", "dvdrip", "remux", "remaster",
+            "proper", "repack", "mkv", "mp4", "avi", "mov", "wmv", "webm",
+        ];
+
+        let mut cleaned = lower;
+        for &tag in noise {
+            // Replace noise tokens bounded by non-alphanumerics or start/end
+            cleaned = remove_noise_token(&cleaned, tag);
+        }
+
+        // Replace common separators with spaces
+        let normalized: String = cleaned
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' {
+                    c
+                } else {
+                    ' '
+                }
+            })
+            .collect();
+
+        // Collapse whitespace
+        let parts: Vec<&str> = normalized.split_whitespace().collect();
+        parts.join(" ")
+    }
+
+    /// Compute the combined similarity score between two filenames/titles.
+    #[must_use]
+    pub fn similarity(&self, name_a: &str, name_b: &str) -> FuzzyScore {
+        let norm_a = Self::normalize(name_a);
+        let norm_b = Self::normalize(name_b);
+
+        if norm_a.is_empty() && norm_b.is_empty() {
+            return FuzzyScore::new(1.0);
+        }
+
+        let edit_sim = EditDistance::similarity(&norm_a, &norm_b);
+        let token_sim = TokenMatcher::new().similarity(&norm_a, &norm_b);
+        let bigram_sim = BigramSimilarity::similarity(&norm_a, &norm_b);
+
+        let combined = edit_sim.value() * self.edit_weight
+            + token_sim.value() * self.token_weight
+            + bigram_sim.value() * self.bigram_weight;
+
+        FuzzyScore::new(combined)
+    }
+
+    /// Returns `true` if the two filenames are considered matching.
+    #[must_use]
+    pub fn is_match(&self, name_a: &str, name_b: &str) -> bool {
+        self.similarity(name_a, name_b)
+            .meets_threshold(self.threshold)
+    }
+
+    /// Find all matching pairs within a list of filenames.
+    ///
+    /// Returns `Vec<(usize, usize, FuzzyScore)>` with `i < j`.
+    #[must_use]
+    pub fn find_matching_pairs(&self, names: &[&str]) -> Vec<(usize, usize, FuzzyScore)> {
+        let mut pairs = Vec::new();
+        for i in 0..names.len() {
+            for j in (i + 1)..names.len() {
+                let score = self.similarity(names[i], names[j]);
+                if score.meets_threshold(self.threshold) {
+                    pairs.push((i, j, score));
+                }
+            }
+        }
+        pairs
+    }
+
+    /// Return the threshold.
+    #[must_use]
+    pub fn threshold(&self) -> f64 {
+        self.threshold
+    }
+}
+
+impl Default for FilenameMatcher {
+    fn default() -> Self {
+        Self::new(0.80)
+    }
+}
+
+/// Remove a noise token from a string, respecting word boundaries.
+fn remove_noise_token(input: &str, token: &str) -> String {
+    let mut result = input.to_string();
+    loop {
+        let lower = result.to_lowercase();
+        if let Some(pos) = lower.find(token) {
+            let before_ok = pos == 0
+                || !lower
+                    .as_bytes()
+                    .get(pos - 1)
+                    .map_or(false, |b| b.is_ascii_alphanumeric());
+            let after_pos = pos + token.len();
+            let after_ok = after_pos >= lower.len()
+                || !lower
+                    .as_bytes()
+                    .get(after_pos)
+                    .map_or(false, |b| b.is_ascii_alphanumeric());
+            if before_ok && after_ok {
+                result = format!("{}{}", &result[..pos], &result[after_pos..]);
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +638,117 @@ mod tests {
 
         let s2 = hamming_similarity(b"abcd", b"axyd").expect("operation should succeed");
         assert!((s2.value() - 0.5).abs() < f64::EPSILON);
+    }
+
+    // ---- FilenameMatcher tests ----
+
+    #[test]
+    fn test_filename_normalize_basic() {
+        let n = FilenameMatcher::normalize("The.Movie.2024.1080p.x264.mkv");
+        assert_eq!(n, "the movie 2024");
+    }
+
+    #[test]
+    fn test_filename_normalize_strips_extension() {
+        let n = FilenameMatcher::normalize("video.mp4");
+        assert_eq!(n, "video");
+    }
+
+    #[test]
+    fn test_filename_normalize_strips_directory() {
+        let n = FilenameMatcher::normalize("/path/to/video.mp4");
+        assert_eq!(n, "video");
+    }
+
+    #[test]
+    fn test_filename_normalize_codec_tags() {
+        let n = FilenameMatcher::normalize("Movie.2024.h265.AAC.BluRay.mp4");
+        assert_eq!(n, "movie 2024");
+    }
+
+    #[test]
+    fn test_filename_matcher_identical() {
+        let m = FilenameMatcher::new(0.8);
+        let s = m.similarity("The.Movie.2024.mkv", "The.Movie.2024.mkv");
+        assert!(s.is_exact());
+    }
+
+    #[test]
+    fn test_filename_matcher_same_content_different_codec() {
+        let m = FilenameMatcher::new(0.8);
+        let s = m.similarity(
+            "The.Movie.2024.1080p.x264.mkv",
+            "The.Movie.2024.720p.x265.mp4",
+        );
+        assert!(s.meets_threshold(0.8), "Score was {}", s.value());
+    }
+
+    #[test]
+    fn test_filename_matcher_different_movies() {
+        let m = FilenameMatcher::new(0.8);
+        let s = m.similarity("Inception.2010.mkv", "Interstellar.2014.mkv");
+        assert!(!s.meets_threshold(0.8));
+    }
+
+    #[test]
+    fn test_filename_matcher_is_match() {
+        let m = FilenameMatcher::new(0.9);
+        assert!(m.is_match("movie.1080p.mkv", "movie.720p.mp4"));
+    }
+
+    #[test]
+    fn test_filename_matcher_find_matching_pairs() {
+        let m = FilenameMatcher::new(0.8);
+        let names = [
+            "The.Movie.2024.1080p.mkv",
+            "The.Movie.2024.720p.mp4",
+            "Totally.Different.2023.mkv",
+        ];
+        let pairs = m.find_matching_pairs(&names);
+        // First two should match, third should not match either
+        assert!(pairs.iter().any(|(i, j, _)| *i == 0 && *j == 1));
+        assert!(!pairs.iter().any(|(_, j, _)| *j == 2));
+    }
+
+    #[test]
+    fn test_filename_matcher_empty_strings() {
+        let m = FilenameMatcher::new(0.5);
+        let s = m.similarity("", "");
+        assert!(s.is_exact());
+    }
+
+    #[test]
+    fn test_filename_matcher_default() {
+        let m = FilenameMatcher::default();
+        assert!((m.threshold() - 0.80).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_filename_matcher_custom_weights() {
+        let m = FilenameMatcher::with_weights(0.7, 1.0, 0.0, 0.0);
+        // With 100% edit weight, edit distance should dominate
+        let s = m.similarity("hello.mp4", "hello.mp4");
+        assert!(s.is_exact());
+    }
+
+    #[test]
+    fn test_filename_normalize_preserves_year() {
+        let n = FilenameMatcher::normalize("Movie.Title.2024.Remaster.mkv");
+        // "remaster" is noise, "2024" should remain
+        assert!(n.contains("2024"));
+        assert!(!n.contains("remaster"));
+    }
+
+    #[test]
+    fn test_remove_noise_token_boundary() {
+        let result = remove_noise_token("test1080pin", "1080p");
+        // "1080p" is adjacent to alphanumeric chars so should NOT be removed
+        assert_eq!(result, "test1080pin");
+    }
+
+    #[test]
+    fn test_remove_noise_token_standalone() {
+        let result = remove_noise_token("test.1080p.file", "1080p");
+        assert!(!result.contains("1080p"));
     }
 }

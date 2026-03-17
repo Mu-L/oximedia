@@ -420,6 +420,80 @@ impl ConformSession {
     }
 }
 
+// ── Watch folder mode ─────────────────────────────────────────────────────────
+
+/// A lightweight watch-folder session that polls a directory at a fixed
+/// interval and reports newly detected source files.
+///
+/// This is intentionally synchronous so it can be driven from a background
+/// thread or a polling loop without requiring an async runtime.
+pub struct WatchFolderSession {
+    /// Directory to poll for new source files.
+    pub poll_dir: PathBuf,
+    /// Polling interval in seconds.
+    pub poll_interval_secs: u64,
+    /// Known paths from the previous poll — used to detect new arrivals.
+    known_paths: parking_lot::Mutex<std::collections::HashSet<PathBuf>>,
+}
+
+impl WatchFolderSession {
+    /// Create a new `WatchFolderSession` for `poll_dir` with the given
+    /// polling interval.
+    ///
+    /// The set of "known" paths is initialised to the files present in
+    /// `poll_dir` at construction time so that pre-existing files are not
+    /// reported as new on the first call to [`check_for_new_sources`].
+    ///
+    /// [`check_for_new_sources`]: WatchFolderSession::check_for_new_sources
+    #[must_use]
+    pub fn new(poll_dir: PathBuf, poll_interval_secs: u64) -> Self {
+        let initial = collect_source_paths(&poll_dir);
+        Self {
+            poll_dir,
+            poll_interval_secs,
+            known_paths: parking_lot::Mutex::new(initial),
+        }
+    }
+
+    /// Poll `poll_dir` once and return paths of **newly detected** source
+    /// files (files present now that were not present on the previous call).
+    ///
+    /// After this call the internal set of known paths is updated to include
+    /// all currently visible files.
+    #[must_use]
+    pub fn check_for_new_sources(&self) -> Vec<PathBuf> {
+        let current = collect_source_paths(&self.poll_dir);
+
+        let mut known = self.known_paths.lock();
+        let new_paths: Vec<PathBuf> = current
+            .iter()
+            .filter(|p| !known.contains(*p))
+            .cloned()
+            .collect();
+
+        // Update known set with everything we see now.
+        *known = current;
+        new_paths
+    }
+}
+
+/// Collect all regular-file paths inside `dir` (non-recursive, depth=1).
+fn collect_source_paths(dir: &Path) -> std::collections::HashSet<PathBuf> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let ft = entry.file_type().ok()?;
+            if ft.is_file() {
+                Some(entry.path())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 use crate::types::TrackType;
 
 impl TrackType {
@@ -467,5 +541,77 @@ mod tests {
         assert_eq!(session.status(), SessionStatus::Created);
         session.set_status(SessionStatus::Scanning);
         assert_eq!(session.status(), SessionStatus::Scanning);
+    }
+
+    // ── WatchFolderSession tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_watch_folder_no_new_files_initially() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should be created");
+        // Place a file before constructing the session
+        std::fs::write(temp_dir.path().join("pre_existing.mov"), b"x")
+            .expect("write should succeed");
+
+        let session = WatchFolderSession::new(temp_dir.path().to_path_buf(), 5);
+        // On first check, nothing should be new (pre-existing files are known)
+        let new = session.check_for_new_sources();
+        assert!(
+            new.is_empty(),
+            "pre-existing files must not be reported as new, got {new:?}"
+        );
+    }
+
+    #[test]
+    fn test_watch_folder_detects_new_file() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should be created");
+
+        let session = WatchFolderSession::new(temp_dir.path().to_path_buf(), 5);
+
+        // No files yet — first check returns nothing
+        assert!(session.check_for_new_sources().is_empty());
+
+        // Add a new file
+        let new_file = temp_dir.path().join("shot_001.mov");
+        std::fs::write(&new_file, b"data").expect("write should succeed");
+
+        let new = session.check_for_new_sources();
+        assert_eq!(new.len(), 1, "new file should be detected");
+        assert_eq!(new[0], new_file);
+    }
+
+    #[test]
+    fn test_watch_folder_does_not_re_report_known_files() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should be created");
+        let session = WatchFolderSession::new(temp_dir.path().to_path_buf(), 5);
+
+        // Introduce a file and consume the notification
+        std::fs::write(temp_dir.path().join("clip.mov"), b"data").expect("write should succeed");
+        let first = session.check_for_new_sources();
+        assert_eq!(first.len(), 1);
+
+        // Second call must not re-report the same file
+        let second = session.check_for_new_sources();
+        assert!(
+            second.is_empty(),
+            "already-reported file must not be reported again"
+        );
+    }
+
+    #[test]
+    fn test_watch_folder_detects_multiple_new_files() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should be created");
+        let session = WatchFolderSession::new(temp_dir.path().to_path_buf(), 1);
+
+        // Baseline check
+        assert!(session.check_for_new_sources().is_empty());
+
+        // Add three files
+        for i in 0..3u8 {
+            std::fs::write(temp_dir.path().join(format!("clip_{i}.mov")), b"data")
+                .expect("write should succeed");
+        }
+
+        let new = session.check_for_new_sources();
+        assert_eq!(new.len(), 3, "all three new files should be detected");
     }
 }

@@ -13,10 +13,12 @@ pub enum SearchError {
     Io(#[from] io::Error),
 
     /// Tantivy error
+    #[cfg(feature = "search-engine")]
     #[error("Index error: {0}")]
     Index(#[from] tantivy::TantivyError),
 
     /// Query parsing error
+    #[cfg(feature = "search-engine")]
     #[error("Query parsing error: {0}")]
     QueryParse(#[from] tantivy::query::QueryParserError),
 

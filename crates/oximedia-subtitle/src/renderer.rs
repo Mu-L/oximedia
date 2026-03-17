@@ -1,4 +1,8 @@
-//! Main subtitle renderer.
+//! Main subtitle renderer with incremental (dirty-region) redraw support.
+//!
+//! The `IncrementalSubtitleRenderer` tracks which subtitle cue is currently
+//! displayed and only composites a new frame when the visible content changes.
+//! This avoids redundant per-frame GPU / CPU work in playout pipelines.
 
 use crate::font::Font;
 use crate::overlay::overlay_subtitle;
@@ -268,5 +272,289 @@ impl SubtitleRenderer {
     /// Set the default style.
     pub fn set_style(&mut self, style: SubtitleStyle) {
         self.default_style = style;
+    }
+}
+
+// ============================================================================
+// Incremental subtitle renderer
+// ============================================================================
+
+/// A dirty rectangle in a video frame (pixel coordinates).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirtyRect {
+    /// Left edge (inclusive).
+    pub x: u32,
+    /// Top edge (inclusive).
+    pub y: u32,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+impl DirtyRect {
+    /// Create a new dirty rect.
+    #[must_use]
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Return `true` if the rect has no area.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.width == 0 || self.height == 0
+    }
+
+    /// Compute the union of two dirty rects (smallest bounding box).
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        if self.is_empty() {
+            return *other;
+        }
+        if other.is_empty() {
+            return *self;
+        }
+        let x1 = self.x.min(other.x);
+        let y1 = self.y.min(other.y);
+        let x2 = (self.x + self.width).max(other.x + other.width);
+        let y2 = (self.y + self.height).max(other.y + other.height);
+        Self::new(x1, y1, x2 - x1, y2 - y1)
+    }
+}
+
+/// Key used to identify the currently displayed subtitle state.
+#[derive(Clone, Debug, PartialEq)]
+struct DisplayedState {
+    /// `(start_ms, end_ms, text)` tuple uniquely identifies a cue.
+    cues: Vec<(i64, i64, String)>,
+}
+
+/// Incremental subtitle renderer that only redraws changed regions.
+///
+/// The renderer maintains a record of the last displayed subtitle state.
+/// On each call to `render_incremental`, it compares the incoming subtitle
+/// set against the last rendered frame.  If the set is unchanged (same active
+/// cues) no work is done and `None` is returned.  If the cues have changed, the
+/// new cues are composited and the dirty region is returned.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use oximedia_subtitle::renderer::IncrementalSubtitleRenderer;
+/// use oximedia_subtitle::{Subtitle, style::SubtitleStyle};
+/// use oximedia_subtitle::font::Font;
+///
+/// let font = Font::from_file("font.ttf")?;
+/// let mut renderer = IncrementalSubtitleRenderer::new(font, SubtitleStyle::default());
+///
+/// // First frame — subtitle appeared → returns Some(dirty_rect)
+/// let dirty = renderer.render_incremental(&subtitles, &mut frame, timestamp)?;
+///
+/// // Second frame with same subtitle active → returns None (no redraw needed)
+/// let dirty2 = renderer.render_incremental(&subtitles, &mut frame, timestamp2)?;
+/// assert!(dirty2.is_none());
+/// ```
+pub struct IncrementalSubtitleRenderer {
+    inner: SubtitleRenderer,
+    /// State from the last successfully rendered frame.
+    last_state: Option<DisplayedState>,
+    /// Dirty rect from the last change (used to clear previous subtitle).
+    last_dirty: Option<DirtyRect>,
+}
+
+impl IncrementalSubtitleRenderer {
+    /// Create a new incremental renderer.
+    #[must_use]
+    pub fn new(font: Font, style: SubtitleStyle) -> Self {
+        Self {
+            inner: SubtitleRenderer::new(font, style),
+            last_state: None,
+            last_dirty: None,
+        }
+    }
+
+    /// Get the default style.
+    #[must_use]
+    pub fn style(&self) -> &SubtitleStyle {
+        self.inner.style()
+    }
+
+    /// Set the default style.
+    pub fn set_style(&mut self, style: SubtitleStyle) {
+        self.inner.set_style(style);
+    }
+
+    /// Render changed subtitle regions onto `frame`.
+    ///
+    /// Returns `Ok(Some(dirty_rect))` if any subtitle was rendered (the region
+    /// that changed), or `Ok(None)` if nothing changed and no redraw was needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if rendering a new cue fails.
+    pub fn render_incremental(
+        &mut self,
+        subtitles: &[Subtitle],
+        frame: &mut VideoFrame,
+        timestamp: Timestamp,
+    ) -> SubtitleResult<Option<DirtyRect>> {
+        let timestamp_ms = (timestamp.to_seconds() * 1000.0) as i64;
+
+        // Collect currently active cues
+        let active: Vec<&Subtitle> = subtitles
+            .iter()
+            .filter(|s| s.is_active(timestamp_ms))
+            .collect();
+
+        let new_state = DisplayedState {
+            cues: active
+                .iter()
+                .map(|s| (s.start_time, s.end_time, s.text.clone()))
+                .collect(),
+        };
+
+        // Compare with last rendered state
+        if self.last_state.as_ref() == Some(&new_state) {
+            // Nothing changed — skip redraw
+            return Ok(None);
+        }
+
+        // Compute dirty rect: union of previous and new subtitle positions.
+        // For simplicity we mark the whole subtitle area as dirty.  A finer
+        // implementation would track per-cue bounding boxes.
+        let mut dirty = DirtyRect::new(0, 0, 0, 0);
+
+        // Render each active subtitle
+        for subtitle in &active {
+            self.inner.render_subtitle(subtitle, frame, timestamp)?;
+            // Approximate dirty rect using frame dimensions as upper bound
+            let cue_dirty = DirtyRect::new(0, frame.height / 2, frame.width, frame.height / 2);
+            dirty = dirty.union(&cue_dirty);
+        }
+
+        // If we had subtitles before and now have none, the old area is dirty
+        if let Some(prev_dirty) = self.last_dirty {
+            dirty = dirty.union(&prev_dirty);
+        }
+
+        self.last_state = Some(new_state);
+        self.last_dirty = if dirty.is_empty() { None } else { Some(dirty) };
+
+        if dirty.is_empty() && active.is_empty() {
+            // State changed (from Some → None) but nothing to paint
+            Ok(Some(DirtyRect::new(0, 0, 0, 0)))
+        } else {
+            Ok(Some(dirty))
+        }
+    }
+
+    /// Force the renderer to forget the last displayed state, ensuring a full
+    /// redraw on the next `render_incremental` call.
+    pub fn invalidate(&mut self) {
+        self.last_state = None;
+        self.last_dirty = None;
+    }
+
+    /// Return the last computed dirty rect, if any.
+    #[must_use]
+    pub fn last_dirty_rect(&self) -> Option<DirtyRect> {
+        self.last_dirty
+    }
+}
+
+#[cfg(test)]
+mod incremental_tests {
+    use super::*;
+
+    #[test]
+    fn test_dirty_rect_new() {
+        let r = DirtyRect::new(10, 20, 100, 50);
+        assert_eq!(r.x, 10);
+        assert_eq!(r.y, 20);
+        assert_eq!(r.width, 100);
+        assert_eq!(r.height, 50);
+    }
+
+    #[test]
+    fn test_dirty_rect_is_empty_zero_width() {
+        let r = DirtyRect::new(0, 0, 0, 100);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn test_dirty_rect_is_empty_zero_height() {
+        let r = DirtyRect::new(0, 0, 100, 0);
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn test_dirty_rect_not_empty() {
+        let r = DirtyRect::new(5, 5, 10, 10);
+        assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn test_dirty_rect_union_basic() {
+        let a = DirtyRect::new(0, 0, 10, 10);
+        let b = DirtyRect::new(5, 5, 10, 10);
+        let u = a.union(&b);
+        assert_eq!(u.x, 0);
+        assert_eq!(u.y, 0);
+        assert_eq!(u.width, 15);
+        assert_eq!(u.height, 15);
+    }
+
+    #[test]
+    fn test_dirty_rect_union_with_empty() {
+        let a = DirtyRect::new(10, 20, 100, 50);
+        let empty = DirtyRect::new(0, 0, 0, 0);
+        assert_eq!(a.union(&empty), a);
+        assert_eq!(empty.union(&a), a);
+    }
+
+    #[test]
+    fn test_dirty_rect_union_both_empty() {
+        let a = DirtyRect::new(0, 0, 0, 0);
+        let b = DirtyRect::new(0, 0, 0, 0);
+        let u = a.union(&b);
+        assert!(u.is_empty());
+    }
+
+    #[test]
+    fn test_dirty_rect_union_adjacent() {
+        let a = DirtyRect::new(0, 0, 50, 10);
+        let b = DirtyRect::new(50, 0, 50, 10);
+        let u = a.union(&b);
+        assert_eq!(u.x, 0);
+        assert_eq!(u.width, 100);
+    }
+
+    #[test]
+    fn test_dirty_rect_equality() {
+        let a = DirtyRect::new(1, 2, 3, 4);
+        let b = DirtyRect::new(1, 2, 3, 4);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_incremental_renderer_invalidate_resets_state() {
+        // We test the state tracking logic without a real font/frame.
+        // Just verify that the DisplayedState comparison logic is correct.
+        let s1 = DisplayedState {
+            cues: vec![(0, 1000, "Hello".to_string())],
+        };
+        let s2 = DisplayedState {
+            cues: vec![(0, 1000, "Hello".to_string())],
+        };
+        let s3 = DisplayedState {
+            cues: vec![(0, 1000, "Different".to_string())],
+        };
+        assert_eq!(s1, s2);
+        assert_ne!(s1, s3);
     }
 }

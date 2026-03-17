@@ -41,6 +41,7 @@ pub fn srt_360p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -70,6 +71,7 @@ pub fn srt_480p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -99,6 +101,7 @@ pub fn srt_720p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -128,6 +131,7 @@ pub fn srt_1080p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -159,6 +163,7 @@ pub fn srt_1080p_60fps() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -189,6 +194,7 @@ pub fn srt_low_latency() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -219,6 +225,7 @@ pub fn srt_broadcast() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

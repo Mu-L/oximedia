@@ -269,9 +269,12 @@ impl Default for StructuringElement {
 /// ```
 /// use oximedia_cv::image::{StructuringElement, morph::erode};
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let src = vec![255u8; 25];
 /// let element = StructuringElement::rectangle(3, 3);
 /// let result = erode(&src, 5, 5, &element)?;
+/// Ok(())
+/// }
 /// ```
 pub fn erode(
     src: &[u8],
@@ -331,9 +334,12 @@ pub fn erode(
 /// ```
 /// use oximedia_cv::image::{StructuringElement, morph::dilate};
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let src = vec![0u8; 25];
 /// let element = StructuringElement::rectangle(3, 3);
 /// let result = dilate(&src, 5, 5, &element)?;
+/// Ok(())
+/// }
 /// ```
 pub fn dilate(
     src: &[u8],
@@ -381,9 +387,12 @@ pub fn dilate(
 /// ```
 /// use oximedia_cv::image::{StructuringElement, morph::morphological_open};
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let src = vec![128u8; 25];
 /// let element = StructuringElement::rectangle(3, 3);
 /// let result = morphological_open(&src, 5, 5, &element)?;
+/// Ok(())
+/// }
 /// ```
 pub fn morphological_open(
     src: &[u8],
@@ -408,9 +417,12 @@ pub fn morphological_open(
 /// ```
 /// use oximedia_cv::image::{StructuringElement, morph::morphological_close};
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let src = vec![128u8; 25];
 /// let element = StructuringElement::rectangle(3, 3);
 /// let result = morphological_close(&src, 5, 5, &element)?;
+/// Ok(())
+/// }
 /// ```
 pub fn morphological_close(
     src: &[u8],

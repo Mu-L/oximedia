@@ -1,6 +1,7 @@
 [package]
 name = "oximedia-graphics"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -25,7 +26,7 @@ oximedia-image.workspace = true
 tiny-skia = "0.12"
 fontdue = "0.9"
 ab_glyph = "0.2"
-kurbo = "0.11"
+kurbo = "0.13"
 palette = "0.7"
 
 # GPU rendering
@@ -34,6 +35,8 @@ bytemuck = { version = "1", features = ["derive"] }
 
 # Template and control
 tera = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true, optional = true }
 axum = { version = "0.8", optional = true }
 
@@ -43,5 +46,5 @@ gpu = ["dep:wgpu"]
 server = ["dep:tokio", "dep:axum"]
 
 [dev-dependencies]
-criterion = "0.5"
-tempfile = "3"
+criterion = "0.8"
+tempfile.workspace = true

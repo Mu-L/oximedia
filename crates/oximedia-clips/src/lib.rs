@@ -48,27 +48,37 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_lossless)]
 
+pub mod ai_tagging;
 pub mod bin_organizer;
+pub mod camera_metadata;
 pub mod clip;
 pub mod clip_audit;
 pub mod clip_bin;
 pub mod clip_compare;
 pub mod clip_export;
+pub mod clip_fingerprint;
 pub mod clip_history;
+pub mod clip_merge;
 pub mod clip_metadata;
+pub mod clip_playlist;
 pub mod clip_relations;
+pub mod clip_relations_bidirectional;
 pub mod clip_search;
 pub mod clip_tag;
 pub mod clip_timeline;
+pub mod clip_waveform;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod database;
 pub mod export;
 pub mod group;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod import;
 pub mod logging;
 pub mod marker;
 pub mod note;
 pub mod proxy;
 pub mod proxy_link;
+pub mod proxy_meta;
 pub mod rating;
 pub mod search;
 pub mod storyboard;
@@ -79,14 +89,23 @@ pub mod trim;
 pub mod version;
 
 mod error;
+#[cfg(not(target_arch = "wasm32"))]
 mod manager;
 
+pub use ai_tagging::{AiTagger, AiTaggerConfig, ClipInfo, TagSource, TagSuggestion};
+pub use camera_metadata::{CameraMetadata, CameraMetadataExt, CameraMetadataStore};
 pub use clip::{Clip, ClipId, ClipMetadata, SubClip};
+pub use clip_waveform::{ClipWaveformGenerator, WaveformData, WaveformThumbnail};
 pub use error::{ClipError, ClipResult};
 pub use group::{Bin, BinId, Collection, CollectionId, Folder, FolderId, SmartCollection};
 pub use logging::{Favorite, Keyword, Rating};
+#[cfg(not(target_arch = "wasm32"))]
 pub use manager::ClipManager;
 pub use marker::{Marker, MarkerId, MarkerType};
 pub use note::{Annotation, Note, NoteId};
 pub use proxy::{ProxyLink, ProxyQuality};
+pub use proxy_meta::{ProxyManagerSpec, ProxyMetadata, ProxySpec, ProxyValidationError};
+pub use take::multi_criteria::{
+    rank_takes_multi_criteria, MultiCriteriaTakeSelector, TakeScoreWeights, TakeWeights,
+};
 pub use take::{Take, TakeId, TakeSelector};

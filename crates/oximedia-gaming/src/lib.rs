@@ -63,6 +63,7 @@ pub mod chat_integration;
 pub mod clip_manager;
 pub mod controller_mapping;
 pub mod encode;
+pub mod event_recorder;
 pub mod event_timeline;
 pub mod frame_pacing;
 pub mod game_event;
@@ -92,8 +93,20 @@ pub mod tournament;
 pub mod vod_manager;
 pub mod webcam;
 
+pub mod game_profile;
+pub mod multi_stream;
+pub mod region_capture;
+
+pub use event_recorder::{
+    EventFormat, EventRecorder, GameEvent as RecorderGameEvent, GameEventType as RecorderEventType,
+};
+pub use multi_stream::{
+    MultiStreamManager, PlatformStatus, PlatformStreamConfig, PlatformStreamState, StreamPlatform,
+};
+pub use region_capture::{CaptureFrame, CaptureRegion as RegionRect, RegionCapture};
+
 use oximedia_core::OxiError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 /// Gaming-specific errors.
@@ -139,10 +152,139 @@ pub enum GamingError {
 /// Result type for gaming operations.
 pub type GamingResult<T> = Result<T, GamingError>;
 
+// ---------------------------------------------------------------------------
+// Pipeline metrics -- real tracking for capture/encode stats
+// ---------------------------------------------------------------------------
+
+/// Real-time pipeline metrics collected from capture and encode stages.
+#[derive(Debug, Clone)]
+pub struct PipelineMetrics {
+    /// Total frames captured by the capture stage.
+    pub frames_captured: u64,
+    /// Total frames encoded by the encoder.
+    pub frames_encoded: u64,
+    /// Total frames dropped (captured but not encoded in time).
+    pub frames_dropped: u64,
+    /// Total bytes output by the encoder.
+    pub total_bytes_encoded: u64,
+    /// Accumulated capture time for averaging.
+    pub total_capture_time: Duration,
+    /// Accumulated encoding time for averaging.
+    pub total_encoding_time: Duration,
+    /// Peak single-frame encoding time.
+    pub peak_encoding_time: Duration,
+    /// Timestamp when streaming started.
+    pub start_time: Option<Instant>,
+}
+
+impl Default for PipelineMetrics {
+    fn default() -> Self {
+        Self {
+            frames_captured: 0,
+            frames_encoded: 0,
+            frames_dropped: 0,
+            total_bytes_encoded: 0,
+            total_capture_time: Duration::ZERO,
+            total_encoding_time: Duration::ZERO,
+            peak_encoding_time: Duration::ZERO,
+            start_time: None,
+        }
+    }
+}
+
+impl PipelineMetrics {
+    /// Average capture latency per frame.
+    #[must_use]
+    pub fn avg_capture_latency(&self) -> Duration {
+        if self.frames_captured > 0 {
+            self.total_capture_time / self.frames_captured as u32
+        } else {
+            Duration::ZERO
+        }
+    }
+
+    /// Average encoding latency per frame.
+    #[must_use]
+    pub fn avg_encoding_latency(&self) -> Duration {
+        if self.frames_encoded > 0 {
+            self.total_encoding_time / self.frames_encoded as u32
+        } else {
+            Duration::ZERO
+        }
+    }
+
+    /// Total glass-to-glass latency estimate (capture + encode).
+    #[must_use]
+    pub fn total_latency(&self) -> Duration {
+        self.avg_capture_latency() + self.avg_encoding_latency()
+    }
+
+    /// Current bitrate in kbps based on total bytes and elapsed time.
+    #[must_use]
+    pub fn current_bitrate_kbps(&self, framerate: u32) -> u32 {
+        if self.frames_encoded == 0 {
+            return 0;
+        }
+        let duration_secs = (self.frames_encoded as f64) / (framerate as f64).max(1.0);
+        if duration_secs > 0.0 {
+            ((self.total_bytes_encoded as f64 * 8.0) / (duration_secs * 1000.0)) as u32
+        } else {
+            0
+        }
+    }
+
+    /// Effective FPS based on frames encoded and elapsed time.
+    #[must_use]
+    pub fn effective_fps(&self) -> f64 {
+        let elapsed = self
+            .start_time
+            .map(|s| s.elapsed())
+            .unwrap_or(Duration::ZERO);
+        let secs = elapsed.as_secs_f64();
+        if secs > 0.0 {
+            self.frames_encoded as f64 / secs
+        } else {
+            0.0
+        }
+    }
+
+    /// Record a capture event.
+    pub fn record_capture(&mut self, capture_time: Duration) {
+        self.frames_captured += 1;
+        self.total_capture_time += capture_time;
+    }
+
+    /// Record an encode event.
+    pub fn record_encode(&mut self, encode_time: Duration, bytes: u64) {
+        self.frames_encoded += 1;
+        self.total_encoding_time += encode_time;
+        self.total_bytes_encoded += bytes;
+        if encode_time > self.peak_encoding_time {
+            self.peak_encoding_time = encode_time;
+        }
+    }
+
+    /// Record a dropped frame.
+    pub fn record_drop(&mut self) {
+        self.frames_dropped += 1;
+    }
+
+    /// Reset all metrics (e.g. on stream restart).
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GameStreamer
+// ---------------------------------------------------------------------------
+
 /// Main game streaming API.
 pub struct GameStreamer {
     config: StreamConfig,
     state: StreamerState,
+    /// Real pipeline metrics.
+    pipeline_metrics: PipelineMetrics,
 }
 
 /// Streamer state.
@@ -341,6 +483,7 @@ impl GameStreamer {
         Ok(Self {
             config,
             state: StreamerState::Idle,
+            pipeline_metrics: PipelineMetrics::default(),
         })
     }
 
@@ -356,6 +499,8 @@ impl GameStreamer {
             ));
         }
 
+        self.pipeline_metrics.reset();
+        self.pipeline_metrics.start_time = Some(Instant::now());
         self.state = StreamerState::Running;
         Ok(())
     }
@@ -426,16 +571,70 @@ impl GameStreamer {
         Ok(())
     }
 
+    /// Record a capture event with its duration. Call this each time a frame
+    /// is captured from the screen capture pipeline.
+    pub fn record_capture(&mut self, capture_duration: Duration) {
+        self.pipeline_metrics.record_capture(capture_duration);
+    }
+
+    /// Record an encode event with its duration and output bytes. Call this
+    /// each time a frame is encoded.
+    pub fn record_encode(&mut self, encode_duration: Duration, bytes: u64) {
+        self.pipeline_metrics.record_encode(encode_duration, bytes);
+    }
+
+    /// Record a dropped frame.
+    pub fn record_drop(&mut self) {
+        self.pipeline_metrics.record_drop();
+    }
+
     /// Get current streaming statistics.
+    ///
+    /// Returns real metrics from the capture/encode pipeline when the streamer
+    /// is running or has been running. When no frames have been processed yet,
+    /// the target framerate from config is returned as FPS.
     #[must_use]
     pub fn get_stats(&self) -> StreamStats {
+        let pm = &self.pipeline_metrics;
+
+        let fps = if pm.frames_encoded > 0 {
+            let eff = pm.effective_fps();
+            if eff > 0.0 {
+                // Clamp to a reasonable u32
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                {
+                    eff.round().min(f64::from(u32::MAX)) as u32
+                }
+            } else {
+                self.config.framerate
+            }
+        } else {
+            self.config.framerate
+        };
+
+        let bitrate = if pm.frames_encoded > 0 {
+            pm.current_bitrate_kbps(self.config.framerate)
+        } else {
+            self.config.bitrate
+        };
+
         StreamStats {
-            fps: self.config.framerate,
-            bitrate: self.config.bitrate,
-            dropped_frames: 0,
-            encoding_latency: Duration::from_millis(5),
-            total_latency: Duration::from_millis(50),
+            fps,
+            bitrate,
+            dropped_frames: pm.frames_dropped,
+            encoding_latency: pm.avg_encoding_latency(),
+            total_latency: pm.total_latency(),
+            frames_captured: pm.frames_captured,
+            frames_encoded: pm.frames_encoded,
+            total_bytes_encoded: pm.total_bytes_encoded,
+            peak_encoding_time: pm.peak_encoding_time,
         }
+    }
+
+    /// Get a reference to the raw pipeline metrics.
+    #[must_use]
+    pub fn pipeline_metrics(&self) -> &PipelineMetrics {
+        &self.pipeline_metrics
     }
 
     /// Check if streaming is active.
@@ -458,6 +657,14 @@ pub struct StreamStats {
     pub encoding_latency: Duration,
     /// Total glass-to-glass latency
     pub total_latency: Duration,
+    /// Total frames captured
+    pub frames_captured: u64,
+    /// Total frames encoded
+    pub frames_encoded: u64,
+    /// Total bytes output by encoder
+    pub total_bytes_encoded: u64,
+    /// Peak single-frame encoding time
+    pub peak_encoding_time: Duration,
 }
 
 #[cfg(test)]
@@ -618,7 +825,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stream_stats() {
+    async fn test_stream_stats_initial() {
         let config = StreamConfig::builder()
             .build()
             .expect("valid stream config");
@@ -627,8 +834,74 @@ mod tests {
             .expect("valid game streamer");
 
         let stats = streamer.get_stats();
+        // Before any frames, should return target FPS
         assert_eq!(stats.fps, 60);
         assert_eq!(stats.dropped_frames, 0);
+        assert_eq!(stats.frames_captured, 0);
+        assert_eq!(stats.frames_encoded, 0);
+    }
+
+    #[tokio::test]
+    async fn test_stream_stats_with_real_metrics() {
+        let config = StreamConfig::builder()
+            .build()
+            .expect("valid stream config");
+        let mut streamer = GameStreamer::new(config)
+            .await
+            .expect("valid game streamer");
+
+        streamer.start().await.expect("start");
+
+        // Simulate capture/encode events
+        for _ in 0..10 {
+            streamer.record_capture(Duration::from_micros(500));
+            streamer.record_encode(Duration::from_millis(2), 5000);
+        }
+        streamer.record_drop();
+
+        let stats = streamer.get_stats();
+        assert_eq!(stats.frames_captured, 10);
+        assert_eq!(stats.frames_encoded, 10);
+        assert_eq!(stats.dropped_frames, 1);
+        assert_eq!(stats.total_bytes_encoded, 50000);
+        assert!(stats.encoding_latency > Duration::ZERO);
+        assert!(stats.total_latency > Duration::ZERO);
+    }
+
+    #[test]
+    fn test_pipeline_metrics_bitrate() {
+        let mut pm = PipelineMetrics::default();
+        pm.start_time = Some(Instant::now());
+
+        // Simulate 60 frames of 10000 bytes each
+        for _ in 0..60 {
+            pm.record_encode(Duration::from_millis(1), 10000);
+        }
+
+        let kbps = pm.current_bitrate_kbps(60);
+        // 60 frames * 10000 bytes * 8 bits / 1s / 1000 = 4800 kbps
+        assert!(kbps > 4000, "bitrate should be reasonable: {kbps}");
+    }
+
+    #[test]
+    fn test_pipeline_metrics_reset() {
+        let mut pm = PipelineMetrics::default();
+        pm.record_capture(Duration::from_millis(1));
+        pm.record_encode(Duration::from_millis(2), 1000);
+        pm.record_drop();
+        pm.reset();
+        assert_eq!(pm.frames_captured, 0);
+        assert_eq!(pm.frames_encoded, 0);
+        assert_eq!(pm.frames_dropped, 0);
+    }
+
+    #[test]
+    fn test_pipeline_metrics_peak_encoding() {
+        let mut pm = PipelineMetrics::default();
+        pm.record_encode(Duration::from_millis(1), 100);
+        pm.record_encode(Duration::from_millis(5), 100);
+        pm.record_encode(Duration::from_millis(2), 100);
+        assert_eq!(pm.peak_encoding_time, Duration::from_millis(5));
     }
 
     #[test]
@@ -640,5 +913,33 @@ mod tests {
         // High quality may use B-frames
         let high_quality = EncoderPreset::HighQuality;
         assert_eq!(high_quality, EncoderPreset::HighQuality);
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_metrics_accessor() {
+        let config = StreamConfig::builder()
+            .build()
+            .expect("valid stream config");
+        let mut streamer = GameStreamer::new(config)
+            .await
+            .expect("valid game streamer");
+
+        streamer.record_capture(Duration::from_millis(1));
+        let pm = streamer.pipeline_metrics();
+        assert_eq!(pm.frames_captured, 1);
+    }
+
+    #[test]
+    fn test_pipeline_latency_zero_when_no_frames() {
+        let pm = PipelineMetrics::default();
+        assert_eq!(pm.avg_capture_latency(), Duration::ZERO);
+        assert_eq!(pm.avg_encoding_latency(), Duration::ZERO);
+        assert_eq!(pm.total_latency(), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_pipeline_effective_fps_zero_without_start() {
+        let pm = PipelineMetrics::default();
+        assert!((pm.effective_fps() - 0.0).abs() < f64::EPSILON);
     }
 }

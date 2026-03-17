@@ -26,7 +26,7 @@ pub async fn run_denoise(opts: DenoiseOptions, json_output: bool) -> Result<()> 
 
     let config = build_config(mode, opts.strength, opts.preserve_grain)?;
 
-    let _denoiser = Denoiser::new(config.clone());
+    let _denoiser = Denoiser::new(config.clone())?;
 
     if json_output {
         let obj = serde_json::json!({

@@ -95,7 +95,8 @@ impl VisualSync {
             return 0.0;
         }
 
-        let bytes_per_pixel = frame_data.len() / (width * height);
+        let total_pixels = width * height;
+        let bytes_per_pixel = frame_data.len().checked_div(total_pixels).unwrap_or(1);
         let mut sum = 0u64;
         let mut count = 0u64;
 
@@ -118,11 +119,7 @@ impl VisualSync {
             count += 1;
         }
 
-        if count > 0 {
-            (sum / count) as f32 / 255.0
-        } else {
-            0.0
-        }
+        sum.checked_div(count).unwrap_or(0) as f32 / 255.0
     }
 
     /// Detect clapper closure
@@ -175,7 +172,8 @@ impl VisualSync {
             return 0.0;
         }
 
-        let bytes_per_pixel = frame_data.len() / (width * height);
+        let total_pixels = width * height;
+        let bytes_per_pixel = frame_data.len().checked_div(total_pixels).unwrap_or(1);
         let mut sum = 0u64;
         let mut count = 0u64;
 
@@ -201,11 +199,7 @@ impl VisualSync {
             }
         }
 
-        if count > 0 {
-            (sum / count) as f32 / 255.0
-        } else {
-            0.0
-        }
+        sum.checked_div(count).unwrap_or(0) as f32 / 255.0
     }
 
     /// Find offset using visual markers
@@ -361,6 +355,7 @@ impl Synchronizer for VisualSync {
         offsets.insert(0, SyncOffset::new(reference_angle, 0, 0.0, 1.0));
 
         // Calculate average confidence
+        #[allow(clippy::manual_checked_ops)]
         let confidence = offsets.iter().map(|o| o.confidence).sum::<f64>() / offsets.len() as f64;
 
         Ok(SyncResult {

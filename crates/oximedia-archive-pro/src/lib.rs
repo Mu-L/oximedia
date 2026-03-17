@@ -225,4 +225,248 @@ mod tests {
         );
         assert_eq!(PreservationFormat::AudioFlac.mime_type(), "audio/flac");
     }
+
+    /// End-to-end OAIS lifecycle: SIP → AIP → DIP with full metadata preservation.
+    ///
+    /// This test exercises:
+    /// 1. SIP creation with content + descriptive metadata (Dublin Core + PREMIS)
+    /// 2. AIP creation from the same content with preservation metadata
+    /// 3. DIP generation from the AIP
+    /// 4. Verification that all key metadata fields survive the full lifecycle
+    #[test]
+    fn test_oais_lifecycle() {
+        use crate::metadata::dublin_core::DublinCoreRecord;
+        use crate::metadata::premis::{
+            EventType, PremisEvent, PremisMetadata, PremisMetadataWithRights, PremisObject,
+            PremisRights, RightsBasis,
+        };
+        use crate::package::oais::{
+            DipGenerationConfig, DipGenerator, OaisBuilder, OaisPackage, OaisPackageType,
+        };
+        use std::io::Write;
+        use tempfile::{NamedTempFile, TempDir};
+
+        let temp_dir = TempDir::new().expect("temp dir creation should succeed");
+
+        // ── Step 1: Create a content file ─────────────────────────────────────
+        let mut content_file = NamedTempFile::new().expect("temp file creation should succeed");
+        content_file
+            .write_all(b"OxiMedia test video frame data for OAIS lifecycle test")
+            .expect("write should succeed");
+        content_file.flush().expect("flush should succeed");
+
+        // ── Step 2: Build descriptive metadata (Dublin Core) ──────────────────
+        let dc = DublinCoreRecord::new()
+            .with_title("OAIS Lifecycle Test Film")
+            .with_creator("COOLJAPAN OU")
+            .with_subject("digital preservation")
+            .with_subject("archival testing")
+            .with_description("Round-trip OAIS lifecycle test for oximedia-archive-pro")
+            .with_publisher("OxiMedia Archive")
+            .with_date("2025-03-14")
+            .with_type("MovingImage")
+            .with_format("video/x-matroska")
+            .with_identifier("urn:test:oais-lifecycle-001")
+            .with_language("en")
+            .with_rights("CC0 1.0 Universal");
+
+        // Serialize DC to a temp file for inclusion in packages
+        let dc_xml = dc.to_xml().expect("DC XML serialization should succeed");
+        let mut dc_file = NamedTempFile::new().expect("DC temp file should be created");
+        dc_file
+            .write_all(dc_xml.as_bytes())
+            .expect("write DC should succeed");
+        dc_file.flush().expect("flush DC should succeed");
+
+        // ── Step 3: Build preservation metadata (PREMIS with rights) ──────────
+        let premis_object =
+            PremisObject::from_file(content_file.path(), "obj-lifecycle-001".to_string())
+                .expect("PremisObject::from_file should succeed")
+                .with_checksum("SHA-256", "placeholder-sha256");
+
+        let ingest_event = PremisEvent::new("evt-ingest-001".to_string(), EventType::Ingestion)
+            .with_detail("Ingested into OxiMedia test archive")
+            .with_outcome("success")
+            .with_linking_object("obj-lifecycle-001");
+
+        let rights = PremisRights::new("rights-lifecycle-001", RightsBasis::License)
+            .with_license_uri("https://creativecommons.org/publicdomain/zero/1.0/")
+            .with_license_terms("CC0 1.0 Universal")
+            .with_act_granted("disseminate")
+            .with_act_granted("reproduce");
+
+        let premis_doc = PremisMetadataWithRights {
+            premis: PremisMetadata::new()
+                .with_object(premis_object)
+                .with_event(ingest_event),
+            rights: vec![rights],
+        };
+
+        let premis_xml = premis_doc
+            .to_xml()
+            .expect("PREMIS XML serialization should succeed");
+        let mut premis_file = NamedTempFile::new().expect("PREMIS temp file should be created");
+        premis_file
+            .write_all(premis_xml.as_bytes())
+            .expect("write PREMIS should succeed");
+        premis_file.flush().expect("flush PREMIS should succeed");
+
+        // ── Step 4: Create SIP ────────────────────────────────────────────────
+        let sip_dir = temp_dir.path().join("lifecycle-sip");
+        let sip = OaisBuilder::new(
+            sip_dir.clone(),
+            OaisPackageType::Sip,
+            "SIP-LC-001".to_string(),
+        )
+        .with_metadata("Creator", "COOLJAPAN OU")
+        .with_metadata("Title", "OAIS Lifecycle Test Film")
+        .with_metadata("Identifier", "urn:test:oais-lifecycle-001")
+        .add_content_file(content_file.path(), std::path::Path::new("video.mkv"))
+        .expect("add_content_file should succeed")
+        .add_metadata_file(dc_file.path(), std::path::Path::new("dublin_core.xml"))
+        .expect("add dc metadata should succeed")
+        .add_metadata_file(premis_file.path(), std::path::Path::new("premis.xml"))
+        .expect("add premis metadata should succeed")
+        .build()
+        .expect("SIP build should succeed");
+
+        assert_eq!(sip.package_type, OaisPackageType::Sip);
+        assert_eq!(sip.id, "SIP-LC-001");
+        assert!(sip_dir.join("content/video.mkv").exists());
+        assert!(sip_dir.join("metadata/dublin_core.xml").exists());
+        assert!(sip_dir.join("metadata/premis.xml").exists());
+
+        // ── Step 5: Create AIP (same content, preservation focus) ────────────
+        let aip_dir = temp_dir.path().join("lifecycle-aip");
+        let aip = OaisBuilder::new(
+            aip_dir.clone(),
+            OaisPackageType::Aip,
+            "AIP-LC-001".to_string(),
+        )
+        .with_metadata("Creator", "COOLJAPAN OU")
+        .with_metadata("Title", "OAIS Lifecycle Test Film")
+        .with_metadata("Identifier", "urn:test:oais-lifecycle-001")
+        .with_metadata("Source-SIP-ID", "SIP-LC-001")
+        .add_content_file(content_file.path(), std::path::Path::new("video.mkv"))
+        .expect("add_content_file should succeed")
+        .add_metadata_file(dc_file.path(), std::path::Path::new("dublin_core.xml"))
+        .expect("add dc metadata should succeed")
+        .add_metadata_file(premis_file.path(), std::path::Path::new("premis.xml"))
+        .expect("add premis metadata should succeed")
+        .build()
+        .expect("AIP build should succeed");
+
+        assert_eq!(aip.package_type, OaisPackageType::Aip);
+        assert_eq!(aip.id, "AIP-LC-001");
+        assert!(aip_dir.join("content/video.mkv").exists());
+        assert!(aip_dir.join("preservation").is_dir());
+
+        // ── Step 6: Generate DIP from AIP ────────────────────────────────────
+        let dip_dir = temp_dir.path().join("lifecycle-dip");
+        let dip_config = DipGenerationConfig {
+            include_preservation_metadata: true,
+            include_submission_metadata: false,
+            format_filter: None,
+            max_files: None,
+            extra_metadata: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("Access-Level".to_string(), "Public".to_string());
+                m.insert(
+                    "Requested-By".to_string(),
+                    "test-user@example.org".to_string(),
+                );
+                m
+            },
+        };
+
+        let dip = DipGenerator::generate(&aip, &dip_dir, "DIP-LC-001", &dip_config)
+            .expect("DIP generation from AIP should succeed");
+
+        assert_eq!(dip.package_type, OaisPackageType::Dip);
+        assert_eq!(dip.id, "DIP-LC-001");
+        assert!(dip_dir.join("content/video.mkv").exists());
+        assert!(dip_dir.join("metadata/dublin_core.xml").exists());
+        assert!(dip_dir.join("metadata/premis.xml").exists());
+        assert!(dip_dir.join("CHECKSUMS.txt").exists());
+
+        // ── Step 7: Verify metadata field preservation ────────────────────────
+        // DIP should reference its source AIP
+        assert_eq!(
+            dip.metadata.get("Source-AIP-ID").map(String::as_str),
+            Some("AIP-LC-001"),
+            "DIP must record its source AIP ID"
+        );
+        assert_eq!(
+            dip.metadata.get("Access-Level").map(String::as_str),
+            Some("Public"),
+            "Extra metadata should be preserved in DIP"
+        );
+        assert_eq!(
+            dip.metadata.get("Title").map(String::as_str),
+            Some("OAIS Lifecycle Test Film"),
+            "Title metadata should be preserved from AIP to DIP"
+        );
+        assert_eq!(
+            dip.metadata.get("Identifier").map(String::as_str),
+            Some("urn:test:oais-lifecycle-001"),
+            "Identifier must be preserved from AIP to DIP"
+        );
+
+        // ── Step 8: Load DIP back and verify round-trip integrity ─────────────
+        let loaded_dip = OaisPackage::load(&dip_dir).expect("Loading DIP from disk should succeed");
+        assert_eq!(loaded_dip.package_type, OaisPackageType::Dip);
+        assert_eq!(loaded_dip.id, "DIP-LC-001");
+        assert_eq!(
+            loaded_dip.metadata.get("Title").map(String::as_str),
+            Some("OAIS Lifecycle Test Film"),
+            "Title must round-trip through JSON manifest"
+        );
+
+        // ── Step 9: Verify Dublin Core XML integrity in the DIP ───────────────
+        let dip_dc_xml = std::fs::read_to_string(dip_dir.join("metadata/dublin_core.xml"))
+            .expect("Reading DIP DC XML should succeed");
+        let recovered_dc =
+            DublinCoreRecord::from_xml(&dip_dc_xml).expect("Parsing DIP DC XML should succeed");
+        assert_eq!(
+            recovered_dc.title.as_deref(),
+            Some("OAIS Lifecycle Test Film"),
+            "DC title must be preserved in DIP metadata"
+        );
+        assert_eq!(
+            recovered_dc.creator.as_deref(),
+            Some("COOLJAPAN OU"),
+            "DC creator must be preserved"
+        );
+        assert_eq!(
+            recovered_dc.subject.len(),
+            2,
+            "Both DC subjects must be preserved"
+        );
+        assert_eq!(
+            recovered_dc.identifier.as_deref(),
+            Some("urn:test:oais-lifecycle-001"),
+            "DC identifier must be preserved end-to-end"
+        );
+        assert_eq!(
+            recovered_dc.rights.as_deref(),
+            Some("CC0 1.0 Universal"),
+            "DC rights must survive the SIP → AIP → DIP pipeline"
+        );
+
+        // ── Step 10: Verify PREMIS XML integrity in the DIP ──────────────────
+        let dip_premis_xml = std::fs::read_to_string(dip_dir.join("metadata/premis.xml"))
+            .expect("Reading DIP PREMIS XML should succeed");
+        assert!(
+            dip_premis_xml.contains("obj-lifecycle-001"),
+            "PREMIS object ID must be preserved in DIP"
+        );
+        assert!(
+            dip_premis_xml.contains("<rightsBasis>license</rightsBasis>"),
+            "PREMIS rights basis must be preserved"
+        );
+        assert!(
+            dip_premis_xml.contains("CC0 1.0 Universal"),
+            "License terms must be preserved end-to-end"
+        );
+    }
 }

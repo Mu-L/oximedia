@@ -206,11 +206,15 @@ impl WhiteBalanceMatching {
             }
         }
 
-        if count > 0 {
+        if let (Some(avg_r), Some(avg_g), Some(avg_b)) = (
+            sum_r.checked_div(count),
+            sum_g.checked_div(count),
+            sum_b.checked_div(count),
+        ) {
             Some([
-                (sum_r / count) as f32 / 255.0,
-                (sum_g / count) as f32 / 255.0,
-                (sum_b / count) as f32 / 255.0,
+                avg_r as f32 / 255.0,
+                avg_g as f32 / 255.0,
+                avg_b as f32 / 255.0,
             ])
         } else {
             None

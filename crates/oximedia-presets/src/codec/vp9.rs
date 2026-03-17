@@ -30,6 +30,7 @@ pub fn vp9_720p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
     Preset::new(metadata, config)
 }
@@ -55,6 +56,7 @@ pub fn vp9_1080p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
     Preset::new(metadata, config)
 }
@@ -81,6 +83,7 @@ pub fn vp9_2160p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
     Preset::new(metadata, config)
 }

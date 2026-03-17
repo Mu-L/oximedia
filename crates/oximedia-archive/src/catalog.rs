@@ -420,6 +420,521 @@ mod tests {
     }
 }
 
+// ── Hierarchical catalog organization ─────────────────────────────────────────
+
+/// Unique collection identifier.
+pub type CollectionId = String;
+
+/// A collection node in the hierarchical catalog tree.
+///
+/// Collections form a tree: each collection may have zero or more
+/// sub-collections and zero or more direct entry IDs.
+#[derive(Clone, Debug)]
+pub struct CatalogCollection {
+    /// Unique identifier for this collection.
+    pub id: CollectionId,
+    /// Human-readable name.
+    pub name: String,
+    /// Optional description.
+    pub description: String,
+    /// Parent collection ID, or `None` for root-level collections.
+    pub parent_id: Option<CollectionId>,
+    /// IDs of entries directly belonging to this collection.
+    pub entry_ids: Vec<String>,
+    /// IDs of child sub-collections.
+    pub child_ids: Vec<CollectionId>,
+    /// Creation timestamp (Unix milliseconds).
+    pub created_at_ms: u64,
+}
+
+impl CatalogCollection {
+    /// Create a new root-level collection.
+    #[must_use]
+    pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            description: String::new(),
+            parent_id: None,
+            entry_ids: Vec::new(),
+            child_ids: Vec::new(),
+            created_at_ms: 0,
+        }
+    }
+
+    /// Create a sub-collection under a parent.
+    #[must_use]
+    pub fn with_parent(mut self, parent_id: impl Into<String>) -> Self {
+        self.parent_id = Some(parent_id.into());
+        self
+    }
+
+    /// Set the description.
+    #[must_use]
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        self.description = desc.into();
+        self
+    }
+
+    /// Set the creation timestamp.
+    #[must_use]
+    pub fn with_created_at(mut self, ms: u64) -> Self {
+        self.created_at_ms = ms;
+        self
+    }
+
+    /// Add an entry ID to this collection.
+    pub fn add_entry(&mut self, entry_id: impl Into<String>) {
+        self.entry_ids.push(entry_id.into());
+    }
+
+    /// Number of direct entries.
+    #[must_use]
+    pub fn entry_count(&self) -> usize {
+        self.entry_ids.len()
+    }
+
+    /// Number of direct child sub-collections.
+    #[must_use]
+    pub fn child_count(&self) -> usize {
+        self.child_ids.len()
+    }
+
+    /// Whether this is a root collection (no parent).
+    #[must_use]
+    pub fn is_root(&self) -> bool {
+        self.parent_id.is_none()
+    }
+}
+
+/// Error type for hierarchical catalog operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HierarchyError {
+    /// Collection not found.
+    CollectionNotFound(String),
+    /// Duplicate collection ID.
+    DuplicateCollection(String),
+    /// Cycle detected (a collection cannot be its own ancestor).
+    CycleDetected(String),
+    /// Entry not found in collection.
+    EntryNotFound(String),
+}
+
+impl std::fmt::Display for HierarchyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CollectionNotFound(id) => write!(f, "collection not found: {id}"),
+            Self::DuplicateCollection(id) => write!(f, "duplicate collection: {id}"),
+            Self::CycleDetected(id) => write!(f, "cycle detected at: {id}"),
+            Self::EntryNotFound(id) => write!(f, "entry not found: {id}"),
+        }
+    }
+}
+
+/// Hierarchical catalog index supporting collections and sub-collections.
+///
+/// Provides tree-structured organization, breadcrumb path computation,
+/// recursive entry collection, and move/rename operations.
+#[derive(Debug, Default)]
+pub struct HierarchicalCatalog {
+    /// All collections keyed by ID.
+    collections: std::collections::HashMap<CollectionId, CatalogCollection>,
+    /// All entries keyed by entry ID -> set of collection IDs they belong to.
+    entry_memberships: std::collections::HashMap<String, Vec<CollectionId>>,
+}
+
+impl HierarchicalCatalog {
+    /// Create an empty hierarchical catalog.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a collection to the catalog.
+    pub fn add_collection(&mut self, collection: CatalogCollection) -> Result<(), HierarchyError> {
+        if self.collections.contains_key(&collection.id) {
+            return Err(HierarchyError::DuplicateCollection(collection.id.clone()));
+        }
+        // If it has a parent, register as child of parent.
+        if let Some(ref parent_id) = collection.parent_id {
+            let parent = self
+                .collections
+                .get_mut(parent_id)
+                .ok_or_else(|| HierarchyError::CollectionNotFound(parent_id.clone()))?;
+            parent.child_ids.push(collection.id.clone());
+        }
+        self.collections.insert(collection.id.clone(), collection);
+        Ok(())
+    }
+
+    /// Get a collection by its ID.
+    #[must_use]
+    pub fn get_collection(&self, id: &str) -> Option<&CatalogCollection> {
+        self.collections.get(id)
+    }
+
+    /// Get a mutable reference to a collection.
+    pub fn get_collection_mut(&mut self, id: &str) -> Option<&mut CatalogCollection> {
+        self.collections.get_mut(id)
+    }
+
+    /// Total number of collections.
+    #[must_use]
+    pub fn collection_count(&self) -> usize {
+        self.collections.len()
+    }
+
+    /// Return all root-level collections (those with no parent).
+    #[must_use]
+    pub fn root_collections(&self) -> Vec<&CatalogCollection> {
+        self.collections.values().filter(|c| c.is_root()).collect()
+    }
+
+    /// Return the direct children of a collection.
+    #[must_use]
+    pub fn children_of(&self, collection_id: &str) -> Vec<&CatalogCollection> {
+        self.collections
+            .get(collection_id)
+            .map(|c| {
+                c.child_ids
+                    .iter()
+                    .filter_map(|cid| self.collections.get(cid))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Assign an entry to a collection.
+    pub fn assign_entry(
+        &mut self,
+        entry_id: &str,
+        collection_id: &str,
+    ) -> Result<(), HierarchyError> {
+        let col = self
+            .collections
+            .get_mut(collection_id)
+            .ok_or_else(|| HierarchyError::CollectionNotFound(collection_id.to_string()))?;
+        if !col.entry_ids.contains(&entry_id.to_string()) {
+            col.entry_ids.push(entry_id.to_string());
+        }
+        self.entry_memberships
+            .entry(entry_id.to_string())
+            .or_default()
+            .push(collection_id.to_string());
+        Ok(())
+    }
+
+    /// Remove an entry from a collection.
+    pub fn remove_entry_from(
+        &mut self,
+        entry_id: &str,
+        collection_id: &str,
+    ) -> Result<(), HierarchyError> {
+        let col = self
+            .collections
+            .get_mut(collection_id)
+            .ok_or_else(|| HierarchyError::CollectionNotFound(collection_id.to_string()))?;
+        let before = col.entry_ids.len();
+        col.entry_ids.retain(|eid| eid != entry_id);
+        if col.entry_ids.len() == before {
+            return Err(HierarchyError::EntryNotFound(entry_id.to_string()));
+        }
+        if let Some(memberships) = self.entry_memberships.get_mut(entry_id) {
+            memberships.retain(|cid| cid != collection_id);
+        }
+        Ok(())
+    }
+
+    /// Get the breadcrumb path from root to the given collection.
+    ///
+    /// Returns a vector of `(id, name)` pairs from root to the target.
+    #[must_use]
+    pub fn breadcrumb_path(&self, collection_id: &str) -> Vec<(String, String)> {
+        let mut path = Vec::new();
+        let mut current_id = Some(collection_id.to_string());
+        let mut seen = std::collections::HashSet::new();
+
+        while let Some(ref cid) = current_id {
+            if seen.contains(cid) {
+                break; // cycle protection
+            }
+            seen.insert(cid.clone());
+            if let Some(col) = self.collections.get(cid) {
+                path.push((col.id.clone(), col.name.clone()));
+                current_id = col.parent_id.clone();
+            } else {
+                break;
+            }
+        }
+        path.reverse();
+        path
+    }
+
+    /// Recursively collect all entry IDs in a collection and its sub-collections.
+    #[must_use]
+    pub fn all_entries_recursive(&self, collection_id: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        let mut stack = vec![collection_id.to_string()];
+        let mut visited = std::collections::HashSet::new();
+
+        while let Some(cid) = stack.pop() {
+            if visited.contains(&cid) {
+                continue;
+            }
+            visited.insert(cid.clone());
+            if let Some(col) = self.collections.get(&cid) {
+                result.extend(col.entry_ids.iter().cloned());
+                for child_id in &col.child_ids {
+                    stack.push(child_id.clone());
+                }
+            }
+        }
+        result
+    }
+
+    /// Compute the depth of a collection in the hierarchy (root = 0).
+    #[must_use]
+    pub fn depth(&self, collection_id: &str) -> usize {
+        let path = self.breadcrumb_path(collection_id);
+        if path.is_empty() {
+            0
+        } else {
+            path.len() - 1
+        }
+    }
+
+    /// Get all collections an entry belongs to.
+    #[must_use]
+    pub fn entry_collections(&self, entry_id: &str) -> Vec<&CatalogCollection> {
+        self.entry_memberships
+            .get(entry_id)
+            .map(|cids| {
+                cids.iter()
+                    .filter_map(|cid| self.collections.get(cid))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Remove a leaf collection (must have no children).
+    pub fn remove_collection(
+        &mut self,
+        collection_id: &str,
+    ) -> Result<CatalogCollection, HierarchyError> {
+        let col = self
+            .collections
+            .get(collection_id)
+            .ok_or_else(|| HierarchyError::CollectionNotFound(collection_id.to_string()))?;
+        if !col.child_ids.is_empty() {
+            return Err(HierarchyError::CycleDetected(format!(
+                "collection '{}' has {} children; remove children first",
+                collection_id,
+                col.child_ids.len()
+            )));
+        }
+        // Unlink from parent
+        let parent_id = col.parent_id.clone();
+        let col = self
+            .collections
+            .remove(collection_id)
+            .ok_or_else(|| HierarchyError::CollectionNotFound(collection_id.to_string()))?;
+        if let Some(ref pid) = parent_id {
+            if let Some(parent) = self.collections.get_mut(pid) {
+                parent.child_ids.retain(|cid| cid != collection_id);
+            }
+        }
+        // Remove entry memberships
+        for entry_id in &col.entry_ids {
+            if let Some(memberships) = self.entry_memberships.get_mut(entry_id) {
+                memberships.retain(|cid| cid != collection_id);
+            }
+        }
+        Ok(col)
+    }
+}
+
+impl HierarchicalCatalog {
+    /// Compute the depth from the breadcrumb path length.
+    fn _depth_from_breadcrumb(&self, collection_id: &str) -> usize {
+        let path = self.breadcrumb_path(collection_id);
+        if path.is_empty() {
+            0
+        } else {
+            path.len() - 1
+        }
+    }
+}
+
+#[cfg(test)]
+mod hierarchy_tests {
+    use super::*;
+
+    fn build_hierarchy() -> HierarchicalCatalog {
+        let mut h = HierarchicalCatalog::new();
+        h.add_collection(CatalogCollection::new("root", "Root Collection").with_created_at(1000))
+            .expect("add root");
+        h.add_collection(
+            CatalogCollection::new("films", "Films")
+                .with_parent("root")
+                .with_description("All film assets"),
+        )
+        .expect("add films");
+        h.add_collection(CatalogCollection::new("docs", "Documentaries").with_parent("films"))
+            .expect("add docs");
+        h.add_collection(CatalogCollection::new("music", "Music Videos").with_parent("films"))
+            .expect("add music");
+        h.add_collection(CatalogCollection::new("audio", "Audio Collection").with_created_at(2000))
+            .expect("add audio");
+        h
+    }
+
+    #[test]
+    fn test_add_and_count() {
+        let h = build_hierarchy();
+        assert_eq!(h.collection_count(), 5);
+    }
+
+    #[test]
+    fn test_root_collections() {
+        let h = build_hierarchy();
+        let roots = h.root_collections();
+        assert_eq!(roots.len(), 2);
+    }
+
+    #[test]
+    fn test_children_of() {
+        let h = build_hierarchy();
+        let children = h.children_of("films");
+        assert_eq!(children.len(), 2);
+    }
+
+    #[test]
+    fn test_children_of_leaf() {
+        let h = build_hierarchy();
+        let children = h.children_of("docs");
+        assert!(children.is_empty());
+    }
+
+    #[test]
+    fn test_assign_entry() {
+        let mut h = build_hierarchy();
+        h.assign_entry("film001", "docs").expect("assign entry");
+        let col = h.get_collection("docs").expect("get docs");
+        assert_eq!(col.entry_count(), 1);
+        assert!(col.entry_ids.contains(&"film001".to_string()));
+    }
+
+    #[test]
+    fn test_remove_entry() {
+        let mut h = build_hierarchy();
+        h.assign_entry("film001", "docs").expect("assign");
+        h.remove_entry_from("film001", "docs").expect("remove");
+        let col = h.get_collection("docs").expect("get docs");
+        assert_eq!(col.entry_count(), 0);
+    }
+
+    #[test]
+    fn test_remove_entry_not_found() {
+        let mut h = build_hierarchy();
+        let result = h.remove_entry_from("ghost", "docs");
+        assert!(matches!(result, Err(HierarchyError::EntryNotFound(_))));
+    }
+
+    #[test]
+    fn test_breadcrumb_path() {
+        let h = build_hierarchy();
+        let path = h.breadcrumb_path("docs");
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0].0, "root");
+        assert_eq!(path[1].0, "films");
+        assert_eq!(path[2].0, "docs");
+    }
+
+    #[test]
+    fn test_breadcrumb_path_root() {
+        let h = build_hierarchy();
+        let path = h.breadcrumb_path("root");
+        assert_eq!(path.len(), 1);
+        assert_eq!(path[0].0, "root");
+    }
+
+    #[test]
+    fn test_all_entries_recursive() {
+        let mut h = build_hierarchy();
+        h.assign_entry("film001", "docs").expect("assign");
+        h.assign_entry("film002", "music").expect("assign");
+        h.assign_entry("film003", "films").expect("assign");
+        let all = h.all_entries_recursive("films");
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
+    fn test_all_entries_recursive_leaf() {
+        let mut h = build_hierarchy();
+        h.assign_entry("film001", "docs").expect("assign");
+        let all = h.all_entries_recursive("docs");
+        assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn test_duplicate_collection_error() {
+        let mut h = build_hierarchy();
+        let result = h.add_collection(CatalogCollection::new("root", "Duplicate"));
+        assert!(matches!(
+            result,
+            Err(HierarchyError::DuplicateCollection(_))
+        ));
+    }
+
+    #[test]
+    fn test_parent_not_found_error() {
+        let mut h = HierarchicalCatalog::new();
+        let result =
+            h.add_collection(CatalogCollection::new("child", "Child").with_parent("nonexistent"));
+        assert!(matches!(result, Err(HierarchyError::CollectionNotFound(_))));
+    }
+
+    #[test]
+    fn test_remove_leaf_collection() {
+        let mut h = build_hierarchy();
+        let removed = h.remove_collection("docs").expect("remove docs");
+        assert_eq!(removed.id, "docs");
+        assert_eq!(h.collection_count(), 4);
+        // Parent should no longer list "docs"
+        let films = h.get_collection("films").expect("get films");
+        assert!(!films.child_ids.contains(&"docs".to_string()));
+    }
+
+    #[test]
+    fn test_remove_non_leaf_fails() {
+        let mut h = build_hierarchy();
+        let result = h.remove_collection("films");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_entry_collections() {
+        let mut h = build_hierarchy();
+        h.assign_entry("film001", "docs").expect("assign");
+        h.assign_entry("film001", "music").expect("assign");
+        let cols = h.entry_collections("film001");
+        assert_eq!(cols.len(), 2);
+    }
+
+    #[test]
+    fn test_collection_is_root() {
+        let h = build_hierarchy();
+        assert!(h.get_collection("root").expect("root").is_root());
+        assert!(!h.get_collection("films").expect("films").is_root());
+    }
+
+    #[test]
+    fn test_hierarchy_error_display() {
+        let e = HierarchyError::CollectionNotFound("test".into());
+        assert!(e.to_string().contains("test"));
+    }
+}
+
 // ── New asset-catalog types ───────────────────────────────────────────────────
 
 /// Classification of a media asset.

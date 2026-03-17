@@ -3,8 +3,7 @@
 //! Collects and renders real-time performance metrics (FPS, frame-time,
 //! CPU / GPU utilisation, bitrate, dropped frames) as a lightweight
 //! text-based overlay that can be composited onto the output stream.
-
-#![allow(dead_code)]
+//! Includes a frame-time graph renderer and usage bar displays.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -28,6 +27,10 @@ pub struct PerfSample {
     pub bitrate_kbps: u32,
     /// Number of frames dropped since the last sample.
     pub dropped_frames: u32,
+    /// VRAM usage in megabytes (0 if not available).
+    pub vram_mb: u32,
+    /// RAM usage in megabytes (0 if not available).
+    pub ram_mb: u32,
 }
 
 impl Default for PerfSample {
@@ -39,6 +42,8 @@ impl Default for PerfSample {
             gpu_usage: 0.0,
             bitrate_kbps: 0,
             dropped_frames: 0,
+            vram_mb: 0,
+            ram_mb: 0,
         }
     }
 }
@@ -103,6 +108,12 @@ impl HudColor {
     pub const fn red() -> Self {
         Self::new(255, 0, 0)
     }
+
+    /// Convert to `[u8; 4]` RGBA array.
+    #[must_use]
+    pub const fn to_rgba(self) -> [u8; 4] {
+        [self.r, self.g, self.b, self.a]
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -134,8 +145,16 @@ pub struct PerfHudConfig {
     pub show_bitrate: bool,
     /// Show dropped frames.
     pub show_dropped: bool,
+    /// Show frame-time sparkline graph.
+    pub show_frame_time_graph: bool,
+    /// Show memory usage (RAM/VRAM).
+    pub show_memory: bool,
     /// Update interval.
     pub update_interval: Duration,
+    /// Graph width in samples (for the frame-time sparkline).
+    pub graph_width: usize,
+    /// Graph height in text lines.
+    pub graph_height: usize,
 }
 
 impl Default for PerfHudConfig {
@@ -152,7 +171,127 @@ impl Default for PerfHudConfig {
             show_gpu: true,
             show_bitrate: true,
             show_dropped: true,
+            show_frame_time_graph: true,
+            show_memory: false,
             update_interval: Duration::from_millis(250),
+            graph_width: 60,
+            graph_height: 5,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FrameTimeGraph -- renders frame-time as a sparkline
+// ---------------------------------------------------------------------------
+
+/// A sparkline-style frame-time graph using Unicode block characters.
+pub struct FrameTimeGraph {
+    /// Width in columns.
+    width: usize,
+    /// Height in rows.
+    height: usize,
+}
+
+impl FrameTimeGraph {
+    /// Create a new frame-time graph renderer.
+    #[must_use]
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            width: width.max(1),
+            height: height.max(1),
+        }
+    }
+
+    /// Render the frame-time graph from the given samples.
+    ///
+    /// Returns a vector of strings, one per row (top to bottom).
+    /// Each column represents one sample, scaled to [0, max_ms].
+    #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation
+    )]
+    pub fn render(&self, samples: &[f32], target_ms: f32) -> Vec<String> {
+        if samples.is_empty() {
+            return vec![String::new(); self.height];
+        }
+
+        // Use target_ms * 2 as the graph ceiling
+        let max_val = target_ms * 2.0;
+
+        // Take the last `width` samples
+        let start = samples.len().saturating_sub(self.width);
+        let visible = &samples[start..];
+
+        // For each column, compute normalised height [0, height]
+        let total_cells = self.height;
+        let bar_heights: Vec<usize> = visible
+            .iter()
+            .map(|&v| {
+                let normalised = (v / max_val).clamp(0.0, 1.0);
+                (normalised * total_cells as f32).round() as usize
+            })
+            .collect();
+
+        // Build rows from top (highest) to bottom (lowest)
+        let mut rows = Vec::with_capacity(self.height);
+        for row in 0..self.height {
+            let threshold = self.height - row;
+            let mut line = String::with_capacity(self.width);
+            for &bh in &bar_heights {
+                if bh >= threshold {
+                    line.push('#');
+                } else {
+                    line.push(' ');
+                }
+            }
+            // Pad remaining columns
+            while line.len() < self.width {
+                line.push(' ');
+            }
+            rows.push(line);
+        }
+
+        rows
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UsageBar -- renders CPU/GPU usage as horizontal bar
+// ---------------------------------------------------------------------------
+
+/// Renders a usage percentage as a horizontal text bar.
+pub struct UsageBar;
+
+impl UsageBar {
+    /// Render a usage bar for the given percentage (0.0 - 1.0).
+    ///
+    /// Returns a string like `[########    ] 67%`
+    #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation
+    )]
+    pub fn render(usage: f32, width: usize, label: &str) -> String {
+        let clamped = usage.clamp(0.0, 1.0);
+        let filled = (clamped * width as f32).round() as usize;
+        let empty = width.saturating_sub(filled);
+
+        let bar: String = "#".repeat(filled) + &" ".repeat(empty);
+        format!("{label}: [{bar}] {:.0}%", clamped * 100.0)
+    }
+
+    /// Determine colour for a usage value.
+    #[must_use]
+    pub fn usage_color(usage: f32) -> HudColor {
+        if usage < 0.6 {
+            HudColor::green()
+        } else if usage < 0.85 {
+            HudColor::yellow()
+        } else {
+            HudColor::red()
         }
     }
 }
@@ -165,6 +304,7 @@ impl Default for PerfHudConfig {
 pub struct PerfHud {
     config: PerfHudConfig,
     history: VecDeque<PerfSample>,
+    graph: FrameTimeGraph,
 }
 
 impl PerfHud {
@@ -172,9 +312,11 @@ impl PerfHud {
     #[must_use]
     pub fn new(config: PerfHudConfig) -> Self {
         let cap = config.history_size;
+        let graph = FrameTimeGraph::new(config.graph_width, config.graph_height);
         Self {
             config,
             history: VecDeque::with_capacity(cap),
+            graph,
         }
     }
 
@@ -268,10 +410,10 @@ impl PerfHud {
             lines.push(format!("Frame: {:.2} ms", self.avg_frame_time_ms()));
         }
         if self.config.show_cpu {
-            lines.push(format!("CPU: {:.0}%", self.avg_cpu() * 100.0));
+            lines.push(UsageBar::render(self.avg_cpu(), 20, "CPU"));
         }
         if self.config.show_gpu {
-            lines.push(format!("GPU: {:.0}%", self.avg_gpu() * 100.0));
+            lines.push(UsageBar::render(self.avg_gpu(), 20, "GPU"));
         }
         if self.config.show_bitrate {
             if let Some(last) = self.history.back() {
@@ -280,6 +422,27 @@ impl PerfHud {
         }
         if self.config.show_dropped {
             lines.push(format!("Dropped: {}", self.total_dropped()));
+        }
+        if self.config.show_memory {
+            if let Some(last) = self.history.back() {
+                lines.push(format!(
+                    "RAM: {} MB  VRAM: {} MB",
+                    last.ram_mb, last.vram_mb
+                ));
+            }
+        }
+        if self.config.show_frame_time_graph {
+            let frame_times: Vec<f32> = self.history.iter().map(|s| s.frame_time_ms).collect();
+            let target_ms = if self.avg_fps() > 0.0 {
+                1000.0 / self.avg_fps()
+            } else {
+                16.67
+            };
+            let graph_rows = self.graph.render(&frame_times, target_ms);
+            lines.push("Frame time:".to_string());
+            for row in &graph_rows {
+                lines.push(format!("|{row}|"));
+            }
         }
         lines
     }
@@ -308,6 +471,50 @@ impl PerfHud {
         let idx = idx.max(1).min(fps_vals.len()) - 1;
         fps_vals[idx]
     }
+
+    /// Maximum frame time in the history.
+    #[must_use]
+    pub fn max_frame_time_ms(&self) -> f32 {
+        self.history
+            .iter()
+            .map(|s| s.frame_time_ms)
+            .fold(0.0_f32, f32::max)
+    }
+
+    /// Minimum frame time in the history.
+    #[must_use]
+    pub fn min_frame_time_ms(&self) -> f32 {
+        self.history
+            .iter()
+            .map(|s| s.frame_time_ms)
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// Frame-time jitter (standard deviation) across the history.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn frame_time_jitter(&self) -> f32 {
+        if self.history.len() < 2 {
+            return 0.0;
+        }
+        let mean = self.avg_frame_time_ms();
+        let variance: f32 = self
+            .history
+            .iter()
+            .map(|s| {
+                let diff = s.frame_time_ms - mean;
+                diff * diff
+            })
+            .sum::<f32>()
+            / (self.history.len() as f32 - 1.0);
+        variance.sqrt()
+    }
+
+    /// Get the latest sample, if any.
+    #[must_use]
+    pub fn latest_sample(&self) -> Option<&PerfSample> {
+        self.history.back()
+    }
 }
 
 #[cfg(test)]
@@ -322,6 +529,8 @@ mod tests {
             gpu_usage: gpu,
             bitrate_kbps: 6000,
             dropped_frames: dropped,
+            vram_mb: 512,
+            ram_mb: 2048,
         }
     }
 
@@ -377,7 +586,7 @@ mod tests {
     fn test_avg_frame_time() {
         let mut hud = PerfHud::new(PerfHudConfig::default());
         hud.push_sample(sample(60.0, 0.0, 0.0, 0));
-        // 1000/60 ≈ 16.667
+        // 1000/60 ~= 16.667
         assert!((hud.avg_frame_time_ms() - 16.6667).abs() < 0.1);
     }
 
@@ -429,6 +638,44 @@ mod tests {
     }
 
     #[test]
+    fn test_render_lines_cpu_gpu_bars() {
+        let mut hud = PerfHud::new(PerfHudConfig::default());
+        hud.push_sample(sample(60.0, 0.5, 0.7, 0));
+        let lines = hud.render_lines();
+        let cpu_line = lines.iter().find(|l| l.starts_with("CPU:"));
+        assert!(cpu_line.is_some());
+        let gpu_line = lines.iter().find(|l| l.starts_with("GPU:"));
+        assert!(gpu_line.is_some());
+    }
+
+    #[test]
+    fn test_render_lines_frame_time_graph() {
+        let mut hud = PerfHud::new(PerfHudConfig::default());
+        for i in 0..20 {
+            #[allow(clippy::cast_precision_loss)]
+            hud.push_sample(sample(60.0 + (i % 5) as f32, 0.0, 0.0, 0));
+        }
+        let lines = hud.render_lines();
+        let graph_header = lines.iter().any(|l| l.contains("Frame time"));
+        assert!(graph_header);
+    }
+
+    #[test]
+    fn test_render_lines_memory() {
+        let cfg = PerfHudConfig {
+            show_memory: true,
+            ..PerfHudConfig::default()
+        };
+        let mut hud = PerfHud::new(cfg);
+        hud.push_sample(sample(60.0, 0.5, 0.5, 0));
+        let lines = hud.render_lines();
+        let mem_line = lines
+            .iter()
+            .any(|l| l.contains("RAM:") && l.contains("VRAM:"));
+        assert!(mem_line);
+    }
+
+    #[test]
     fn test_clear() {
         let mut hud = PerfHud::new(PerfHudConfig::default());
         hud.push_sample(PerfSample::default());
@@ -444,7 +691,7 @@ mod tests {
             hud.push_sample(sample(30.0 + i as f32, 0.0, 0.0, 0));
         }
         let p1 = hud.percentile_1_fps();
-        // lowest values are 30, 31, … — 1% of 100 = index 0
+        // lowest values are 30, 31, ... - 1% of 100 = index 0
         assert!(p1 >= 30.0 && p1 <= 32.0);
     }
 
@@ -464,5 +711,142 @@ mod tests {
             let hud = PerfHud::new(cfg);
             assert_eq!(hud.config().position, pos);
         }
+    }
+
+    // FrameTimeGraph tests
+
+    #[test]
+    fn test_frame_time_graph_empty() {
+        let graph = FrameTimeGraph::new(10, 3);
+        let rows = graph.render(&[], 16.67);
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn test_frame_time_graph_single_sample() {
+        let graph = FrameTimeGraph::new(5, 3);
+        let rows = graph.render(&[16.67], 16.67);
+        assert_eq!(rows.len(), 3);
+        // The single bar should have some '#' characters
+        let has_bar = rows.iter().any(|r| r.contains('#'));
+        assert!(has_bar);
+    }
+
+    #[test]
+    fn test_frame_time_graph_full() {
+        let graph = FrameTimeGraph::new(5, 3);
+        let samples = vec![16.0, 17.0, 33.0, 10.0, 20.0];
+        let rows = graph.render(&samples, 16.67);
+        assert_eq!(rows.len(), 3);
+        // All rows should be `width` characters long
+        for row in &rows {
+            assert_eq!(row.len(), 5);
+        }
+    }
+
+    #[test]
+    fn test_frame_time_graph_overflow_clamped() {
+        let graph = FrameTimeGraph::new(5, 3);
+        // Very high value should be clamped to max height
+        let samples = vec![1000.0];
+        let rows = graph.render(&samples, 16.67);
+        // All rows should have '#' in the first column
+        for row in &rows {
+            assert_eq!(row.chars().next(), Some('#'));
+        }
+    }
+
+    // UsageBar tests
+
+    #[test]
+    fn test_usage_bar_zero() {
+        let bar = UsageBar::render(0.0, 10, "CPU");
+        assert!(bar.contains("CPU"));
+        assert!(bar.contains("0%"));
+    }
+
+    #[test]
+    fn test_usage_bar_full() {
+        let bar = UsageBar::render(1.0, 10, "GPU");
+        assert!(bar.contains("100%"));
+        assert!(bar.contains("##########"));
+    }
+
+    #[test]
+    fn test_usage_bar_half() {
+        let bar = UsageBar::render(0.5, 10, "CPU");
+        assert!(bar.contains("50%"));
+    }
+
+    #[test]
+    fn test_usage_color_green() {
+        let c = UsageBar::usage_color(0.3);
+        assert_eq!(c, HudColor::green());
+    }
+
+    #[test]
+    fn test_usage_color_yellow() {
+        let c = UsageBar::usage_color(0.7);
+        assert_eq!(c, HudColor::yellow());
+    }
+
+    #[test]
+    fn test_usage_color_red() {
+        let c = UsageBar::usage_color(0.95);
+        assert_eq!(c, HudColor::red());
+    }
+
+    // Additional PerfHud tests
+
+    #[test]
+    fn test_max_frame_time() {
+        let mut hud = PerfHud::new(PerfHudConfig::default());
+        hud.push_sample(sample(60.0, 0.0, 0.0, 0));
+        hud.push_sample(sample(30.0, 0.0, 0.0, 0));
+        // 30 fps => 33.33ms frame time
+        assert!(hud.max_frame_time_ms() > 30.0);
+    }
+
+    #[test]
+    fn test_min_frame_time() {
+        let mut hud = PerfHud::new(PerfHudConfig::default());
+        hud.push_sample(sample(60.0, 0.0, 0.0, 0));
+        hud.push_sample(sample(120.0, 0.0, 0.0, 0));
+        // 120 fps => ~8.33ms
+        assert!(hud.min_frame_time_ms() < 10.0);
+    }
+
+    #[test]
+    fn test_frame_time_jitter_constant() {
+        let mut hud = PerfHud::new(PerfHudConfig::default());
+        for _ in 0..10 {
+            hud.push_sample(sample(60.0, 0.0, 0.0, 0));
+        }
+        // All same FPS => jitter ~0
+        assert!(hud.frame_time_jitter() < 0.01);
+    }
+
+    #[test]
+    fn test_frame_time_jitter_variable() {
+        let mut hud = PerfHud::new(PerfHudConfig::default());
+        hud.push_sample(sample(30.0, 0.0, 0.0, 0));
+        hud.push_sample(sample(120.0, 0.0, 0.0, 0));
+        // Very different frame times => non-zero jitter
+        assert!(hud.frame_time_jitter() > 1.0);
+    }
+
+    #[test]
+    fn test_latest_sample() {
+        let mut hud = PerfHud::new(PerfHudConfig::default());
+        assert!(hud.latest_sample().is_none());
+        hud.push_sample(sample(60.0, 0.5, 0.7, 2));
+        let latest = hud.latest_sample().expect("should have sample");
+        assert!((latest.fps - 60.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_hud_color_to_rgba() {
+        let c = HudColor::new(10, 20, 30);
+        assert_eq!(c.to_rgba(), [10, 20, 30, 255]);
     }
 }

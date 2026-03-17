@@ -34,6 +34,16 @@ pub struct Statistics {
     pub p95_encoding_fps: f64,
     /// 99th percentile encoding FPS
     pub p99_encoding_fps: f64,
+    /// 95% confidence interval lower bound for mean encoding FPS
+    pub ci_encoding_fps_lower: f64,
+    /// 95% confidence interval upper bound for mean encoding FPS
+    pub ci_encoding_fps_upper: f64,
+    /// 95% confidence interval lower bound for mean decoding FPS
+    pub ci_decoding_fps_lower: f64,
+    /// 95% confidence interval upper bound for mean decoding FPS
+    pub ci_decoding_fps_upper: f64,
+    /// Number of outliers removed from encoding FPS before computing stats
+    pub outliers_removed: usize,
 }
 
 /// Statistical analysis provider.
@@ -48,20 +58,72 @@ impl StatisticalAnalysis for Statistics {
     }
 }
 
+/// Remove outliers from a sorted slice using the IQR (Tukey fences) method.
+///
+/// Values outside `[Q1 - 1.5*IQR, Q3 + 1.5*IQR]` are considered outliers.
+/// Returns the cleaned values and the number of outliers removed.
+fn remove_outliers_iqr(values: &[f64]) -> (Vec<f64>, usize) {
+    if values.len() < 4 {
+        // Too few points for reliable IQR estimation — return as-is.
+        return (values.to_vec(), 0);
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let q1 = percentile(&mut sorted.clone(), 25.0);
+    let q3 = percentile(&mut sorted.clone(), 75.0);
+    let iqr = q3 - q1;
+    let lower = q1 - 1.5 * iqr;
+    let upper = q3 + 1.5 * iqr;
+
+    let cleaned: Vec<f64> = values
+        .iter()
+        .copied()
+        .filter(|&v| v >= lower && v <= upper)
+        .collect();
+    let removed = values.len() - cleaned.len();
+    (cleaned, removed)
+}
+
 /// Compute statistics from sequence results.
+///
+/// Encoding and decoding FPS values are cleaned of outliers (IQR method) before
+/// computing means and confidence intervals.  The `outliers_removed` field on the
+/// returned [`Statistics`] reflects how many FPS measurements were discarded.
 #[must_use]
 pub fn compute_statistics(results: &[SequenceResult]) -> Statistics {
     if results.is_empty() {
         return Statistics::default();
     }
 
-    let encoding_fps: Vec<f64> = results.iter().map(|r| r.encoding_fps).collect();
-    let decoding_fps: Vec<f64> = results.iter().map(|r| r.decoding_fps).collect();
+    let raw_encoding_fps: Vec<f64> = results.iter().map(|r| r.encoding_fps).collect();
+    let raw_decoding_fps: Vec<f64> = results.iter().map(|r| r.decoding_fps).collect();
     let file_sizes: Vec<u64> = results.iter().map(|r| r.file_size_bytes).collect();
 
     let psnr_values: Vec<f64> = results.iter().filter_map(|r| r.metrics.psnr).collect();
-
     let ssim_values: Vec<f64> = results.iter().filter_map(|r| r.metrics.ssim).collect();
+
+    // Apply IQR outlier removal to FPS measurements.
+    let (encoding_fps, enc_out) = remove_outliers_iqr(&raw_encoding_fps);
+    let (decoding_fps, dec_out) = remove_outliers_iqr(&raw_decoding_fps);
+    let outliers_removed = enc_out + dec_out;
+
+    // Compute 95 % confidence intervals using z = 1.96 (large-sample approximation).
+    let z95 = 1.96_f64;
+    let enc_ci = {
+        let sd = std_dev(&encoding_fps);
+        let n = (encoding_fps.len() as f64).max(1.0);
+        let margin = z95 * (sd / n.sqrt());
+        let m = mean(&encoding_fps);
+        (m - margin, m + margin)
+    };
+    let dec_ci = {
+        let sd = std_dev(&decoding_fps);
+        let n = (decoding_fps.len() as f64).max(1.0);
+        let margin = z95 * (sd / n.sqrt());
+        let m = mean(&decoding_fps);
+        (m - margin, m + margin)
+    };
 
     Statistics {
         mean_encoding_fps: mean(&encoding_fps),
@@ -94,6 +156,11 @@ pub fn compute_statistics(results: &[SequenceResult]) -> Statistics {
         median_file_size: median_u64(&mut file_sizes.clone()),
         p95_encoding_fps: percentile(&mut encoding_fps.clone(), 95.0),
         p99_encoding_fps: percentile(&mut encoding_fps.clone(), 99.0),
+        ci_encoding_fps_lower: enc_ci.0,
+        ci_encoding_fps_upper: enc_ci.1,
+        ci_decoding_fps_lower: dec_ci.0,
+        ci_decoding_fps_upper: dec_ci.1,
+        outliers_removed,
     }
 }
 

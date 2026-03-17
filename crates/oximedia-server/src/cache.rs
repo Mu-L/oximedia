@@ -31,7 +31,7 @@ impl CacheKey {
 
     /// Computes a 64-bit hash of the key using FNV-1a.
     ///
-    /// This is used as the storage key inside [`ResponseCache`] to keep
+    /// This is used as the storage key inside `ResponseCache` to keep
     /// the map compact and avoid re-hashing the full strings on every lookup.
     #[allow(dead_code)]
     pub fn hash(&self) -> u64 {
@@ -378,7 +378,7 @@ impl CacheStats {
 
 /// A response cache keyed by [`CacheKey`] with path-prefix invalidation.
 ///
-/// This is a companion to [`ResponseCache`] for millisecond-resolution
+/// This is a companion to `ResponseCache` for millisecond-resolution
 /// timestamps and richer statistics via [`CacheStats`].
 #[allow(dead_code)]
 #[derive(Debug)]

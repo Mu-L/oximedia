@@ -33,11 +33,13 @@ pub mod math;
 
 pub mod background_plate;
 pub mod camera_frustum;
+pub mod camera_tracker;
 pub mod camera_tracking;
 pub mod color;
 pub mod constants;
 pub mod examples;
 pub mod frustum;
+pub mod frustum_culling;
 pub mod genlock;
 pub mod greenscreen;
 pub mod icvfx;

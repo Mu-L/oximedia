@@ -634,12 +634,14 @@ impl TimelineImporter {
             use oximedia_edl::timecode::EdlFrameRate;
             match edl.frame_rate {
                 EdlFrameRate::Fps23976 => Rational::new(24000, 1001),
+                EdlFrameRate::Fps23_976 => Rational::new(24000, 1001),
                 EdlFrameRate::Fps24 => Rational::new(24, 1),
                 EdlFrameRate::Fps25 => Rational::new(25, 1),
                 EdlFrameRate::Fps2997DF | EdlFrameRate::Fps2997NDF => Rational::new(30000, 1001),
                 EdlFrameRate::Fps30 => Rational::new(30, 1),
                 EdlFrameRate::Fps50 => Rational::new(50, 1),
                 EdlFrameRate::Fps5994 => Rational::new(60000, 1001),
+                EdlFrameRate::Fps59_94 => Rational::new(60000, 1001),
                 EdlFrameRate::Fps60 => Rational::new(60, 1),
             }
         };

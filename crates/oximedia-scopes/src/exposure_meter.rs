@@ -490,3 +490,446 @@ mod tests {
         assert!((reading.over_exposed_ratio - 1.0).abs() < f64::EPSILON);
     }
 }
+
+// ============================================================================
+// Enhanced Exposure Metering: ExposureMeter / new MeteringMode variants
+// ============================================================================
+
+/// Extended metering mode with highlight/shadow bias options.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeteringModeEx {
+    /// Multi-zone weighted average (9×9 grid, perimeter zones at 50% weight).
+    Evaluative,
+    /// Gaussian-weighted toward the image center (σ = 0.3 × min(w,h)).
+    CenterWeighted,
+    /// 5% central circle only.
+    Spot,
+    /// Bias toward highlights: weight = luma².
+    Highlight,
+    /// Bias toward shadows: weight = (1 − luma)².
+    Shadow,
+}
+
+/// Camera-style exposure meter.
+pub struct ExposureMeter {
+    /// Active metering mode.
+    pub mode: MeteringModeEx,
+    /// Frame width in pixels.
+    pub width: u32,
+    /// Frame height in pixels.
+    pub height: u32,
+}
+
+/// Exposure reading produced by [`ExposureMeter::measure`].
+#[derive(Debug, Clone)]
+pub struct ExposureReadingEx {
+    /// Exposure value (EV); 0 = 18% grey correctly exposed.
+    pub ev: f32,
+    /// Stops from correct exposure (negative = under, positive = over).
+    pub stops_from_correct: f32,
+    /// Gain adjustment in dB needed to reach correct exposure.
+    pub suggested_gain_db: f32,
+    /// Mean luminance of the metered area (linear 0–1).
+    pub luminance_avg: f32,
+    /// Peak luminance in the metered area.
+    pub luminance_max: f32,
+    /// Minimum luminance in the metered area.
+    pub luminance_min: f32,
+    /// Fraction of pixels brighter than 0.95.
+    pub clipping_pct: f32,
+    /// Fraction of pixels darker than 0.02.
+    pub crushed_pct: f32,
+}
+
+impl ExposureMeter {
+    /// Creates a new meter with the specified mode and frame dimensions.
+    #[must_use]
+    pub fn new(mode: MeteringModeEx, width: u32, height: u32) -> Self {
+        Self {
+            mode,
+            width,
+            height,
+        }
+    }
+
+    /// Measures exposure from a normalised luma slice (values 0.0–1.0,
+    /// length == `width × height`).
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn measure(&self, luma: &[f32]) -> ExposureReadingEx {
+        let n = (self.width as usize) * (self.height as usize);
+        if luma.len() < n || n == 0 {
+            return Self::zero_reading();
+        }
+
+        // Global statistics needed for all modes
+        let mut luma_max = 0.0_f32;
+        let mut luma_min = 1.0_f32;
+        let mut clipping = 0u64;
+        let mut crushed = 0u64;
+        for &v in &luma[..n] {
+            if v > luma_max {
+                luma_max = v;
+            }
+            if v < luma_min {
+                luma_min = v;
+            }
+            if v > 0.95 {
+                clipping += 1;
+            }
+            if v < 0.02 {
+                crushed += 1;
+            }
+        }
+
+        let avg = match self.mode {
+            MeteringModeEx::Evaluative => self.average_evaluative(luma, n),
+            MeteringModeEx::CenterWeighted => self.average_center_weighted(luma),
+            MeteringModeEx::Spot => self.average_spot(luma),
+            MeteringModeEx::Highlight => Self::average_highlight(luma, n),
+            MeteringModeEx::Shadow => Self::average_shadow(luma, n),
+        };
+
+        let ev = if avg > 0.0 {
+            (avg / 0.18).log2()
+        } else {
+            -10.0
+        };
+        let stops_from_correct = ev;
+        let suggested_gain_db = -ev * 6.0;
+        let total = n as f32;
+
+        ExposureReadingEx {
+            ev,
+            stops_from_correct,
+            suggested_gain_db,
+            luminance_avg: avg,
+            luminance_max: luma_max,
+            luminance_min: luma_min,
+            clipping_pct: clipping as f32 / total,
+            crushed_pct: crushed as f32 / total,
+        }
+    }
+
+    /// Returns the linear gain factor to apply for 18% grey correct exposure.
+    ///
+    /// A returned value of `1.0` means no adjustment needed.
+    #[must_use]
+    pub fn auto_exposure_gain(&self, luma: &[f32]) -> f32 {
+        let reading = self.measure(luma);
+        if reading.luminance_avg > 0.0 {
+            0.18 / reading.luminance_avg
+        } else {
+            1.0
+        }
+    }
+
+    // ── private helpers ──────────────────────────────────────────────────────
+
+    fn zero_reading() -> ExposureReadingEx {
+        ExposureReadingEx {
+            ev: -10.0,
+            stops_from_correct: -10.0,
+            suggested_gain_db: 60.0,
+            luminance_avg: 0.0,
+            luminance_max: 0.0,
+            luminance_min: 0.0,
+            clipping_pct: 0.0,
+            crushed_pct: 0.0,
+        }
+    }
+
+    /// Evaluative: 9×9 grid, perimeter zones weighted at 50%.
+    #[allow(clippy::cast_precision_loss)]
+    fn average_evaluative(&self, luma: &[f32], n: usize) -> f32 {
+        const ZONES: u32 = 9;
+        let zone_w = (self.width / ZONES).max(1);
+        let zone_h = (self.height / ZONES).max(1);
+
+        let mut weighted_sum = 0.0_f64;
+        let mut weight_total = 0.0_f64;
+
+        for idx in 0..n {
+            let x = (idx as u32) % self.width;
+            let y = (idx as u32) / self.width;
+            let zx = (x / zone_w).min(ZONES - 1);
+            let zy = (y / zone_h).min(ZONES - 1);
+            // Perimeter zones get 50% weight
+            let is_perimeter = zx == 0 || zx == ZONES - 1 || zy == 0 || zy == ZONES - 1;
+            let w: f64 = if is_perimeter { 0.5 } else { 1.0 };
+            weighted_sum += f64::from(luma[idx]) * w;
+            weight_total += w;
+        }
+
+        if weight_total > 0.0 {
+            (weighted_sum / weight_total) as f32
+        } else {
+            0.0
+        }
+    }
+
+    /// Center-weighted: Gaussian with σ = 0.3 × min(w, h).
+    #[allow(clippy::cast_precision_loss)]
+    fn average_center_weighted(&self, luma: &[f32]) -> f32 {
+        let cx = self.width as f64 / 2.0;
+        let cy = self.height as f64 / 2.0;
+        let sigma = 0.3 * (self.width.min(self.height)) as f64;
+        let two_sigma2 = 2.0 * sigma * sigma;
+
+        let mut weighted_sum = 0.0_f64;
+        let mut weight_total = 0.0_f64;
+        let w = self.width as usize;
+
+        for (idx, &v) in luma.iter().enumerate() {
+            let x = (idx % w) as f64;
+            let y = (idx / w) as f64;
+            let dx = x - cx;
+            let dy = y - cy;
+            let wt = (-(dx * dx + dy * dy) / two_sigma2).exp();
+            weighted_sum += f64::from(v) * wt;
+            weight_total += wt;
+        }
+
+        if weight_total > 0.0 {
+            (weighted_sum / weight_total) as f32
+        } else {
+            0.0
+        }
+    }
+
+    /// Spot: centre circle covering 5% of pixels by area.
+    #[allow(clippy::cast_precision_loss)]
+    fn average_spot(&self, luma: &[f32]) -> f32 {
+        let cx = self.width as f64 / 2.0;
+        let cy = self.height as f64 / 2.0;
+        // radius so that π·r² = 0.05 × w × h
+        let area = (self.width as f64) * (self.height as f64) * 0.05;
+        let radius = (area / std::f64::consts::PI).sqrt();
+        let w = self.width as usize;
+
+        let mut sum = 0.0_f64;
+        let mut count = 0u64;
+        for (idx, &v) in luma.iter().enumerate() {
+            let x = (idx % w) as f64;
+            let y = (idx / w) as f64;
+            let dx = x - cx;
+            let dy = y - cy;
+            if (dx * dx + dy * dy).sqrt() <= radius {
+                sum += f64::from(v);
+                count += 1;
+            }
+        }
+
+        if count > 0 {
+            (sum / count as f64) as f32
+        } else {
+            0.0
+        }
+    }
+
+    /// Highlight bias: weight = luma².
+    #[allow(clippy::cast_precision_loss)]
+    fn average_highlight(luma: &[f32], n: usize) -> f32 {
+        let mut weighted_sum = 0.0_f64;
+        let mut weight_total = 0.0_f64;
+        for &v in &luma[..n] {
+            let w = f64::from(v) * f64::from(v);
+            weighted_sum += f64::from(v) * w;
+            weight_total += w;
+        }
+        if weight_total > 0.0 {
+            (weighted_sum / weight_total) as f32
+        } else {
+            0.0
+        }
+    }
+
+    /// Shadow bias: weight = (1 − luma)².
+    #[allow(clippy::cast_precision_loss)]
+    fn average_shadow(luma: &[f32], n: usize) -> f32 {
+        let mut weighted_sum = 0.0_f64;
+        let mut weight_total = 0.0_f64;
+        for &v in &luma[..n] {
+            let inv = 1.0_f64 - f64::from(v);
+            let w = inv * inv;
+            weighted_sum += f64::from(v) * w;
+            weight_total += w;
+        }
+        if weight_total > 0.0 {
+            (weighted_sum / weight_total) as f32
+        } else {
+            0.0
+        }
+    }
+}
+
+#[cfg(test)]
+mod exposure_meter_ex_tests {
+    use super::*;
+
+    fn flat_luma(width: u32, height: u32, value: f32) -> Vec<f32> {
+        vec![value; (width * height) as usize]
+    }
+
+    fn gradient_luma(width: u32, height: u32) -> Vec<f32> {
+        let n = (width * height) as usize;
+        (0..n).map(|i| i as f32 / (n - 1) as f32).collect()
+    }
+
+    // ── construction ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_meter_new() {
+        let m = ExposureMeter::new(MeteringModeEx::Evaluative, 1920, 1080);
+        assert_eq!(m.width, 1920);
+        assert_eq!(m.height, 1080);
+        assert_eq!(m.mode, MeteringModeEx::Evaluative);
+    }
+
+    // ── EV maths ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ev_18_gray() {
+        let m = ExposureMeter::new(MeteringModeEx::Evaluative, 10, 10);
+        let luma = flat_luma(10, 10, 0.18);
+        let r = m.measure(&luma);
+        assert!(
+            r.ev.abs() < 0.05,
+            "EV at 18% grey should be ≈0, got {}",
+            r.ev
+        );
+    }
+
+    #[test]
+    fn test_ev_overexposed() {
+        let m = ExposureMeter::new(MeteringModeEx::Evaluative, 10, 10);
+        let luma = flat_luma(10, 10, 0.72); // 2 stops over
+        let r = m.measure(&luma);
+        assert!(
+            r.ev > 1.5,
+            "EV should be > 1.5 for bright frame, got {}",
+            r.ev
+        );
+    }
+
+    #[test]
+    fn test_ev_underexposed() {
+        let m = ExposureMeter::new(MeteringModeEx::Evaluative, 10, 10);
+        let luma = flat_luma(10, 10, 0.045); // 2 stops under
+        let r = m.measure(&luma);
+        assert!(
+            r.ev < -1.5,
+            "EV should be < -1.5 for dark frame, got {}",
+            r.ev
+        );
+    }
+
+    // ── stops_from_correct & suggested_gain_db ────────────────────────────
+
+    #[test]
+    fn test_stops_from_correct_equals_ev() {
+        let m = ExposureMeter::new(MeteringModeEx::Spot, 20, 20);
+        let luma = flat_luma(20, 20, 0.36);
+        let r = m.measure(&luma);
+        assert!((r.stops_from_correct - r.ev).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_suggested_gain_db() {
+        let m = ExposureMeter::new(MeteringModeEx::Spot, 10, 10);
+        let luma = flat_luma(10, 10, 0.18);
+        let r = m.measure(&luma);
+        // At 18% grey, EV≈0, so gain_db≈0
+        assert!(r.suggested_gain_db.abs() < 0.5);
+    }
+
+    // ── clipping / crushed ────────────────────────────────────────────────
+
+    #[test]
+    fn test_clipping_pct_all_white() {
+        let m = ExposureMeter::new(MeteringModeEx::Evaluative, 10, 10);
+        let luma = flat_luma(10, 10, 1.0);
+        let r = m.measure(&luma);
+        assert!((r.clipping_pct - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_crushed_pct_all_black() {
+        let m = ExposureMeter::new(MeteringModeEx::Evaluative, 10, 10);
+        let luma = flat_luma(10, 10, 0.0);
+        let r = m.measure(&luma);
+        assert!((r.crushed_pct - 1.0).abs() < 1e-5);
+    }
+
+    // ── luminance min/max ────────────────────────────────────────────────
+
+    #[test]
+    fn test_luma_min_max() {
+        let m = ExposureMeter::new(MeteringModeEx::Evaluative, 16, 16);
+        let luma = gradient_luma(16, 16);
+        let r = m.measure(&luma);
+        assert!(r.luminance_max > 0.98);
+        assert!(r.luminance_min < 0.02);
+    }
+
+    // ── mode-specific weighting ──────────────────────────────────────────
+
+    #[test]
+    fn test_highlight_mode_biases_bright() {
+        let m_hl = ExposureMeter::new(MeteringModeEx::Highlight, 16, 16);
+        let m_sh = ExposureMeter::new(MeteringModeEx::Shadow, 16, 16);
+        let luma = gradient_luma(16, 16);
+        let r_hl = m_hl.measure(&luma);
+        let r_sh = m_sh.measure(&luma);
+        assert!(
+            r_hl.luminance_avg > r_sh.luminance_avg,
+            "Highlight avg {} should exceed shadow avg {}",
+            r_hl.luminance_avg,
+            r_sh.luminance_avg
+        );
+    }
+
+    #[test]
+    fn test_center_weighted_uniform() {
+        // Uniform luma → center-weighted avg should still equal that value
+        let m = ExposureMeter::new(MeteringModeEx::CenterWeighted, 20, 20);
+        let luma = flat_luma(20, 20, 0.5);
+        let r = m.measure(&luma);
+        assert!((r.luminance_avg - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_spot_subset() {
+        // Uniform frame → spot average equals full average
+        let m = ExposureMeter::new(MeteringModeEx::Spot, 100, 100);
+        let luma = flat_luma(100, 100, 0.4);
+        let r = m.measure(&luma);
+        assert!((r.luminance_avg - 0.4).abs() < 0.01);
+    }
+
+    // ── auto_exposure_gain ───────────────────────────────────────────────
+
+    #[test]
+    fn test_auto_exposure_gain_grey() {
+        let m = ExposureMeter::new(MeteringModeEx::Evaluative, 10, 10);
+        let luma = flat_luma(10, 10, 0.18);
+        let gain = m.auto_exposure_gain(&luma);
+        assert!((gain - 1.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn test_auto_exposure_gain_dark() {
+        let m = ExposureMeter::new(MeteringModeEx::Evaluative, 10, 10);
+        let luma = flat_luma(10, 10, 0.09); // 1 stop under
+        let gain = m.auto_exposure_gain(&luma);
+        assert!(gain > 1.8 && gain < 2.2, "Expected ~2× gain, got {gain}");
+    }
+
+    #[test]
+    fn test_measure_empty_input() {
+        let m = ExposureMeter::new(MeteringModeEx::Evaluative, 10, 10);
+        let r = m.measure(&[]);
+        assert_eq!(r.luminance_avg, 0.0);
+        assert!(r.ev < -5.0);
+    }
+}

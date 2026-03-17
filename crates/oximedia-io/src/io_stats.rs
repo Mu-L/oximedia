@@ -367,7 +367,7 @@ mod tests {
     fn test_latency_histogram_min_max() {
         let mut h = LatencyHistogram::new();
         h.record(Duration::from_micros(5));
-        h.record(Duration::from_micros(2000));
+        h.record(Duration::from_millis(2));
         assert_eq!(h.min_us(), 5);
         assert_eq!(h.max_us(), 2000);
     }

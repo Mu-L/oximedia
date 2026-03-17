@@ -70,7 +70,10 @@ impl<T: Clone> AccelCache<T> {
         }
         self.clock += 1;
         let clock = self.clock;
-        let entry = self.entries.get_mut(&key).expect("key confirmed present");
+        let entry = self
+            .entries
+            .get_mut(&key)
+            .unwrap_or_else(|| unreachable!("key confirmed present via contains_key"));
         entry.last_access = clock;
         entry.hit_count += 1;
         self.stats.hits += 1;
@@ -119,7 +122,7 @@ impl<T: Clone> AccelCache<T> {
             .iter()
             .min_by_key(|(_, e)| e.last_access)
             .map(|(&k, _)| k)
-            .expect("entries is non-empty");
+            .unwrap_or_else(|| unreachable!("entries is non-empty (checked above)"));
 
         if let Some(evicted) = self.entries.remove(&lru_key) {
             self.current_usage = self.current_usage.saturating_sub(evicted.size_bytes);

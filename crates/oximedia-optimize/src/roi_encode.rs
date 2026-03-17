@@ -5,6 +5,10 @@
 //! and adjusting encoding parameters (QP offsets, bitrate allocation) to prioritize
 //! visual quality in those regions. Common use cases include face-aware encoding,
 //! text region preservation, and broadcast graphics protection.
+//!
+//! The ROI encoder integrates with the main [`Optimizer`](crate::Optimizer) pipeline
+//! via [`RoiOptimizeResult`], which provides per-CTU QP adjustments that the
+//! optimizer applies on top of its base AQ decisions.
 
 /// Coordinate type for ROI regions.
 #[allow(clippy::cast_precision_loss)]
@@ -195,6 +199,17 @@ impl QpDeltaMap {
     pub fn active_ctu_count(&self) -> usize {
         self.deltas.iter().filter(|&&d| d != 0).count()
     }
+
+    /// Merges another QP delta map, adding deltas element-wise with clamping.
+    pub fn merge_additive(&mut self, other: &Self, max_magnitude: i8) {
+        if self.cols != other.cols || self.rows != other.rows {
+            return;
+        }
+        for i in 0..self.deltas.len() {
+            let sum = i16::from(self.deltas[i]) + i16::from(other.deltas[i]);
+            self.deltas[i] = sum.clamp(i16::from(-max_magnitude), i16::from(max_magnitude)) as i8;
+        }
+    }
 }
 
 /// The ROI encoder optimizer generates per-CTU QP delta maps from ROI regions.
@@ -230,11 +245,23 @@ impl RoiEncoder {
         self.regions.len()
     }
 
+    /// Returns the current regions.
+    pub fn regions(&self) -> &[RoiRegion] {
+        &self.regions
+    }
+
+    /// Returns the encoder configuration.
+    pub fn config(&self) -> &RoiEncoderConfig {
+        &self.config
+    }
+
     /// Generates a QP delta map for the current set of regions.
     #[allow(clippy::cast_precision_loss)]
     pub fn generate_qp_map(&self) -> QpDeltaMap {
-        let cols = ((self.config.frame_width + self.config.ctu_size - 1) / self.config.ctu_size) as usize;
-        let rows = ((self.config.frame_height + self.config.ctu_size - 1) / self.config.ctu_size) as usize;
+        let cols =
+            ((self.config.frame_width + self.config.ctu_size - 1) / self.config.ctu_size) as usize;
+        let rows =
+            ((self.config.frame_height + self.config.ctu_size - 1) / self.config.ctu_size) as usize;
         let mut map = QpDeltaMap::new(cols, rows);
 
         if self.regions.is_empty() {
@@ -245,12 +272,8 @@ impl RoiEncoder {
             for col in 0..cols {
                 let ctu_x = (col as u32 * self.config.ctu_size) as Coord;
                 let ctu_y = (row as u32 * self.config.ctu_size) as Coord;
-                let ctu_region = RoiRegion::new(
-                    ctu_x,
-                    ctu_y,
-                    self.config.ctu_size,
-                    self.config.ctu_size,
-                );
+                let ctu_region =
+                    RoiRegion::new(ctu_x, ctu_y, self.config.ctu_size, self.config.ctu_size);
 
                 let mut max_priority: f64 = 0.0;
                 for region in &self.regions {
@@ -277,6 +300,37 @@ impl RoiEncoder {
         map
     }
 
+    /// Generates an [`RoiOptimizeResult`] for pipeline integration with the main Optimizer.
+    ///
+    /// This produces a result that includes both the QP delta map and per-block
+    /// quality weights that the Optimizer uses to adjust AQ decisions.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn optimize_frame(&self) -> RoiOptimizeResult {
+        let map = self.generate_qp_map();
+        let analysis = analyze_qp_map(&map);
+
+        // Compute per-CTU quality weights (higher priority = lower weight = more bits)
+        let quality_weights: Vec<f64> = map
+            .deltas
+            .iter()
+            .map(|&d| {
+                // Convert delta to weight: negative delta (boost) -> higher weight
+                let w = 1.0 - f64::from(d) / f64::from(self.config.max_qp_reduction as i8);
+                w.clamp(0.5, 2.0)
+            })
+            .collect();
+
+        let bitrate_impact = self.estimate_bitrate_impact();
+
+        RoiOptimizeResult {
+            qp_map: map,
+            quality_weights,
+            analysis,
+            estimated_bitrate_change: bitrate_impact,
+            has_active_regions: !self.regions.is_empty(),
+        }
+    }
+
     /// Computes a QP delta from a priority value.
     #[allow(clippy::cast_precision_loss)]
     #[allow(clippy::cast_possible_truncation)]
@@ -291,8 +345,11 @@ impl RoiEncoder {
             }
             QpAdjustMode::PriorityScale => {
                 if priority > 1.0 {
-                    let reduction = (priority - 1.0).min(1.0) * f64::from(self.config.max_qp_reduction);
-                    -(reduction.round().min(f64::from(self.config.max_qp_reduction)) as i8)
+                    let reduction =
+                        (priority - 1.0).min(1.0) * f64::from(self.config.max_qp_reduction);
+                    -(reduction
+                        .round()
+                        .min(f64::from(self.config.max_qp_reduction)) as i8)
                 } else if priority < 1.0 {
                     let increase = (1.0 - priority) * f64::from(self.config.max_qp_increase);
                     increase.round().min(f64::from(self.config.max_qp_increase)) as i8
@@ -303,7 +360,8 @@ impl RoiEncoder {
             QpAdjustMode::FixedQp => {
                 let target_qp = (f64::from(self.config.base_qp) / priority).round() as i16;
                 let delta = target_qp - i16::from(self.config.base_qp);
-                delta.max(-i16::from(self.config.max_qp_reduction))
+                delta
+                    .max(-i16::from(self.config.max_qp_reduction))
                     .min(i16::from(self.config.max_qp_increase)) as i8
             }
         }
@@ -317,6 +375,57 @@ impl RoiEncoder {
         // Rough model: each QP unit ~= 12% bitrate change
         let factor = 2.0_f64.powf(-avg_delta / 6.0);
         factor - 1.0
+    }
+}
+
+/// Result of ROI optimization for integration with the main Optimizer pipeline.
+#[derive(Debug, Clone)]
+pub struct RoiOptimizeResult {
+    /// Per-CTU QP delta map.
+    pub qp_map: QpDeltaMap,
+    /// Per-CTU quality weights (1.0 = normal, >1.0 = boosted region).
+    pub quality_weights: Vec<f64>,
+    /// Summary analysis of the QP map.
+    pub analysis: RoiAnalysisSummary,
+    /// Estimated bitrate change factor (0.0 = no change, positive = more bits).
+    pub estimated_bitrate_change: f64,
+    /// Whether any active ROI regions exist.
+    pub has_active_regions: bool,
+}
+
+impl RoiOptimizeResult {
+    /// Creates an empty result with no active regions.
+    pub fn empty(cols: usize, rows: usize) -> Self {
+        Self {
+            qp_map: QpDeltaMap::new(cols, rows),
+            quality_weights: vec![1.0; cols * rows],
+            analysis: RoiAnalysisSummary {
+                total_ctus: cols * rows,
+                roi_ctus: 0,
+                avg_delta: 0.0,
+                min_delta: 0,
+                max_delta: 0,
+            },
+            estimated_bitrate_change: 0.0,
+            has_active_regions: false,
+        }
+    }
+
+    /// Returns the QP delta for a specific CTU position.
+    pub fn qp_delta_at(&self, col: usize, row: usize) -> i8 {
+        self.qp_map.get(col, row)
+    }
+
+    /// Returns the quality weight for a specific CTU position.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn quality_weight_at(&self, col: usize, row: usize) -> f64 {
+        if col < self.qp_map.cols && row < self.qp_map.rows {
+            let idx = row * self.qp_map.cols + col;
+            if idx < self.quality_weights.len() {
+                return self.quality_weights[idx];
+            }
+        }
+        1.0
     }
 }
 
@@ -450,6 +559,21 @@ mod tests {
     }
 
     #[test]
+    fn test_qp_delta_map_merge_additive() {
+        let mut map1 = QpDeltaMap::new(2, 2);
+        map1.set(0, 0, -3);
+        map1.set(1, 1, 2);
+
+        let mut map2 = QpDeltaMap::new(2, 2);
+        map2.set(0, 0, -4);
+        map2.set(1, 1, 3);
+
+        map1.merge_additive(&map2, 6);
+        assert_eq!(map1.get(0, 0), -6); // clamped to -6
+        assert_eq!(map1.get(1, 1), 5);
+    }
+
+    #[test]
     fn test_roi_encoder_empty_regions() {
         let config = RoiEncoderConfig {
             frame_width: 128,
@@ -516,5 +640,117 @@ mod tests {
         assert_eq!(enc.region_count(), 2);
         enc.clear_regions();
         assert_eq!(enc.region_count(), 0);
+    }
+
+    // --- New tests for ROI pipeline integration ---
+
+    #[test]
+    fn test_roi_optimize_frame_no_regions() {
+        let config = RoiEncoderConfig {
+            frame_width: 128,
+            frame_height: 128,
+            ctu_size: 64,
+            ..Default::default()
+        };
+        let enc = RoiEncoder::new(config);
+        let result = enc.optimize_frame();
+        assert!(!result.has_active_regions);
+        assert_eq!(result.analysis.roi_ctus, 0);
+        assert!((result.estimated_bitrate_change - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_roi_optimize_frame_with_regions() {
+        let config = RoiEncoderConfig {
+            frame_width: 256,
+            frame_height: 256,
+            ctu_size: 64,
+            adjust_mode: QpAdjustMode::AbsoluteOffset,
+            max_qp_reduction: 8,
+            ..Default::default()
+        };
+        let mut enc = RoiEncoder::new(config);
+        enc.add_region(RoiRegion::with_priority(0, 0, 128, 128, 1.5));
+        let result = enc.optimize_frame();
+        assert!(result.has_active_regions);
+        assert!(result.analysis.roi_ctus > 0);
+        // Boosted region should have quality weight > 1.0
+        let w = result.quality_weight_at(0, 0);
+        assert!(w > 1.0, "Quality weight in ROI should be > 1.0: {}", w);
+    }
+
+    #[test]
+    fn test_roi_optimize_result_empty() {
+        let result = RoiOptimizeResult::empty(4, 4);
+        assert!(!result.has_active_regions);
+        assert_eq!(result.quality_weights.len(), 16);
+        assert!((result.quality_weight_at(0, 0) - 1.0).abs() < f64::EPSILON);
+        assert_eq!(result.qp_delta_at(0, 0), 0);
+    }
+
+    #[test]
+    fn test_roi_optimize_result_accessors() {
+        let config = RoiEncoderConfig {
+            frame_width: 128,
+            frame_height: 128,
+            ctu_size: 64,
+            adjust_mode: QpAdjustMode::AbsoluteOffset,
+            max_qp_reduction: 6,
+            ..Default::default()
+        };
+        let mut enc = RoiEncoder::new(config);
+        enc.add_region(RoiRegion::with_priority(0, 0, 64, 64, 1.0));
+        let result = enc.optimize_frame();
+        // CTU (0,0) should have negative delta
+        assert!(result.qp_delta_at(0, 0) < 0);
+        // Out of bounds should return defaults
+        assert_eq!(result.qp_delta_at(100, 100), 0);
+        assert!((result.quality_weight_at(100, 100) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_roi_high_priority_gets_more_bits() {
+        let config = RoiEncoderConfig {
+            frame_width: 256,
+            frame_height: 256,
+            ctu_size: 64,
+            adjust_mode: QpAdjustMode::AbsoluteOffset,
+            max_qp_reduction: 10,
+            ..Default::default()
+        };
+        let mut enc = RoiEncoder::new(config);
+        // High priority face region
+        enc.add_region(RoiRegion::with_priority(0, 0, 64, 64, 2.0));
+        let result = enc.optimize_frame();
+        let delta_roi = result.qp_delta_at(0, 0);
+        let delta_bg = result.qp_delta_at(3, 3);
+        // ROI should have more negative delta (lower QP = more bits)
+        assert!(
+            delta_roi < delta_bg,
+            "ROI delta ({}) should be less than background ({})",
+            delta_roi,
+            delta_bg
+        );
+    }
+
+    #[test]
+    fn test_roi_encoder_regions_accessor() {
+        let config = RoiEncoderConfig::default();
+        let mut enc = RoiEncoder::new(config);
+        enc.add_region(RoiRegion::new(0, 0, 100, 100));
+        enc.add_region(RoiRegion::with_priority(200, 200, 50, 50, 2.0));
+        assert_eq!(enc.regions().len(), 2);
+        assert_eq!(enc.regions()[0].width, 100);
+        assert!((enc.regions()[1].priority - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_merge_additive_different_sizes_noop() {
+        let mut map1 = QpDeltaMap::new(2, 2);
+        map1.set(0, 0, -3);
+        let map2 = QpDeltaMap::new(3, 3);
+        map1.merge_additive(&map2, 10);
+        // Should not change since sizes differ
+        assert_eq!(map1.get(0, 0), -3);
     }
 }

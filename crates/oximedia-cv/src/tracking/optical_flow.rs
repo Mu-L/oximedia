@@ -128,10 +128,13 @@ impl OpticalFlow {
     /// ```
     /// use oximedia_cv::tracking::{OpticalFlow, FlowMethod};
     ///
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let flow = OpticalFlow::new(FlowMethod::Farneback);
     /// let prev = vec![100u8; 100];
     /// let curr = vec![100u8; 100];
     /// let field = flow.compute(&prev, &curr, 10, 10)?;
+    /// Ok(())
+    /// }
     /// ```
     pub fn compute(&self, prev: &[u8], curr: &[u8], w: u32, h: u32) -> CvResult<FlowField> {
         if w == 0 || h == 0 {
@@ -625,6 +628,7 @@ fn compute_weighted_gradient_matrix(
 }
 
 /// Compute polynomial expansion for Farneback method.
+#[allow(clippy::manual_checked_ops)]
 fn compute_polynomial_expansion(img: &[u8], w: u32, h: u32, win_size: usize) -> Vec<(f64, f64)> {
     let size = w as usize * h as usize;
     let mut result = vec![(0.0, 0.0); size];
@@ -711,7 +715,7 @@ fn downsample(img: &[u8], w: u32, h: u32) -> Vec<u8> {
                 }
             }
 
-            result[(y * new_w + x) as usize] = if count > 0 { (sum / count) as u8 } else { 0 };
+            result[(y * new_w + x) as usize] = sum.checked_div(count).unwrap_or(0) as u8;
         }
     }
 

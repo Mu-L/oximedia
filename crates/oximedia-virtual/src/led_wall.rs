@@ -266,6 +266,320 @@ impl MoireRiskAssessor {
 }
 
 // ---------------------------------------------------------------------------
+// LedPanel (new-style, richer metadata)
+// ---------------------------------------------------------------------------
+
+/// Color gamut of an LED panel.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PanelGamut {
+    Rec709,
+    DciP3,
+    Rec2020,
+}
+
+/// Face of the LED volume where a panel is mounted.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WallFace {
+    Front,
+    Left,
+    Right,
+    Ceiling,
+    Floor,
+}
+
+/// Physical position and orientation of an LED panel inside the volume.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PanelPosition {
+    /// Horizontal offset from centre in mm.
+    pub x_mm: f32,
+    /// Vertical offset from centre in mm.
+    pub y_mm: f32,
+    /// Depth offset in mm (positive = further from camera).
+    pub z_mm: f32,
+    /// Panel rotation angle in degrees.
+    pub rotation_deg: f32,
+    /// Which face of the volume this panel belongs to.
+    pub face: WallFace,
+}
+
+/// A single LED panel tile with rich physical and electrical metadata.
+#[derive(Debug, Clone)]
+pub struct LedPanel {
+    /// Unique string identifier for the panel.
+    pub id: String,
+    /// Horizontal resolution in pixels.
+    pub width_pixels: u32,
+    /// Vertical resolution in pixels.
+    pub height_pixels: u32,
+    /// Centre-to-centre pixel pitch in millimetres.
+    pub pixel_pitch_mm: f32,
+    /// Peak brightness in nits (cd/m²).
+    pub nits_peak: f32,
+    /// Scan / refresh rate in Hz.
+    pub refresh_rate_hz: f32,
+    /// Color gamut of the panel.
+    pub color_gamut: PanelGamut,
+    /// Physical position within the LED volume.
+    pub position: PanelPosition,
+}
+
+impl LedPanel {
+    /// Create a new panel with default position (front face, zero offset) and
+    /// Rec709 gamut at 60 Hz.
+    #[must_use]
+    pub fn new(id: &str, width: u32, height: u32, pitch_mm: f32, nits: f32) -> Self {
+        Self {
+            id: id.to_owned(),
+            width_pixels: width,
+            height_pixels: height,
+            pixel_pitch_mm: pitch_mm,
+            nits_peak: nits,
+            refresh_rate_hz: 60.0,
+            color_gamut: PanelGamut::Rec709,
+            position: PanelPosition {
+                x_mm: 0.0,
+                y_mm: 0.0,
+                z_mm: 0.0,
+                rotation_deg: 0.0,
+                face: WallFace::Front,
+            },
+        }
+    }
+
+    /// Physical width of the panel in millimetres (`width_pixels × pixel_pitch_mm`).
+    #[must_use]
+    pub fn physical_width_mm(&self) -> f32 {
+        self.width_pixels as f32 * self.pixel_pitch_mm
+    }
+
+    /// Physical height of the panel in millimetres (`height_pixels × pixel_pitch_mm`).
+    #[must_use]
+    pub fn physical_height_mm(&self) -> f32 {
+        self.height_pixels as f32 * self.pixel_pitch_mm
+    }
+
+    /// Resolution in megapixels.
+    #[must_use]
+    pub fn resolution_mpx(&self) -> f32 {
+        (self.width_pixels as f32 * self.height_pixels as f32) / 1_000_000.0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LedVolumeV2
+// ---------------------------------------------------------------------------
+
+/// Color processing mode for an LED volume.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColorProcessingMode {
+    /// No gamma – suitable for in-camera capture.
+    Linear,
+    /// Standard monitor gamma.
+    DisplayGamma,
+    /// SMPTE ST 2084 HDR (PQ) curve.
+    PqHdr,
+}
+
+/// A complete LED volume composed of [`LedPanel`] tiles.
+///
+/// This is a richer replacement for the older [`LedVolume`] type; both coexist
+/// in this module for backward compatibility.
+#[derive(Debug, Clone)]
+pub struct LedVolumeV2 {
+    /// Unique identifier.
+    pub id: String,
+    /// Human-readable display name.
+    pub name: String,
+    /// Constituent panels.
+    pub panels: Vec<LedPanel>,
+    /// Computed total horizontal pixel span (call [`LedVolumeV2::compute_total_resolution`]).
+    pub total_width_pixels: u32,
+    /// Computed total vertical pixel span.
+    pub total_height_pixels: u32,
+    /// Driving frame rate in Hz.
+    pub driving_fps: f32,
+    /// Color processing mode applied to content driven to the volume.
+    pub color_processing: ColorProcessingMode,
+}
+
+impl LedVolumeV2 {
+    /// Create an empty LED volume.
+    #[must_use]
+    pub fn new(id: &str, name: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            panels: Vec::new(),
+            total_width_pixels: 0,
+            total_height_pixels: 0,
+            driving_fps: 24.0,
+            color_processing: ColorProcessingMode::Linear,
+        }
+    }
+
+    /// Append a panel to the volume.
+    pub fn add_panel(&mut self, panel: LedPanel) {
+        self.panels.push(panel);
+    }
+
+    /// Remove the panel with the given `id`.  Returns `true` if a panel was removed.
+    pub fn remove_panel(&mut self, id: &str) -> bool {
+        let before = self.panels.len();
+        self.panels.retain(|p| p.id != id);
+        self.panels.len() < before
+    }
+
+    /// Recompute `total_width_pixels` and `total_height_pixels` from the panel list.
+    ///
+    /// Uses the max horizontal extent (sum of widths of front-face panels) and the
+    /// maximum height found on any single panel as a practical approximation.
+    pub fn compute_total_resolution(&mut self) {
+        let front_width: u32 = self
+            .panels
+            .iter()
+            .filter(|p| p.position.face == WallFace::Front)
+            .map(|p| p.width_pixels)
+            .sum();
+        let max_height: u32 = self
+            .panels
+            .iter()
+            .map(|p| p.height_pixels)
+            .max()
+            .unwrap_or(0);
+        self.total_width_pixels = front_width;
+        self.total_height_pixels = max_height;
+    }
+
+    /// Return references to all panels on the given face.
+    #[must_use]
+    pub fn panels_by_face(&self, face: &WallFace) -> Vec<&LedPanel> {
+        self.panels
+            .iter()
+            .filter(|p| &p.position.face == face)
+            .collect()
+    }
+
+    /// Minimum peak brightness across all panels (weakest-link metric).
+    ///
+    /// Returns `0.0` for an empty volume.
+    #[must_use]
+    pub fn peak_nits(&self) -> f32 {
+        self.panels
+            .iter()
+            .map(|p| p.nits_peak)
+            .reduce(f32::min)
+            .unwrap_or(0.0)
+    }
+
+    /// Returns `true` when at least one panel exceeds 1000 nits **and** the
+    /// color processing mode is [`ColorProcessingMode::PqHdr`].
+    #[must_use]
+    pub fn requires_hdr(&self) -> bool {
+        self.color_processing == ColorProcessingMode::PqHdr
+            && self.panels.iter().any(|p| p.nits_peak > 1000.0)
+    }
+
+    /// Validate the volume configuration.
+    ///
+    /// Returns a list of human-readable error strings (empty = valid).
+    #[must_use]
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors: Vec<String> = Vec::new();
+
+        if self.panels.is_empty() {
+            errors.push("LED volume has no panels".to_owned());
+            return errors;
+        }
+
+        // Check refresh rate consistency.
+        let first_hz = self.panels[0].refresh_rate_hz;
+        let mismatched_refresh = self
+            .panels
+            .iter()
+            .any(|p| (p.refresh_rate_hz - first_hz).abs() > 0.1);
+        if mismatched_refresh {
+            errors.push("Panels have mismatched refresh rates".to_owned());
+        }
+
+        // Check pixel pitch consistency.
+        let first_pitch = self.panels[0].pixel_pitch_mm;
+        let mismatched_pitch = self
+            .panels
+            .iter()
+            .any(|p| (p.pixel_pitch_mm - first_pitch).abs() > 0.01);
+        if mismatched_pitch {
+            errors.push("Panels have inconsistent pixel pitch values".to_owned());
+        }
+
+        errors
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MoireChecker (new-style, per CameraTransform context)
+// ---------------------------------------------------------------------------
+
+/// Estimates moiré risk between an LED panel and a camera sensor given a
+/// shooting distance.
+pub struct MoireChecker {
+    /// Camera sensor resolution (width × height) in pixels.
+    pub camera_sensor_pixels: (u32, u32),
+    /// Lens focal length in millimetres.
+    pub lens_focal_length_mm: f32,
+}
+
+impl MoireChecker {
+    /// Compute a moiré risk score in `[0.0, 1.0]` for the given panel at
+    /// `camera_distance_m` metres.
+    ///
+    /// Apparent pixel density at the sensor is estimated as:
+    /// `panel_ppi × focal_length / (distance_mm − focal_length)`.
+    ///
+    /// Risk = `|sensor_ppi − apparent_ppi| / sensor_ppi`, clamped to `[0, 1]`.
+    /// A score near 0 indicates similar densities (high interference risk); a
+    /// score near 1 indicates very different densities (low risk).
+    ///
+    /// Returns `1.0` (maximum risk flag) for degenerate inputs.
+    #[must_use]
+    pub fn risk_score(&self, panel: &LedPanel, camera_distance_m: f32) -> f32 {
+        if camera_distance_m <= 0.0
+            || self.lens_focal_length_mm <= 0.0
+            || panel.pixel_pitch_mm <= 0.0
+        {
+            return 1.0;
+        }
+
+        // Sensor PPI: pixels per mm on sensor (assuming square sensor of width
+        // equal to sensor_pixels.0 at a canonical 36 mm full-frame width).
+        let sensor_width_mm = 36.0_f32;
+        let sensor_ppi = self.camera_sensor_pixels.0 as f32 / sensor_width_mm;
+
+        // Panel pixels per mm in world space.
+        let panel_ppi = 1.0_f32 / panel.pixel_pitch_mm;
+
+        let distance_mm = camera_distance_m * 1_000.0_f32;
+        let focal = self.lens_focal_length_mm;
+
+        // Guard against division by zero when focal length ≥ distance.
+        let denom = distance_mm - focal;
+        if denom.abs() < 1e-6 {
+            return 1.0;
+        }
+
+        // Apparent pixel density projected onto the sensor plane.
+        let apparent_ppi = panel_ppi * (focal / denom).abs();
+
+        if sensor_ppi <= 0.0 {
+            return 1.0;
+        }
+
+        // Risk: similarity between sensor density and apparent LED density.
+        let diff = (sensor_ppi - apparent_ppi).abs();
+        (diff / sensor_ppi).clamp(0.0, 1.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -393,5 +707,148 @@ mod tests {
         let panel = sample_panel();
         let risk = MoireRiskAssessor::assess(&panel, 0.0, 50.0);
         assert_eq!(risk, 1.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // New-style LedPanel tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_led_panel_new_defaults() {
+        let p = LedPanel::new("P1", 320, 160, 2.5, 1800.0);
+        assert_eq!(p.id, "P1");
+        assert_eq!(p.width_pixels, 320);
+        assert_eq!(p.height_pixels, 160);
+        assert!((p.pixel_pitch_mm - 2.5).abs() < 1e-5);
+        assert!((p.nits_peak - 1800.0).abs() < 1e-5);
+        assert_eq!(p.color_gamut, PanelGamut::Rec709);
+        assert_eq!(p.position.face, WallFace::Front);
+    }
+
+    #[test]
+    fn test_led_panel_physical_width() {
+        let p = LedPanel::new("P2", 256, 128, 2.8, 1500.0);
+        let expected = 256.0_f32 * 2.8_f32;
+        assert!((p.physical_width_mm() - expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_led_panel_physical_height() {
+        let p = LedPanel::new("P3", 256, 128, 2.8, 1500.0);
+        let expected = 128.0_f32 * 2.8_f32;
+        assert!((p.physical_height_mm() - expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_led_panel_resolution_mpx() {
+        let p = LedPanel::new("P4", 1000, 1000, 1.0, 1000.0);
+        assert!((p.resolution_mpx() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_led_volume_v2_add_remove_panel() {
+        let mut vol = LedVolumeV2::new("V1", "Stage A");
+        let p = LedPanel::new("PA", 256, 128, 2.5, 1200.0);
+        vol.add_panel(p);
+        assert_eq!(vol.panels.len(), 1);
+        let removed = vol.remove_panel("PA");
+        assert!(removed);
+        assert!(vol.panels.is_empty());
+    }
+
+    #[test]
+    fn test_led_volume_v2_remove_nonexistent() {
+        let mut vol = LedVolumeV2::new("V2", "Stage B");
+        let removed = vol.remove_panel("ghost");
+        assert!(!removed);
+    }
+
+    #[test]
+    fn test_led_volume_v2_compute_total_resolution() {
+        let mut vol = LedVolumeV2::new("V3", "Stage C");
+        let mut p1 = LedPanel::new("F1", 256, 128, 2.5, 1200.0);
+        p1.position.face = WallFace::Front;
+        let mut p2 = LedPanel::new("F2", 256, 256, 2.5, 1200.0);
+        p2.position.face = WallFace::Front;
+        vol.add_panel(p1);
+        vol.add_panel(p2);
+        vol.compute_total_resolution();
+        // Width = 256 + 256 = 512 (front panels)
+        assert_eq!(vol.total_width_pixels, 512);
+        // Height = max(128, 256) = 256
+        assert_eq!(vol.total_height_pixels, 256);
+    }
+
+    #[test]
+    fn test_led_volume_v2_panels_by_face() {
+        let mut vol = LedVolumeV2::new("V4", "Stage D");
+        let mut lp = LedPanel::new("L1", 128, 128, 2.5, 1000.0);
+        lp.position.face = WallFace::Left;
+        vol.add_panel(LedPanel::new("F1", 256, 128, 2.5, 1000.0));
+        vol.add_panel(lp);
+        let left = vol.panels_by_face(&WallFace::Left);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, "L1");
+    }
+
+    #[test]
+    fn test_led_volume_v2_peak_nits_weakest_link() {
+        let mut vol = LedVolumeV2::new("V5", "Stage E");
+        vol.add_panel(LedPanel::new("A", 100, 100, 2.0, 2000.0));
+        vol.add_panel(LedPanel::new("B", 100, 100, 2.0, 800.0));
+        // Weakest link = 800
+        assert!((vol.peak_nits() - 800.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_led_volume_v2_requires_hdr() {
+        let mut vol = LedVolumeV2::new("V6", "Stage F");
+        vol.color_processing = ColorProcessingMode::PqHdr;
+        vol.add_panel(LedPanel::new("H1", 100, 100, 2.0, 1500.0));
+        assert!(vol.requires_hdr());
+
+        vol.color_processing = ColorProcessingMode::Linear;
+        assert!(!vol.requires_hdr());
+    }
+
+    #[test]
+    fn test_led_volume_v2_validate_empty() {
+        let vol = LedVolumeV2::new("V7", "Stage G");
+        let errors = vol.validate();
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn test_led_volume_v2_validate_mismatched_refresh() {
+        let mut vol = LedVolumeV2::new("V8", "Stage H");
+        let mut p1 = LedPanel::new("R1", 128, 128, 2.5, 1000.0);
+        p1.refresh_rate_hz = 60.0;
+        let mut p2 = LedPanel::new("R2", 128, 128, 2.5, 1000.0);
+        p2.refresh_rate_hz = 120.0;
+        vol.add_panel(p1);
+        vol.add_panel(p2);
+        let errors = vol.validate();
+        assert!(errors.iter().any(|e| e.contains("refresh")));
+    }
+
+    #[test]
+    fn test_moire_checker_risk_score_range() {
+        let checker = MoireChecker {
+            camera_sensor_pixels: (6000, 4000),
+            lens_focal_length_mm: 50.0,
+        };
+        let panel = LedPanel::new("MC1", 256, 128, 2.8, 1500.0);
+        let score = checker.risk_score(&panel, 5.0);
+        assert!((0.0..=1.0).contains(&score));
+    }
+
+    #[test]
+    fn test_moire_checker_degenerate_distance() {
+        let checker = MoireChecker {
+            camera_sensor_pixels: (6000, 4000),
+            lens_focal_length_mm: 50.0,
+        };
+        let panel = LedPanel::new("MC2", 256, 128, 2.8, 1500.0);
+        assert_eq!(checker.risk_score(&panel, 0.0), 1.0);
     }
 }

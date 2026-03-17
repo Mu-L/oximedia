@@ -50,6 +50,7 @@ pub fn smooth_240p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("ismv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -79,6 +80,7 @@ pub fn smooth_360p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("ismv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -108,6 +110,7 @@ pub fn smooth_480p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("ismv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -137,6 +140,7 @@ pub fn smooth_720p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("ismv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -166,6 +170,7 @@ pub fn smooth_1080p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("ismv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

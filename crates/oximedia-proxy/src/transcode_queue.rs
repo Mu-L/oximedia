@@ -2,11 +2,17 @@
 //!
 //! Provides a priority-based queue for scheduling and tracking proxy transcode
 //! jobs, along with batch request support and queue statistics.
+//!
+//! The `ParallelTranscodeExecutor` uses Rayon's work-stealing thread pool to
+//! transcode multiple proxy jobs concurrently, saturating available CPU cores
+//! without spawning excessive threads.
 
 #![allow(dead_code)]
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 /// Specification for a proxy transcode output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -494,5 +500,292 @@ mod tests {
     fn test_batch_estimate_duration_positive() {
         let mins = ProxyBatchRequest::estimate_duration_mins(10, 25.0);
         assert!(mins > 0.0);
+    }
+}
+
+// ============================================================================
+// Parallel Transcode Executor (Rayon work-stealing)
+// ============================================================================
+
+/// Result of a single parallel transcode task.
+#[derive(Debug, Clone)]
+pub struct ParallelJobResult {
+    /// Job ID from the original request.
+    pub id: String,
+    /// Whether the job succeeded.
+    pub success: bool,
+    /// Output path on success.
+    pub output_path: Option<String>,
+    /// Error message on failure.
+    pub error: Option<String>,
+    /// Simulated processing duration in milliseconds.
+    pub duration_ms: u64,
+}
+
+/// User-supplied transcode function signature.
+///
+/// The function receives `(source_path, spec)` and should return either
+/// `Ok(output_path)` or `Err(error_message)`.  It will be called from Rayon
+/// worker threads, so it must be `Send + Sync`.
+pub type TranscodeFn =
+    Arc<dyn Fn(&str, &ProxySpec) -> std::result::Result<String, String> + Send + Sync>;
+
+/// Configuration for the parallel executor.
+#[derive(Clone)]
+pub struct ParallelExecutorConfig {
+    /// Maximum number of concurrent transcode threads.
+    /// `0` means use all available logical CPUs.
+    pub thread_count: usize,
+    /// User-supplied transcode function.
+    pub transcode_fn: TranscodeFn,
+}
+
+impl ParallelExecutorConfig {
+    /// Create a config with a custom transcode function and thread count.
+    pub fn new(thread_count: usize, transcode_fn: TranscodeFn) -> Self {
+        Self {
+            thread_count,
+            transcode_fn,
+        }
+    }
+
+    /// Create a config that uses a no-op (stub) transcode for testing.
+    #[must_use]
+    pub fn stub() -> Self {
+        let fn_: TranscodeFn = Arc::new(|src, spec| {
+            Ok(format!(
+                "/proxy/{}_{}x{}.mp4",
+                std::path::Path::new(src)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("clip"),
+                spec.resolution.0,
+                spec.resolution.1,
+            ))
+        });
+        Self {
+            thread_count: 0,
+            transcode_fn: fn_,
+        }
+    }
+}
+
+/// Parallel batch proxy transcode executor powered by Rayon.
+///
+/// Jobs from a `ProxyTranscodeQueue` are dispatched to Rayon's global or a
+/// custom thread pool using work-stealing.  Completed results are collected
+/// in a thread-safe results vector.
+pub struct ParallelTranscodeExecutor {
+    config: ParallelExecutorConfig,
+}
+
+impl ParallelTranscodeExecutor {
+    /// Create a new executor with the given configuration.
+    pub fn new(config: ParallelExecutorConfig) -> Self {
+        Self { config }
+    }
+
+    /// Execute all `Queued` jobs from `queue` in parallel and return results.
+    ///
+    /// The queue is not mutated; callers should apply results using
+    /// [`ParallelTranscodeExecutor::apply_results`] if they wish to update
+    /// statuses.
+    ///
+    /// # Errors
+    ///
+    /// Never errors at the executor level; individual job failures are captured
+    /// in [`ParallelJobResult::success`] / [`ParallelJobResult::error`].
+    pub fn execute_batch(&self, queue: &ProxyTranscodeQueue) -> Vec<ParallelJobResult> {
+        // Collect all queued jobs into an owned snapshot (no queue mutation)
+        let jobs: Vec<(String, String, ProxySpec)> = queue
+            .iter()
+            .filter(|j| j.status == JobStatus::Queued)
+            .map(|j| {
+                (
+                    j.request.id.clone(),
+                    j.request.source_path.clone(),
+                    j.request.proxy_spec.clone(),
+                )
+            })
+            .collect();
+
+        let transcode_fn = Arc::clone(&self.config.transcode_fn);
+        let results: Arc<Mutex<Vec<ParallelJobResult>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let threads = if self.config.thread_count == 0 {
+            num_cpus::get()
+        } else {
+            self.config.thread_count
+        };
+
+        // Build a private thread pool limited to `threads` workers.
+        // If construction fails (extremely rare — only on resource exhaustion),
+        // fall back to running jobs sequentially on the calling thread so that
+        // we always return results and never panic.
+        let pool_opt: Option<rayon::ThreadPool> = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .ok();
+
+        let results_clone = Arc::clone(&results);
+        let run_jobs = move || {
+            jobs.par_iter().for_each(|(id, src, spec)| {
+                let start = std::time::Instant::now();
+                let outcome = (transcode_fn)(src, spec);
+                let duration_ms = start.elapsed().as_millis() as u64;
+
+                let result = match outcome {
+                    Ok(out) => ParallelJobResult {
+                        id: id.clone(),
+                        success: true,
+                        output_path: Some(out),
+                        error: None,
+                        duration_ms,
+                    },
+                    Err(e) => ParallelJobResult {
+                        id: id.clone(),
+                        success: false,
+                        output_path: None,
+                        error: Some(e),
+                        duration_ms,
+                    },
+                };
+
+                if let Ok(mut guard) = results_clone.lock() {
+                    guard.push(result);
+                }
+            });
+        };
+
+        match pool_opt {
+            Some(pool) => pool.install(run_jobs),
+            // Fallback: global rayon pool (uses all CPUs, still parallel)
+            None => run_jobs(),
+        }
+
+        Arc::try_unwrap(results)
+            .ok()
+            .and_then(|m| m.into_inner().ok())
+            .unwrap_or_default()
+    }
+
+    /// Apply a batch of results back to a mutable queue, updating job statuses.
+    pub fn apply_results(queue: &mut ProxyTranscodeQueue, results: &[ParallelJobResult]) {
+        for r in results {
+            if r.success {
+                queue.start_job(&r.id, 0);
+                queue.complete_job(&r.id, r.output_path.as_deref().unwrap_or(""));
+            } else {
+                queue.start_job(&r.id, 0);
+                queue.fail_job(&r.id, r.error.as_deref().unwrap_or("unknown error"));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod parallel_tests {
+    use super::*;
+
+    fn make_queue(n: usize) -> ProxyTranscodeQueue {
+        let mut q = ProxyTranscodeQueue::new();
+        for i in 0..n {
+            q.submit(ProxyRequest::new(
+                format!("job_{i}"),
+                format!("/src/clip_{i}.mov"),
+                ProxySpec::h264_hd(),
+                100,
+                i as u64 * 10,
+            ));
+        }
+        q
+    }
+
+    #[test]
+    fn test_parallel_executor_all_succeed() {
+        let config = ParallelExecutorConfig::stub();
+        let executor = ParallelTranscodeExecutor::new(config);
+        let queue = make_queue(8);
+
+        let results = executor.execute_batch(&queue);
+        assert_eq!(results.len(), 8);
+        assert!(results.iter().all(|r| r.success));
+        assert!(results.iter().all(|r| r.output_path.is_some()));
+    }
+
+    #[test]
+    fn test_parallel_executor_error_fn() {
+        let fail_fn: TranscodeFn =
+            Arc::new(|_src, _spec| Err("simulated transcode failure".to_string()));
+        let config = ParallelExecutorConfig::new(2, fail_fn);
+        let executor = ParallelTranscodeExecutor::new(config);
+        let queue = make_queue(4);
+
+        let results = executor.execute_batch(&queue);
+        assert_eq!(results.len(), 4);
+        assert!(results.iter().all(|r| !r.success));
+        assert!(results.iter().all(|r| r.error.is_some()));
+    }
+
+    #[test]
+    fn test_parallel_executor_empty_queue() {
+        let config = ParallelExecutorConfig::stub();
+        let executor = ParallelTranscodeExecutor::new(config);
+        let queue = ProxyTranscodeQueue::new();
+
+        let results = executor.execute_batch(&queue);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_apply_results_updates_statuses() {
+        let config = ParallelExecutorConfig::stub();
+        let executor = ParallelTranscodeExecutor::new(config);
+        let mut queue = make_queue(3);
+
+        let results = executor.execute_batch(&queue);
+        ParallelTranscodeExecutor::apply_results(&mut queue, &results);
+
+        let stats = QueueStats::compute(&queue);
+        assert_eq!(stats.completed, 3);
+        assert_eq!(stats.pending, 0);
+    }
+
+    #[test]
+    fn test_apply_results_marks_failures() {
+        let fail_fn: TranscodeFn = Arc::new(|_src, _spec| Err("err".to_string()));
+        let config = ParallelExecutorConfig::new(1, fail_fn);
+        let executor = ParallelTranscodeExecutor::new(config);
+        let mut queue = make_queue(2);
+
+        let results = executor.execute_batch(&queue);
+        ParallelTranscodeExecutor::apply_results(&mut queue, &results);
+
+        let stats = QueueStats::compute(&queue);
+        assert_eq!(stats.failed, 2);
+    }
+
+    #[test]
+    fn test_parallel_result_has_duration() {
+        let config = ParallelExecutorConfig::stub();
+        let executor = ParallelTranscodeExecutor::new(config);
+        let queue = make_queue(2);
+        let results = executor.execute_batch(&queue);
+        // duration_ms may be 0 on fast machines but field must exist
+        assert!(results.iter().all(|r| r.duration_ms < u64::MAX));
+    }
+
+    #[test]
+    fn test_parallel_skips_non_queued_jobs() {
+        let config = ParallelExecutorConfig::stub();
+        let executor = ParallelTranscodeExecutor::new(config);
+        let mut queue = make_queue(4);
+        // Pre-cancel two jobs so they aren't in Queued state
+        queue.cancel_job("job_0");
+        queue.cancel_job("job_1");
+
+        let results = executor.execute_batch(&queue);
+        // Only 2 queued jobs should be executed
+        assert_eq!(results.len(), 2);
     }
 }

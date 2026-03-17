@@ -94,6 +94,7 @@ pub fn analyze_file(path: &Path) -> Result<Vec<Issue>> {
             description: format!("File is very small ({} bytes), likely truncated", file_size),
             location: Some(0),
             fixable: false,
+            confidence: 0.8,
         });
     }
 
@@ -129,6 +130,7 @@ fn analyze_container_structure(path: &Path) -> Result<Vec<Issue>> {
                 .to_string(),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -192,6 +194,7 @@ pub fn analyze_timestamps(path: &Path) -> Result<Vec<Issue>> {
             ),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -211,6 +214,7 @@ pub fn analyze_timestamps(path: &Path) -> Result<Vec<Issue>> {
             ),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -225,6 +229,7 @@ pub fn analyze_timestamps(path: &Path) -> Result<Vec<Issue>> {
             ),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -239,6 +244,7 @@ pub fn analyze_timestamps(path: &Path) -> Result<Vec<Issue>> {
             ),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -257,6 +263,7 @@ pub fn analyze_timestamps(path: &Path) -> Result<Vec<Issue>> {
                 ),
                 location: None,
                 fixable: false,
+                confidence: 0.8,
             });
         }
     }
@@ -569,7 +576,9 @@ pub fn analyze_indices(path: &Path) -> Result<Vec<Issue>> {
                 .to_string(),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
+
         return Ok(issues);
     }
 
@@ -589,6 +598,7 @@ pub fn analyze_indices(path: &Path) -> Result<Vec<Issue>> {
             ),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -607,6 +617,7 @@ pub fn analyze_indices(path: &Path) -> Result<Vec<Issue>> {
             ),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -625,6 +636,7 @@ pub fn analyze_indices(path: &Path) -> Result<Vec<Issue>> {
             ),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -636,6 +648,7 @@ pub fn analyze_indices(path: &Path) -> Result<Vec<Issue>> {
                 .to_string(),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -654,6 +667,7 @@ pub fn analyze_indices(path: &Path) -> Result<Vec<Issue>> {
             ),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -896,7 +910,9 @@ pub fn analyze_metadata(path: &Path) -> Result<Vec<Issue>> {
                 .to_string(),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
+
         return Ok(issues);
     }
 
@@ -915,6 +931,7 @@ pub fn analyze_metadata(path: &Path) -> Result<Vec<Issue>> {
             ),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -929,6 +946,7 @@ pub fn analyze_metadata(path: &Path) -> Result<Vec<Issue>> {
             ),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -941,6 +959,7 @@ pub fn analyze_metadata(path: &Path) -> Result<Vec<Issue>> {
                 .to_string(),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -953,6 +972,7 @@ pub fn analyze_metadata(path: &Path) -> Result<Vec<Issue>> {
                     .to_string(),
             location: None,
             fixable: true,
+            confidence: 0.8,
         });
     }
 
@@ -965,6 +985,7 @@ pub fn analyze_metadata(path: &Path) -> Result<Vec<Issue>> {
                     .to_string(),
             location: None,
             fixable: false,
+            confidence: 0.8,
         });
     }
 

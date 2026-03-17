@@ -321,11 +321,7 @@ fn interpolate_channel(
         }
     }
 
-    if count == 0 {
-        0
-    } else {
-        (sum / count) as u16
-    }
+    sum.checked_div(count).unwrap_or(0) as u16
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

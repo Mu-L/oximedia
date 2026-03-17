@@ -290,4 +290,43 @@ mod tests {
         assert_eq!(track.captions.len(), 1);
         assert_eq!(track.captions[0].style.alignment, Alignment::Left);
     }
+
+    /// Round-trip test: write a WebVTT track then parse it back and verify the
+    /// key fields are preserved.
+    #[test]
+    fn test_webvtt_roundtrip() {
+        let mut original = CaptionTrack::new(Language::english());
+        original
+            .add_caption(Caption::new(
+                Timestamp::from_hmsm(0, 0, 2, 0),
+                Timestamp::from_hmsm(0, 0, 4, 500),
+                "WebVTT round-trip caption".to_string(),
+            ))
+            .expect("add_caption should succeed");
+        original
+            .add_caption(Caption::new(
+                Timestamp::from_hmsm(0, 0, 6, 0),
+                Timestamp::from_hmsm(0, 0, 9, 250),
+                "Second WebVTT entry".to_string(),
+            ))
+            .expect("add_caption should succeed");
+
+        // Serialize to WebVTT bytes
+        let bytes = WebVttWriter.write(&original).expect("write should succeed");
+
+        // Deserialize back
+        let parsed = WebVttParser.parse(&bytes).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.captions.len(),
+            original.captions.len(),
+            "caption count must match after WebVTT round-trip"
+        );
+
+        for (orig, rt) in original.captions.iter().zip(parsed.captions.iter()) {
+            assert_eq!(orig.start, rt.start, "start timestamp mismatch");
+            assert_eq!(orig.end, rt.end, "end timestamp mismatch");
+            assert_eq!(orig.text, rt.text, "text content mismatch");
+        }
+    }
 }

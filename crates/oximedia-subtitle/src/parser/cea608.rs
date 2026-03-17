@@ -29,7 +29,7 @@ pub enum Cea608Mode {
 ///
 /// Tracks foreground (non-displayed) and background (displayed) caption memories,
 /// current display mode, cursor position, and character style.  Call
-/// [`decode_pair`] for each byte pair extracted from the VBI or embedded data.
+/// `decode_pair` for each byte pair extracted from the VBI or embedded data.
 pub struct Cea608Decoder {
     mode: Cea608Mode,
     /// Non-displayed memory (written to during pop-on accumulation).

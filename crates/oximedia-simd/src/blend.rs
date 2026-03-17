@@ -67,7 +67,9 @@ pub fn composite_over(fg: [u8; 4], bg: [u8; 4]) -> [u8; 4] {
         let fc = u32::from(fg[i]);
         let bc = u32::from(bg[i]);
         // pre-multiply each channel, composite, then un-premultiply
-        let val = (fc * fa + bc * ba * (255 - fa) / 255) / out_a;
+        let val = (fc * fa + bc * ba * (255 - fa) / 255)
+            .checked_div(out_a)
+            .unwrap_or(0);
         out[i] = val.min(255) as u8;
     }
     out[3] = out_a.min(255) as u8;
@@ -98,15 +100,18 @@ pub fn unpremultiply_alpha(pixels: &mut [u8]) {
     for i in 0..count {
         let base = i * 4;
         let a = u32::from(pixels[base + 3]);
-        if a == 0 {
-            pixels[base] = 0;
-            pixels[base + 1] = 0;
-            pixels[base + 2] = 0;
-        } else {
-            pixels[base] = (u32::from(pixels[base]) * 255 / a).min(255) as u8;
-            pixels[base + 1] = (u32::from(pixels[base + 1]) * 255 / a).min(255) as u8;
-            pixels[base + 2] = (u32::from(pixels[base + 2]) * 255 / a).min(255) as u8;
-        }
+        pixels[base] = (u32::from(pixels[base]) * 255)
+            .checked_div(a)
+            .unwrap_or(0)
+            .min(255) as u8;
+        pixels[base + 1] = (u32::from(pixels[base + 1]) * 255)
+            .checked_div(a)
+            .unwrap_or(0)
+            .min(255) as u8;
+        pixels[base + 2] = (u32::from(pixels[base + 2]) * 255)
+            .checked_div(a)
+            .unwrap_or(0)
+            .min(255) as u8;
     }
 }
 

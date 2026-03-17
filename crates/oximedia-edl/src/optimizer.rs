@@ -212,6 +212,129 @@ pub fn remove_duplicate_clips(clips: &mut Vec<EdlClipEntry>) -> usize {
     before - clips.len()
 }
 
+/// Consolidate events in an [`crate::Edl`] by merging adjacent cuts from the same reel.
+///
+/// This operates directly on the main `Edl` structure, converting events to
+/// clip entries, running the optimization pipeline, and converting back.
+/// The EDL events are replaced in-place.
+///
+/// Only consecutive `Cut` events with the same reel, where the first event's
+/// `record_out` equals the next event's `record_in` AND the source timecodes
+/// are contiguous, will be merged.
+///
+/// Returns an `OptimizeStats` describing the consolidation results.
+pub fn consolidate_edl_events(edl: &mut crate::Edl, opts: &OptimizeOptions) -> OptimizeStats {
+    use crate::event::{EditType, EdlEvent};
+    use crate::timecode::EdlTimecode;
+
+    if edl.events.is_empty() {
+        return OptimizeStats::new(0);
+    }
+
+    let original_count = edl.events.len();
+
+    // Keep a reference to the original events for non-merged properties
+    let original_events = edl.events.clone();
+
+    // Build a map of event index -> original event for properties preservation
+    // We only consolidate Cut events; non-Cut events pass through untouched.
+    let mut cut_clips: Vec<(usize, EdlClipEntry)> = Vec::new();
+    let mut non_cut_indices: Vec<usize> = Vec::new();
+
+    for (i, event) in edl.events.iter().enumerate() {
+        if event.edit_type == EditType::Cut {
+            cut_clips.push((
+                i,
+                EdlClipEntry {
+                    id: event.number,
+                    source_name: event.reel.clone(),
+                    record_in: event.record_in.to_frames(),
+                    record_out: event.record_out.to_frames(),
+                    source_in: event.source_in.to_frames(),
+                    source_out: event.source_out.to_frames(),
+                },
+            ));
+        } else {
+            non_cut_indices.push(i);
+        }
+    }
+
+    let mut cut_clip_entries: Vec<EdlClipEntry> =
+        cut_clips.iter().map(|(_, c)| c.clone()).collect();
+    let stats = optimize_edl(&mut cut_clip_entries, opts);
+
+    // Rebuild the event list from optimized clips + non-cut events
+    let mut new_events: Vec<EdlEvent> = Vec::new();
+
+    // Convert optimized clips back to events
+    for clip in &cut_clip_entries {
+        // Find the original event that corresponds to the beginning of this clip
+        // (the merged clip retains the id of the first contributing event)
+        let template = original_events
+            .iter()
+            .find(|e| e.number == clip.id)
+            .unwrap_or(&original_events[0]);
+
+        // Reconstruct timecodes from frames
+        let frame_rate = edl.frame_rate;
+        let record_in = match EdlTimecode::from_frames(clip.record_in, frame_rate) {
+            Ok(tc) => tc,
+            Err(_) => continue,
+        };
+        let record_out = match EdlTimecode::from_frames(clip.record_out, frame_rate) {
+            Ok(tc) => tc,
+            Err(_) => continue,
+        };
+        let source_in = match EdlTimecode::from_frames(clip.source_in, frame_rate) {
+            Ok(tc) => tc,
+            Err(_) => continue,
+        };
+        let source_out = match EdlTimecode::from_frames(clip.source_out, frame_rate) {
+            Ok(tc) => tc,
+            Err(_) => continue,
+        };
+
+        let mut new_event = EdlEvent::new(
+            clip.id,
+            clip.source_name.clone(),
+            template.track.clone(),
+            EditType::Cut,
+            source_in,
+            source_out,
+            record_in,
+            record_out,
+        );
+
+        // Preserve clip name from the first contributing event
+        new_event.clip_name = template.clip_name.clone();
+        new_event.comments = template.comments.clone();
+
+        new_events.push(new_event);
+    }
+
+    // Add non-cut events back
+    for &idx in &non_cut_indices {
+        new_events.push(original_events[idx].clone());
+    }
+
+    // Sort by record_in
+    new_events.sort_by_key(|e| e.record_in.to_frames());
+
+    // Renumber
+    for (i, event) in new_events.iter_mut().enumerate() {
+        event.number = (i + 1) as u32;
+    }
+
+    edl.events = new_events;
+
+    OptimizeStats {
+        original_clips: original_count,
+        optimized_clips: edl.events.len(),
+        merged_count: stats.merged_count,
+        removed_count: stats.removed_count,
+    }
+}
+
 /// Merge adjacent clips that share the same source and are contiguous.
 ///
 /// When two consecutive clips satisfy [`EdlClipEntry::is_adjacent_to`],
@@ -432,5 +555,162 @@ mod tests {
         let stats = optimize_edl(&mut clips, &OptimizeOptions::all());
         assert_eq!(stats.original_clips, 0);
         assert_eq!(stats.optimized_clips, 0);
+    }
+
+    // ── consolidate_edl_events tests ──
+
+    mod consolidate_tests {
+        use super::super::*;
+        use crate::event::{EditType, EdlEvent, TrackType};
+        use crate::timecode::{EdlFrameRate, EdlTimecode};
+        use crate::{Edl, EdlFormat};
+
+        fn make_cut_event(num: u32, reel: &str, sec_in: u8, sec_out: u8) -> EdlEvent {
+            let fr = EdlFrameRate::Fps25;
+            EdlEvent::new(
+                num,
+                reel.to_string(),
+                TrackType::Video,
+                EditType::Cut,
+                EdlTimecode::new(1, 0, sec_in, 0, fr).expect("failed to create"),
+                EdlTimecode::new(1, 0, sec_out, 0, fr).expect("failed to create"),
+                EdlTimecode::new(1, 0, sec_in, 0, fr).expect("failed to create"),
+                EdlTimecode::new(1, 0, sec_out, 0, fr).expect("failed to create"),
+            )
+        }
+
+        fn make_edl(events: Vec<EdlEvent>) -> Edl {
+            let mut edl = Edl::new(EdlFormat::Cmx3600);
+            edl.set_frame_rate(EdlFrameRate::Fps25);
+            for e in events {
+                edl.events.push(e);
+            }
+            edl
+        }
+
+        #[test]
+        fn test_consolidate_empty_edl() {
+            let mut edl = make_edl(vec![]);
+            let stats = consolidate_edl_events(&mut edl, &OptimizeOptions::all());
+            assert_eq!(stats.original_clips, 0);
+            assert_eq!(stats.optimized_clips, 0);
+        }
+
+        #[test]
+        fn test_consolidate_single_event() {
+            let mut edl = make_edl(vec![make_cut_event(1, "R1", 0, 5)]);
+            let stats = consolidate_edl_events(&mut edl, &OptimizeOptions::all());
+            assert_eq!(stats.original_clips, 1);
+            assert_eq!(stats.optimized_clips, 1);
+            assert_eq!(edl.events.len(), 1);
+        }
+
+        #[test]
+        fn test_consolidate_adjacent_same_reel() {
+            let mut edl = make_edl(vec![
+                make_cut_event(1, "R1", 0, 5),
+                make_cut_event(2, "R1", 5, 10),
+            ]);
+            let stats = consolidate_edl_events(&mut edl, &OptimizeOptions::all());
+            assert_eq!(stats.original_clips, 2);
+            assert_eq!(stats.optimized_clips, 1);
+            assert_eq!(edl.events.len(), 1);
+            // Merged event should span 0..10
+            assert_eq!(edl.events[0].record_in.seconds(), 0);
+            assert_eq!(edl.events[0].record_out.seconds(), 10);
+        }
+
+        #[test]
+        fn test_consolidate_chain_of_three() {
+            let mut edl = make_edl(vec![
+                make_cut_event(1, "R1", 0, 5),
+                make_cut_event(2, "R1", 5, 10),
+                make_cut_event(3, "R1", 10, 15),
+            ]);
+            let stats = consolidate_edl_events(&mut edl, &OptimizeOptions::all());
+            assert_eq!(stats.optimized_clips, 1);
+            assert_eq!(edl.events[0].record_out.seconds(), 15);
+        }
+
+        #[test]
+        fn test_consolidate_different_reels_not_merged() {
+            let mut edl = make_edl(vec![
+                make_cut_event(1, "R1", 0, 5),
+                make_cut_event(2, "R2", 5, 10),
+            ]);
+            let stats = consolidate_edl_events(&mut edl, &OptimizeOptions::all());
+            assert_eq!(stats.optimized_clips, 2);
+            assert_eq!(edl.events.len(), 2);
+        }
+
+        #[test]
+        fn test_consolidate_non_adjacent_not_merged() {
+            let mut edl = make_edl(vec![
+                make_cut_event(1, "R1", 0, 5),
+                make_cut_event(2, "R1", 10, 15), // gap at 5..10
+            ]);
+            let stats = consolidate_edl_events(&mut edl, &OptimizeOptions::all());
+            assert_eq!(stats.optimized_clips, 2);
+        }
+
+        #[test]
+        fn test_consolidate_preserves_non_cut_events() {
+            let fr = EdlFrameRate::Fps25;
+            let tc3 = EdlTimecode::new(1, 0, 5, 0, fr).expect("failed to create");
+            let tc4 = EdlTimecode::new(1, 0, 10, 0, fr).expect("failed to create");
+
+            let mut dissolve = EdlEvent::new(
+                2,
+                "R1".to_string(),
+                TrackType::Video,
+                EditType::Dissolve,
+                tc3,
+                tc4,
+                tc3,
+                tc4,
+            );
+            dissolve.set_transition_duration(15);
+
+            let mut edl = make_edl(vec![make_cut_event(1, "R1", 0, 5), dissolve]);
+            let _stats = consolidate_edl_events(&mut edl, &OptimizeOptions::all());
+            // Both events should remain (dissolve is not a Cut, so not consolidated)
+            assert_eq!(edl.events.len(), 2);
+        }
+
+        #[test]
+        fn test_consolidate_renumbers_correctly() {
+            let mut edl = make_edl(vec![
+                make_cut_event(10, "R1", 0, 5),
+                make_cut_event(20, "R1", 5, 10),
+                make_cut_event(30, "R2", 15, 20),
+            ]);
+            consolidate_edl_events(&mut edl, &OptimizeOptions::all());
+            // After consolidation: R1 merged -> 1 event, R2 -> 1 event = 2 total
+            assert_eq!(edl.events.len(), 2);
+            assert_eq!(edl.events[0].number, 1);
+            assert_eq!(edl.events[1].number, 2);
+        }
+
+        #[test]
+        fn test_consolidate_preserves_clip_name() {
+            let mut evt = make_cut_event(1, "R1", 0, 5);
+            evt.clip_name = Some("my_clip.mov".to_string());
+            let mut edl = make_edl(vec![evt, make_cut_event(2, "R1", 5, 10)]);
+            consolidate_edl_events(&mut edl, &OptimizeOptions::all());
+            assert_eq!(edl.events[0].clip_name, Some("my_clip.mov".to_string()));
+        }
+
+        #[test]
+        fn test_consolidate_with_duplicates() {
+            let mut edl = make_edl(vec![
+                make_cut_event(1, "R1", 0, 5),
+                make_cut_event(2, "R1", 0, 5), // duplicate
+                make_cut_event(3, "R1", 5, 10),
+            ]);
+            let stats = consolidate_edl_events(&mut edl, &OptimizeOptions::all());
+            // After dedup + merge: should be 1 event spanning 0..10
+            assert_eq!(edl.events.len(), 1);
+            assert!(stats.removed_count > 0 || stats.merged_count > 0);
+        }
     }
 }

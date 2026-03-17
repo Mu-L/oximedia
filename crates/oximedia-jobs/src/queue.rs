@@ -3,6 +3,7 @@
 
 //! Job queue implementation with priority and dependency management.
 
+use crate::dead_letter_queue::DeadLetterQueue;
 use crate::job::{Job, JobStatus};
 use crate::metrics::{MetricsCollector, QueueStats};
 use crate::persistence::{JobPersistence, PersistenceError};
@@ -61,6 +62,12 @@ pub struct QueueConfig {
     pub enable_scheduled_jobs: bool,
     /// Enable deadline checking
     pub enable_deadline_checking: bool,
+    /// Maximum number of entries the dead letter queue can hold (0 = unlimited).
+    pub max_dlq_size: usize,
+    /// Jobs that exceed this many total attempts are moved to the DLQ rather
+    /// than being retried again.  `0` disables DLQ promotion (use the retry
+    /// policy's own `max_retries` as the sole limit).
+    pub max_retry_limit: u32,
 }
 
 impl Default for QueueConfig {
@@ -73,6 +80,8 @@ impl Default for QueueConfig {
             cleanup_interval_days: 30,
             enable_scheduled_jobs: true,
             enable_deadline_checking: true,
+            max_dlq_size: 1000,
+            max_retry_limit: 5,
         }
     }
 }
@@ -93,6 +102,11 @@ pub struct JobQueue {
     completed_jobs: Arc<RwLock<HashMap<Uuid, JobStatus>>>,
     /// Shutdown flag
     shutdown: Arc<RwLock<bool>>,
+    /// Drain flag — when true the queue stops accepting new submissions but
+    /// continues processing in-flight jobs until they finish.
+    draining: Arc<RwLock<bool>>,
+    /// Dead letter queue for permanently-failed jobs.
+    dead_letter_queue: Arc<RwLock<DeadLetterQueue>>,
 }
 
 impl Clone for JobQueue {
@@ -105,6 +119,8 @@ impl Clone for JobQueue {
             running_jobs: self.running_jobs.clone(),
             completed_jobs: self.completed_jobs.clone(),
             shutdown: self.shutdown.clone(),
+            draining: self.draining.clone(),
+            dead_letter_queue: self.dead_letter_queue.clone(),
         }
     }
 }
@@ -123,6 +139,7 @@ impl JobQueue {
     ) -> Result<Self> {
         let persistence = Arc::new(JobPersistence::new(&config.db_path)?);
         let worker_pool = Arc::new(WorkerPool::new(executor, metrics.clone(), worker_config));
+        let dlq = DeadLetterQueue::new(config.max_dlq_size);
 
         Ok(Self {
             persistence,
@@ -132,6 +149,8 @@ impl JobQueue {
             running_jobs: Arc::new(RwLock::new(HashMap::new())),
             completed_jobs: Arc::new(RwLock::new(HashMap::new())),
             shutdown: Arc::new(RwLock::new(false)),
+            draining: Arc::new(RwLock::new(false)),
+            dead_letter_queue: Arc::new(RwLock::new(dlq)),
         })
     }
 
@@ -147,15 +166,19 @@ impl JobQueue {
     ) -> Result<Self> {
         let persistence = Arc::new(JobPersistence::in_memory()?);
         let worker_pool = Arc::new(WorkerPool::new(executor, metrics.clone(), worker_config));
+        let default_config = QueueConfig::default();
+        let dlq = DeadLetterQueue::new(default_config.max_dlq_size);
 
         Ok(Self {
             persistence,
             worker_pool,
             metrics,
-            config: QueueConfig::default(),
+            config: default_config,
             running_jobs: Arc::new(RwLock::new(HashMap::new())),
             completed_jobs: Arc::new(RwLock::new(HashMap::new())),
             shutdown: Arc::new(RwLock::new(false)),
+            draining: Arc::new(RwLock::new(false)),
+            dead_letter_queue: Arc::new(RwLock::new(dlq)),
         })
     }
 
@@ -192,7 +215,11 @@ impl JobQueue {
         }
     }
 
-    /// Submit a job to the queue
+    /// Submit a job to the queue.
+    ///
+    /// Returns [`QueueError::Shutdown`] if the queue is shutting down **or**
+    /// in drain mode (drain mode stops new submissions while allowing in-flight
+    /// jobs to finish naturally).
     ///
     /// # Errors
     ///
@@ -201,12 +228,67 @@ impl JobQueue {
         if *self.shutdown.read().await {
             return Err(QueueError::Shutdown);
         }
+        if *self.draining.read().await {
+            return Err(QueueError::Shutdown);
+        }
 
         let job_id = job.id;
         info!("Submitting job {} ({})", job.name, job_id);
 
         self.persistence.save_job(&job)?;
 
+        Ok(job_id)
+    }
+
+    /// Enter drain mode: stop accepting new job submissions and wait for all
+    /// currently in-flight jobs to complete before returning.
+    ///
+    /// This is a graceful alternative to an immediate `shutdown()`.
+    pub async fn drain(&self) {
+        info!("Job queue entering drain mode — no new submissions accepted");
+        *self.draining.write().await = true;
+
+        // Poll until no jobs are running.
+        let poll_interval = Duration::from_millis(500);
+        loop {
+            let in_flight = self.running_jobs.read().await.len();
+            if in_flight == 0 {
+                break;
+            }
+            debug!("Draining: {} job(s) still in flight", in_flight);
+            sleep(poll_interval).await;
+        }
+
+        info!("Job queue drain complete — all in-flight jobs finished");
+    }
+
+    /// Returns `true` when the queue is in drain mode (new submissions are blocked).
+    pub async fn is_draining(&self) -> bool {
+        *self.draining.read().await
+    }
+
+    /// Return the number of entries currently in the dead letter queue.
+    pub async fn dlq_len(&self) -> usize {
+        self.dead_letter_queue.read().await.len()
+    }
+
+    /// Requeue a job from the dead letter queue back into the main queue.
+    ///
+    /// The job's retry counter and status are reset before re-submission.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the job is not in the DLQ or if submission fails.
+    pub async fn requeue_from_dlq(&self, job_id: Uuid) -> Result<Uuid> {
+        let job = self
+            .dead_letter_queue
+            .write()
+            .await
+            .requeue(job_id)
+            .map_err(|e| QueueError::InvalidState(e.to_string()))?;
+
+        self.persistence.save_job(&job)?;
+        info!("Requeued job {} from DLQ", job_id);
         Ok(job_id)
     }
 
@@ -300,6 +382,7 @@ impl JobQueue {
         let completed_jobs = self.completed_jobs.clone();
         let shutdown = self.shutdown.clone();
         let config = self.config.clone();
+        let dead_letter_queue = self.dead_letter_queue.clone();
 
         tokio::spawn(async move {
             let mut interval =
@@ -317,22 +400,27 @@ impl JobQueue {
                     &worker_pool,
                     &running_jobs,
                     &completed_jobs,
+                    &dead_letter_queue,
                     config.max_concurrent_jobs,
                     config.enable_retry,
+                    config.max_retry_limit,
                 )
                 .await;
             }
         });
     }
 
-    /// Process pending jobs
+    /// Process pending jobs, promoting permanently-failed ones to the DLQ.
+    #[allow(clippy::too_many_arguments)]
     async fn process_pending_jobs(
         persistence: &JobPersistence,
         worker_pool: &WorkerPool,
         running_jobs: &RwLock<HashMap<Uuid, Job>>,
         completed_jobs: &RwLock<HashMap<Uuid, JobStatus>>,
+        dead_letter_queue: &RwLock<DeadLetterQueue>,
         max_concurrent: usize,
         enable_retry: bool,
+        max_retry_limit: u32,
     ) {
         let running_count = running_jobs.read().await.len();
         if running_count >= max_concurrent {
@@ -370,6 +458,28 @@ impl JobQueue {
             };
 
             for mut job in failed_jobs {
+                // If the job has exceeded the queue-level retry limit (and that
+                // limit is enabled), move it to the dead letter queue instead
+                // of retrying it again.
+                if max_retry_limit > 0 && job.attempts >= max_retry_limit {
+                    let reason = job
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "max retry limit exceeded".to_string());
+                    let attempts = job.attempts;
+                    warn!(
+                        "Job {} exceeded max retry limit ({}/{}), moving to DLQ",
+                        job.id, attempts, max_retry_limit
+                    );
+                    match dead_letter_queue.write().await.admit(job, reason, attempts) {
+                        Ok(()) => {}
+                        Err(e) => {
+                            error!("Failed to admit job to DLQ: {}", e);
+                        }
+                    }
+                    continue;
+                }
+
                 if job.should_retry() {
                     if let Some(retry_time) = job.next_retry_time() {
                         if Utc::now() >= retry_time {

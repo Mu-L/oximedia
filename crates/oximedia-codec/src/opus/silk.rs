@@ -543,22 +543,260 @@ struct SubframeParams {
     subframe_gain: f32,
 }
 
-/// SILK encoder state (stub).
+// =============================================================================
+// Voice Activity Detection (VAD)
+// =============================================================================
+
+/// VAD decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VadDecision {
+    /// Active speech detected.
+    Active,
+    /// Silence / background noise.
+    Inactive,
+}
+
+/// Voice Activity Detector for SILK using a multi-band energy + spectral flux approach.
+///
+/// The algorithm:
+/// 1. Computes per-band energy across 4 sub-bands (low, mid-low, mid-high, high).
+/// 2. Maintains a smoothed noise floor estimate for each band via minimum statistics.
+/// 3. Computes SNR per band and derives a combined likelihood score.
+/// 4. Applies a hang-over counter to avoid premature VAD drop-out.
+#[derive(Clone, Debug)]
+pub struct VoiceActivityDetector {
+    /// Sample rate in Hz.
+    sample_rate: u32,
+    /// Smoothed signal energy per band (4 bands).
+    signal_energy: [f32; 4],
+    /// Minimum statistics noise floor per band.
+    noise_floor: [f32; 4],
+    /// EMA weight for signal energy update.
+    signal_ema: f32,
+    /// EMA weight for noise floor update (slow).
+    noise_ema: f32,
+    /// Hang-over counter (frames to stay Active after speech ends).
+    hangover_counter: u32,
+    /// Maximum hang-over in frames.
+    hangover_max: u32,
+    /// Energy threshold for voice detection (dB above noise floor).
+    threshold_db: f32,
+    /// Spectral flux history for voice/noise discrimination.
+    prev_band_energy: [f32; 4],
+    /// Total frames processed.
+    frame_count: u64,
+}
+
+impl VoiceActivityDetector {
+    /// Create a new VAD.
+    ///
+    /// `sample_rate` must be 8000, 12000, 16000, or 24000 Hz (SILK rates).
+    #[must_use]
+    pub fn new(sample_rate: u32) -> Self {
+        Self {
+            sample_rate,
+            signal_energy: [1e-6f32; 4],
+            noise_floor: [1e-6f32; 4],
+            signal_ema: 0.3,
+            noise_ema: 0.02,
+            hangover_counter: 0,
+            hangover_max: 8, // ~160 ms at 20 ms frames
+            threshold_db: 12.0,
+            prev_band_energy: [0.0f32; 4],
+            frame_count: 0,
+        }
+    }
+
+    /// Set the hang-over length in frames.
+    pub fn set_hangover(&mut self, frames: u32) {
+        self.hangover_max = frames;
+    }
+
+    /// Set the detection threshold in dB above noise floor.
+    pub fn set_threshold_db(&mut self, db: f32) {
+        self.threshold_db = db.clamp(0.0, 40.0);
+    }
+
+    /// Process a frame of samples (mono, f32 in [-1, 1]) and return VAD decision.
+    ///
+    /// Frame size is typically 160–480 samples (10–30 ms at 16 kHz).
+    pub fn process(&mut self, samples: &[f32]) -> VadDecision {
+        if samples.is_empty() {
+            self.frame_count += 1;
+            return VadDecision::Inactive;
+        }
+
+        let band_energy = self.compute_band_energy(samples);
+        self.update_signal_energy(&band_energy);
+
+        // Compute spectral flux (L1 change in band energy since last frame)
+        let flux: f32 = band_energy
+            .iter()
+            .zip(self.prev_band_energy.iter())
+            .map(|(&b, &p)| (b - p).abs())
+            .sum::<f32>();
+        self.prev_band_energy = band_energy;
+
+        // Update noise floor slowly when likely inactive
+        let is_likely_noise = self.is_likely_noise(&band_energy);
+        if is_likely_noise {
+            for i in 0..4 {
+                self.noise_floor[i] =
+                    self.noise_floor[i] * (1.0 - self.noise_ema) + band_energy[i] * self.noise_ema;
+                // Never let noise floor exceed signal energy
+                self.noise_floor[i] = self.noise_floor[i].min(self.signal_energy[i]);
+            }
+        }
+
+        // Compute per-band SNR and voice likelihood
+        let mut voice_bands = 0u32;
+        for i in 0..4 {
+            let noise = self.noise_floor[i].max(1e-10);
+            let snr_db = 10.0 * (self.signal_energy[i] / noise).log10();
+            if snr_db >= self.threshold_db {
+                voice_bands += 1;
+            }
+        }
+
+        // Spectral flux boost: high flux in speech-relevant bands suggests voice
+        let flux_boost = flux > 0.01;
+        let speech_active = voice_bands >= 2 || (voice_bands >= 1 && flux_boost);
+
+        self.frame_count += 1;
+
+        if speech_active {
+            self.hangover_counter = self.hangover_max;
+            VadDecision::Active
+        } else if self.hangover_counter > 0 {
+            self.hangover_counter -= 1;
+            VadDecision::Active
+        } else {
+            VadDecision::Inactive
+        }
+    }
+
+    /// Compute RMS energy in 4 sub-bands using simple bandpass filtering.
+    ///
+    /// Band boundaries (for 16 kHz input; scaled for other rates):
+    /// - Band 0: 0–500 Hz    (voiced fundamental + low harmonics)
+    /// - Band 1: 500–1500 Hz (primary speech formants)
+    /// - Band 2: 1500–3000 Hz (fricatives, high formants)
+    /// - Band 3: 3000–4000 Hz (voiceless fricatives, breath)
+    fn compute_band_energy(&self, samples: &[f32]) -> [f32; 4] {
+        // Use a simple DFT-free approximation: downsample using decimation and
+        // separate low/high with first-order IIR half-band filters.
+        //
+        // Step 1: split into low (LPF) and high (HPF) using leaky integrator.
+        // Step 2: split low into sub-low and sub-high similarly.
+        // This gives us 4 bands via a 2-level binary tree.
+
+        let n = samples.len() as f32;
+
+        // Further split the low band at ~500 Hz
+        let alpha2 = {
+            let fc = 500.0f32 / self.sample_rate as f32;
+            (-2.0 * std::f32::consts::PI * fc).exp()
+        };
+
+        let mut lp2 = 0.0f32;
+        let mut band0_e = 0.0f32;
+        let mut band1_e = 0.0f32;
+        for &s in samples {
+            lp2 = lp2 * alpha2 + s * (1.0 - alpha2);
+            let hp2 = s - lp2;
+            band0_e += lp2 * lp2;
+            band1_e += hp2 * hp2;
+        }
+
+        // Further split the high band at ~3000 Hz
+        let alpha3 = {
+            let fc = 3000.0f32 / self.sample_rate as f32;
+            (-2.0 * std::f32::consts::PI * fc).exp()
+        };
+
+        let mut lp3 = 0.0f32;
+        let mut band2_e = 0.0f32;
+        let mut band3_e = 0.0f32;
+        for &s in samples {
+            lp3 = lp3 * alpha3 + s * (1.0 - alpha3);
+            let hp3 = s - lp3;
+            band2_e += lp3 * lp3;
+            band3_e += hp3 * hp3;
+        }
+
+        let inv_n = if n > 0.0 { 1.0 / n } else { 1.0 };
+        [
+            band0_e * inv_n,
+            band1_e * inv_n,
+            band2_e * inv_n,
+            band3_e * inv_n,
+        ]
+    }
+
+    /// Update signal energy estimate (EMA).
+    fn update_signal_energy(&mut self, band_energy: &[f32; 4]) {
+        for i in 0..4 {
+            self.signal_energy[i] =
+                self.signal_energy[i] * (1.0 - self.signal_ema) + band_energy[i] * self.signal_ema;
+        }
+    }
+
+    /// Heuristic: is the current band energy likely noise?
+    fn is_likely_noise(&self, band_energy: &[f32; 4]) -> bool {
+        // Low total energy compared to running signal estimate → likely noise
+        let total: f32 = band_energy.iter().sum();
+        let running: f32 = self.signal_energy.iter().sum();
+        total < running * 0.5
+    }
+
+    /// Reset internal state.
+    pub fn reset(&mut self) {
+        self.signal_energy = [1e-6f32; 4];
+        self.noise_floor = [1e-6f32; 4];
+        self.hangover_counter = 0;
+        self.prev_band_energy = [0.0f32; 4];
+        self.frame_count = 0;
+    }
+
+    /// Current hang-over counter value.
+    #[must_use]
+    pub const fn hangover_counter(&self) -> u32 {
+        self.hangover_counter
+    }
+
+    /// Total frames processed.
+    #[must_use]
+    pub const fn frame_count(&self) -> u64 {
+        self.frame_count
+    }
+}
+
+// =============================================================================
+// SilkEncoder with integrated VAD
+// =============================================================================
+
+/// SILK encoder with integrated Voice Activity Detection.
 #[derive(Debug)]
 pub struct SilkEncoder {
     /// Sample rate
-    #[allow(dead_code)]
     sample_rate: u32,
     /// Number of channels
-    #[allow(dead_code)]
     channels: usize,
     /// Bandwidth
     #[allow(dead_code)]
     bandwidth: OpusBandwidth,
+    /// Voice activity detector.
+    vad: VoiceActivityDetector,
+    /// Last VAD decision.
+    last_vad: VadDecision,
+    /// DTX (Discontinuous Transmission) mode: skip encoding inactive frames.
+    pub dtx_enabled: bool,
+    /// Count of consecutive inactive frames (for DTX).
+    inactive_frame_count: u32,
 }
 
 impl SilkEncoder {
-    /// Creates a new SILK encoder.
+    /// Creates a new SILK encoder with VAD.
     ///
     /// # Arguments
     ///
@@ -570,34 +808,100 @@ impl SilkEncoder {
             sample_rate,
             channels,
             bandwidth,
+            vad: VoiceActivityDetector::new(sample_rate),
+            last_vad: VadDecision::Inactive,
+            dtx_enabled: false,
+            inactive_frame_count: 0,
         }
     }
 
-    /// Encodes a SILK frame.
+    /// Run VAD on the first channel of the input and return the decision.
+    ///
+    /// When `dtx_enabled` is `true`, returns `None` on inactive frames (skip encoding).
+    #[must_use]
+    pub fn run_vad(&mut self, input: &[f32], frame_size: usize) -> VadDecision {
+        // Mono downmix for VAD: use channel 0 only
+        let ch = self.channels;
+        let mono: Vec<f32> = if ch == 1 {
+            input[..frame_size.min(input.len())].to_vec()
+        } else {
+            (0..frame_size.min(input.len() / ch))
+                .map(|i| input[i * ch])
+                .collect()
+        };
+        self.last_vad = self.vad.process(&mono);
+        self.last_vad
+    }
+
+    /// Return the most recent VAD decision without re-running analysis.
+    #[must_use]
+    pub const fn last_vad_decision(&self) -> VadDecision {
+        self.last_vad
+    }
+
+    /// Encodes a SILK frame with VAD-driven DTX.
+    ///
+    /// Returns `Ok(0)` if DTX suppresses the frame (inactive speech with dtx_enabled).
     ///
     /// # Arguments
     ///
-    /// * `input` - Input sample buffer
+    /// * `input` - Input sample buffer (interleaved if multi-channel)
     /// * `output` - Compressed frame data
     /// * `frame_size` - Number of samples per channel
     pub fn encode(
         &mut self,
-        _input: &[f32],
+        input: &[f32],
         output: &mut [u8],
-        _frame_size: usize,
+        frame_size: usize,
     ) -> CodecResult<usize> {
-        // Stub: return minimal valid packet
         if output.is_empty() {
             return Err(CodecError::InvalidData("Output buffer empty".to_string()));
         }
 
-        // Return 0 bytes encoded (stub)
-        Ok(0)
+        let vad = self.run_vad(input, frame_size);
+
+        if vad == VadDecision::Inactive {
+            self.inactive_frame_count += 1;
+            if self.dtx_enabled && self.inactive_frame_count > 1 {
+                // DTX: emit zero bytes for this frame
+                return Ok(0);
+            }
+        } else {
+            self.inactive_frame_count = 0;
+        }
+
+        // Stub: emit a minimal comfort noise indicator byte
+        output[0] = if vad == VadDecision::Active {
+            0x01
+        } else {
+            0x00
+        };
+        Ok(1)
     }
 
-    /// Resets encoder state.
+    /// Resets encoder state including VAD.
     pub fn reset(&mut self) {
-        // Nothing to reset in stub
+        self.vad.reset();
+        self.last_vad = VadDecision::Inactive;
+        self.inactive_frame_count = 0;
+    }
+
+    /// Return a reference to the internal VAD for inspection.
+    #[must_use]
+    pub const fn vad(&self) -> &VoiceActivityDetector {
+        &self.vad
+    }
+
+    /// Return the sample rate.
+    #[must_use]
+    pub const fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// Return the channel count.
+    #[must_use]
+    pub const fn channels(&self) -> usize {
+        self.channels
     }
 }
 
@@ -635,17 +939,171 @@ mod tests {
     #[test]
     fn test_silk_encoder_creation() {
         let encoder = SilkEncoder::new(48000, 2, OpusBandwidth::Wideband);
-        assert_eq!(encoder.sample_rate, 48000);
-        assert_eq!(encoder.channels, 2);
+        assert_eq!(encoder.sample_rate(), 48000);
+        assert_eq!(encoder.channels(), 2);
     }
 
     #[test]
-    fn test_silk_encoder_stub() {
-        let mut encoder = SilkEncoder::new(48000, 1, OpusBandwidth::Wideband);
-        let input = vec![0.0f32; 480];
+    fn test_silk_encoder_encode_active() {
+        let mut encoder = SilkEncoder::new(16000, 1, OpusBandwidth::Wideband);
+        // Generate a 440 Hz sine wave — should be classified as active speech
+        let freq = 440.0f32;
+        let sr = 16000.0f32;
+        let input: Vec<f32> = (0..320)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sr).sin() * 0.5)
+            .collect();
+        let mut output = vec![0u8; 1024];
+        let result = encoder.encode(&input, &mut output, 320);
+        assert!(result.is_ok());
+        assert!(
+            result.expect("encode should succeed") >= 1,
+            "Active frame must emit at least 1 byte"
+        );
+    }
+
+    #[test]
+    fn test_silk_encoder_dtx_silence() {
+        let mut encoder = SilkEncoder::new(16000, 1, OpusBandwidth::Wideband);
+        encoder.dtx_enabled = true;
+        let silence = vec![0.0f32; 320];
         let mut output = vec![0u8; 1024];
 
-        let result = encoder.encode(&input, &mut output, 480);
+        // First inactive frame still emits (first occurrence)
+        let _ = encoder.encode(&silence, &mut output, 320);
+        // After a few consecutive inactive frames, DTX kicks in
+        for _ in 0..5 {
+            let _ = encoder.encode(&silence, &mut output, 320);
+        }
+        let result = encoder.encode(&silence, &mut output, 320);
         assert!(result.is_ok());
+        // DTX should suppress: 0 bytes
+        assert_eq!(
+            result.expect("encode should succeed"),
+            0,
+            "DTX must suppress silent frames"
+        );
+    }
+
+    #[test]
+    fn test_vad_creation() {
+        let vad = VoiceActivityDetector::new(16000);
+        assert_eq!(vad.frame_count(), 0);
+        assert_eq!(vad.hangover_counter(), 0);
+    }
+
+    #[test]
+    fn test_vad_silence_returns_inactive() {
+        let mut vad = VoiceActivityDetector::new(16000);
+        let silence = vec![0.0f32; 320];
+        // First few frames: hang-over might keep it active; after warm-up → inactive
+        for _ in 0..20 {
+            let _ = vad.process(&silence);
+        }
+        let decision = vad.process(&silence);
+        assert_eq!(
+            decision,
+            VadDecision::Inactive,
+            "Prolonged silence must be inactive"
+        );
+    }
+
+    #[test]
+    fn test_vad_sine_wave_returns_active() {
+        let mut vad = VoiceActivityDetector::new(16000);
+        // Feed silence to establish noise floor
+        let silence = vec![0.0f32; 320];
+        for _ in 0..10 {
+            let _ = vad.process(&silence);
+        }
+        // Now feed a loud sine wave (well above noise floor)
+        let sine: Vec<f32> = (0..320)
+            .map(|i| (2.0 * std::f32::consts::PI * 300.0 * i as f32 / 16000.0).sin() * 0.8)
+            .collect();
+        let decision = vad.process(&sine);
+        assert_eq!(
+            decision,
+            VadDecision::Active,
+            "Loud sine wave must be active"
+        );
+    }
+
+    #[test]
+    fn test_vad_frame_count_increments() {
+        let mut vad = VoiceActivityDetector::new(16000);
+        let frame = vec![0.0f32; 160];
+        for i in 1..=5 {
+            vad.process(&frame);
+            assert_eq!(vad.frame_count(), i);
+        }
+    }
+
+    #[test]
+    fn test_vad_empty_frame_returns_inactive() {
+        let mut vad = VoiceActivityDetector::new(16000);
+        let decision = vad.process(&[]);
+        assert_eq!(decision, VadDecision::Inactive);
+    }
+
+    #[test]
+    fn test_vad_hangover_maintains_active() {
+        let mut vad = VoiceActivityDetector::new(16000);
+        vad.set_hangover(4);
+        // Feed silence to establish floor
+        let silence = vec![0.0f32; 160];
+        for _ in 0..5 {
+            let _ = vad.process(&silence);
+        }
+        // Feed loud tone to trigger active
+        let tone: Vec<f32> = (0..160)
+            .map(|i| (2.0 * std::f32::consts::PI * 400.0 * i as f32 / 16000.0).sin() * 0.9)
+            .collect();
+        let d1 = vad.process(&tone);
+        // Return to silence — should stay active for hangover_max frames
+        let d2 = vad.process(&silence);
+        assert_eq!(d1, VadDecision::Active);
+        // Hang-over keeps it active immediately after speech
+        assert_eq!(d2, VadDecision::Active, "Hang-over should keep active flag");
+    }
+
+    #[test]
+    fn test_vad_reset_clears_state() {
+        let mut vad = VoiceActivityDetector::new(16000);
+        let frame = vec![0.5f32; 320];
+        for _ in 0..10 {
+            vad.process(&frame);
+        }
+        vad.reset();
+        assert_eq!(vad.frame_count(), 0);
+        assert_eq!(vad.hangover_counter(), 0);
+    }
+
+    #[test]
+    fn test_vad_set_threshold() {
+        let mut vad = VoiceActivityDetector::new(16000);
+        vad.set_threshold_db(20.0);
+        // Very low amplitude signal should be inactive with high threshold
+        let low: Vec<f32> = vec![0.0001f32; 320];
+        for _ in 0..5 {
+            let _ = vad.process(&low);
+        }
+        let d = vad.process(&low);
+        assert_eq!(d, VadDecision::Inactive);
+    }
+
+    #[test]
+    fn test_encoder_vad_method() {
+        let mut encoder = SilkEncoder::new(16000, 1, OpusBandwidth::Narrowband);
+        let sine: Vec<f32> = (0..320)
+            .map(|i| (2.0 * std::f32::consts::PI * 250.0 * i as f32 / 16000.0).sin() * 0.7)
+            .collect();
+        // Warm up noise floor first with silence
+        let silence = vec![0.0f32; 320];
+        for _ in 0..5 {
+            let _ = encoder.run_vad(&silence, 320);
+        }
+        let decision = encoder.run_vad(&sine, 320);
+        // Strong sine above noise floor should be active
+        assert_eq!(decision, VadDecision::Active);
+        assert_eq!(encoder.last_vad_decision(), VadDecision::Active);
     }
 }

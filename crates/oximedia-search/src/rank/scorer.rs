@@ -182,6 +182,8 @@ mod tests {
             mime_type: None,
             duration_ms: None,
             created_at: 0,
+            modified_at: None,
+            file_size: None,
             matched_fields: fields,
             thumbnail_url: None,
         }

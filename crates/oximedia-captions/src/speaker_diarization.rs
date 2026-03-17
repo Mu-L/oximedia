@@ -208,12 +208,169 @@ impl SpeakerChangeDetector {
     }
 }
 
+// ── Types merged from speaker_diarize module ─────────────────────────────────
+
+/// An identifier and optional human-readable name for a speaker.
+///
+/// A lightweight speaker label for caption-level attribution, complementing
+/// [`Speaker`] which carries full voice-signature data for identification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpeakerLabel {
+    /// Numeric speaker identifier (0-indexed within a diarization result).
+    pub id: u8,
+    /// Optional display name assigned by the operator.
+    pub name: Option<String>,
+}
+
+impl SpeakerLabel {
+    /// Create a new speaker label.
+    pub fn new(id: u8, name: Option<impl Into<String>>) -> Self {
+        Self {
+            id,
+            name: name.map(Into::into),
+        }
+    }
+
+    /// Returns the human-readable name, falling back to `"Speaker N"` when no
+    /// name has been assigned.
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        match &self.name {
+            Some(n) => n.clone(),
+            None => format!("Speaker {}", self.id),
+        }
+    }
+}
+
+/// A contiguous caption segment attributed to a single speaker.
+///
+/// Carries the full caption text along with timing, whereas
+/// [`DiarizationSegment`] carries only timing and confidence without text.
+#[derive(Debug, Clone)]
+pub struct SpeakerSegment {
+    /// Speaker who produced this segment.
+    pub speaker: SpeakerLabel,
+    /// Start timestamp in milliseconds.
+    pub start_ms: u64,
+    /// End timestamp in milliseconds.
+    pub end_ms: u64,
+    /// Caption text for this segment.
+    pub text: String,
+}
+
+impl SpeakerSegment {
+    /// Create a new speaker segment.
+    pub fn new(speaker: SpeakerLabel, start_ms: u64, end_ms: u64, text: impl Into<String>) -> Self {
+        Self {
+            speaker,
+            start_ms,
+            end_ms,
+            text: text.into(),
+        }
+    }
+
+    /// Duration of this segment in milliseconds.
+    #[must_use]
+    pub fn duration_ms(&self) -> u64 {
+        self.end_ms.saturating_sub(self.start_ms)
+    }
+
+    /// Number of whitespace-separated words in this segment.
+    #[must_use]
+    pub fn word_count(&self) -> usize {
+        if self.text.is_empty() {
+            0
+        } else {
+            self.text.split_whitespace().count()
+        }
+    }
+}
+
+/// A text-oriented diarization result built from [`SpeakerSegment`]s.
+///
+/// Provides segment filtering and consecutive-segment merging, complementing
+/// [`DiarizationResult`] which focuses on timing and speaker-time statistics.
+#[derive(Debug, Default)]
+pub struct TextDiarizationResult {
+    /// Segments in presentation order (by `start_ms`).
+    pub segments: Vec<SpeakerSegment>,
+}
+
+impl TextDiarizationResult {
+    /// Create an empty diarization result.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of distinct speaker IDs present in the result.
+    #[must_use]
+    pub fn speaker_count(&self) -> usize {
+        let mut ids: Vec<u8> = self.segments.iter().map(|s| s.speaker.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.len()
+    }
+
+    /// All segments attributed to `speaker_id`.
+    #[must_use]
+    pub fn segments_for(&self, speaker_id: u8) -> Vec<&SpeakerSegment> {
+        self.segments
+            .iter()
+            .filter(|s| s.speaker.id == speaker_id)
+            .collect()
+    }
+
+    /// Merge consecutive segments for `speaker_id` where the gap between
+    /// adjacent segments is less than 500 ms.
+    ///
+    /// The merged segment's text is formed by joining the constituent texts
+    /// with a single space.  The speaker label of the first segment in each
+    /// merged group is used.
+    #[must_use]
+    pub fn merge_consecutive(&self, speaker_id: u8) -> Vec<SpeakerSegment> {
+        const GAP_THRESHOLD_MS: u64 = 500;
+
+        let mut speaker_segs: Vec<&SpeakerSegment> = self.segments_for(speaker_id);
+        // Sort by start time to ensure correct adjacency checks.
+        speaker_segs.sort_by_key(|s| s.start_ms);
+
+        let mut merged: Vec<SpeakerSegment> = Vec::new();
+
+        for seg in speaker_segs {
+            if let Some(last) = merged.last_mut() {
+                let gap = seg.start_ms.saturating_sub(last.end_ms);
+                if gap < GAP_THRESHOLD_MS {
+                    // Merge into the current group.
+                    last.end_ms = seg.end_ms;
+                    if !last.text.is_empty() {
+                        last.text.push(' ');
+                    }
+                    last.text.push_str(&seg.text);
+                    continue;
+                }
+            }
+            merged.push(seg.clone());
+        }
+
+        merged
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn uniform_features(val: f32, len: usize) -> Vec<f32> {
         vec![val; len]
+    }
+
+    fn label(id: u8, name: Option<&str>) -> SpeakerLabel {
+        SpeakerLabel::new(id, name)
+    }
+
+    fn speaker_seg(speaker_id: u8, start: u64, end: u64, text: &str) -> SpeakerSegment {
+        SpeakerSegment::new(label(speaker_id, None), start, end, text)
     }
 
     #[test]
@@ -332,5 +489,109 @@ mod tests {
         let changes = SpeakerChangeDetector::detect(&features, 500);
         assert!(!changes.is_empty());
         assert!(changes.contains(&1000)); // at window index 2, t = 2 * 500 ms
+    }
+
+    // ── SpeakerLabel tests (merged from speaker_diarize) ──
+
+    #[test]
+    fn test_label_display_name_with_name() {
+        let l = label(0, Some("Alice"));
+        assert_eq!(l.display_name(), "Alice");
+    }
+
+    #[test]
+    fn test_label_display_name_fallback() {
+        let l = label(3, None::<&str>);
+        assert_eq!(l.display_name(), "Speaker 3");
+    }
+
+    #[test]
+    fn test_label_display_name_speaker_zero() {
+        let l = label(0, None::<&str>);
+        assert_eq!(l.display_name(), "Speaker 0");
+    }
+
+    // ── SpeakerSegment tests (merged from speaker_diarize) ──
+
+    #[test]
+    fn test_speaker_segment_duration_ms() {
+        let s = speaker_seg(0, 1000, 3000, "hello");
+        assert_eq!(s.duration_ms(), 2000);
+    }
+
+    #[test]
+    fn test_speaker_segment_word_count() {
+        let s = speaker_seg(0, 0, 1000, "one two three");
+        assert_eq!(s.word_count(), 3);
+    }
+
+    #[test]
+    fn test_speaker_segment_word_count_empty() {
+        let s = speaker_seg(0, 0, 100, "");
+        assert_eq!(s.word_count(), 0);
+    }
+
+    // ── TextDiarizationResult tests (merged from speaker_diarize) ──
+
+    #[test]
+    fn test_text_diarization_speaker_count_empty() {
+        let dr = TextDiarizationResult::new();
+        assert_eq!(dr.speaker_count(), 0);
+    }
+
+    #[test]
+    fn test_text_diarization_speaker_count_two() {
+        let mut dr = TextDiarizationResult::new();
+        dr.segments.push(speaker_seg(0, 0, 1000, "hello"));
+        dr.segments.push(speaker_seg(1, 1200, 2000, "hi"));
+        dr.segments.push(speaker_seg(0, 2100, 3000, "world"));
+        assert_eq!(dr.speaker_count(), 2);
+    }
+
+    #[test]
+    fn test_text_diarization_segments_for() {
+        let mut dr = TextDiarizationResult::new();
+        dr.segments.push(speaker_seg(0, 0, 500, "A"));
+        dr.segments.push(speaker_seg(1, 600, 1000, "B"));
+        dr.segments.push(speaker_seg(0, 1100, 1500, "C"));
+        let s0 = dr.segments_for(0);
+        assert_eq!(s0.len(), 2);
+    }
+
+    #[test]
+    fn test_text_diarization_segments_for_unknown() {
+        let mut dr = TextDiarizationResult::new();
+        dr.segments.push(speaker_seg(0, 0, 500, "A"));
+        assert!(dr.segments_for(9).is_empty());
+    }
+
+    #[test]
+    fn test_text_diarization_merge_within_gap() {
+        let mut dr = TextDiarizationResult::new();
+        dr.segments.push(speaker_seg(0, 0, 1000, "Hello"));
+        dr.segments.push(speaker_seg(0, 1200, 2000, "world"));
+        let merged = dr.merge_consecutive(0);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Hello world");
+        assert_eq!(merged[0].end_ms, 2000);
+    }
+
+    #[test]
+    fn test_text_diarization_merge_exceeds_gap() {
+        let mut dr = TextDiarizationResult::new();
+        dr.segments.push(speaker_seg(0, 0, 1000, "First"));
+        dr.segments.push(speaker_seg(0, 1600, 2200, "Second"));
+        let merged = dr.merge_consecutive(0);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn test_text_diarization_merge_ignores_other_speakers() {
+        let mut dr = TextDiarizationResult::new();
+        dr.segments.push(speaker_seg(0, 0, 500, "Alice"));
+        dr.segments.push(speaker_seg(1, 600, 1000, "Bob"));
+        dr.segments.push(speaker_seg(0, 700, 1200, "Alice again"));
+        let merged = dr.merge_consecutive(0);
+        assert_eq!(merged.len(), 1);
     }
 }

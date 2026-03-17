@@ -191,10 +191,26 @@ pub fn compare_metadata(meta1: &MediaMetadata, meta2: &MediaMetadata) -> Metadat
     }
 }
 
-/// Compare filenames using normalized Levenshtein distance.
+/// Compare filenames using a combination of Levenshtein edit distance,
+/// Jaccard token overlap, and bigram (Dice coefficient) similarity.
+///
+/// This multi-signal approach is robust against common filename variations:
+/// - `"My Video (1080p)"` vs `"my_video_1080p"` (separators, case)
+/// - `"vacation_2024_final"` vs `"vacation_2024_final_v2"` (suffixes)
+/// - `"clip_001"` vs `"clip_002"` (numeric increments)
+///
+/// The function uses two comparison strategies and returns the **maximum**
+/// of the two scores:
+///
+/// 1. **Raw comparison**: Normalized filenames (lowercase, collapsed separators)
+///    compared via edit distance (40%), token Jaccard (35%), bigram Dice (25%).
+/// 2. **Media-aware comparison**: Uses [`crate::fuzzy_match::FilenameMatcher`]
+///    which strips common noise tokens (resolution tags like "1080p", codec names
+///    like "x264", release markers like "BluRay") before comparing. This ensures
+///    that files like `"Movie.2024.1080p.x264.mkv"` and `"Movie.2024.720p.h265.mp4"`
+///    are recognized as the same content despite different encoding parameters.
 #[must_use]
 pub fn compare_filenames(name1: &str, name2: &str) -> f64 {
-    // Normalize: lowercase, remove special characters
     let norm1 = normalize_filename(name1);
     let norm2 = normalize_filename(name2);
 
@@ -206,21 +222,100 @@ pub fn compare_filenames(name1: &str, name2: &str) -> f64 {
         return 0.0;
     }
 
-    let distance = levenshtein_distance(&norm1, &norm2);
-    let max_len = norm1.len().max(norm2.len());
+    // Strategy 1: Raw comparison (original logic)
+    let raw_score = raw_filename_similarity(&norm1, &norm2);
 
-    1.0 - (distance as f64 / max_len as f64)
+    // Strategy 2: Media-aware comparison using FilenameMatcher
+    // This strips codec tags, resolution markers, release-group tokens, etc.
+    let matcher = crate::fuzzy_match::FilenameMatcher::new(0.0); // threshold=0 to always get a score
+    let media_aware_score = matcher.similarity(name1, name2).value();
+
+    // Return the maximum of the two strategies so that either approach
+    // can detect duplicates that the other would miss.
+    raw_score.max(media_aware_score)
 }
 
-/// Normalize filename for comparison.
+/// Raw filename similarity using edit distance, token Jaccard, and bigram Dice.
+fn raw_filename_similarity(norm1: &str, norm2: &str) -> f64 {
+    // 1. Levenshtein edit distance score
+    let distance = levenshtein_distance(norm1, norm2);
+    let max_len = norm1.len().max(norm2.len());
+    let edit_score = 1.0 - (distance as f64 / max_len as f64);
+
+    // 2. Token Jaccard index (bag-of-words overlap)
+    let tokens1 = tokenize_filename(norm1);
+    let tokens2 = tokenize_filename(norm2);
+    let token_score = if tokens1.is_empty() && tokens2.is_empty() {
+        1.0
+    } else {
+        let intersection = tokens1.intersection(&tokens2).count();
+        let union = tokens1.union(&tokens2).count();
+        if union == 0 {
+            0.0
+        } else {
+            intersection as f64 / union as f64
+        }
+    };
+
+    // 3. Bigram Dice coefficient
+    let bigrams1 = char_bigrams(norm1);
+    let bigrams2 = char_bigrams(norm2);
+    let bigram_score = if bigrams1.is_empty() && bigrams2.is_empty() {
+        1.0
+    } else {
+        let mut overlap = 0usize;
+        for (bg, count_a) in &bigrams1 {
+            if let Some(count_b) = bigrams2.get(bg) {
+                overlap += (*count_a).min(*count_b);
+            }
+        }
+        let total_a: usize = bigrams1.values().sum();
+        let total_b: usize = bigrams2.values().sum();
+        let denom = total_a + total_b;
+        if denom == 0 {
+            0.0
+        } else {
+            2.0 * overlap as f64 / denom as f64
+        }
+    };
+
+    // Weighted combination
+    edit_score * 0.40 + token_score * 0.35 + bigram_score * 0.25
+}
+
+/// Normalize filename for comparison: lowercase, strip separators, collapse whitespace.
 fn normalize_filename(name: &str) -> String {
     name.to_lowercase()
         .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c
+            } else {
+                // Replace separators (underscore, dot, dash, etc.) with space
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Tokenize a normalized filename into a set of words (split on whitespace).
+fn tokenize_filename(name: &str) -> std::collections::HashSet<String> {
+    name.split_whitespace().map(|s| s.to_string()).collect()
+}
+
+/// Extract character bigrams with counts from a string.
+fn char_bigrams(s: &str) -> std::collections::HashMap<(char, char), usize> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut map = std::collections::HashMap::new();
+    if chars.len() >= 2 {
+        for pair in chars.windows(2) {
+            *map.entry((pair[0], pair[1])).or_insert(0) += 1;
+        }
+    }
+    map
 }
 
 /// Calculate Levenshtein distance between two strings.
@@ -838,5 +933,82 @@ mod tests {
 
         assert_eq!(groups.len(), 1); // One group of duplicates
         assert!(groups[0].len() >= 2); // At least two files in the group
+    }
+
+    // ---- Media-aware filename comparison tests ----
+
+    #[test]
+    fn test_filename_comparison_strips_codec_tags() {
+        // Same movie, different encoding parameters
+        let score = compare_filenames(
+            "The.Movie.2024.1080p.x264.mkv",
+            "The.Movie.2024.720p.x265.mp4",
+        );
+        assert!(
+            score > 0.8,
+            "Same movie with different codecs/resolutions should score > 0.8, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_filename_comparison_strips_release_markers() {
+        let score = compare_filenames(
+            "Movie.Title.2024.BluRay.REMUX.mkv",
+            "Movie.Title.2024.WEB-DL.mp4",
+        );
+        assert!(
+            score > 0.8,
+            "Same movie with different release types should score > 0.8, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_filename_comparison_different_content() {
+        // Completely different movies should score low
+        let score = compare_filenames("Inception.2010.1080p.mkv", "Interstellar.2014.720p.mp4");
+        assert!(
+            score < 0.8,
+            "Different movies should score < 0.8, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_filename_comparison_uhd_vs_hd() {
+        let score = compare_filenames(
+            "Documentary.2024.2160p.HDR.mkv",
+            "Documentary.2024.1080p.SDR.mp4",
+        );
+        assert!(
+            score > 0.7,
+            "Same content at different quality tiers should be similar, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_filename_comparison_audio_codecs_stripped() {
+        let score = compare_filenames("Concert.2024.FLAC.mkv", "Concert.2024.AAC.mp4");
+        assert!(
+            score > 0.8,
+            "Same content with different audio codecs should match, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_metadata_comparison_uses_fuzzy_filename() {
+        let mut meta1 = create_test_metadata("Movie.2024.1080p.x264.BluRay.mkv", 100.0, 1920, 1080);
+        meta1.video_codec = Some("h264".to_string());
+        meta1.audio_codec = Some("aac".to_string());
+
+        let mut meta2 = create_test_metadata("Movie.2024.720p.x265.WEB-DL.mp4", 100.0, 1280, 720);
+        meta2.video_codec = Some("h265".to_string());
+        meta2.audio_codec = Some("opus".to_string());
+
+        let sim = compare_metadata(&meta1, &meta2);
+        // filename_similarity should be high due to media-aware stripping
+        assert!(
+            sim.filename_similarity > 0.7,
+            "Media-aware filename comparison should score > 0.7, got {}",
+            sim.filename_similarity
+        );
     }
 }

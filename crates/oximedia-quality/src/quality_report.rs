@@ -317,6 +317,110 @@ impl QualityReport {
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
     }
+
+    /// Exports per-frame metrics to CSV format.
+    ///
+    /// The output has one row per frame-metric pair, with columns:
+    /// `frame,metric,value`
+    ///
+    /// If `include_summaries` is `true`, a second section is appended after
+    /// a blank line with columns:
+    /// `metric,mean,min,max,stddev,median,p5,p95,count`
+    #[must_use]
+    pub fn to_csv(&self, include_summaries: bool) -> String {
+        let mut csv = String::new();
+
+        // Per-frame section
+        csv.push_str("frame,metric,value\n");
+        for fm in &self.frame_metrics {
+            csv.push_str(&format!("{},{},{:.6}\n", fm.frame, fm.metric, fm.value));
+        }
+
+        // Optional summaries section
+        if include_summaries && !self.summaries.is_empty() {
+            csv.push('\n');
+            csv.push_str("metric,mean,min,max,stddev,median,p5,p95,count\n");
+            let mut metric_names: Vec<&String> = self.summaries.keys().collect();
+            metric_names.sort();
+            for name in metric_names {
+                if let Some(s) = self.summaries.get(name) {
+                    csv.push_str(&format!(
+                        "{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{}\n",
+                        s.name,
+                        s.mean,
+                        s.min,
+                        s.max,
+                        s.stddev,
+                        s.median,
+                        s.percentile_5,
+                        s.percentile_95,
+                        s.count
+                    ));
+                }
+            }
+        }
+
+        csv
+    }
+
+    /// Exports the report to CSV and writes it to a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written.
+    pub fn export_csv(
+        &self,
+        path: &std::path::Path,
+        include_summaries: bool,
+    ) -> std::io::Result<()> {
+        let csv = self.to_csv(include_summaries);
+        std::fs::write(path, csv)
+    }
+
+    /// Exports only per-frame data for a specific metric to CSV.
+    ///
+    /// Columns: `frame,value`
+    #[must_use]
+    pub fn metric_to_csv(&self, metric: &str) -> String {
+        let mut csv = String::new();
+        csv.push_str("frame,value\n");
+        for fm in &self.frame_metrics {
+            if fm.metric == metric {
+                csv.push_str(&format!("{},{:.6}\n", fm.frame, fm.value));
+            }
+        }
+        csv
+    }
+
+    /// Exports issues to CSV format.
+    ///
+    /// Columns: `severity,frame,metric,measured,threshold,message`
+    #[must_use]
+    pub fn issues_to_csv(&self) -> String {
+        let mut csv = String::new();
+        csv.push_str("severity,frame,metric,measured,threshold,message\n");
+        for issue in &self.issues {
+            let frame_str = issue.frame.map_or_else(String::new, |f| f.to_string());
+            let metric_str = issue.metric.as_deref().unwrap_or("");
+            let measured_str = issue
+                .measured_value
+                .map_or_else(String::new, |v| format!("{v:.6}"));
+            let threshold_str = issue
+                .threshold
+                .map_or_else(String::new, |v| format!("{v:.6}"));
+            // Escape commas and quotes in message
+            let escaped_message = if issue.message.contains(',') || issue.message.contains('"') {
+                format!("\"{}\"", issue.message.replace('"', "\"\""))
+            } else {
+                issue.message.clone()
+            };
+            csv.push_str(&format!(
+                "{:?},{},{},{},{},{}\n",
+                issue.severity, frame_str, metric_str, measured_str, threshold_str, escaped_message
+            ));
+        }
+        csv
+    }
 }
 
 #[cfg(test)]
@@ -449,5 +553,128 @@ mod tests {
         assert!(Severity::Info < Severity::Warning);
         assert!(Severity::Warning < Severity::Error);
         assert!(Severity::Error < Severity::Critical);
+    }
+
+    // ── CSV Export Tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_to_csv_per_frame_only() {
+        let mut report = QualityReport::new("test.mp4");
+        report.add_frame_metric(0, "PSNR", 35.0);
+        report.add_frame_metric(1, "PSNR", 33.5);
+        report.add_frame_metric(0, "SSIM", 0.95);
+        let csv = report.to_csv(false);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[0], "frame,metric,value");
+        assert_eq!(lines.len(), 4); // header + 3 data rows
+        assert!(lines[1].starts_with("0,PSNR,"));
+        assert!(lines[2].starts_with("1,PSNR,"));
+        assert!(lines[3].starts_with("0,SSIM,"));
+    }
+
+    #[test]
+    fn test_to_csv_with_summaries() {
+        let mut report = QualityReport::new("test.mp4");
+        for i in 0..5 {
+            report.add_frame_metric(i, "PSNR", 30.0 + i as f64);
+        }
+        report.compute_summaries();
+        let csv = report.to_csv(true);
+        assert!(csv.contains("metric,mean,min,max"));
+        assert!(csv.contains("PSNR,"));
+    }
+
+    #[test]
+    fn test_to_csv_empty_report() {
+        let report = QualityReport::new("empty.mp4");
+        let csv = report.to_csv(false);
+        assert_eq!(csv, "frame,metric,value\n");
+    }
+
+    #[test]
+    fn test_metric_to_csv() {
+        let mut report = QualityReport::new("test.mp4");
+        report.add_frame_metric(0, "PSNR", 35.0);
+        report.add_frame_metric(1, "PSNR", 33.0);
+        report.add_frame_metric(0, "SSIM", 0.95);
+        let csv = report.metric_to_csv("PSNR");
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[0], "frame,value");
+        assert_eq!(lines.len(), 3); // header + 2 PSNR rows
+    }
+
+    #[test]
+    fn test_metric_to_csv_missing_metric() {
+        let report = QualityReport::new("test.mp4");
+        let csv = report.metric_to_csv("VMAF");
+        assert_eq!(csv, "frame,value\n");
+    }
+
+    #[test]
+    fn test_issues_to_csv() {
+        let mut report = QualityReport::new("test.mp4");
+        report.add_issue(
+            QualityIssue::new(Severity::Warning, "Low PSNR")
+                .with_frame(5)
+                .with_metric("PSNR")
+                .with_values(28.0, 30.0),
+        );
+        report.add_issue(QualityIssue::new(Severity::Error, "Black frame").with_frame(10));
+        let csv = report.issues_to_csv();
+        let lines: Vec<&str> = csv.lines().collect();
+        assert_eq!(lines[0], "severity,frame,metric,measured,threshold,message");
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].contains("Warning"));
+        assert!(lines[1].contains("Low PSNR"));
+        assert!(lines[2].contains("Error"));
+    }
+
+    #[test]
+    fn test_issues_to_csv_escapes_commas() {
+        let mut report = QualityReport::new("test.mp4");
+        report.add_issue(QualityIssue::new(
+            Severity::Info,
+            "Value is 1,234 which is fine",
+        ));
+        let csv = report.issues_to_csv();
+        // Message with comma should be quoted
+        assert!(csv.contains("\"Value is 1,234 which is fine\""));
+    }
+
+    #[test]
+    fn test_export_csv_writes_file() {
+        let mut report = QualityReport::new("test.mp4");
+        report.add_frame_metric(0, "PSNR", 35.0);
+        report.add_frame_metric(1, "PSNR", 33.0);
+        report.compute_summaries();
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("oximedia_quality_test_export.csv");
+        report
+            .export_csv(&path, true)
+            .expect("should write CSV file");
+        let contents = std::fs::read_to_string(&path).expect("should read CSV file");
+        assert!(contents.contains("frame,metric,value"));
+        assert!(contents.contains("PSNR"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_to_csv_summaries_sorted() {
+        let mut report = QualityReport::new("test.mp4");
+        report.add_frame_metric(0, "SSIM", 0.95);
+        report.add_frame_metric(0, "PSNR", 35.0);
+        report.add_frame_metric(0, "VMAF", 80.0);
+        report.compute_summaries();
+        let csv = report.to_csv(true);
+        // Summaries should be sorted alphabetically
+        let summary_section: &str = csv.split("\n\n").last().unwrap_or("");
+        let lines: Vec<&str> = summary_section.lines().collect();
+        // Skip header line, first metric should be PSNR (alphabetically before SSIM)
+        if lines.len() >= 3 {
+            assert!(lines[1].starts_with("PSNR"));
+            assert!(lines[2].starts_with("SSIM"));
+            assert!(lines[3].starts_with("VMAF"));
+        }
     }
 }

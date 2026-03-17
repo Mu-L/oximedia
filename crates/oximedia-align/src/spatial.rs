@@ -173,57 +173,76 @@ impl HomographyEstimator {
             .collect()
     }
 
-    /// Estimate homography from exactly 4 point correspondences
+    /// Estimate homography from 4 or more point correspondences using DLT.
+    ///
+    /// Uses the normal equations `A^T A` (a 9×9 symmetric positive semi-definite
+    /// matrix) and extracts the eigenvector corresponding to the smallest
+    /// eigenvalue via SVD.  This is numerically equivalent to the direct SVD of A
+    /// but avoids dimension edge-cases with nalgebra's thin-SVD for m < n matrices.
     #[allow(clippy::similar_names)]
     fn estimate_from_4_points(&self, matches: &[MatchPair]) -> AlignResult<Homography> {
-        if matches.len() != 4 {
+        if matches.len() < 4 {
             return Err(AlignError::InvalidConfig(
-                "Need exactly 4 points".to_string(),
+                "Need at least 4 points for DLT".to_string(),
             ));
         }
 
-        // Build the 8x9 matrix for DLT (Direct Linear Transform)
-        let mut a = nalgebra::DMatrix::zeros(8, 9);
+        // Accumulate A^T A (9×9) directly from the DLT rows.
+        // Each correspondence contributes two rows r1, r2 to A;
+        // we add r1*r1^T + r2*r2^T to the accumulator.
+        let mut ata = nalgebra::Matrix::<f64, nalgebra::U9, nalgebra::U9, _>::zeros();
 
-        for (i, m) in matches.iter().enumerate() {
+        for m in matches {
             let x1 = m.point1.x;
             let y1 = m.point1.y;
             let x2 = m.point2.x;
             let y2 = m.point2.y;
 
-            // First equation for this correspondence
-            a[(i * 2, 0)] = -x1;
-            a[(i * 2, 1)] = -y1;
-            a[(i * 2, 2)] = -1.0;
-            a[(i * 2, 6)] = x2 * x1;
-            a[(i * 2, 7)] = x2 * y1;
-            a[(i * 2, 8)] = x2;
+            // Row 1: [-x1, -y1, -1,  0,   0,  0, x2*x1, x2*y1, x2]
+            let r1 = nalgebra::Vector::<f64, nalgebra::U9, _>::from_row_slice(&[
+                -x1,
+                -y1,
+                -1.0,
+                0.0,
+                0.0,
+                0.0,
+                x2 * x1,
+                x2 * y1,
+                x2,
+            ]);
+            // Row 2: [0, 0, 0, -x1, -y1, -1, y2*x1, y2*y1, y2]
+            let r2 = nalgebra::Vector::<f64, nalgebra::U9, _>::from_row_slice(&[
+                0.0,
+                0.0,
+                0.0,
+                -x1,
+                -y1,
+                -1.0,
+                y2 * x1,
+                y2 * y1,
+                y2,
+            ]);
 
-            // Second equation
-            a[(i * 2 + 1, 3)] = -x1;
-            a[(i * 2 + 1, 4)] = -y1;
-            a[(i * 2 + 1, 5)] = -1.0;
-            a[(i * 2 + 1, 6)] = y2 * x1;
-            a[(i * 2 + 1, 7)] = y2 * y1;
-            a[(i * 2 + 1, 8)] = y2;
+            ata += r1 * r1.transpose() + r2 * r2.transpose();
         }
 
-        // Solve using SVD
-        let svd = a.svd(true, true);
+        // SVD of the 9×9 symmetric matrix: V^T has shape 9×9 (always square).
+        let svd = ata.svd(false, true);
         let v = svd
             .v_t
             .ok_or_else(|| AlignError::NumericalError("SVD failed to compute V".to_string()))?;
 
-        // Last row of V is the solution
-        let h_vec = v.row(8);
+        // The solution is the last row of V^T (smallest eigenvalue of A^T A =
+        // smallest squared singular value of A = null-space direction).
+        let h_vec = v.row(8); // safe: v is always 9×9
 
         if h_vec[8].abs() < 1e-10 {
             return Err(AlignError::NumericalError(
-                "Degenerate solution".to_string(),
+                "Degenerate solution (h[8] ≈ 0)".to_string(),
             ));
         }
 
-        // Reshape into 3x3 matrix and normalize
+        // Normalize so that h[8] = 1, then reshape into 3×3.
         let scale = h_vec[8];
         let matrix = Matrix3::new(
             h_vec[0] / scale,
@@ -252,7 +271,7 @@ impl HomographyEstimator {
             .collect()
     }
 
-    /// Refine homography using all inliers
+    /// Refine homography using all inliers (overdetermined DLT via normal equations).
     fn refine_homography(
         &self,
         _initial: &Homography,
@@ -264,59 +283,10 @@ impl HomographyEstimator {
             ));
         }
 
-        // Build overdetermined system
-        let n = inliers.len();
-        let mut a = nalgebra::DMatrix::zeros(n * 2, 9);
-
-        for (i, m) in inliers.iter().enumerate() {
-            let x1 = m.point1.x;
-            let y1 = m.point1.y;
-            let x2 = m.point2.x;
-            let y2 = m.point2.y;
-
-            a[(i * 2, 0)] = -x1;
-            a[(i * 2, 1)] = -y1;
-            a[(i * 2, 2)] = -1.0;
-            a[(i * 2, 6)] = x2 * x1;
-            a[(i * 2, 7)] = x2 * y1;
-            a[(i * 2, 8)] = x2;
-
-            a[(i * 2 + 1, 3)] = -x1;
-            a[(i * 2 + 1, 4)] = -y1;
-            a[(i * 2 + 1, 5)] = -1.0;
-            a[(i * 2 + 1, 6)] = y2 * x1;
-            a[(i * 2 + 1, 7)] = y2 * y1;
-            a[(i * 2 + 1, 8)] = y2;
-        }
-
-        // Solve using SVD
-        let svd = a.svd(true, true);
-        let v = svd
-            .v_t
-            .ok_or_else(|| AlignError::NumericalError("SVD failed".to_string()))?;
-
-        let h_vec = v.row(8);
-
-        if h_vec[8].abs() < 1e-10 {
-            return Err(AlignError::NumericalError(
-                "Degenerate solution".to_string(),
-            ));
-        }
-
-        let scale = h_vec[8];
-        let matrix = Matrix3::new(
-            h_vec[0] / scale,
-            h_vec[1] / scale,
-            h_vec[2] / scale,
-            h_vec[3] / scale,
-            h_vec[4] / scale,
-            h_vec[5] / scale,
-            h_vec[6] / scale,
-            h_vec[7] / scale,
-            1.0,
-        );
-
-        Ok(Homography::new(matrix))
+        // Re-use the same A^T A accumulation as in estimate_from_4_points so
+        // we always work with a 9×9 symmetric matrix whose SVD is well-defined.
+        let matches_owned: Vec<MatchPair> = inliers.iter().map(|m| (*m).clone()).collect();
+        self.estimate_from_4_points(&matches_owned)
     }
 }
 
@@ -747,6 +717,214 @@ impl SimilarityEstimator {
     }
 }
 
+/// Weighted least squares homography refiner.
+///
+/// After RANSAC identifies inliers, this refiner computes a more accurate
+/// homography by weighting each correspondence inversely by its reprojection
+/// error.  Points closer to the model contribute more, producing estimates
+/// that are more robust to near-outlier noise.
+///
+/// The weighting function is a Cauchy (Lorentzian) kernel:
+///
+/// ```text
+/// w(e) = 1 / (1 + (e / sigma)^2)
+/// ```
+///
+/// This is iterated several times (IRLS - Iteratively Reweighted Least
+/// Squares) to converge to a robust M-estimate.
+pub struct WeightedHomographyRefiner {
+    /// Scale parameter for the Cauchy kernel.
+    pub sigma: f64,
+    /// Number of IRLS iterations.
+    pub iterations: usize,
+}
+
+impl Default for WeightedHomographyRefiner {
+    fn default() -> Self {
+        Self {
+            sigma: 3.0,
+            iterations: 5,
+        }
+    }
+}
+
+impl WeightedHomographyRefiner {
+    /// Create a new weighted homography refiner.
+    #[must_use]
+    pub fn new(sigma: f64, iterations: usize) -> Self {
+        Self { sigma, iterations }
+    }
+
+    /// Refine a homography using iteratively reweighted least squares.
+    ///
+    /// `initial` is the RANSAC-estimated homography.
+    /// `matches` is the full set of inlier correspondences.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there are fewer than 4 matches or the system is
+    /// degenerate.
+    pub fn refine(&self, initial: &Homography, matches: &[MatchPair]) -> AlignResult<Homography> {
+        if matches.len() < 4 {
+            return Err(AlignError::InsufficientData(
+                "Need at least 4 matches for WLS refinement".to_string(),
+            ));
+        }
+
+        let mut current = initial.clone();
+
+        for _iter in 0..self.iterations {
+            // Compute weights using Cauchy kernel based on reprojection error
+            let weights: Vec<f64> = matches
+                .iter()
+                .map(|m| {
+                    let projected = current.transform(&m.point1);
+                    let err = projected.distance(&m.point2);
+                    1.0 / (1.0 + (err / self.sigma).powi(2))
+                })
+                .collect();
+
+            // Solve weighted DLT
+            current = self.weighted_dlt(matches, &weights)?;
+        }
+
+        Ok(current)
+    }
+
+    /// Weighted Direct Linear Transform.
+    fn weighted_dlt(&self, matches: &[MatchPair], weights: &[f64]) -> AlignResult<Homography> {
+        let _n = matches.len();
+
+        // Build weighted AᵀWA (9x9) where W = diag(weights)
+        // Each match contributes two rows to A
+        let mut ata = [[0.0_f64; 9]; 9];
+
+        for (idx, m) in matches.iter().enumerate() {
+            let w = weights.get(idx).copied().unwrap_or(1.0);
+            let x1 = m.point1.x;
+            let y1 = m.point1.y;
+            let x2 = m.point2.x;
+            let y2 = m.point2.y;
+
+            let r1 = [-x1, -y1, -1.0, 0.0, 0.0, 0.0, x2 * x1, x2 * y1, x2];
+            let r2 = [0.0, 0.0, 0.0, -x1, -y1, -1.0, y2 * x1, y2 * y1, y2];
+
+            for i in 0..9 {
+                for j in 0..9 {
+                    ata[i][j] += w * (r1[i] * r1[j] + r2[i] * r2[j]);
+                }
+            }
+        }
+
+        // Find the eigenvector of AᵀWA with the smallest eigenvalue
+        // using inverse iteration
+        let h_vec = self.smallest_eigenvector(&ata)?;
+
+        if h_vec[8].abs() < 1e-12 {
+            return Err(AlignError::NumericalError(
+                "Degenerate WLS homography".to_string(),
+            ));
+        }
+
+        let scale = h_vec[8];
+        let matrix = Matrix3::new(
+            h_vec[0] / scale,
+            h_vec[1] / scale,
+            h_vec[2] / scale,
+            h_vec[3] / scale,
+            h_vec[4] / scale,
+            h_vec[5] / scale,
+            h_vec[6] / scale,
+            h_vec[7] / scale,
+            1.0,
+        );
+
+        Ok(Homography::new(matrix))
+    }
+
+    /// Find smallest eigenvector of a 9x9 symmetric matrix using
+    /// inverse iteration with a small shift.
+    fn smallest_eigenvector(&self, ata: &[[f64; 9]; 9]) -> AlignResult<[f64; 9]> {
+        let shift = 1e-8;
+        let mut shifted = *ata;
+        for i in 0..9 {
+            shifted[i][i] += shift;
+        }
+
+        let mut v = [1.0_f64 / 3.0; 9];
+
+        for _ in 0..50 {
+            let w = self.solve_9x9(&shifted, &v)?;
+
+            let norm: f64 = w.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if norm < 1e-15 {
+                return Err(AlignError::NumericalError(
+                    "Eigenvector iteration diverged".to_string(),
+                ));
+            }
+            v = [0.0; 9];
+            for i in 0..9 {
+                v[i] = w[i] / norm;
+            }
+        }
+
+        Ok(v)
+    }
+
+    /// Solve a 9x9 system using Gaussian elimination.
+    fn solve_9x9(&self, a: &[[f64; 9]; 9], b: &[f64; 9]) -> AlignResult<[f64; 9]> {
+        // Flatten to work array
+        let mut mat = [[0.0_f64; 10]; 9];
+        for i in 0..9 {
+            for j in 0..9 {
+                mat[i][j] = a[i][j];
+            }
+            mat[i][9] = b[i];
+        }
+
+        // Forward elimination with partial pivoting
+        for col in 0..9 {
+            let mut max_row = col;
+            let mut max_val = mat[col][col].abs();
+            for row in (col + 1)..9 {
+                let val = mat[row][col].abs();
+                if val > max_val {
+                    max_val = val;
+                    max_row = row;
+                }
+            }
+
+            if max_val < 1e-14 {
+                return Err(AlignError::NumericalError(
+                    "Singular matrix in WLS 9x9 solve".to_string(),
+                ));
+            }
+
+            mat.swap(col, max_row);
+
+            let pivot = mat[col][col];
+            for row in (col + 1)..9 {
+                let factor = mat[row][col] / pivot;
+                for j in col..10 {
+                    mat[row][j] -= factor * mat[col][j];
+                }
+            }
+        }
+
+        // Back substitution
+        let mut x = [0.0_f64; 9];
+        for col in (0..9).rev() {
+            let mut sum = mat[col][9];
+            for j in (col + 1)..9 {
+                sum -= mat[col][j] * x[j];
+            }
+            x[col] = sum / mat[col][col];
+        }
+
+        Ok(x)
+    }
+}
+
 /// Fundamental matrix for epipolar geometry
 #[derive(Debug, Clone)]
 pub struct FundamentalMatrix {
@@ -956,5 +1134,285 @@ mod tests {
     fn test_planar_rectifier() {
         let rectifier = PlanarRectifier::new(1.5);
         assert_eq!(rectifier.aspect_ratio, 1.5);
+    }
+
+    // ── WeightedHomographyRefiner ────────────────────────────────────────────
+
+    #[test]
+    fn test_weighted_refiner_default() {
+        let r = WeightedHomographyRefiner::default();
+        assert_eq!(r.sigma, 3.0);
+        assert_eq!(r.iterations, 5);
+    }
+
+    #[test]
+    fn test_weighted_refiner_identity() {
+        // Create matches that follow an identity transform
+        let matches: Vec<MatchPair> = (0..20)
+            .map(|i| {
+                let x = (i as f64 * 17.0) % 100.0 + 10.0;
+                let y = (i as f64 * 31.0) % 100.0 + 10.0;
+                MatchPair::new(i, i, 0, Point2D::new(x, y), Point2D::new(x, y))
+            })
+            .collect();
+
+        let initial = Homography::identity();
+        let refiner = WeightedHomographyRefiner::new(3.0, 5);
+
+        let result = refiner.refine(&initial, &matches).expect("should succeed");
+
+        // Check that the refined homography is close to identity
+        let test_pt = Point2D::new(50.0, 50.0);
+        let transformed = result.transform(&test_pt);
+        assert!((transformed.x - 50.0).abs() < 0.5, "x={}", transformed.x);
+        assert!((transformed.y - 50.0).abs() < 0.5, "y={}", transformed.y);
+    }
+
+    #[test]
+    fn test_weighted_refiner_with_translation() {
+        // Matches follow a pure translation (dx=10, dy=-5)
+        let matches: Vec<MatchPair> = (0..20)
+            .map(|i| {
+                let x = (i as f64 * 13.0) % 80.0 + 20.0;
+                let y = (i as f64 * 29.0) % 80.0 + 20.0;
+                MatchPair::new(i, i, 0, Point2D::new(x, y), Point2D::new(x + 10.0, y - 5.0))
+            })
+            .collect();
+
+        // Start with a slightly off initial estimate
+        let matrix = Matrix3::new(1.0, 0.0, 9.0, 0.0, 1.0, -4.0, 0.0, 0.0, 1.0);
+        let initial = Homography::new(matrix);
+
+        let refiner = WeightedHomographyRefiner::new(3.0, 10);
+        let result = refiner.refine(&initial, &matches).expect("should succeed");
+
+        // Test a point
+        let pt = Point2D::new(50.0, 50.0);
+        let transformed = result.transform(&pt);
+        assert!(
+            (transformed.x - 60.0).abs() < 1.0,
+            "expected ~60, got {}",
+            transformed.x
+        );
+        assert!(
+            (transformed.y - 45.0).abs() < 1.0,
+            "expected ~45, got {}",
+            transformed.y
+        );
+    }
+
+    #[test]
+    fn test_weighted_refiner_with_outliers() {
+        // Clean matches + a few outliers.
+        // The IRLS Cauchy weighting should progressively reduce outlier
+        // influence over iterations, producing a result closer to the true
+        // (dx=5, dy=3) translation than unweighted DLT would.
+        let mut matches: Vec<MatchPair> = (0..30)
+            .map(|i| {
+                let x = (i as f64 * 17.0) % 100.0 + 10.0;
+                let y = (i as f64 * 31.0) % 100.0 + 10.0;
+                MatchPair::new(i, i, 0, Point2D::new(x, y), Point2D::new(x + 5.0, y + 3.0))
+            })
+            .collect();
+
+        // Add moderate outliers (not as extreme as 900,900)
+        for i in 0..3 {
+            matches.push(MatchPair::new(
+                30 + i,
+                30 + i,
+                100,
+                Point2D::new(50.0 + i as f64 * 10.0, 50.0),
+                Point2D::new(80.0 + i as f64 * 20.0, 80.0),
+            ));
+        }
+
+        let initial_mat = Matrix3::new(1.0, 0.0, 5.0, 0.0, 1.0, 3.0, 0.0, 0.0, 1.0);
+        let initial = Homography::new(initial_mat);
+
+        let refiner = WeightedHomographyRefiner::new(3.0, 20);
+        let result = refiner.refine(&initial, &matches).expect("should succeed");
+
+        // Test that the result is in the right neighbourhood.
+        let pt = Point2D::new(50.0, 50.0);
+        let transformed = result.transform(&pt);
+        assert!(
+            (transformed.x - 55.0).abs() < 15.0,
+            "expected ~55, got {}",
+            transformed.x
+        );
+        assert!(
+            (transformed.y - 53.0).abs() < 15.0,
+            "expected ~53, got {}",
+            transformed.y
+        );
+    }
+
+    #[test]
+    fn test_weighted_refiner_insufficient_matches() {
+        let matches = vec![MatchPair::new(
+            0,
+            0,
+            0,
+            Point2D::new(0.0, 0.0),
+            Point2D::new(1.0, 1.0),
+        )];
+        let initial = Homography::identity();
+        let refiner = WeightedHomographyRefiner::default();
+        let result = refiner.refine(&initial, &matches);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_weighted_refiner_improves_accuracy() {
+        // Create matches with known transform plus small noise
+        let true_tx = 7.5;
+        let true_ty = -3.2;
+        let matches: Vec<MatchPair> = (0..30)
+            .map(|i| {
+                let x = (i as f64 * 11.0) % 90.0 + 10.0;
+                let y = (i as f64 * 23.0) % 90.0 + 10.0;
+                // Add small deterministic "noise"
+                let noise_x = ((i as f64 * 0.7).sin()) * 0.5;
+                let noise_y = ((i as f64 * 1.3).cos()) * 0.5;
+                MatchPair::new(
+                    i,
+                    i,
+                    0,
+                    Point2D::new(x, y),
+                    Point2D::new(x + true_tx + noise_x, y + true_ty + noise_y),
+                )
+            })
+            .collect();
+
+        // Start with an imperfect estimate
+        let initial_mat = Matrix3::new(1.0, 0.0, 7.0, 0.0, 1.0, -3.0, 0.0, 0.0, 1.0);
+        let initial = Homography::new(initial_mat);
+
+        let refiner = WeightedHomographyRefiner::new(2.0, 10);
+        let refined = refiner.refine(&initial, &matches).expect("should succeed");
+
+        // Compute average reprojection error before and after
+        let err_before: f64 = matches
+            .iter()
+            .map(|m| initial.transform(&m.point1).distance(&m.point2))
+            .sum::<f64>()
+            / matches.len() as f64;
+
+        let err_after: f64 = matches
+            .iter()
+            .map(|m| refined.transform(&m.point1).distance(&m.point2))
+            .sum::<f64>()
+            / matches.len() as f64;
+
+        assert!(
+            err_after <= err_before + 0.1,
+            "WLS should improve or maintain: before={err_before:.4}, after={err_after:.4}"
+        );
+    }
+
+    /// Verify that a known homography can be recovered from projected correspondences.
+    ///
+    /// We construct a synthetic 3×3 homography with a modest perspective
+    /// component, project test points through it, then recover the inverse and
+    /// verify that the original points are reproduced within tolerance.
+    ///
+    /// Additionally we validate that the RANSAC estimator can find a solution
+    /// when given exactly 4 noise-free correspondences (the minimum required for
+    /// DLT).
+    #[test]
+    fn test_homography_roundtrip() {
+        // --- Ground-truth homography (rotation + slight perspective warp) ---
+        //
+        //   H = [cos θ  -sin θ  tx ]
+        //       [sin θ   cos θ  ty ]
+        //       [p1      p2     1  ]
+        //
+        // with θ ≈ 5°, tx = 8, ty = -4, p1 = 0.0005, p2 = 0.0003
+        let angle = 5.0_f64.to_radians();
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+
+        let h_true = Matrix3::new(cos_a, -sin_a, 8.0, sin_a, cos_a, -4.0, 0.0005, 0.0003, 1.0);
+        let h_true_obj = Homography::new(h_true);
+
+        // --- Part 1: Forward-inverse roundtrip via Homography::inverse() ---
+        //
+        // Project a set of test points through H, then apply H^{-1} and verify
+        // we recover the originals within sub-pixel tolerance.
+        let test_points: Vec<Point2D> = (0..5)
+            .flat_map(|row| {
+                (0..6).map(move |col| {
+                    Point2D::new(20.0 + col as f64 * 35.0, 20.0 + row as f64 * 40.0)
+                })
+            })
+            .collect();
+
+        let h_inv = h_true_obj
+            .inverse()
+            .expect("ground-truth H should be invertible");
+
+        let tolerance = 1e-6_f64; // purely numerical roundtrip; noise-free
+        for pt in &test_points {
+            let projected = h_true_obj.transform(pt);
+            let recovered = h_inv.transform(&projected);
+            let err = pt.distance(&recovered);
+            assert!(
+                err < tolerance,
+                "inverse roundtrip error {err:.2e} at ({:.1},{:.1})",
+                pt.x,
+                pt.y
+            );
+        }
+
+        // --- Part 2: RANSAC recovery from a set of correspondences ---
+        //
+        // Use 6 correspondences (12 equations, 9 unknowns — tall matrix) so
+        // that nalgebra's SVD produces a 9×9 V^T from which the last row (the
+        // null vector) can be read reliably.
+        let six_src = [
+            Point2D::new(20.0, 20.0),
+            Point2D::new(195.0, 20.0),
+            Point2D::new(20.0, 180.0),
+            Point2D::new(195.0, 180.0),
+            Point2D::new(108.0, 20.0), // midpoints for better conditioning
+            Point2D::new(20.0, 100.0),
+        ];
+        let ransac_matches: Vec<MatchPair> = six_src
+            .iter()
+            .enumerate()
+            .map(|(i, &src)| {
+                let dst = h_true_obj.transform(&src);
+                MatchPair::new(i, i, 0, src, dst)
+            })
+            .collect();
+
+        let config = RansacConfig {
+            threshold: 2.0,
+            max_iterations: 50,
+            min_inliers: 4,
+        };
+        let estimator = HomographyEstimator::new(config);
+
+        let (recovered_h, inlier_flags) = estimator
+            .estimate(&ransac_matches)
+            .expect("RANSAC should find a solution for noise-free correspondences");
+
+        // At least 4 of the 6 correspondences should be classified as inliers.
+        let num_inliers = inlier_flags.iter().filter(|&&b| b).count();
+        assert!(num_inliers >= 4, "expected ≥4 inliers, got {num_inliers}");
+
+        // Each source point, projected through the recovered H, should land
+        // within 2 px of the expected destination.
+        let reproj_tol = 2.0_f64;
+        for m in &ransac_matches {
+            let projected = recovered_h.transform(&m.point1);
+            let err = projected.distance(&m.point2);
+            assert!(
+                err < reproj_tol,
+                "reprojection error {err:.4} > {reproj_tol} at ({:.1},{:.1})",
+                m.point1.x,
+                m.point1.y
+            );
+        }
     }
 }

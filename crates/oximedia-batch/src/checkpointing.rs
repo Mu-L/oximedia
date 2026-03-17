@@ -220,6 +220,169 @@ fn current_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+// ---------------------------------------------------------------------------
+// JobCheckpoint — lightweight struct for raw state-byte checkpoints
+// ---------------------------------------------------------------------------
+
+/// A raw-state checkpoint, distinct from [`CheckpointData`].
+///
+/// `state_bytes` carries arbitrary serialized job state that the caller
+/// controls, allowing resume-on-failure for any kind of workload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobCheckpoint {
+    /// Unique job identifier.
+    pub job_id: String,
+    /// Step index at which the checkpoint was taken.
+    pub step: u32,
+    /// Opaque serialized job state (caller-controlled encoding).
+    pub state_bytes: Vec<u8>,
+    /// Creation time as Unix epoch seconds.
+    pub created_at: u64,
+}
+
+impl JobCheckpoint {
+    /// Create a new checkpoint with the current timestamp.
+    #[must_use]
+    pub fn new(job_id: impl Into<String>, step: u32, state_bytes: Vec<u8>) -> Self {
+        Self {
+            job_id: job_id.into(),
+            step,
+            state_bytes,
+            created_at: current_timestamp(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PersistentCheckpointStore — file-backed store using temp_dir()
+// ---------------------------------------------------------------------------
+
+/// A checkpoint store that persists [`JobCheckpoint`] entries as JSON files
+/// under `std::env::temp_dir()`.
+///
+/// File naming: `oximedia_checkpoint_<job_id>.json`
+/// (Non-ASCII / path-unsafe characters in `job_id` are replaced with `_`.)
+#[derive(Debug, Clone)]
+pub struct PersistentCheckpointStore {
+    /// Base directory for checkpoint files.
+    base_dir: std::path::PathBuf,
+}
+
+impl PersistentCheckpointStore {
+    /// Create a store rooted at `std::env::temp_dir()`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            base_dir: std::env::temp_dir(),
+        }
+    }
+
+    /// Create a store rooted at a custom directory (useful for tests).
+    #[must_use]
+    pub fn with_dir(dir: std::path::PathBuf) -> Self {
+        Self { base_dir: dir }
+    }
+
+    fn checkpoint_path(&self, job_id: &str) -> std::path::PathBuf {
+        // Replace characters that are unsafe in file names with underscores.
+        let safe_id: String = job_id
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.base_dir
+            .join(format!("oximedia_checkpoint_{safe_id}.json"))
+    }
+
+    /// Persist a checkpoint to disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization or the file write fails.
+    pub fn save(&self, checkpoint: &JobCheckpoint) -> Result<()> {
+        let path = self.checkpoint_path(&checkpoint.job_id);
+        let json = serde_json::to_vec(checkpoint).map_err(BatchError::SerializationError)?;
+        std::fs::write(&path, &json).map_err(BatchError::IoError)?;
+        Ok(())
+    }
+
+    /// Load a checkpoint from disk.
+    ///
+    /// Returns `Ok(None)` if no checkpoint file exists for the given job.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file exists but cannot be read or parsed.
+    pub fn load(&self, job_id: &str) -> Result<Option<JobCheckpoint>> {
+        let path = self.checkpoint_path(job_id);
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let cp: JobCheckpoint =
+                    serde_json::from_slice(&bytes).map_err(BatchError::SerializationError)?;
+                Ok(Some(cp))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(BatchError::IoError(e)),
+        }
+    }
+
+    /// Delete a checkpoint file.
+    ///
+    /// Returns `Ok(true)` if the file existed and was deleted, `Ok(false)` if
+    /// it did not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file exists but cannot be removed.
+    pub fn delete(&self, job_id: &str) -> Result<bool> {
+        let path = self.checkpoint_path(job_id);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(BatchError::IoError(e)),
+        }
+    }
+
+    /// List all job IDs that have a checkpoint file in the store directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be read.
+    pub fn list(&self) -> Result<Vec<String>> {
+        let prefix = "oximedia_checkpoint_";
+        let suffix = ".json";
+        let entries = std::fs::read_dir(&self.base_dir).map_err(BatchError::IoError)?;
+        let mut ids = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(BatchError::IoError)?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with(prefix) && name_str.ends_with(suffix) {
+                let id_part = &name_str[prefix.len()..name_str.len() - suffix.len()];
+                ids.push(id_part.to_string());
+            }
+        }
+        Ok(ids)
+    }
+
+    /// Return `true` if a checkpoint file exists for the given job.
+    #[must_use]
+    pub fn exists(&self, job_id: &str) -> bool {
+        self.checkpoint_path(job_id).exists()
+    }
+}
+
+impl Default for PersistentCheckpointStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +504,150 @@ mod tests {
     fn test_checkpoint_timestamp_nonzero() {
         let cp = CheckpointData::new(&jid("t"), "l", 0, 1);
         assert!(cp.timestamp_secs > 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // JobCheckpoint tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_job_checkpoint_new() {
+        let cp = JobCheckpoint::new("job-123", 5, b"state data".to_vec());
+        assert_eq!(cp.job_id, "job-123");
+        assert_eq!(cp.step, 5);
+        assert_eq!(cp.state_bytes, b"state data");
+        assert!(cp.created_at > 0);
+    }
+
+    #[test]
+    fn test_job_checkpoint_empty_state() {
+        let cp = JobCheckpoint::new("empty-state", 0, Vec::new());
+        assert!(cp.state_bytes.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // PersistentCheckpointStore tests
+    // -----------------------------------------------------------------------
+
+    fn temp_store(suffix: &str) -> PersistentCheckpointStore {
+        let dir = std::env::temp_dir().join(format!("oximedia_cpstore_{suffix}"));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        PersistentCheckpointStore::with_dir(dir)
+    }
+
+    #[test]
+    fn test_persistent_store_save_and_load() {
+        let store = temp_store("save_load");
+        let cp = JobCheckpoint::new("job-save", 3, b"saved state".to_vec());
+        store.save(&cp).expect("save failed");
+
+        let loaded = store.load("job-save").expect("load failed");
+        assert!(loaded.is_some());
+        let loaded = loaded.expect("expected Some");
+        assert_eq!(loaded.job_id, "job-save");
+        assert_eq!(loaded.step, 3);
+        assert_eq!(loaded.state_bytes, b"saved state");
+        store.delete("job-save").ok();
+    }
+
+    #[test]
+    fn test_persistent_store_load_missing_returns_none() {
+        let store = temp_store("load_none");
+        let result = store.load("no_such_job").expect("load failed unexpectedly");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_persistent_store_delete_existing() {
+        let store = temp_store("delete_exist");
+        let cp = JobCheckpoint::new("del-job", 1, vec![1, 2, 3]);
+        store.save(&cp).expect("save failed");
+        assert!(store.exists("del-job"));
+        let deleted = store.delete("del-job").expect("delete failed");
+        assert!(deleted);
+        assert!(!store.exists("del-job"));
+    }
+
+    #[test]
+    fn test_persistent_store_delete_nonexistent_returns_false() {
+        let store = temp_store("delete_none");
+        let deleted = store.delete("phantom-job").expect("delete error");
+        assert!(!deleted);
+    }
+
+    #[test]
+    fn test_persistent_store_list_jobs() {
+        let store = temp_store("list_jobs");
+        store
+            .save(&JobCheckpoint::new("list-a", 1, vec![]))
+            .expect("save a");
+        store
+            .save(&JobCheckpoint::new("list-b", 2, vec![]))
+            .expect("save b");
+
+        let ids = store.list().expect("list failed");
+        assert!(ids.contains(&"list-a".to_string()));
+        assert!(ids.contains(&"list-b".to_string()));
+
+        store.delete("list-a").ok();
+        store.delete("list-b").ok();
+    }
+
+    #[test]
+    fn test_persistent_store_overwrite() {
+        let store = temp_store("overwrite");
+        let cp1 = JobCheckpoint::new("ow-job", 1, b"v1".to_vec());
+        store.save(&cp1).expect("save v1");
+        let cp2 = JobCheckpoint::new("ow-job", 2, b"v2".to_vec());
+        store.save(&cp2).expect("save v2");
+
+        let loaded = store.load("ow-job").expect("load").expect("Some");
+        assert_eq!(loaded.step, 2);
+        assert_eq!(loaded.state_bytes, b"v2");
+        store.delete("ow-job").ok();
+    }
+
+    #[test]
+    fn test_persistent_store_exists() {
+        let store = temp_store("exists_check");
+        assert!(!store.exists("ex-job"));
+        store
+            .save(&JobCheckpoint::new("ex-job", 0, vec![]))
+            .expect("save");
+        assert!(store.exists("ex-job"));
+        store.delete("ex-job").ok();
+    }
+
+    #[test]
+    fn test_persistent_store_special_chars_in_job_id() {
+        let store = temp_store("special_chars");
+        // Slashes and spaces should be sanitised to underscores.
+        let cp = JobCheckpoint::new("job/with spaces:and!symbols", 0, b"data".to_vec());
+        store.save(&cp).expect("save");
+        let loaded = store
+            .load("job/with spaces:and!symbols")
+            .expect("load")
+            .expect("Some");
+        assert_eq!(loaded.state_bytes, b"data");
+        store.delete("job/with spaces:and!symbols").ok();
+    }
+
+    #[test]
+    fn test_persistent_store_large_state_bytes() {
+        let store = temp_store("large_state");
+        let large: Vec<u8> = (0u8..=255).cycle().take(65536).collect();
+        let cp = JobCheckpoint::new("large-job", 99, large.clone());
+        store.save(&cp).expect("save large");
+        let loaded = store.load("large-job").expect("load").expect("Some");
+        assert_eq!(loaded.state_bytes.len(), 65536);
+        assert_eq!(loaded.state_bytes, large);
+        store.delete("large-job").ok();
+    }
+
+    #[test]
+    fn test_persistent_store_default_constructor() {
+        let store = PersistentCheckpointStore::default();
+        // Should use temp_dir without panicking.
+        assert!(store.base_dir.exists() || !store.base_dir.exists()); // always true, just ensure no panic
     }
 }

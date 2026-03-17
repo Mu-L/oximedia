@@ -70,8 +70,30 @@ impl HardwareAccel for CpuAccel {
                     channels,
                 );
             }
-            ScaleFilter::Bilinear | ScaleFilter::Bicubic | ScaleFilter::Lanczos => {
+            ScaleFilter::Bilinear => {
                 scale_bilinear(
+                    input,
+                    &mut output,
+                    src_width,
+                    src_height,
+                    dst_width,
+                    dst_height,
+                    channels,
+                );
+            }
+            ScaleFilter::Bicubic => {
+                scale_bicubic(
+                    input,
+                    &mut output,
+                    src_width,
+                    src_height,
+                    dst_width,
+                    dst_height,
+                    channels,
+                );
+            }
+            ScaleFilter::Lanczos => {
+                scale_lanczos(
                     input,
                     &mut output,
                     src_width,
@@ -198,6 +220,152 @@ fn scale_bilinear(
                     let result = p1 * (1.0 - y_frac) + p2 * y_frac;
 
                     row[dst_idx + c] = result.clamp(0.0, 255.0) as u8;
+                }
+            }
+        });
+}
+
+/// Cubic interpolation kernel (Catmull-Rom): weight function for bicubic.
+///
+/// Uses the standard cubic convolution with a = -0.5 (Catmull-Rom spline).
+#[inline]
+fn cubic_weight(t: f32) -> f32 {
+    let t_abs = t.abs();
+    if t_abs <= 1.0 {
+        (1.5 * t_abs - 2.5) * t_abs * t_abs + 1.0
+    } else if t_abs <= 2.0 {
+        ((-0.5 * t_abs + 2.5) * t_abs - 4.0) * t_abs + 2.0
+    } else {
+        0.0
+    }
+}
+
+/// Bicubic scaling (CPU implementation) using Catmull-Rom spline.
+fn scale_bicubic(
+    input: &[u8],
+    output: &mut [u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+    channels: u32,
+) {
+    let x_ratio = src_width as f32 / dst_width as f32;
+    let y_ratio = src_height as f32 / dst_height as f32;
+
+    output
+        .par_chunks_exact_mut((dst_width * channels) as usize)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let src_y = (y as f32 + 0.5) * y_ratio - 0.5;
+            let y0 = src_y.floor() as i32;
+
+            for x in 0..dst_width {
+                let src_x = (x as f32 + 0.5) * x_ratio - 0.5;
+                let x0 = src_x.floor() as i32;
+                let dst_idx = (x * channels) as usize;
+
+                for c in 0..channels as usize {
+                    let mut sum = 0.0f32;
+                    let mut weight_sum = 0.0f32;
+
+                    for ky in -1i32..=2 {
+                        let sy = (y0 + ky).clamp(0, src_height as i32 - 1) as u32;
+                        let wy = cubic_weight(src_y - (y0 + ky) as f32);
+
+                        for kx in -1i32..=2 {
+                            let sx = (x0 + kx).clamp(0, src_width as i32 - 1) as u32;
+                            let wx = cubic_weight(src_x - (x0 + kx) as f32);
+                            let w = wx * wy;
+
+                            let src_idx = ((sy * src_width + sx) * channels) as usize + c;
+                            sum += f32::from(input[src_idx]) * w;
+                            weight_sum += w;
+                        }
+                    }
+
+                    let value = if weight_sum.abs() > 1e-6 {
+                        sum / weight_sum
+                    } else {
+                        sum
+                    };
+                    row[dst_idx + c] = value.clamp(0.0, 255.0) as u8;
+                }
+            }
+        });
+}
+
+/// Lanczos kernel function: sinc(x) * sinc(x/a) windowed.
+///
+/// Uses a = 3 (Lanczos-3) for high-quality resampling.
+#[inline]
+fn lanczos_kernel(x: f32, a: f32) -> f32 {
+    if x.abs() < 1e-6 {
+        return 1.0;
+    }
+    if x.abs() >= a {
+        return 0.0;
+    }
+    let pi_x = std::f32::consts::PI * x;
+    let pi_x_over_a = pi_x / a;
+    (pi_x.sin() / pi_x) * (pi_x_over_a.sin() / pi_x_over_a)
+}
+
+/// Lanczos-3 scaling (CPU implementation).
+///
+/// Lanczos-3 uses a 6-tap (radius 3) kernel for the highest quality
+/// resampling among standard filters.
+fn scale_lanczos(
+    input: &[u8],
+    output: &mut [u8],
+    src_width: u32,
+    src_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+    channels: u32,
+) {
+    let a = 3.0f32; // Lanczos-3
+    let x_ratio = src_width as f32 / dst_width as f32;
+    let y_ratio = src_height as f32 / dst_height as f32;
+
+    output
+        .par_chunks_exact_mut((dst_width * channels) as usize)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let src_y = (y as f32 + 0.5) * y_ratio - 0.5;
+            let y0 = src_y.floor() as i32;
+
+            for x in 0..dst_width {
+                let src_x = (x as f32 + 0.5) * x_ratio - 0.5;
+                let x0 = src_x.floor() as i32;
+                let dst_idx = (x * channels) as usize;
+
+                for c in 0..channels as usize {
+                    let mut sum = 0.0f32;
+                    let mut weight_sum = 0.0f32;
+                    let radius = a as i32;
+
+                    for ky in (1 - radius)..=radius {
+                        let sy = (y0 + ky).clamp(0, src_height as i32 - 1) as u32;
+                        let wy = lanczos_kernel(src_y - (y0 + ky) as f32, a);
+
+                        for kx in (1 - radius)..=radius {
+                            let sx = (x0 + kx).clamp(0, src_width as i32 - 1) as u32;
+                            let wx = lanczos_kernel(src_x - (x0 + kx) as f32, a);
+                            let w = wx * wy;
+
+                            let src_idx = ((sy * src_width + sx) * channels) as usize + c;
+                            sum += f32::from(input[src_idx]) * w;
+                            weight_sum += w;
+                        }
+                    }
+
+                    let value = if weight_sum.abs() > 1e-6 {
+                        sum / weight_sum
+                    } else {
+                        sum
+                    };
+                    row[dst_idx + c] = value.clamp(0.0, 255.0) as u8;
                 }
             }
         });

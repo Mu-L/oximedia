@@ -92,6 +92,20 @@ impl CaptionLine {
     }
 }
 
+/// Timing gap between two consecutive caption lines (in frames).
+///
+/// A gap of zero means consecutive captions are displayed back-to-back
+/// with no blank frames in between.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptionGap {
+    /// Index of the earlier caption line.
+    pub from_line: usize,
+    /// Index of the later caption line.
+    pub to_line: usize,
+    /// Gap duration in frames (0 if back-to-back).
+    pub gap_frames: u64,
+}
+
 /// A QC report for a collection of caption lines.
 #[derive(Debug, Clone)]
 pub struct CaptionQcReport {
@@ -99,13 +113,33 @@ pub struct CaptionQcReport {
     pub lines: Vec<CaptionLine>,
     /// Errors found, as (line_index, error) pairs.
     pub errors: Vec<(usize, CaptionError)>,
+    /// Timing gaps between consecutive captions (populated when fps is provided).
+    pub gaps: Vec<CaptionGap>,
 }
 
 impl CaptionQcReport {
     /// Creates a new report.
     #[must_use]
     pub fn new(lines: Vec<CaptionLine>, errors: Vec<(usize, CaptionError)>) -> Self {
-        Self { lines, errors }
+        Self {
+            lines,
+            errors,
+            gaps: Vec::new(),
+        }
+    }
+
+    /// Creates a new report with timing gap information.
+    #[must_use]
+    pub fn with_gaps(
+        lines: Vec<CaptionLine>,
+        errors: Vec<(usize, CaptionError)>,
+        gaps: Vec<CaptionGap>,
+    ) -> Self {
+        Self {
+            lines,
+            errors,
+            gaps,
+        }
     }
 
     /// Returns `true` if any errors were found.
@@ -134,6 +168,20 @@ impl CaptionQcReport {
         errored_lines.dedup();
         errored_lines.len() as f32 / self.lines.len() as f32
     }
+
+    /// Returns all timing gaps between consecutive captions in seconds, given `fps`.
+    ///
+    /// Returns an empty vec if no gap information was collected.
+    #[must_use]
+    pub fn gap_durations_secs(&self, fps: f32) -> Vec<f32> {
+        if fps <= 0.0 {
+            return Vec::new();
+        }
+        self.gaps
+            .iter()
+            .map(|g| g.gap_frames as f32 / fps)
+            .collect()
+    }
 }
 
 /// Checker that validates caption lines against configurable thresholds.
@@ -145,62 +193,184 @@ pub struct CaptionQcChecker {
     pub max_wpm: f32,
     /// Maximum allowed caption duration in frames.
     pub max_duration_frames: u64,
+    /// Maximum allowed character rate in characters per second (CPS).
+    ///
+    /// Typical broadcast limit is 17 CPS; streaming platforms often allow 20–25 CPS.
+    /// `None` disables the CPS check.
+    pub max_chars_per_second: Option<f32>,
+    /// Frames-per-second of the associated video.
+    ///
+    /// Used for WPM / CPS calculations and gap duration reporting.
+    /// Defaults to 25.0 if not set.
+    pub fps: f32,
+    /// Minimum gap between consecutive captions in frames.
+    ///
+    /// Captions with a smaller gap are flagged with [`CaptionError::Overlap`].
+    /// A value of 0 disables the minimum-gap check.
+    pub min_gap_frames: u64,
 }
 
 impl CaptionQcChecker {
     /// Returns a checker configured with typical broadcast defaults:
     /// - 42 characters per line
     /// - 180 WPM
-    /// - 6 seconds at 25fps = 150 frames
+    /// - 6 seconds at 25 fps = 150 frames
+    /// - 17 CPS (characters per second)
+    /// - 25.0 fps
+    /// - 2-frame minimum gap between captions
     #[must_use]
     pub fn broadcast_default() -> Self {
         Self {
             max_chars_per_line: 42,
             max_wpm: 180.0,
             max_duration_frames: 150,
+            max_chars_per_second: Some(17.0),
+            fps: 25.0,
+            min_gap_frames: 2,
         }
+    }
+
+    /// Returns a checker tuned for online/streaming platforms:
+    /// - 42 characters per line
+    /// - 220 WPM
+    /// - 10 seconds at 25 fps = 250 frames
+    /// - 25 CPS
+    /// - 25.0 fps
+    /// - 1-frame minimum gap
+    #[must_use]
+    pub fn streaming_default() -> Self {
+        Self {
+            max_chars_per_line: 42,
+            max_wpm: 220.0,
+            max_duration_frames: 250,
+            max_chars_per_second: Some(25.0),
+            fps: 25.0,
+            min_gap_frames: 1,
+        }
+    }
+
+    /// Overrides the frame rate used for timing computations.
+    #[must_use]
+    pub const fn with_fps(mut self, fps: f32) -> Self {
+        self.fps = fps;
+        self
+    }
+
+    /// Sets the maximum characters-per-second threshold. Pass `None` to disable.
+    #[must_use]
+    pub const fn with_max_cps(mut self, max_cps: Option<f32>) -> Self {
+        self.max_chars_per_second = max_cps;
+        self
+    }
+
+    /// Sets the minimum gap between consecutive captions in frames.
+    #[must_use]
+    pub const fn with_min_gap_frames(mut self, frames: u64) -> Self {
+        self.min_gap_frames = frames;
+        self
+    }
+
+    /// Computes the character rate (characters per second) of a caption at the
+    /// configured frame rate.
+    ///
+    /// Returns `0.0` if the duration is zero or fps is non-positive.
+    #[must_use]
+    pub fn chars_per_second(&self, line: &CaptionLine) -> f32 {
+        if self.fps <= 0.0 {
+            return 0.0;
+        }
+        let dur_frames = line.duration_frames();
+        if dur_frames == 0 {
+            return 0.0;
+        }
+        let dur_secs = dur_frames as f32 / self.fps;
+        line.char_count() as f32 / dur_secs
     }
 
     /// Runs all checks against the provided caption lines and returns a report.
     ///
-    /// Assumes 25 fps for WPM calculations when not otherwise specified.
+    /// Checks performed (in order):
+    /// 1. Bad timing (start ≥ end) — skips remaining checks for that line.
+    /// 2. Line too long (exceeds `max_chars_per_line`).
+    /// 3. Reading speed too fast (exceeds `max_wpm`).
+    /// 4. Character rate too fast (exceeds `max_chars_per_second`, if set).
+    /// 5. Duration too long (exceeds `max_duration_frames`).
+    /// 6. Overlap / insufficient gap with next caption.
+    ///
+    /// Gap information is always collected and stored in [`CaptionQcReport::gaps`].
     #[must_use]
     pub fn check(&self, lines: &[CaptionLine]) -> CaptionQcReport {
-        const FPS: f32 = 25.0;
+        let fps = self.fps;
         let mut errors: Vec<(usize, CaptionError)> = Vec::new();
+        let mut gaps: Vec<CaptionGap> = Vec::new();
 
         for (i, line) in lines.iter().enumerate() {
-            // Bad timing
+            // ── 1. Bad timing ─────────────────────────────────────────────
             if line.start_frame >= line.end_frame {
                 errors.push((i, CaptionError::BadTiming));
-                continue; // Skip further checks on a bad-timing line
+                // Still compute gap to the next line (if it has valid timing)
+                if let Some(next) = lines.get(i + 1) {
+                    if next.start_frame > line.end_frame {
+                        gaps.push(CaptionGap {
+                            from_line: i,
+                            to_line: i + 1,
+                            gap_frames: next.start_frame - line.end_frame,
+                        });
+                    }
+                }
+                continue; // Skip quality checks on a malformed line
             }
 
-            // Too long
+            // ── 2. Line too long ─────────────────────────────────────────
             if line.char_count() > self.max_chars_per_line {
                 errors.push((i, CaptionError::TooLong));
             }
 
-            // Too fast
-            let wpm = line.words_per_minute(FPS);
+            // ── 3. Reading speed (WPM) ───────────────────────────────────
+            let wpm = line.words_per_minute(fps);
             if wpm > self.max_wpm {
                 errors.push((i, CaptionError::TooFast));
             }
 
-            // Duration too long
+            // ── 4. Character rate (CPS) ──────────────────────────────────
+            if let Some(max_cps) = self.max_chars_per_second {
+                let cps = self.chars_per_second(line);
+                if cps > max_cps {
+                    errors.push((i, CaptionError::TooFast));
+                }
+            }
+
+            // ── 5. Duration too long ─────────────────────────────────────
             if line.duration_frames() > self.max_duration_frames {
                 errors.push((i, CaptionError::TooFast));
             }
 
-            // Overlap check with next line
+            // ── 6. Gap / overlap with next caption ───────────────────────
             if let Some(next) = lines.get(i + 1) {
                 if next.start_frame < line.end_frame {
+                    // Actual overlap
                     errors.push((i, CaptionError::Overlap));
+                    gaps.push(CaptionGap {
+                        from_line: i,
+                        to_line: i + 1,
+                        gap_frames: 0,
+                    });
+                } else {
+                    let gap = next.start_frame - line.end_frame;
+                    // Insufficient gap (but not an overlap)
+                    if self.min_gap_frames > 0 && gap < self.min_gap_frames {
+                        errors.push((i, CaptionError::Overlap));
+                    }
+                    gaps.push(CaptionGap {
+                        from_line: i,
+                        to_line: i + 1,
+                        gap_frames: gap,
+                    });
                 }
             }
         }
 
-        CaptionQcReport::new(lines.to_vec(), errors)
+        CaptionQcReport::with_gaps(lines.to_vec(), errors, gaps)
     }
 }
 

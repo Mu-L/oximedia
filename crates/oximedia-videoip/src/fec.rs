@@ -1,4 +1,9 @@
 //! Forward Error Correction (FEC) using Reed-Solomon codes.
+//!
+//! This module includes an `AdaptiveFecController` that measures packet loss
+//! over a sliding window and automatically adjusts the parity-to-data ratio,
+//! keeping overhead low during good network conditions and ramping up
+//! protection during congestion.
 
 use crate::error::{VideoIpError, VideoIpResult};
 use crate::packet::{Packet, PacketBuilder, PacketFlags};

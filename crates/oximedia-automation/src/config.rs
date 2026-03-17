@@ -311,6 +311,7 @@ impl ConfigPresets {
             health_check_interval: 5,
             failure_threshold: 3,
             switch_delay_ms: 100,
+            ..FailoverConfig::default()
         };
 
         config.master.monitoring = MonitorConfig {
@@ -397,6 +398,7 @@ impl ConfigPresets {
             health_check_interval: 10,
             failure_threshold: 3,
             switch_delay_ms: 200,
+            ..FailoverConfig::default()
         };
 
         let channel = ChannelConfig {

@@ -459,7 +459,7 @@ mod tests {
     fn test_open_to_half_open_transition() {
         let config = CircuitBreakerConfig::new()
             .with_failure_threshold(1)
-            .with_open_duration(Duration::from_millis(1000));
+            .with_open_duration(Duration::from_secs(1));
         let mut cb = CircuitBreaker::new("test", config);
         cb.record_failure();
         assert_eq!(cb.state(), CircuitState::Open);

@@ -220,6 +220,171 @@ pub fn adapt_xyz(xyz: (f64, f64, f64), matrix: &[[f64; 3]; 3]) -> (f64, f64, f64
     mat3_mul_vec(matrix, xyz)
 }
 
+// ── Multi-illuminant support ──────────────────────────────────────────────────
+
+/// CIE Standard Illuminant A (incandescent / tungsten, 2856 K).
+///
+/// Approximated from the Planckian radiator at 2856 K relative to equal-energy
+/// (normalised so Y = 1). Values per CIE Publication 15 (2004).
+#[must_use]
+pub fn illuminant_a() -> WhitePoint {
+    WhitePoint::new(1.09850, 1.00000, 0.35585)
+}
+
+/// CIE Standard Illuminant F2 (cool-white fluorescent).
+///
+/// Representative of cool-white fluorescent tube illumination used in offices.
+/// Values from CIE Publication 15 (2004), Table T.1.
+#[must_use]
+pub fn illuminant_f2() -> WhitePoint {
+    // CIE xy: 0.3721, 0.3751
+    WhitePoint::new(0.9915, 1.00000, 0.6731)
+}
+
+/// CIE Standard Illuminant F7 (broadband daylight fluorescent).
+///
+/// Represents a broadband daylight-simulating fluorescent lamp.
+/// Values from CIE Publication 15 (2004).
+#[must_use]
+pub fn illuminant_f7() -> WhitePoint {
+    // CIE xy: 0.3129, 0.3292 (close to D65)
+    WhitePoint::new(0.9503, 1.00000, 1.0887)
+}
+
+/// CIE Standard Illuminant F11 (narrowband cool-white fluorescent).
+///
+/// A three-band lamp commonly used in industrial settings.
+/// Values from CIE Publication 15 (2004).
+#[must_use]
+pub fn illuminant_f11() -> WhitePoint {
+    // CIE xy: 0.3805, 0.3769
+    WhitePoint::new(1.0096, 1.00000, 0.6432)
+}
+
+/// CIE Standard Illuminant E (equal-energy white).
+///
+/// A theoretical equal-energy illuminant where all wavelengths have equal power.
+/// XYZ = (1, 1, 1) when normalised.
+#[must_use]
+pub fn illuminant_e() -> WhitePoint {
+    WhitePoint::new(1.00000, 1.00000, 1.00000)
+}
+
+/// Computes the chromatic adaptation matrix for a sequence of illuminants.
+///
+/// This computes a single combined matrix that adapts from `src_illuminant`
+/// through intermediate illuminants to `dst_illuminant`. This is useful for
+/// multi-step workflows (e.g. scene illuminant → D50 → D65) where each
+/// adaptation step uses the same CAT method.
+///
+/// # Arguments
+///
+/// * `illuminants` - Ordered list of illuminants; the first is the source,
+///   the last is the destination. Must have at least 2 elements.
+/// * `method` - Chromatic adaptation method to use for each step.
+///
+/// # Returns
+///
+/// A single combined 3×3 matrix equivalent to applying each step in sequence.
+///
+/// # Panics
+///
+/// Panics if `illuminants` has fewer than 2 elements, or if any CAT matrix
+/// is singular.
+#[must_use]
+pub fn compute_multi_illuminant_adaptation(
+    illuminants: &[WhitePoint],
+    method: AdaptationMethod,
+) -> [[f64; 3]; 3] {
+    assert!(
+        illuminants.len() >= 2,
+        "Need at least 2 illuminants for multi-illuminant adaptation"
+    );
+
+    // Start with identity
+    let mut combined = [[1.0_f64, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+    for pair in illuminants.windows(2) {
+        let step = compute_adaptation_matrix(&pair[0], &pair[1], method);
+        combined = mat3_mul(&step, &combined);
+    }
+
+    combined
+}
+
+/// Adapts a colour from one illuminant to another, given a set of illuminant
+/// definitions and adaptation method.
+///
+/// This is a convenience wrapper that computes and applies the adaptation
+/// matrix in one call, allowing easy switching between illuminants.
+#[must_use]
+pub fn adapt_xyz_between(
+    xyz: (f64, f64, f64),
+    src: &WhitePoint,
+    dst: &WhitePoint,
+    method: AdaptationMethod,
+) -> (f64, f64, f64) {
+    let matrix = compute_adaptation_matrix(src, dst, method);
+    adapt_xyz(xyz, &matrix)
+}
+
+/// Multi-illuminant chromatic adaptation state machine.
+///
+/// Supports adapting through a chain of illuminants (e.g. for multi-step
+/// studio workflows where the viewing illuminant changes at each stage).
+#[derive(Debug, Clone)]
+pub struct MultiIlluminantAdapter {
+    /// The sequence of white points in the adaptation chain.
+    pub illuminants: Vec<WhitePoint>,
+    /// Chromatic adaptation method.
+    pub method: AdaptationMethod,
+    /// Pre-computed combined adaptation matrix.
+    combined_matrix: [[f64; 3]; 3],
+}
+
+impl MultiIlluminantAdapter {
+    /// Create a new multi-illuminant adapter.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `illuminants` has fewer than 2 entries.
+    #[must_use]
+    pub fn new(illuminants: Vec<WhitePoint>, method: AdaptationMethod) -> Self {
+        let combined_matrix = compute_multi_illuminant_adaptation(&illuminants, method);
+        Self {
+            illuminants,
+            method,
+            combined_matrix,
+        }
+    }
+
+    /// Adapt an XYZ colour through the full illuminant chain.
+    #[must_use]
+    pub fn adapt(&self, xyz: (f64, f64, f64)) -> (f64, f64, f64) {
+        adapt_xyz(xyz, &self.combined_matrix)
+    }
+
+    /// Returns the combined adaptation matrix.
+    #[must_use]
+    pub fn combined_matrix(&self) -> [[f64; 3]; 3] {
+        self.combined_matrix
+    }
+
+    /// Returns the source illuminant (first in the chain).
+    #[must_use]
+    pub fn source_illuminant(&self) -> &WhitePoint {
+        &self.illuminants[0]
+    }
+
+    /// Returns the destination illuminant (last in the chain).
+    #[must_use]
+    pub fn destination_illuminant(&self) -> &WhitePoint {
+        self.illuminants
+            .last()
+            .expect("must have at least 2 illuminants")
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -362,5 +527,142 @@ mod tests {
         assert_near(back.0, xyz.0, 1e-6, "round-trip X");
         assert_near(back.1, xyz.1, 1e-6, "round-trip Y");
         assert_near(back.2, xyz.2, 1e-6, "round-trip Z");
+    }
+
+    // ── Multi-illuminant and additional illuminant tests ───────────────────────
+
+    #[test]
+    fn test_illuminant_a_white_point() {
+        let wp = illuminant_a();
+        // Illuminant A is incandescent; X should be > 1 (reddish)
+        assert!(
+            wp.x > 1.0,
+            "Illuminant A X should be > 1 for tungsten: {}",
+            wp.x
+        );
+        assert_near(wp.y, 1.0, 1e-10, "Illuminant A Y");
+        assert!(
+            wp.z < 1.0,
+            "Illuminant A Z should be < 1 for warm light: {}",
+            wp.z
+        );
+    }
+
+    #[test]
+    fn test_illuminant_f2_white_point() {
+        let wp = illuminant_f2();
+        assert_near(wp.y, 1.0, 1e-10, "F2 Y");
+        assert!(wp.x > 0.5, "F2 X should be positive");
+    }
+
+    #[test]
+    fn test_illuminant_e_equal_energy() {
+        let wp = illuminant_e();
+        assert_near(wp.x, 1.0, 1e-10, "Equal energy X");
+        assert_near(wp.y, 1.0, 1e-10, "Equal energy Y");
+        assert_near(wp.z, 1.0, 1e-10, "Equal energy Z");
+    }
+
+    #[test]
+    fn test_illuminant_f7_close_to_d65() {
+        let f7 = illuminant_f7();
+        let d65_wp = d65();
+        // F7 is a daylight-simulator — should be close to D65 in Y
+        assert_near(f7.y, d65_wp.y, 0.01, "F7 Y close to D65");
+    }
+
+    #[test]
+    fn test_multi_illuminant_two_step_matches_direct() {
+        // A→D65→D50 combined should be close to A→D50 directly
+        let a_wp = illuminant_a();
+        let d65_wp = d65();
+        let d50_wp = d50();
+
+        let direct = compute_adaptation_matrix(&a_wp, &d50_wp, AdaptationMethod::Bradford);
+        let multi = compute_multi_illuminant_adaptation(
+            &[a_wp, d65_wp, d50_wp],
+            AdaptationMethod::Bradford,
+        );
+
+        let xyz = (0.5, 0.5, 0.5);
+        let direct_out = adapt_xyz(xyz, &direct);
+        let multi_out = adapt_xyz(xyz, &multi);
+
+        // Multi-step may differ slightly due to numerical accumulation
+        // We just verify both produce valid and similar results
+        assert_near(
+            direct_out.1,
+            multi_out.1,
+            0.02,
+            "Y should be close between direct and multi-step",
+        );
+    }
+
+    #[test]
+    fn test_multi_illuminant_identity_chain() {
+        // D65 → D65 chain should give identity
+        let d65_wp = d65();
+        let combined =
+            compute_multi_illuminant_adaptation(&[d65_wp, d65_wp], AdaptationMethod::Bradford);
+        let xyz = (0.5, 0.6, 0.4);
+        let out = adapt_xyz(xyz, &combined);
+        assert_near(out.0, xyz.0, 1e-8, "X identity chain");
+        assert_near(out.1, xyz.1, 1e-8, "Y identity chain");
+        assert_near(out.2, xyz.2, 1e-8, "Z identity chain");
+    }
+
+    #[test]
+    fn test_adapt_xyz_between_d65_d50() {
+        let src = d65();
+        let dst = d50();
+        let adapted = adapt_xyz_between(
+            (src.x, src.y, src.z),
+            &src,
+            &dst,
+            AdaptationMethod::Bradford,
+        );
+        assert_near(adapted.0, dst.x, 0.01, "between D65->D50 X");
+        assert_near(adapted.1, dst.y, 0.01, "between D65->D50 Y");
+    }
+
+    #[test]
+    fn test_multi_illuminant_adapter_construction() {
+        let adapter = MultiIlluminantAdapter::new(vec![d65(), d50()], AdaptationMethod::Bradford);
+        assert_eq!(adapter.illuminants.len(), 2);
+        // Adapting the D65 white point should give approximately D50
+        let adapted = adapter.adapt((d65().x, d65().y, d65().z));
+        assert_near(adapted.0, d50().x, 0.01, "adapter D65->D50 X");
+    }
+
+    #[test]
+    fn test_multi_illuminant_adapter_three_step() {
+        // A → D65 → D50
+        let adapter = MultiIlluminantAdapter::new(
+            vec![illuminant_a(), d65(), d50()],
+            AdaptationMethod::Cat02,
+        );
+        assert_eq!(adapter.illuminants.len(), 3);
+        let out = adapter.adapt((0.5, 0.6, 0.1));
+        assert!(out.0.is_finite() && out.1.is_finite() && out.2.is_finite());
+    }
+
+    #[test]
+    fn test_round_trip_d50_d65_a_illuminants() {
+        // Test round-trip for each standard illuminant
+        for (src, dst) in [
+            (d50(), d65()),
+            (d65(), d50()),
+            (illuminant_a(), d65()),
+            (d65(), illuminant_a()),
+        ] {
+            let m_fwd = compute_adaptation_matrix(&src, &dst, AdaptationMethod::Bradford);
+            let m_rev = compute_adaptation_matrix(&dst, &src, AdaptationMethod::Bradford);
+            let xyz = (0.4, 0.5, 0.3);
+            let fwd = adapt_xyz(xyz, &m_fwd);
+            let back = adapt_xyz(fwd, &m_rev);
+            assert_near(back.0, xyz.0, 1e-5, "round-trip X");
+            assert_near(back.1, xyz.1, 1e-5, "round-trip Y");
+            assert_near(back.2, xyz.2, 1e-5, "round-trip Z");
+        }
     }
 }

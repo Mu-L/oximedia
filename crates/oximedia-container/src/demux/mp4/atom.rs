@@ -17,8 +17,8 @@ use oximedia_core::{OxiError, OxiResult};
 ///
 /// let data = [0x00, 0x00, 0x00, 0x14, b'f', b't', b'y', b'p'];
 /// let mut atom = Mp4Atom::new(&data);
-/// assert_eq!(atom.read_u32()?, 20);
-/// assert_eq!(atom.read_type()?, "ftyp");
+/// assert_eq!(atom.read_u32().expect("valid u32"), 20);
+/// assert_eq!(atom.read_type().expect("valid type"), "ftyp");
 /// ```
 pub struct Mp4Atom<'a> {
     /// The underlying data buffer.

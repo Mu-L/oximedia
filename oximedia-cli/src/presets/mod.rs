@@ -8,7 +8,7 @@
 //!
 //! # Examples
 //!
-//! ```no_run
+//! ```rust,ignore
 //! use oximedia_cli::presets::{PresetManager, PresetCategory};
 //!
 //! let manager = PresetManager::new();

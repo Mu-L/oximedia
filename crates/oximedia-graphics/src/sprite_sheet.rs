@@ -70,16 +70,8 @@ impl SpriteSheet {
         frame_width: u32,
         frame_height: u32,
     ) -> Self {
-        let cols = if frame_width > 0 {
-            atlas_width / frame_width
-        } else {
-            0
-        };
-        let rows = if frame_height > 0 {
-            atlas_height / frame_height
-        } else {
-            0
-        };
+        let cols = atlas_width.checked_div(frame_width).unwrap_or(0);
+        let rows = atlas_height.checked_div(frame_height).unwrap_or(0);
         let mut frames = Vec::with_capacity((cols * rows) as usize);
 
         for row in 0..rows {
@@ -117,21 +109,15 @@ impl SpriteSheet {
     /// Number of columns in the grid.
     #[must_use]
     pub fn columns(&self) -> u32 {
-        if self.frame_width > 0 {
-            self.atlas_width / self.frame_width
-        } else {
-            0
-        }
+        self.atlas_width.checked_div(self.frame_width).unwrap_or(0)
     }
 
     /// Number of rows in the grid.
     #[must_use]
     pub fn rows(&self) -> u32 {
-        if self.frame_height > 0 {
-            self.atlas_height / self.frame_height
-        } else {
-            0
-        }
+        self.atlas_height
+            .checked_div(self.frame_height)
+            .unwrap_or(0)
     }
 }
 

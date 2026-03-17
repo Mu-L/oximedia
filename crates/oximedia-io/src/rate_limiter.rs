@@ -1,7 +1,8 @@
 //! I/O rate limiting for bandwidth control.
 //!
 //! Provides a token-bucket rate limiter, a per-stream rate limiting manager,
-//! and a sliding-window bandwidth tracker.
+//! a sliding-window bandwidth tracker, and a bidirectional rate limiter with
+//! separate read and write bandwidth limits.
 
 #![allow(dead_code)]
 
@@ -272,6 +273,203 @@ impl BandwidthTracker {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// IoDirection — read vs write
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Direction of an I/O operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IoDirection {
+    /// Data flowing from source to consumer (read).
+    Read,
+    /// Data flowing from producer to sink (write).
+    Write,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DirectionalLimits — separate read/write rate limits
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Independent bandwidth limits for read and write directions.
+#[derive(Debug, Clone, Copy)]
+pub struct DirectionalLimits {
+    /// Maximum sustained bandwidth for read operations (bytes per second).
+    pub read_bytes_per_sec: u64,
+    /// Maximum burst for read operations (bytes).
+    pub read_burst_bytes: u64,
+    /// Maximum sustained bandwidth for write operations (bytes per second).
+    pub write_bytes_per_sec: u64,
+    /// Maximum burst for write operations (bytes).
+    pub write_burst_bytes: u64,
+}
+
+impl DirectionalLimits {
+    /// Create symmetric limits where read and write have the same rate.
+    #[must_use]
+    pub fn symmetric(bytes_per_sec: u64) -> Self {
+        Self {
+            read_bytes_per_sec: bytes_per_sec,
+            read_burst_bytes: bytes_per_sec,
+            write_bytes_per_sec: bytes_per_sec,
+            write_burst_bytes: bytes_per_sec,
+        }
+    }
+
+    /// Create asymmetric limits (common in consumer networking: slow upload, fast download).
+    #[must_use]
+    pub fn asymmetric(read_bps: u64, write_bps: u64) -> Self {
+        Self {
+            read_bytes_per_sec: read_bps,
+            read_burst_bytes: read_bps,
+            write_bytes_per_sec: write_bps,
+            write_burst_bytes: write_bps,
+        }
+    }
+
+    /// Set burst sizes explicitly.
+    #[must_use]
+    pub fn with_burst(mut self, read_burst: u64, write_burst: u64) -> Self {
+        self.read_burst_bytes = read_burst;
+        self.write_burst_bytes = write_burst;
+        self
+    }
+
+    /// Convert to a `RateLimit` for the given direction.
+    #[must_use]
+    pub fn for_direction(&self, direction: IoDirection) -> RateLimit {
+        match direction {
+            IoDirection::Read => {
+                RateLimit::with_burst(self.read_bytes_per_sec, self.read_burst_bytes)
+            }
+            IoDirection::Write => {
+                RateLimit::with_burst(self.write_bytes_per_sec, self.write_burst_bytes)
+            }
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DirectionalRateLimiter
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A rate limiter that maintains separate token buckets for read and write.
+///
+/// Useful for I/O layers where upload and download bandwidth must be
+/// controlled independently (e.g. network media streaming, cloud storage).
+pub struct DirectionalRateLimiter {
+    read_bucket: TokenBucket,
+    write_bucket: TokenBucket,
+    config: DirectionalLimits,
+}
+
+impl DirectionalRateLimiter {
+    /// Create a new directional limiter with the given limits.
+    ///
+    /// `now_ms` is the current time in milliseconds.
+    #[must_use]
+    pub fn new(limits: DirectionalLimits, now_ms: u64) -> Self {
+        let read_limit = limits.for_direction(IoDirection::Read);
+        let write_limit = limits.for_direction(IoDirection::Write);
+        Self {
+            read_bucket: TokenBucket::new(read_limit, now_ms),
+            write_bucket: TokenBucket::new(write_limit, now_ms),
+            config: limits,
+        }
+    }
+
+    /// Attempt to consume `bytes` from the appropriate bucket for `direction`.
+    ///
+    /// Returns `Allowed` if tokens were consumed, `Throttled(wait_ms)` otherwise.
+    pub fn check_and_consume(
+        &mut self,
+        direction: IoDirection,
+        bytes: u64,
+        now_ms: u64,
+    ) -> RateLimitResult {
+        let bucket = match direction {
+            IoDirection::Read => &mut self.read_bucket,
+            IoDirection::Write => &mut self.write_bucket,
+        };
+        if bucket.try_consume(bytes, now_ms) {
+            RateLimitResult::Allowed
+        } else {
+            let wait_ms = bucket.wait_ms_for(bytes);
+            RateLimitResult::Throttled(wait_ms)
+        }
+    }
+
+    /// Return an estimate of how long until `bytes` tokens are available in `direction`.
+    #[must_use]
+    pub fn wait_ms_for(&self, direction: IoDirection, bytes: u64) -> u64 {
+        match direction {
+            IoDirection::Read => self.read_bucket.wait_ms_for(bytes),
+            IoDirection::Write => self.write_bucket.wait_ms_for(bytes),
+        }
+    }
+
+    /// Return the configured directional limits.
+    #[must_use]
+    pub fn config(&self) -> &DirectionalLimits {
+        &self.config
+    }
+
+    /// Return current token count for the given direction.
+    #[must_use]
+    pub fn available_tokens(&self, direction: IoDirection) -> f64 {
+        match direction {
+            IoDirection::Read => self.read_bucket.tokens,
+            IoDirection::Write => self.write_bucket.tokens,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DirectionalBandwidthTracker
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Tracks separate read and write bandwidth with sliding time windows.
+pub struct DirectionalBandwidthTracker {
+    read_tracker: BandwidthTracker,
+    write_tracker: BandwidthTracker,
+}
+
+impl DirectionalBandwidthTracker {
+    /// Create a new tracker with the given window duration for both directions.
+    #[must_use]
+    pub fn new(window_ms: u64) -> Self {
+        Self {
+            read_tracker: BandwidthTracker::new(window_ms),
+            write_tracker: BandwidthTracker::new(window_ms),
+        }
+    }
+
+    /// Record a transfer of `bytes` in `direction` at time `now_ms`.
+    pub fn record(&mut self, direction: IoDirection, bytes: u64, now_ms: u64) {
+        match direction {
+            IoDirection::Read => self.read_tracker.record(bytes, now_ms),
+            IoDirection::Write => self.write_tracker.record(bytes, now_ms),
+        }
+    }
+
+    /// Current bandwidth in bytes per second for the given direction.
+    #[must_use]
+    pub fn current_bps(&self, direction: IoDirection, now_ms: u64) -> u64 {
+        match direction {
+            IoDirection::Read => self.read_tracker.current_bps(now_ms),
+            IoDirection::Write => self.write_tracker.current_bps(now_ms),
+        }
+    }
+
+    /// Total bytes transferred in the window for the given direction.
+    #[must_use]
+    pub fn total_bytes_in_window(&self, direction: IoDirection, now_ms: u64) -> u64 {
+        match direction {
+            IoDirection::Read => self.read_tracker.total_bytes_in_window(now_ms),
+            IoDirection::Write => self.write_tracker.total_bytes_in_window(now_ms),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +612,114 @@ mod tests {
         tracker.record(400, 2000);
         // At now=2000 window covers [0, 2000]; all three are included
         assert_eq!(tracker.total_bytes_in_window(2000), 700);
+    }
+
+    // ── DirectionalLimits ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_directional_limits_symmetric() {
+        let limits = DirectionalLimits::symmetric(1_000_000);
+        assert_eq!(limits.read_bytes_per_sec, 1_000_000);
+        assert_eq!(limits.write_bytes_per_sec, 1_000_000);
+        assert_eq!(limits.read_burst_bytes, 1_000_000);
+        assert_eq!(limits.write_burst_bytes, 1_000_000);
+    }
+
+    #[test]
+    fn test_directional_limits_asymmetric() {
+        let limits = DirectionalLimits::asymmetric(10_000_000, 1_000_000);
+        assert_eq!(limits.read_bytes_per_sec, 10_000_000);
+        assert_eq!(limits.write_bytes_per_sec, 1_000_000);
+    }
+
+    #[test]
+    fn test_directional_limits_for_direction() {
+        let limits = DirectionalLimits::asymmetric(2000, 1000);
+        let read_limit = limits.for_direction(IoDirection::Read);
+        assert_eq!(read_limit.bytes_per_sec, 2000);
+        let write_limit = limits.for_direction(IoDirection::Write);
+        assert_eq!(write_limit.bytes_per_sec, 1000);
+    }
+
+    // ── DirectionalRateLimiter ────────────────────────────────────────────────
+
+    #[test]
+    fn test_directional_rate_limiter_read_allowed() {
+        let limits = DirectionalLimits::asymmetric(10_000, 1_000);
+        let mut rl = DirectionalRateLimiter::new(limits, 0);
+        assert_eq!(
+            rl.check_and_consume(IoDirection::Read, 5_000, 0),
+            RateLimitResult::Allowed
+        );
+    }
+
+    #[test]
+    fn test_directional_rate_limiter_write_throttled() {
+        let limits = DirectionalLimits::asymmetric(10_000, 500);
+        let mut rl = DirectionalRateLimiter::new(limits, 0);
+        // Drain write bucket
+        rl.check_and_consume(IoDirection::Write, 500, 0);
+        let result = rl.check_and_consume(IoDirection::Write, 100, 0);
+        assert!(matches!(result, RateLimitResult::Throttled(_)));
+    }
+
+    #[test]
+    fn test_directional_rate_limiter_read_and_write_independent() {
+        let limits = DirectionalLimits::asymmetric(10_000, 500);
+        let mut rl = DirectionalRateLimiter::new(limits, 0);
+        // Drain write bucket completely
+        rl.check_and_consume(IoDirection::Write, 500, 0);
+        // Write is throttled
+        assert!(matches!(
+            rl.check_and_consume(IoDirection::Write, 1, 0),
+            RateLimitResult::Throttled(_)
+        ));
+        // Read is still allowed (independent bucket, 10_000 burst)
+        assert_eq!(
+            rl.check_and_consume(IoDirection::Read, 5_000, 0),
+            RateLimitResult::Allowed
+        );
+    }
+
+    #[test]
+    fn test_directional_rate_limiter_wait_ms() {
+        let limits = DirectionalLimits::symmetric(1000); // 1 token/ms
+        let mut rl = DirectionalRateLimiter::new(limits, 0);
+        rl.check_and_consume(IoDirection::Write, 1000, 0); // drain write
+        let wait = rl.wait_ms_for(IoDirection::Write, 500);
+        assert!(wait >= 500);
+        // Read has full tokens
+        assert_eq!(rl.wait_ms_for(IoDirection::Read, 500), 0);
+    }
+
+    #[test]
+    fn test_directional_rate_limiter_available_tokens() {
+        let limits = DirectionalLimits::symmetric(1000);
+        let rl = DirectionalRateLimiter::new(limits, 0);
+        // Both start full
+        assert!((rl.available_tokens(IoDirection::Read) - 1000.0).abs() < f64::EPSILON);
+        assert!((rl.available_tokens(IoDirection::Write) - 1000.0).abs() < f64::EPSILON);
+    }
+
+    // ── DirectionalBandwidthTracker ───────────────────────────────────────────
+
+    #[test]
+    fn test_directional_bandwidth_tracker_separate() {
+        let mut tracker = DirectionalBandwidthTracker::new(1000);
+        tracker.record(IoDirection::Read, 500_000, 500);
+        tracker.record(IoDirection::Write, 100_000, 500);
+        // Read: 500 KB / 1 s
+        assert_eq!(tracker.current_bps(IoDirection::Read, 1000), 500_000);
+        // Write: 100 KB / 1 s
+        assert_eq!(tracker.current_bps(IoDirection::Write, 1000), 100_000);
+    }
+
+    #[test]
+    fn test_directional_bandwidth_tracker_total_bytes() {
+        let mut tracker = DirectionalBandwidthTracker::new(2000);
+        tracker.record(IoDirection::Read, 100, 0);
+        tracker.record(IoDirection::Write, 200, 500);
+        assert_eq!(tracker.total_bytes_in_window(IoDirection::Read, 2000), 100);
+        assert_eq!(tracker.total_bytes_in_window(IoDirection::Write, 2000), 200);
     }
 }

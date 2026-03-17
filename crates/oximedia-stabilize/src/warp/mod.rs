@@ -9,4 +9,6 @@ pub mod interpolation;
 
 pub use apply::FrameWarper;
 pub use boundary::BoundaryMode;
-pub use interpolation::InterpolationMethod;
+pub use interpolation::{
+    bilinear_quality_score, bilinear_row_simd, warp_bilinear_simd, InterpolationMethod,
+};

@@ -1,17 +1,28 @@
 //! GPU compute operations
 
+pub mod chroma;
 pub mod colorspace;
+pub mod composite;
+pub mod denoise;
 pub mod filter;
+pub mod histogram_eq;
+pub mod quality_metrics;
 pub mod scale;
 pub mod tonemap;
 pub mod transform;
 
+pub use chroma::{ChromaOps, ChromaSubsampling, YcbcrCoefficients};
 pub use colorspace::{ColorSpace, ColorSpaceConversion};
+pub use denoise::{DenoiseAlgorithm, DenoiseKernel, DenoiseOperation};
 pub use filter::FilterOperation;
+pub use histogram_eq::{EqualizationMode, HistogramEqualizer, HistogramEqualizerConfig};
+pub use quality_metrics::{
+    compute_ms_ssim, compute_psnr, compute_ssim, MsSsimResult, PsnrResult, SsimResult,
+};
 pub use scale::{ScaleFilter, ScaleOperation};
 pub use tonemap::{
-    aces_tonemap, apply_gamma, apply_tonemap_frame, hable_tonemap, reinhard_tonemap,
-    TonemapAlgorithm, TonemapParams,
+    aces_tonemap, apply_gamma, apply_tonemap_frame, drago_log_tonemap, hable_tonemap,
+    reinhard_tonemap, TonemapAlgorithm, TonemapParams,
 };
 pub use transform::TransformOperation;
 

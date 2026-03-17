@@ -51,7 +51,7 @@ impl DownbeatDetector {
     }
 
     /// Compute harmonic strength of a frame.
-    fn compute_harmonic_strength(&self, frame: &[rustfft::num_complex::Complex<f32>]) -> f32 {
+    fn compute_harmonic_strength(&self, frame: &[oxifft::Complex<f32>]) -> f32 {
         let mag = crate::utils::magnitude_spectrum(frame);
 
         // Focus on low to mid frequencies (bass and chord content)

@@ -35,6 +35,7 @@ pub fn highest_1080p() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
     Preset::new(metadata, config)
 }
@@ -60,6 +61,7 @@ pub fn highest_1440p() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
     Preset::new(metadata, config)
 }
@@ -86,6 +88,7 @@ pub fn highest_2160p() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
     Preset::new(metadata, config)
 }
@@ -112,6 +115,7 @@ pub fn highest_4320p() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
     Preset::new(metadata, config)
 }

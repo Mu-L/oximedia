@@ -30,21 +30,27 @@ pub mod compat;
 pub mod delivery_spec;
 pub mod display_config;
 pub mod dm_metadata;
+pub mod dv_xml_metadata;
 pub mod enhancement;
 pub mod frame_analysis;
+pub mod ipt_pq;
 pub mod level_analysis;
 pub mod level_mapping;
 pub mod mapping_curve;
 pub mod mastering;
 mod metadata;
 pub mod metadata_block;
+pub mod metadata_validator;
+#[allow(dead_code)]
 mod parser;
+pub mod profile8;
 pub mod profile_convert;
 pub mod profiles;
 mod rpu;
 pub mod scene_trim;
 pub mod shot_boundary;
 pub mod shot_metadata;
+pub mod shot_metadata_ext;
 pub mod target_display;
 pub mod tone_mapping;
 mod tonemap;
@@ -56,8 +62,9 @@ pub mod xml_metadata;
 // Re-export types, but avoid ambiguous glob re-exports
 pub use metadata::{
     ColorVolumeTransform, ContentMetadataDescriptor, ContentType, HueVector, Level10Metadata,
-    Level11Metadata, Level1Metadata, Level2Metadata, Level3Metadata, Level5Metadata,
-    Level6Metadata, Level8Metadata, Level9Metadata, MetadataBlock, SaturationVector, TrimPass,
+    Level11Metadata, Level1Metadata, Level2Metadata, Level3Metadata, Level4Metadata,
+    Level5Metadata, Level6Metadata, Level7Metadata, Level8Metadata, Level9Metadata, MetadataBlock,
+    SaturationVector, TrimPass,
 };
 pub use rpu::*;
 pub use tonemap::{
@@ -191,11 +198,17 @@ pub struct DolbyVisionRpu {
     /// Level 2 metadata (trim passes)
     pub level2: Option<Level2Metadata>,
 
+    /// Level 4 metadata (global dimming)
+    pub level4: Option<Level4Metadata>,
+
     /// Level 5 metadata (active area)
     pub level5: Option<Level5Metadata>,
 
     /// Level 6 metadata (fallback)
     pub level6: Option<Level6Metadata>,
+
+    /// Level 7 metadata (source display color volume)
+    pub level7: Option<Level7Metadata>,
 
     /// Level 8 metadata (target display)
     pub level8: Option<Level8Metadata>,
@@ -217,8 +230,10 @@ impl DolbyVisionRpu {
             vdr_dm_data: None,
             level1: None,
             level2: None,
+            level4: None,
             level5: None,
             level6: None,
+            level7: None,
             level8: None,
             level9: None,
             level11: None,
@@ -270,46 +285,13 @@ impl DolbyVisionRpu {
         tonemap::apply_dolbyvision_tonemap(self, pixel_data)
     }
 
-    /// Validate RPU structure for consistency.
+    /// Validate RPU structure for consistency, including all metadata levels.
     ///
     /// # Errors
     ///
     /// Returns error if validation fails.
     pub fn validate(&self) -> Result<()> {
-        // Check profile-specific requirements
-        match self.profile {
-            Profile::Profile5 | Profile::Profile8 | Profile::Profile8_4 => {
-                if !self.profile.is_backward_compatible() {
-                    return Err(DolbyVisionError::Generic(
-                        "Profile mismatch: expected backward compatible profile".to_string(),
-                    ));
-                }
-            }
-            Profile::Profile7 => {
-                if !self.profile.has_mel() {
-                    return Err(DolbyVisionError::Generic(
-                        "Profile 7 requires MEL support".to_string(),
-                    ));
-                }
-            }
-            Profile::Profile8_1 => {
-                if !self.profile.is_low_latency() {
-                    return Err(DolbyVisionError::Generic(
-                        "Profile 8.1 is not marked as low-latency".to_string(),
-                    ));
-                }
-            }
-        }
-
-        // Validate header
-        if self.header.rpu_format > 1 {
-            return Err(DolbyVisionError::InvalidHeader(format!(
-                "Invalid RPU format: {}",
-                self.header.rpu_format
-            )));
-        }
-
-        Ok(())
+        validation::validate_rpu(self)
     }
 }
 

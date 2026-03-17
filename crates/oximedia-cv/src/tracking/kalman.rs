@@ -225,12 +225,15 @@ impl KalmanFilter {
     /// ```
     /// use oximedia_cv::tracking::KalmanFilter;
     ///
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut kf = KalmanFilter::constant_velocity(1.0);
     /// kf.set_state(vec![0.0, 0.0, 1.0, 1.0])?;
     ///
     /// let predicted = kf.predict();
     /// // After 1 second at velocity (1, 1), position should be (1, 1)
     /// assert!((predicted[0] - 1.0).abs() < 0.001);
+    /// Ok(())
+    /// }
     /// ```
     pub fn predict(&mut self) -> Vec<f64> {
         // x = F * x
@@ -285,11 +288,14 @@ impl KalmanFilter {
     /// ```
     /// use oximedia_cv::tracking::KalmanFilter;
     ///
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut kf = KalmanFilter::constant_velocity(1.0);
     /// kf.set_state(vec![0.0, 0.0, 1.0, 1.0])?;
     ///
     /// let measurement = vec![2.0, 3.0];
     /// let updated = kf.update(&measurement)?;
+    /// Ok(())
+    /// }
     /// ```
     pub fn update(&mut self, measurement: &[f64]) -> CvResult<Vec<f64>> {
         if measurement.len() != self.measure_dim {

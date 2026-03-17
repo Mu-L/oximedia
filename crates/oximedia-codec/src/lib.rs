@@ -150,9 +150,11 @@
 #![allow(clippy::unnecessary_map_or)]
 
 pub mod av1_obu;
+pub mod avif;
 pub mod bitrate_model;
 pub mod bitstream_writer;
 pub mod codec_caps;
+pub mod codec_profile;
 pub mod color_range;
 pub mod entropy_coding;
 pub mod error;
@@ -164,6 +166,7 @@ pub mod intra;
 pub mod motion;
 pub mod multipass;
 pub mod nal_unit;
+pub mod packet_builder;
 pub mod packet_queue;
 pub mod picture_timing;
 pub mod profile_level;
@@ -189,8 +192,26 @@ pub mod celt;
 // PNG codec
 pub mod png;
 
+// APNG (Animated PNG) top-level encoder/decoder
+pub mod apng;
+
+// Vorbis audio codec (encoder + decoder)
+pub mod vorbis;
+pub use vorbis::{
+    SimpleVorbisEncoder, VorbisConfig, VorbisEncConfig, VorbisEncoder, VorbisPacket, VorbisQuality,
+};
+
+// FLAC lossless audio codec (encoder + decoder)
+pub mod flac;
+
+// PCM raw audio codec (encoder + decoder)
+pub mod pcm;
+
 // GIF codec
 pub mod gif;
+
+// WebP codec
+pub mod webp;
 
 // JPEG-XL codec
 #[cfg(feature = "jpegxl")]
@@ -235,10 +256,12 @@ pub use multipass::{
     SceneChangeDetector, Stats, VbvStatistics,
 };
 pub use rate_control::{
-    AdaptiveQuantization, AllocationResult, AnalysisResult, AqMode, BitrateAllocator, BlockQpMap,
-    BufferModel, CbrController, ComplexityEstimator, ContentAnalyzer, ContentType, CqpController,
+    AdaptiveAllocation, AdaptiveQuantization, AllocationResult, AnalysisResult, AqMode,
+    BitrateAllocator, BlockQpMap, BufferModel, CbrController, ComplexityEstimator,
+    ContentAdaptiveAllocator, ContentAnalyzer, ContentMetrics, ContentType, CqpController,
     CrfController, FrameStats, GopAllocationStatus, GopStats, Lookahead, QpResult, QpSelector,
-    QpStrategy, RateControlMode, RateController, RcConfig, RcOutput, SceneChangeThreshold,
+    QpStrategy, RateControlMode, RateController, RcConfig, RcOutput,
+    SceneChangeDetector as RcSceneChangeDetector, SceneChangeThreshold, SceneContentType,
     TextureMetrics, VbrController,
 };
 pub use reconstruct::{
@@ -250,9 +273,12 @@ pub use reconstruct::{
     StageResult, SuperResConfig, SuperResUpscaler, UpscaleMethod,
 };
 pub use tile::{
-    assemble_tiles, decode_tile_stream, HeaderedTileEncodeOp, RawLumaEncodeOp, TileConfig,
-    TileCoord, TileEncodeOp, TileEncodeStats, TileEncoder, TileResult,
+    assemble_tiles, decode_tile_stream, decode_tiles_parallel, HeaderedTileEncodeOp,
+    RawLumaEncodeOp, TileConfig, TileCoord, TileDecodeOp, TileDecodeResult, TileEncodeOp,
+    TileEncodeStats, TileEncoder, TileResult,
 };
+
+pub use pcm::{ByteOrder, PcmConfig, PcmDecoder, PcmEncoder, PcmFormat};
 pub use traits::{
     BitrateMode, DecoderConfig, EncodedPacket, EncoderConfig, EncoderPreset, VideoDecoder,
     VideoEncoder,
@@ -262,10 +288,14 @@ pub use traits::{
 pub use av1::{Av1Decoder, Av1Encoder};
 
 #[cfg(feature = "vp9")]
-pub use vp9::Vp9Decoder;
+pub use vp9::{
+    SimpleVp9Encoder, Vp9Decoder, Vp9EncConfig, Vp9Encoder, Vp9EncoderConfig, Vp9Packet, Vp9Profile,
+};
 
 #[cfg(feature = "vp8")]
-pub use vp8::Vp8Decoder;
+pub use vp8::{
+    SimpleVp8Encoder, Vp8Decoder, Vp8EncConfig, Vp8Encoder, Vp8EncoderConfig, Vp8Packet,
+};
 
 #[cfg(feature = "theora")]
 pub use theora::{TheoraConfig, TheoraDecoder, TheoraEncoder};
@@ -310,3 +340,5 @@ pub use jpegxl::{
     DecodedImage as JxlImage, JxlColorSpace, JxlConfig, JxlDecoder, JxlEncoder, JxlFrameEncoding,
     JxlHeader, ModularDecoder, ModularEncoder,
 };
+
+pub use avif::{AvifConfig, AvifDecoder, AvifEncoder, AvifImage, AvifProbeResult, YuvFormat};

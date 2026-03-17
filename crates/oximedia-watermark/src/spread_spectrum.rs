@@ -6,7 +6,7 @@
 use crate::error::{WatermarkError, WatermarkResult};
 use crate::payload::{generate_pn_sequence, pack_bits, unpack_bits, PayloadCodec};
 use crate::psychoacoustic::PsychoacousticModel;
-use rustfft::{num_complex::Complex, FftPlanner};
+use oxifft::Complex;
 
 /// Spread spectrum watermarking configuration.
 #[derive(Debug, Clone)]
@@ -122,9 +122,6 @@ impl SpreadSpectrumEmbedder {
         }
 
         let mut watermarked = samples.to_vec();
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(frame_size);
-        let ifft = planner.plan_fft_inverse(frame_size);
 
         // Calculate masking threshold using the first frame only.
         // The psychoacoustic model requires exactly frame_size samples.
@@ -155,9 +152,9 @@ impl SpreadSpectrumEmbedder {
             let frame = &samples[frame_start..frame_start + frame_size];
 
             // FFT
-            let mut freq_data: Vec<Complex<f32>> =
+            let freq_input: Vec<Complex<f32>> =
                 frame.iter().map(|&s| Complex::new(s, 0.0)).collect();
-            fft.process(&mut freq_data);
+            let mut freq_data = oxifft::fft(&freq_input);
 
             // Embed bits in frequency domain
             for _ in 0..8 {
@@ -204,12 +201,12 @@ impl SpreadSpectrumEmbedder {
             }
 
             // IFFT
-            ifft.process(&mut freq_data);
+            let ifft_result = oxifft::ifft(&freq_data);
 
             // Overlap-add
             #[allow(clippy::cast_precision_loss)]
             let scale = 1.0 / frame_size as f32;
-            for (i, c) in freq_data.iter().enumerate().take(frame_size) {
+            for (i, c) in ifft_result.iter().enumerate().take(frame_size) {
                 let idx = frame_start + i;
                 if idx < watermarked.len() {
                     watermarked[idx] = c.re * scale;
@@ -306,8 +303,6 @@ impl SpreadSpectrumDetector {
         let required_frames = expected_bits.div_ceil(8);
 
         let mut bits = Vec::new();
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(frame_size);
 
         for frame_idx in 0..required_frames {
             let frame_start = frame_idx * hop_size;
@@ -318,9 +313,9 @@ impl SpreadSpectrumDetector {
             let frame = &samples[frame_start..frame_start + frame_size];
 
             // FFT
-            let mut freq_data: Vec<Complex<f32>> =
+            let freq_input: Vec<Complex<f32>> =
                 frame.iter().map(|&s| Complex::new(s, 0.0)).collect();
-            fft.process(&mut freq_data);
+            let freq_data = oxifft::fft(&freq_input);
 
             // Extract bits
             for _ in 0..8 {

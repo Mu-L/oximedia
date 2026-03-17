@@ -83,7 +83,11 @@ pub fn apply_frame_offset(
 /// # Errors
 ///
 /// Returns an error if any resulting timecode is invalid.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 pub fn apply_linear_stretch(
     cues: &[SubtitleCue],
     anchor_frame: u64,
@@ -112,10 +116,7 @@ pub fn apply_linear_stretch(
 ///
 /// Both slices must have the same length. Returns `None` if empty.
 #[allow(clippy::cast_precision_loss)]
-pub fn compute_average_drift(
-    cues: &[SubtitleCue],
-    reference_in_frames: &[u64],
-) -> Option<f64> {
+pub fn compute_average_drift(cues: &[SubtitleCue], reference_in_frames: &[u64]) -> Option<f64> {
     if cues.is_empty() || cues.len() != reference_in_frames.len() {
         return None;
     }
@@ -154,7 +155,12 @@ mod tests {
     }
 
     fn make_cue(id: u32, s_in: u8, f_in: u8, s_out: u8, f_out: u8) -> SubtitleCue {
-        SubtitleCue::new(id, tc(0, 0, s_in, f_in), tc(0, 0, s_out, f_out), format!("cue {id}"))
+        SubtitleCue::new(
+            id,
+            tc(0, 0, s_in, f_in),
+            tc(0, 0, s_out, f_out),
+            format!("cue {id}"),
+        )
     }
 
     #[test]
@@ -187,7 +193,8 @@ mod tests {
     #[test]
     fn test_apply_frame_offset_positive() {
         let cues = vec![make_cue(1, 0, 0, 1, 0)];
-        let shifted = apply_frame_offset(&cues, 10, FrameRate::Fps25).expect("frame offset should succeed");
+        let shifted =
+            apply_frame_offset(&cues, 10, FrameRate::Fps25).expect("frame offset should succeed");
         assert_eq!(shifted[0].tc_in.to_frames(), 10);
         assert_eq!(shifted[0].tc_out.to_frames(), 35);
     }
@@ -202,7 +209,8 @@ mod tests {
     #[test]
     fn test_linear_stretch_identity() {
         let cues = vec![make_cue(1, 1, 0, 2, 0)];
-        let stretched = apply_linear_stretch(&cues, 0, 1.0, FrameRate::Fps25).expect("linear stretch should succeed");
+        let stretched = apply_linear_stretch(&cues, 0, 1.0, FrameRate::Fps25)
+            .expect("linear stretch should succeed");
         assert_eq!(stretched[0].tc_in.to_frames(), cues[0].tc_in.to_frames());
         assert_eq!(stretched[0].tc_out.to_frames(), cues[0].tc_out.to_frames());
     }
@@ -210,7 +218,8 @@ mod tests {
     #[test]
     fn test_linear_stretch_double() {
         let cues = vec![make_cue(1, 1, 0, 2, 0)]; // frames 25..50
-        let stretched = apply_linear_stretch(&cues, 0, 2.0, FrameRate::Fps25).expect("linear stretch should succeed");
+        let stretched = apply_linear_stretch(&cues, 0, 2.0, FrameRate::Fps25)
+            .expect("linear stretch should succeed");
         assert_eq!(stretched[0].tc_in.to_frames(), 50);
         assert_eq!(stretched[0].tc_out.to_frames(), 100);
     }

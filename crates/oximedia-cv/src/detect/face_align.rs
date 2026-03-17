@@ -11,6 +11,7 @@
 //! ```
 //! use oximedia_cv::detect::face_align::{FaceAligner, Point2f, ReferenceTemplate};
 //!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create face aligner with 112x112 output
 //! let aligner = FaceAligner::new(112, 112);
 //!
@@ -26,6 +27,8 @@
 //! // Align face (dummy image for example)
 //! let image = vec![0u8; 100 * 100 * 3];
 //! let aligned = aligner.align(&image, 100, 100, &landmarks)?;
+//! Ok(())
+//! }
 //! ```
 
 use crate::error::{CvError, CvResult};
@@ -258,6 +261,7 @@ impl ReferenceTemplate {
 /// ```
 /// use oximedia_cv::detect::face_align::{FaceAligner, Point2f};
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let aligner = FaceAligner::new(112, 112);
 ///
 /// let landmarks = vec![
@@ -271,6 +275,8 @@ impl ReferenceTemplate {
 /// let image = vec![128u8; 100 * 100 * 3];
 /// let aligned = aligner.align(&image, 100, 100, &landmarks)?;
 /// assert_eq!(aligned.len(), 112 * 112 * 3);
+/// Ok(())
+/// }
 /// ```
 pub struct FaceAligner {
     /// Reference landmark template.
@@ -351,6 +357,7 @@ impl FaceAligner {
     /// ```
     /// use oximedia_cv::detect::face_align::{FaceAligner, Point2f};
     ///
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let aligner = FaceAligner::new(112, 112);
     ///
     /// let landmarks = vec![
@@ -364,6 +371,8 @@ impl FaceAligner {
     /// let image = vec![128u8; 100 * 100 * 3];
     /// let aligned = aligner.align(&image, 100, 100, &landmarks)?;
     /// assert_eq!(aligned.len(), 112 * 112 * 3);
+    /// Ok(())
+    /// }
     /// ```
     pub fn align(
         &self,

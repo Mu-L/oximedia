@@ -387,6 +387,257 @@ pub fn compute_vectorscope_stats(
     }
 }
 
+// =============================================================================
+// Enhanced Vectorscope: zoom/pan controls and IQ display mode
+// =============================================================================
+
+/// Display mode for vectorscope chrominance axes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorscopeDisplayMode {
+    /// Standard UV (Cb/Cr) display — default broadcast convention.
+    Uv,
+    /// IQ display — NTSC in-phase / quadrature representation.
+    /// I-axis at 33° from +Cr, Q-axis at 33°+90° = 123° from +Cr.
+    Iq,
+}
+
+/// Zoom and pan control for vectorscope navigation.
+#[derive(Debug, Clone)]
+pub struct VectorscopeViewport {
+    /// Zoom factor (1.0 = full view, 2.0 = 2x zoom into center).
+    pub zoom: f32,
+    /// Horizontal pan offset in normalized coordinates [-1.0, 1.0].
+    /// 0.0 = centered, negative = pan left, positive = pan right.
+    pub pan_x: f32,
+    /// Vertical pan offset in normalized coordinates [-1.0, 1.0].
+    /// 0.0 = centered, negative = pan up, positive = pan down.
+    pub pan_y: f32,
+}
+
+impl Default for VectorscopeViewport {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        }
+    }
+}
+
+impl VectorscopeViewport {
+    /// Creates a viewport with the given zoom and centered pan.
+    #[must_use]
+    pub fn with_zoom(zoom: f32) -> Self {
+        Self {
+            zoom: zoom.max(0.1),
+            pan_x: 0.0,
+            pan_y: 0.0,
+        }
+    }
+
+    /// Creates a viewport with zoom and pan offsets.
+    #[must_use]
+    pub fn new(zoom: f32, pan_x: f32, pan_y: f32) -> Self {
+        Self {
+            zoom: zoom.max(0.1),
+            pan_x: pan_x.clamp(-1.0, 1.0),
+            pan_y: pan_y.clamp(-1.0, 1.0),
+        }
+    }
+
+    /// Applies the viewport transform: maps (cb_centered, cr_centered) in [-128,127]
+    /// to scope pixel coordinates (scope_x, scope_y).
+    fn transform(
+        &self,
+        cb_centered: f32,
+        cr_centered: f32,
+        center_x: f32,
+        center_y: f32,
+        max_radius: f32,
+        gain: f32,
+    ) -> (f32, f32) {
+        let scaled_cb = cb_centered * gain * max_radius / 128.0;
+        let scaled_cr = cr_centered * gain * max_radius / 128.0;
+
+        // Apply zoom and pan
+        let zoomed_x = scaled_cb * self.zoom + self.pan_x * max_radius;
+        let zoomed_y = scaled_cr * self.zoom + self.pan_y * max_radius;
+
+        (center_x + zoomed_x, center_y - zoomed_y)
+    }
+}
+
+/// Rotation matrix for IQ transform.
+/// I-axis is at 33° from Cr axis, Q-axis is perpendicular.
+/// I = Cr * cos(33°) + Cb * sin(33°)
+/// Q = -Cr * sin(33°) + Cb * cos(33°)
+fn uv_to_iq(cb_centered: f32, cr_centered: f32) -> (f32, f32) {
+    const IQ_ANGLE_RAD: f32 = 33.0 * PI / 180.0;
+    let cos_a = IQ_ANGLE_RAD.cos();
+    let sin_a = IQ_ANGLE_RAD.sin();
+    let i = cr_centered * cos_a + cb_centered * sin_a;
+    let q = -cr_centered * sin_a + cb_centered * cos_a;
+    (i, q)
+}
+
+/// Generates a vectorscope with extended controls.
+///
+/// Supports zoom/pan viewport and IQ vs UV display mode selection.
+///
+/// # Errors
+///
+/// Returns an error if frame data is insufficient.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
+pub fn generate_vectorscope_extended(
+    frame: &[u8],
+    width: u32,
+    height: u32,
+    config: &ScopeConfig,
+    display_mode: VectorscopeDisplayMode,
+    viewport: &VectorscopeViewport,
+) -> OxiResult<ScopeData> {
+    let expected_size = (width * height * 3) as usize;
+    if frame.len() < expected_size {
+        return Err(oximedia_core::OxiError::InvalidData(format!(
+            "Frame data too small: expected {expected_size}, got {}",
+            frame.len()
+        )));
+    }
+
+    let scope_width = config.width;
+    let scope_height = config.height;
+
+    let mut canvas = Canvas::new(scope_width, scope_height);
+    let mut accumulator = vec![0u32; (scope_width * scope_height) as usize];
+
+    let center_x = scope_width as f32 / 2.0;
+    let center_y = scope_height as f32 / 2.0;
+    let max_radius = (scope_width.min(scope_height) / 2 - 10) as f32;
+    let gain = config.vectorscope_gain;
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel_idx = ((y * width + x) * 3) as usize;
+            let r = frame[pixel_idx];
+            let g = frame[pixel_idx + 1];
+            let b = frame[pixel_idx + 2];
+
+            let (_luma, cb, cr) = rgb_to_ycbcr(r, g, b);
+            let cb_centered = f32::from(cb) - 128.0;
+            let cr_centered = f32::from(cr) - 128.0;
+
+            // Apply IQ rotation if needed
+            let (horiz, vert) = match display_mode {
+                VectorscopeDisplayMode::Uv => (cb_centered, cr_centered),
+                VectorscopeDisplayMode::Iq => uv_to_iq(cb_centered, cr_centered),
+            };
+
+            let (scope_x_f, scope_y_f) =
+                viewport.transform(horiz, vert, center_x, center_y, max_radius, gain);
+
+            let sx = scope_x_f as i32;
+            let sy = scope_y_f as i32;
+
+            if sx >= 0 && sx < scope_width as i32 && sy >= 0 && sy < scope_height as i32 {
+                let idx = (sy as u32 * scope_width + sx as u32) as usize;
+                if idx < accumulator.len() {
+                    accumulator[idx] = accumulator[idx].saturating_add(1);
+                }
+            }
+        }
+    }
+
+    let max_val = accumulator.iter().copied().max().unwrap_or(1);
+
+    match config.vectorscope_mode {
+        VectorscopeMode::Circular => {
+            for y in 0..scope_height {
+                for x in 0..scope_width {
+                    let dx = x as f32 - center_x;
+                    let dy = y as f32 - center_y;
+                    let distance = (dx * dx + dy * dy).sqrt();
+                    if distance <= max_radius {
+                        let idx = (y * scope_width + x) as usize;
+                        let count = accumulator[idx];
+                        if count > 0 {
+                            let normalized = ((count as f32 / max_val as f32).sqrt() * 255.0) as u8;
+                            canvas.accumulate_pixel(x, y, normalized);
+                        }
+                    }
+                }
+            }
+        }
+        VectorscopeMode::Rectangular => {
+            for y in 0..scope_height {
+                for x in 0..scope_width {
+                    let idx = (y * scope_width + x) as usize;
+                    let count = accumulator[idx];
+                    if count > 0 {
+                        let normalized = ((count as f32 / max_val as f32).sqrt() * 255.0) as u8;
+                        canvas.accumulate_pixel(x, y, normalized);
+                    }
+                }
+            }
+        }
+    }
+
+    if config.show_graticule {
+        crate::render::draw_vectorscope_graticule(&mut canvas, config);
+    }
+    if config.show_labels {
+        draw_vectorscope_labels(&mut canvas);
+        // Draw IQ axis labels if in IQ mode
+        if display_mode == VectorscopeDisplayMode::Iq {
+            draw_iq_axis_labels(&mut canvas);
+        }
+    }
+
+    Ok(ScopeData {
+        width: scope_width,
+        height: scope_height,
+        data: canvas.data,
+        scope_type: ScopeType::Vectorscope,
+    })
+}
+
+/// Draws I and Q axis labels on the vectorscope.
+fn draw_iq_axis_labels(canvas: &mut Canvas) {
+    let cx = canvas.width / 2;
+    let cy = canvas.height / 2;
+    let radius = (canvas.width.min(canvas.height) / 2) as f32 - 15.0;
+
+    // I-axis at 33° from +Cr (positive direction)
+    let i_angle = (33.0_f32).to_radians();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let i_x = (cx as f32 + i_angle.cos() * radius) as u32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let i_y = (cy as f32 - i_angle.sin() * radius) as u32;
+
+    // Q-axis at 123° from +Cr
+    let q_angle = (123.0_f32).to_radians();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let q_x = (cx as f32 + q_angle.cos() * radius) as u32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let q_y = (cy as f32 - q_angle.sin() * radius) as u32;
+
+    let yellow = [255, 255, 0, 255];
+
+    // Draw I/Q markers (small crosses)
+    for &(px, py) in &[(i_x, i_y), (q_x, q_y)] {
+        if px >= 2 && py >= 2 && px + 2 < canvas.width && py + 2 < canvas.height {
+            canvas.set_pixel(px - 1, py, yellow);
+            canvas.set_pixel(px + 1, py, yellow);
+            canvas.set_pixel(px, py - 1, yellow);
+            canvas.set_pixel(px, py + 1, yellow);
+            canvas.set_pixel(px, py, yellow);
+        }
+    }
+}
+
 /// SMPTE color bar target positions.
 ///
 /// Returns (Cb, Cr) coordinates for 75% color bars.
@@ -533,6 +784,120 @@ mod tests {
         // Test rectangular mode
         config.vectorscope_mode = VectorscopeMode::Rectangular;
         let result = generate_vectorscope(&frame, 50, 50, &config);
+        assert!(result.is_ok());
+    }
+
+    // ── Extended vectorscope tests ────────────────────────────────────
+
+    #[test]
+    fn test_viewport_default() {
+        let vp = VectorscopeViewport::default();
+        assert!((vp.zoom - 1.0).abs() < 1e-6);
+        assert!((vp.pan_x).abs() < 1e-6);
+        assert!((vp.pan_y).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_viewport_with_zoom() {
+        let vp = VectorscopeViewport::with_zoom(3.0);
+        assert!((vp.zoom - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_viewport_with_zoom_clamp_minimum() {
+        let vp = VectorscopeViewport::with_zoom(-5.0);
+        assert!(vp.zoom >= 0.1);
+    }
+
+    #[test]
+    fn test_viewport_new_clamps_pan() {
+        let vp = VectorscopeViewport::new(2.0, 5.0, -5.0);
+        assert!((vp.pan_x - 1.0).abs() < 1e-6);
+        assert!((vp.pan_y - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_display_mode_uv() {
+        let frame = create_test_frame(50, 50);
+        let config = ScopeConfig::default();
+        let vp = VectorscopeViewport::default();
+        let result =
+            generate_vectorscope_extended(&frame, 50, 50, &config, VectorscopeDisplayMode::Uv, &vp);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_display_mode_iq() {
+        let frame = create_test_frame(50, 50);
+        let config = ScopeConfig::default();
+        let vp = VectorscopeViewport::default();
+        let result =
+            generate_vectorscope_extended(&frame, 50, 50, &config, VectorscopeDisplayMode::Iq, &vp);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_viewport_zoom_2x() {
+        let frame = create_test_frame(50, 50);
+        let config = ScopeConfig::default();
+        let vp = VectorscopeViewport::with_zoom(2.0);
+        let result =
+            generate_vectorscope_extended(&frame, 50, 50, &config, VectorscopeDisplayMode::Uv, &vp);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_viewport_pan() {
+        let frame = create_test_frame(50, 50);
+        let config = ScopeConfig::default();
+        let vp = VectorscopeViewport::new(1.5, 0.3, -0.2);
+        let result =
+            generate_vectorscope_extended(&frame, 50, 50, &config, VectorscopeDisplayMode::Uv, &vp);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_uv_to_iq_neutral() {
+        // Neutral point (0,0) should remain (0,0) after rotation
+        let (i, q) = uv_to_iq(0.0, 0.0);
+        assert!(i.abs() < 1e-6);
+        assert!(q.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_uv_to_iq_preserves_magnitude() {
+        let cb = 50.0_f32;
+        let cr = 30.0_f32;
+        let mag_uv = (cb * cb + cr * cr).sqrt();
+        let (i, q) = uv_to_iq(cb, cr);
+        let mag_iq = (i * i + q * q).sqrt();
+        assert!((mag_uv - mag_iq).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_extended_vectorscope_invalid_frame() {
+        let frame = vec![0u8; 10];
+        let config = ScopeConfig::default();
+        let vp = VectorscopeViewport::default();
+        let result = generate_vectorscope_extended(
+            &frame,
+            100,
+            100,
+            &config,
+            VectorscopeDisplayMode::Uv,
+            &vp,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extended_vectorscope_rectangular_iq() {
+        let frame = create_test_frame(50, 50);
+        let mut config = ScopeConfig::default();
+        config.vectorscope_mode = VectorscopeMode::Rectangular;
+        let vp = VectorscopeViewport::default();
+        let result =
+            generate_vectorscope_extended(&frame, 50, 50, &config, VectorscopeDisplayMode::Iq, &vp);
         assert!(result.is_ok());
     }
 

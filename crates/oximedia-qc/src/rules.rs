@@ -363,3 +363,231 @@ impl Thresholds {
         self
     }
 }
+
+/// Threshold-based severity classification for numeric QC measurements.
+///
+/// Allows mapping measured values to [`Severity`] levels based on configurable
+/// boundary ranges. Values within the acceptable range map to [`Severity::Info`];
+/// successive boundaries escalate through Warning, Error, and Critical.
+///
+/// # Example
+///
+/// ```
+/// use oximedia_qc::rules::{SeverityClassifier, Severity};
+///
+/// // Loudness check: target -23 LUFS ± 1 LU (warning), ± 3 LU (error), ± 6 LU (critical)
+/// let classifier = SeverityClassifier::new(-24.0, -22.0)
+///     .with_warning_range(-26.0, -20.0)
+///     .with_error_range(-29.0, -17.0)
+///     .with_critical_range(-35.0, -10.0);
+///
+/// assert_eq!(classifier.classify(-23.0), Severity::Info);
+/// assert_eq!(classifier.classify(-25.0), Severity::Warning);
+/// assert_eq!(classifier.classify(-28.0), Severity::Error);
+/// assert_eq!(classifier.classify(-34.0), Severity::Critical);
+/// // Values outside even the critical range map to Critical
+/// assert_eq!(classifier.classify(-40.0), Severity::Critical);
+/// ```
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "json", derive(serde::Serialize, serde::Deserialize))]
+pub struct SeverityClassifier {
+    /// Inclusive lower bound of the Info (acceptable) range.
+    pub info_min: f64,
+    /// Inclusive upper bound of the Info (acceptable) range.
+    pub info_max: f64,
+    /// Inclusive lower bound of the Warning range (wider than Info).
+    pub warning_min: Option<f64>,
+    /// Inclusive upper bound of the Warning range (wider than Info).
+    pub warning_max: Option<f64>,
+    /// Inclusive lower bound of the Error range (wider than Warning).
+    pub error_min: Option<f64>,
+    /// Inclusive upper bound of the Error range (wider than Warning).
+    pub error_max: Option<f64>,
+    /// Inclusive lower bound of the Critical range (wider than Error).
+    pub critical_min: Option<f64>,
+    /// Inclusive upper bound of the Critical range (wider than Error).
+    pub critical_max: Option<f64>,
+}
+
+impl SeverityClassifier {
+    /// Creates a classifier with only an Info (acceptable) band.
+    ///
+    /// Values outside `[info_min, info_max]` immediately escalate to Critical
+    /// unless additional bands are configured via the builder methods.
+    #[must_use]
+    pub const fn new(info_min: f64, info_max: f64) -> Self {
+        Self {
+            info_min,
+            info_max,
+            warning_min: None,
+            warning_max: None,
+            error_min: None,
+            error_max: None,
+            critical_min: None,
+            critical_max: None,
+        }
+    }
+
+    /// Sets the Warning band boundaries.
+    #[must_use]
+    pub const fn with_warning_range(mut self, min: f64, max: f64) -> Self {
+        self.warning_min = Some(min);
+        self.warning_max = Some(max);
+        self
+    }
+
+    /// Sets the Error band boundaries.
+    #[must_use]
+    pub const fn with_error_range(mut self, min: f64, max: f64) -> Self {
+        self.error_min = Some(min);
+        self.error_max = Some(max);
+        self
+    }
+
+    /// Sets the Critical band boundaries.
+    #[must_use]
+    pub const fn with_critical_range(mut self, min: f64, max: f64) -> Self {
+        self.critical_min = Some(min);
+        self.critical_max = Some(max);
+        self
+    }
+
+    /// Classifies a measured value into a [`Severity`] level.
+    ///
+    /// Evaluation is from tightest (Info) to widest (Critical) band. Values
+    /// that fall outside all configured bands return [`Severity::Critical`].
+    #[must_use]
+    pub fn classify(&self, value: f64) -> Severity {
+        // Inside the acceptable (Info) band?
+        if value >= self.info_min && value <= self.info_max {
+            return Severity::Info;
+        }
+
+        // Inside Warning band (if configured)?
+        if let (Some(wmin), Some(wmax)) = (self.warning_min, self.warning_max) {
+            if value >= wmin && value <= wmax {
+                return Severity::Warning;
+            }
+        }
+
+        // Inside Error band (if configured)?
+        if let (Some(emin), Some(emax)) = (self.error_min, self.error_max) {
+            if value >= emin && value <= emax {
+                return Severity::Error;
+            }
+        }
+
+        // Inside Critical band (if configured)?
+        if let (Some(cmin), Some(cmax)) = (self.critical_min, self.critical_max) {
+            if value >= cmin && value <= cmax {
+                return Severity::Critical;
+            }
+        }
+
+        // Outside all configured bands — always Critical.
+        Severity::Critical
+    }
+
+    /// Convenience: creates a standard loudness classifier for EBU R128 (-23 LUFS).
+    ///
+    /// - Info:     −24.0 … −22.0 LUFS  (±1 LU)
+    /// - Warning:  −26.0 … −20.0 LUFS  (±3 LU)
+    /// - Error:    −29.0 … −17.0 LUFS  (±6 LU)
+    /// - Critical: −35.0 … −10.0 LUFS  (±12 LU)
+    #[must_use]
+    pub const fn ebu_r128_loudness() -> Self {
+        Self::new(-24.0, -22.0)
+            .with_warning_range(-26.0, -20.0)
+            .with_error_range(-29.0, -17.0)
+            .with_critical_range(-35.0, -10.0)
+    }
+
+    /// Convenience: creates a luma-range classifier for broadcast-legal 8-bit video.
+    ///
+    /// Luma must stay within 16–235. Ranges:
+    /// - Info:     16 … 235  (legal)
+    /// - Warning:   8 … 247  (near-legal)
+    /// - Error:     4 … 251
+    /// - Critical:  0 … 255
+    #[must_use]
+    pub const fn broadcast_luma_8bit() -> Self {
+        Self::new(16.0, 235.0)
+            .with_warning_range(8.0, 247.0)
+            .with_error_range(4.0, 251.0)
+            .with_critical_range(0.0, 255.0)
+    }
+
+    /// Convenience: creates a chroma-range classifier for broadcast-legal 8-bit video.
+    ///
+    /// Chroma (Cb/Cr) must stay within 16–240. Ranges:
+    /// - Info:     16 … 240  (legal)
+    /// - Warning:   8 … 248  (near-legal)
+    /// - Error:     4 … 252
+    /// - Critical:  0 … 255
+    #[must_use]
+    pub const fn broadcast_chroma_8bit() -> Self {
+        Self::new(16.0, 240.0)
+            .with_warning_range(8.0, 248.0)
+            .with_error_range(4.0, 252.0)
+            .with_critical_range(0.0, 255.0)
+    }
+}
+
+#[cfg(test)]
+mod severity_classifier_tests {
+    use super::*;
+
+    #[test]
+    fn test_info_range_included() {
+        let c = SeverityClassifier::new(16.0, 235.0);
+        assert_eq!(c.classify(16.0), Severity::Info);
+        assert_eq!(c.classify(235.0), Severity::Info);
+        assert_eq!(c.classify(128.0), Severity::Info);
+    }
+
+    #[test]
+    fn test_warning_range() {
+        let c = SeverityClassifier::new(16.0, 235.0).with_warning_range(8.0, 247.0);
+        assert_eq!(c.classify(10.0), Severity::Warning);
+        assert_eq!(c.classify(240.0), Severity::Warning);
+    }
+
+    #[test]
+    fn test_error_range() {
+        let c = SeverityClassifier::new(16.0, 235.0)
+            .with_warning_range(8.0, 247.0)
+            .with_error_range(4.0, 251.0);
+        assert_eq!(c.classify(5.0), Severity::Error);
+        assert_eq!(c.classify(250.0), Severity::Error);
+    }
+
+    #[test]
+    fn test_critical_range() {
+        let c = SeverityClassifier::ebu_r128_loudness();
+        assert_eq!(c.classify(-34.0), Severity::Critical);
+        assert_eq!(c.classify(-40.0), Severity::Critical); // outside all bands
+    }
+
+    #[test]
+    fn test_outside_all_bands_is_critical() {
+        let c = SeverityClassifier::new(16.0, 235.0).with_warning_range(8.0, 247.0);
+        assert_eq!(c.classify(0.0), Severity::Critical);
+        assert_eq!(c.classify(255.0), Severity::Critical);
+    }
+
+    #[test]
+    fn test_ebu_r128_target() {
+        let c = SeverityClassifier::ebu_r128_loudness();
+        assert_eq!(c.classify(-23.0), Severity::Info);
+        assert_eq!(c.classify(-25.0), Severity::Warning);
+        assert_eq!(c.classify(-28.0), Severity::Error);
+    }
+
+    #[test]
+    fn test_broadcast_luma_preset() {
+        let c = SeverityClassifier::broadcast_luma_8bit();
+        assert_eq!(c.classify(128.0), Severity::Info);
+        assert_eq!(c.classify(10.0), Severity::Warning);
+        assert_eq!(c.classify(253.0), Severity::Critical);
+    }
+}

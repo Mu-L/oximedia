@@ -383,3 +383,287 @@ mod tests {
         assert!(bs.is_significant());
     }
 }
+
+// ── SIMD pixel analysis ────────────────────────────────────────────────────
+
+/// Statistics from a SIMD-accelerated pixel range check.
+///
+/// Returned by [`simd_luma_range_check`] and [`simd_chroma_range_check`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PixelRangeStats {
+    /// Minimum pixel value observed.
+    pub min_val: u8,
+    /// Maximum pixel value observed.
+    pub max_val: u8,
+    /// Number of pixels below the legal minimum.
+    pub below_min_count: usize,
+    /// Number of pixels above the legal maximum.
+    pub above_max_count: usize,
+    /// Total number of pixels analysed.
+    pub total_pixels: usize,
+}
+
+impl PixelRangeStats {
+    /// Returns `true` if all pixels are within the legal range.
+    #[must_use]
+    pub fn is_legal(&self) -> bool {
+        self.below_min_count == 0 && self.above_max_count == 0
+    }
+
+    /// Fraction of pixels that fall outside the legal range (0.0–1.0).
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn violation_ratio(&self) -> f64 {
+        if self.total_pixels == 0 {
+            return 0.0;
+        }
+        let violations = self.below_min_count + self.above_max_count;
+        violations as f64 / self.total_pixels as f64
+    }
+}
+
+/// Checks luma (Y) pixel values against the broadcast-legal 8-bit range [16, 235].
+///
+/// Uses SSE 4.1 SIMD intrinsics when the CPU supports it, falling back to a
+/// portable scalar path otherwise. The detection is performed at runtime via
+/// `is_x86_feature_detected!("sse4.1")`.
+///
+/// Returns [`PixelRangeStats`] with violation counts and min/max values.
+#[must_use]
+pub fn simd_luma_range_check(pixels: &[u8]) -> PixelRangeStats {
+    const LEGAL_MIN: u8 = 16;
+    const LEGAL_MAX: u8 = 235;
+    simd_range_check_inner(pixels, LEGAL_MIN, LEGAL_MAX)
+}
+
+/// Checks chroma (Cb/Cr) pixel values against the broadcast-legal 8-bit range [16, 240].
+///
+/// Uses SSE 4.1 SIMD intrinsics when the CPU supports it, falling back to a
+/// portable scalar path otherwise. The detection is performed at runtime via
+/// `is_x86_feature_detected!("sse4.1")`.
+///
+/// Returns [`PixelRangeStats`] with violation counts and min/max values.
+#[must_use]
+pub fn simd_chroma_range_check(pixels: &[u8]) -> PixelRangeStats {
+    const LEGAL_MIN: u8 = 16;
+    const LEGAL_MAX: u8 = 240;
+    simd_range_check_inner(pixels, LEGAL_MIN, LEGAL_MAX)
+}
+
+/// Internal dispatcher: selects SSE 4.1 or scalar path at runtime.
+fn simd_range_check_inner(pixels: &[u8], legal_min: u8, legal_max: u8) -> PixelRangeStats {
+    if pixels.is_empty() {
+        return PixelRangeStats {
+            min_val: 0,
+            max_val: 0,
+            below_min_count: 0,
+            above_max_count: 0,
+            total_pixels: 0,
+        };
+    }
+
+    // Runtime CPU feature detection: prefer SSE 4.1 SIMD on x86/x86_64.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        if is_x86_feature_detected!("sse4.1") {
+            // SAFETY: We verified SSE 4.1 availability at runtime.
+            #[allow(unsafe_code)]
+            return unsafe { simd_range_check_sse41(pixels, legal_min, legal_max) };
+        }
+    }
+
+    simd_range_check_scalar(pixels, legal_min, legal_max)
+}
+
+/// SSE 4.1-accelerated pixel range check.
+///
+/// Processes 16 bytes per iteration using `_mm_min_epu8` / `_mm_max_epu8`
+/// to accumulate running min/max, then counts violations in the tail with the
+/// scalar path.
+///
+/// # Safety
+///
+/// Caller must ensure SSE 4.1 is available (verified via
+/// `is_x86_feature_detected!`).
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "sse4.1")]
+#[allow(unsafe_code)]
+unsafe fn simd_range_check_sse41(pixels: &[u8], legal_min: u8, legal_max: u8) -> PixelRangeStats {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    let len = pixels.len();
+    let chunks = len / 16;
+    let remainder_start = chunks * 16;
+
+    // Initialise running SIMD min/max accumulators.
+    let mut running_min = _mm_set1_epi8(u8::MAX as i8);
+    let mut running_max = _mm_set1_epi8(0_i8);
+
+    for chunk in 0..chunks {
+        let ptr = pixels.as_ptr().add(chunk * 16);
+        // SAFETY: ptr is within bounds (chunks * 16 <= len).
+        let v = _mm_loadu_si128(ptr.cast::<__m128i>());
+        running_min = _mm_min_epu8(running_min, v);
+        running_max = _mm_max_epu8(running_max, v);
+    }
+
+    // Reduce SIMD accumulators to scalar min/max.
+    let mut min_bytes = [0u8; 16];
+    let mut max_bytes = [0u8; 16];
+    _mm_storeu_si128(min_bytes.as_mut_ptr().cast::<__m128i>(), running_min);
+    _mm_storeu_si128(max_bytes.as_mut_ptr().cast::<__m128i>(), running_max);
+
+    let simd_min = min_bytes.iter().copied().fold(u8::MAX, u8::min);
+    let simd_max = max_bytes.iter().copied().fold(0u8, u8::max);
+
+    // Count violations in the SIMD-processed chunk range using the scalar helper,
+    // then combine with the remainder.
+    let simd_stats = simd_range_check_scalar(&pixels[..remainder_start], legal_min, legal_max);
+    let tail_stats = simd_range_check_scalar(&pixels[remainder_start..], legal_min, legal_max);
+
+    // Use SIMD-computed global min/max (more accurate over all 16-byte chunks).
+    let global_min = simd_min
+        .min(if remainder_start < len {
+            tail_stats.min_val
+        } else {
+            u8::MAX
+        })
+        .min(simd_min);
+    let global_max = simd_max.max(tail_stats.max_val);
+
+    PixelRangeStats {
+        min_val: global_min,
+        max_val: global_max,
+        below_min_count: simd_stats.below_min_count + tail_stats.below_min_count,
+        above_max_count: simd_stats.above_max_count + tail_stats.above_max_count,
+        total_pixels: len,
+    }
+}
+
+/// Portable scalar pixel range check — used as fallback and for remainder bytes.
+#[allow(clippy::cast_precision_loss)]
+fn simd_range_check_scalar(pixels: &[u8], legal_min: u8, legal_max: u8) -> PixelRangeStats {
+    if pixels.is_empty() {
+        return PixelRangeStats {
+            min_val: 0,
+            max_val: 0,
+            below_min_count: 0,
+            above_max_count: 0,
+            total_pixels: 0,
+        };
+    }
+
+    let mut min_val = u8::MAX;
+    let mut max_val = 0u8;
+    let mut below_min_count = 0usize;
+    let mut above_max_count = 0usize;
+
+    for &p in pixels {
+        if p < min_val {
+            min_val = p;
+        }
+        if p > max_val {
+            max_val = p;
+        }
+        if p < legal_min {
+            below_min_count += 1;
+        } else if p > legal_max {
+            above_max_count += 1;
+        }
+    }
+
+    PixelRangeStats {
+        min_val,
+        max_val,
+        below_min_count,
+        above_max_count,
+        total_pixels: pixels.len(),
+    }
+}
+
+#[cfg(test)]
+mod simd_tests {
+    use super::*;
+
+    #[test]
+    fn test_simd_luma_all_legal() {
+        // All values in legal luma range [16, 235]
+        let pixels: Vec<u8> = (16..=235u8).collect();
+        let stats = simd_luma_range_check(&pixels);
+        assert!(stats.is_legal());
+        assert_eq!(stats.below_min_count, 0);
+        assert_eq!(stats.above_max_count, 0);
+        assert_eq!(stats.min_val, 16);
+        assert_eq!(stats.max_val, 235);
+    }
+
+    #[test]
+    fn test_simd_luma_below_min() {
+        let pixels = vec![0u8, 8, 15, 16, 128, 235];
+        let stats = simd_luma_range_check(&pixels);
+        assert!(!stats.is_legal());
+        assert_eq!(stats.below_min_count, 3); // 0, 8, 15
+        assert_eq!(stats.above_max_count, 0);
+    }
+
+    #[test]
+    fn test_simd_luma_above_max() {
+        let pixels = vec![16u8, 128, 235, 236, 250, 255];
+        let stats = simd_luma_range_check(&pixels);
+        assert!(!stats.is_legal());
+        assert_eq!(stats.below_min_count, 0);
+        assert_eq!(stats.above_max_count, 3); // 236, 250, 255
+    }
+
+    #[test]
+    fn test_simd_chroma_legal_range() {
+        // Chroma legal max is 240
+        let pixels = vec![16u8, 128, 240];
+        let stats = simd_chroma_range_check(&pixels);
+        assert!(stats.is_legal());
+    }
+
+    #[test]
+    fn test_simd_chroma_above_max_240() {
+        let pixels = vec![16u8, 240, 241, 255];
+        let stats = simd_chroma_range_check(&pixels);
+        assert!(!stats.is_legal());
+        assert_eq!(stats.above_max_count, 2); // 241, 255
+    }
+
+    #[test]
+    fn test_simd_empty_input() {
+        let stats = simd_luma_range_check(&[]);
+        assert_eq!(stats.total_pixels, 0);
+        assert!(stats.is_legal()); // vacuously true
+    }
+
+    #[test]
+    fn test_simd_violation_ratio() {
+        let pixels = vec![0u8, 255, 128, 128]; // 2 violations out of 4
+        let stats = simd_luma_range_check(&pixels);
+        let ratio = stats.violation_ratio();
+        assert!((ratio - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_simd_luma_large_chunk_boundary() {
+        // Test that 16-byte SIMD chunk boundaries work correctly
+        // (17 pixels so we have one 16-byte SIMD chunk + 1 scalar remainder)
+        let mut pixels = vec![128u8; 16]; // all legal
+        pixels.push(0u8); // one illegal value in remainder
+        let stats = simd_luma_range_check(&pixels);
+        assert_eq!(stats.below_min_count, 1);
+        assert_eq!(stats.total_pixels, 17);
+    }
+
+    #[test]
+    fn test_simd_violation_ratio_zero_when_legal() {
+        let pixels = vec![128u8; 32];
+        let stats = simd_luma_range_check(&pixels);
+        assert_eq!(stats.violation_ratio(), 0.0);
+    }
+}

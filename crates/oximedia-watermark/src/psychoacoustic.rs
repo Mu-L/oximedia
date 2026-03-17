@@ -3,7 +3,7 @@
 //! This module implements psychoacoustic masking threshold calculation
 //! to ensure watermark imperceptibility based on human hearing properties.
 
-use rustfft::{num_complex::Complex, FftPlanner};
+use oxifft::Complex;
 use std::f32::consts::PI;
 
 /// Psychoacoustic model for masking threshold calculation.
@@ -68,15 +68,12 @@ impl PsychoacousticModel {
 
     /// Compute magnitude spectrum using FFT.
     fn compute_spectrum(&self, samples: &[f32]) -> Vec<f32> {
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(self.frame_size);
+        let buffer: Vec<Complex<f32>> = samples.iter().map(|&s| Complex::new(s, 0.0)).collect();
 
-        let mut buffer: Vec<Complex<f32>> = samples.iter().map(|&s| Complex::new(s, 0.0)).collect();
-
-        fft.process(&mut buffer);
+        let fft_result = oxifft::fft(&buffer);
 
         // Return magnitude spectrum (first half due to symmetry)
-        buffer[..self.frame_size / 2]
+        fft_result[..self.frame_size / 2]
             .iter()
             .map(|c| c.norm())
             .collect()

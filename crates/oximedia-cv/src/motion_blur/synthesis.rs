@@ -176,10 +176,10 @@ impl MotionBlurSynthesizer {
                 }
 
                 let dst_idx = ((y * width + x) * 3) as usize;
-                if count > 0 {
-                    output[dst_idx] = (r_sum / count) as u8;
-                    output[dst_idx + 1] = (g_sum / count) as u8;
-                    output[dst_idx + 2] = (b_sum / count) as u8;
+                if let Some(r_avg) = r_sum.checked_div(count) {
+                    output[dst_idx] = r_avg as u8;
+                    output[dst_idx + 1] = g_sum.checked_div(count).unwrap_or(0) as u8;
+                    output[dst_idx + 2] = b_sum.checked_div(count).unwrap_or(0) as u8;
                 } else {
                     let src_idx = dst_idx;
                     output[dst_idx] = image[src_idx];
@@ -285,13 +285,13 @@ impl MotionBlurSynthesizer {
                     }
                 }
 
-                if count > 0 {
+                if let Some(r_avg) = r_sum.checked_div(count) {
                     accumulator.add_sample(
                         x,
                         y,
-                        (r_sum / count) as u8,
-                        (g_sum / count) as u8,
-                        (b_sum / count) as u8,
+                        r_avg as u8,
+                        g_sum.checked_div(count).unwrap_or(0) as u8,
+                        b_sum.checked_div(count).unwrap_or(0) as u8,
                         1.0,
                     );
                 }

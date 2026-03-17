@@ -282,6 +282,130 @@ impl BiquadFilter {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Direct Form II Transposed (DF2T) biquad
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Biquad filter state for the Direct Form II Transposed topology.
+///
+/// DF2T uses only two delay elements (w1, w2) and avoids the "noise gain"
+/// issue that affects Direct Form I when the filter poles are near the unit
+/// circle.  This makes it the preferred topology for high-Q filters and
+/// filters operating at high frequencies relative to the sample rate.
+///
+/// ## Filter equations
+///
+/// ```text
+/// y[n]   =  b0·x[n] + w1[n-1]
+/// w1[n]  =  b1·x[n] – a1·y[n] + w2[n-1]
+/// w2[n]  =  b2·x[n] – a2·y[n]
+/// ```
+#[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
+pub struct BiquadStateDf2t {
+    /// First delay element.
+    pub w1: f32,
+    /// Second delay element.
+    pub w2: f32,
+}
+
+impl BiquadStateDf2t {
+    /// Create a new, zeroed DF2T state.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reset the delay elements to zero.
+    pub fn reset(&mut self) {
+        self.w1 = 0.0;
+        self.w2 = 0.0;
+    }
+}
+
+/// Biquad filter in the **Direct Form II Transposed** topology.
+///
+/// Compared to [`BiquadFilter`] (Direct Form I), `BiquadFilterDf2t`:
+///
+/// - Uses **2 delay elements** instead of 4 → lower memory footprint.
+/// - Has **better numerical stability** for high-Q resonant filters.
+/// - Is the preferred choice for EQ bands close to Nyquist.
+///
+/// The coefficient design functions from [`BiquadCoeffs`] are reused since
+/// the transfer function is identical; only the state-update equations differ.
+///
+/// # Example
+///
+/// ```
+/// use oximedia_audio::biquad::{BiquadCoeffs, BiquadFilterDf2t};
+///
+/// let coeffs = BiquadCoeffs::peaking_eq(1000.0, 6.0, 1.0, 48000.0);
+/// let mut filter = BiquadFilterDf2t::new(coeffs);
+/// let output = filter.process(0.5);
+/// assert!(output.is_finite());
+/// ```
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct BiquadFilterDf2t {
+    /// Shared coefficient set.
+    pub coeffs: BiquadCoeffs,
+    /// DF2T state.
+    pub state: BiquadStateDf2t,
+}
+
+impl BiquadFilterDf2t {
+    /// Create a new DF2T filter with the given coefficients and zeroed state.
+    #[must_use]
+    pub fn new(coeffs: BiquadCoeffs) -> Self {
+        Self {
+            coeffs,
+            state: BiquadStateDf2t::new(),
+        }
+    }
+
+    /// Process a single sample and return the filtered output.
+    ///
+    /// Implements the DF2T equations:
+    ///
+    /// ```text
+    /// y   = b0·x + w1
+    /// w1' = b1·x – a1·y + w2
+    /// w2' = b2·x – a2·y
+    /// ```
+    #[inline]
+    pub fn process(&mut self, x: f32) -> f32 {
+        let y = self.coeffs.b0 * x + self.state.w1;
+        let new_w1 = self.coeffs.b1 * x - self.coeffs.a1 * y + self.state.w2;
+        let new_w2 = self.coeffs.b2 * x - self.coeffs.a2 * y;
+        self.state.w1 = new_w1;
+        self.state.w2 = new_w2;
+        y
+    }
+
+    /// Process a block of samples and return the filtered output as a new `Vec<f32>`.
+    #[must_use]
+    pub fn process_block(&mut self, samples: &[f32]) -> Vec<f32> {
+        samples.iter().map(|&s| self.process(s)).collect()
+    }
+
+    /// Process a block of samples in-place.
+    pub fn process_block_inplace(&mut self, samples: &mut [f32]) {
+        for s in samples.iter_mut() {
+            *s = self.process(*s);
+        }
+    }
+
+    /// Reset the filter state to silence.
+    pub fn reset(&mut self) {
+        self.state.reset();
+    }
+
+    /// Replace the filter coefficients without resetting state (smooth parameter change).
+    pub fn set_coeffs(&mut self, coeffs: BiquadCoeffs) {
+        self.coeffs = coeffs;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Unit tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -479,6 +603,88 @@ mod tests {
     }
 
     // ── set_coeffs ────────────────────────────────────────────────────────────
+
+    // ── DF2T biquad tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_df2t_identity_passthrough() {
+        let mut f = BiquadFilterDf2t::new(BiquadCoeffs::identity());
+        let out = f.process(0.75);
+        assert!(
+            (out - 0.75).abs() < 1e-7,
+            "DF2T identity should pass sample; got {out}"
+        );
+    }
+
+    #[test]
+    fn test_df2t_lowpass_passes_dc() {
+        let mut f = BiquadFilterDf2t::new(BiquadCoeffs::lowpass(4000.0, 0.707, SR));
+        let mut out = 0.0_f32;
+        for _ in 0..2000 {
+            out = f.process(1.0);
+        }
+        assert!(out > 0.9, "DF2T LP should pass DC; got {out}");
+    }
+
+    #[test]
+    fn test_df2t_highpass_blocks_dc() {
+        let mut f = BiquadFilterDf2t::new(BiquadCoeffs::highpass(1000.0, 0.707, SR));
+        let mut out = 0.0_f32;
+        for _ in 0..2000 {
+            out = f.process(1.0);
+        }
+        assert!(out.abs() < 0.01, "DF2T HP should block DC; got {out}");
+    }
+
+    #[test]
+    fn test_df2t_reset_clears_state() {
+        let mut f = BiquadFilterDf2t::new(BiquadCoeffs::lowpass(500.0, 0.707, SR));
+        for _ in 0..100 {
+            f.process(1.0);
+        }
+        f.reset();
+        let out = f.process(0.0);
+        assert_eq!(out, 0.0, "DF2T after reset+silence should give 0");
+    }
+
+    #[test]
+    fn test_df2t_matches_df1_output() {
+        // DF2T and DF1 share the same transfer function; outputs should match
+        let coeffs = BiquadCoeffs::lowpass(2000.0, 0.707, SR);
+        let mut df1 = BiquadFilter::new(coeffs.clone());
+        let mut df2t = BiquadFilterDf2t::new(coeffs);
+        for i in 0..512 {
+            let x = (i as f32 * 0.1).sin();
+            let y1 = df1.process(x);
+            let y2 = df2t.process(x);
+            assert!(
+                (y1 - y2).abs() < 1e-5,
+                "DF1 vs DF2T mismatch at sample {i}: {y1} vs {y2}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_df2t_block_length() {
+        let mut f = BiquadFilterDf2t::new(BiquadCoeffs::bandpass(1000.0, 200.0, SR));
+        let input = vec![0.5_f32; 256];
+        let out = f.process_block(&input);
+        assert_eq!(out.len(), 256);
+    }
+
+    #[test]
+    fn test_df2t_block_inplace_matches_block() {
+        let coeffs = BiquadCoeffs::peaking_eq(1000.0, 6.0, 1.0, SR);
+        let input: Vec<f32> = (0..128).map(|i| (i as f32 * 0.05).sin()).collect();
+        let mut f1 = BiquadFilterDf2t::new(coeffs.clone());
+        let expected = f1.process_block(&input);
+        let mut f2 = BiquadFilterDf2t::new(coeffs);
+        let mut buf = input.clone();
+        f2.process_block_inplace(&mut buf);
+        for (e, g) in expected.iter().zip(buf.iter()) {
+            assert!((e - g).abs() < 1e-6, "inplace vs block mismatch");
+        }
+    }
 
     #[test]
     fn test_set_coeffs_updates_filter() {

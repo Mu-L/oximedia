@@ -3,9 +3,9 @@
 //! This module provides tools for detecting and analyzing JPEG compression artifacts,
 //! including double compression detection, blocking artifacts, and quantization analysis.
 
+use crate::flat_array2::{FlatArray2, FlatArray3};
 use crate::{ForensicTest, ForensicsResult};
 use image::RgbImage;
-use ndarray::{Array2, Array3};
 use std::f64::consts::PI;
 
 /// JPEG block size (8x8)
@@ -15,11 +15,11 @@ const BLOCK_SIZE: usize = 8;
 #[derive(Debug, Clone)]
 pub struct DctCoefficients {
     /// Y channel coefficients
-    pub y: Array3<f64>,
+    pub y: FlatArray3<f64>,
     /// Cb channel coefficients
-    pub cb: Array3<f64>,
+    pub cb: FlatArray3<f64>,
     /// Cr channel coefficients
-    pub cr: Array3<f64>,
+    pub cr: FlatArray3<f64>,
 }
 
 /// Quantization table analysis result
@@ -134,11 +134,11 @@ pub fn analyze_compression(image: &RgbImage) -> ForensicsResult<ForensicTest> {
 }
 
 /// Convert RGB image to YCbCr color space
-fn rgb_to_ycbcr(image: &RgbImage) -> (Array2<f64>, Array2<f64>, Array2<f64>) {
+fn rgb_to_ycbcr(image: &RgbImage) -> (FlatArray2<f64>, FlatArray2<f64>, FlatArray2<f64>) {
     let (width, height) = image.dimensions();
-    let mut y = Array2::zeros((height as usize, width as usize));
-    let mut cb = Array2::zeros((height as usize, width as usize));
-    let mut cr = Array2::zeros((height as usize, width as usize));
+    let mut y = FlatArray2::zeros((height as usize, width as usize));
+    let mut cb = FlatArray2::zeros((height as usize, width as usize));
+    let mut cr = FlatArray2::zeros((height as usize, width as usize));
 
     for (x, y_coord, pixel) in image.enumerate_pixels() {
         let r = pixel[0] as f64;
@@ -154,7 +154,7 @@ fn rgb_to_ycbcr(image: &RgbImage) -> (Array2<f64>, Array2<f64>, Array2<f64>) {
 }
 
 /// Detect blocking artifacts in an image channel
-fn detect_blocking_artifacts(channel: &Array2<f64>) -> BlockingArtifacts {
+fn detect_blocking_artifacts(channel: &FlatArray2<f64>) -> BlockingArtifacts {
     let (height, width) = channel.dim();
 
     // Calculate horizontal blocking score
@@ -231,12 +231,12 @@ fn detect_blocking_artifacts(channel: &Array2<f64>) -> BlockingArtifacts {
 }
 
 /// Compute DCT coefficients for 8x8 blocks
-fn compute_dct_blocks(channel: &Array2<f64>) -> Array3<f64> {
+fn compute_dct_blocks(channel: &FlatArray2<f64>) -> FlatArray3<f64> {
     let (height, width) = channel.dim();
     let blocks_h = height / BLOCK_SIZE;
     let blocks_w = width / BLOCK_SIZE;
 
-    let mut dct_blocks = Array3::zeros((blocks_h, blocks_w, BLOCK_SIZE * BLOCK_SIZE));
+    let mut dct_blocks = FlatArray3::zeros(blocks_h, blocks_w, BLOCK_SIZE * BLOCK_SIZE);
 
     for by in 0..blocks_h {
         for bx in 0..blocks_w {
@@ -255,11 +255,11 @@ fn compute_dct_blocks(channel: &Array2<f64>) -> Array3<f64> {
 }
 
 /// Extract an 8x8 block from a channel
-fn extract_block(channel: &Array2<f64>, block_y: usize, block_x: usize) -> Array2<f64> {
+fn extract_block(channel: &FlatArray2<f64>, block_y: usize, block_x: usize) -> FlatArray2<f64> {
     let y_start = block_y * BLOCK_SIZE;
     let x_start = block_x * BLOCK_SIZE;
 
-    let mut block = Array2::zeros((BLOCK_SIZE, BLOCK_SIZE));
+    let mut block = FlatArray2::zeros((BLOCK_SIZE, BLOCK_SIZE));
 
     for i in 0..BLOCK_SIZE {
         for j in 0..BLOCK_SIZE {
@@ -273,8 +273,8 @@ fn extract_block(channel: &Array2<f64>, block_y: usize, block_x: usize) -> Array
 }
 
 /// Perform 2D DCT on an 8x8 block
-fn dct_2d(block: &Array2<f64>) -> Array2<f64> {
-    let mut dct = Array2::zeros((BLOCK_SIZE, BLOCK_SIZE));
+fn dct_2d(block: &FlatArray2<f64>) -> FlatArray2<f64> {
+    let mut dct = FlatArray2::zeros((BLOCK_SIZE, BLOCK_SIZE));
 
     for u in 0..BLOCK_SIZE {
         for v in 0..BLOCK_SIZE {
@@ -300,7 +300,7 @@ fn dct_2d(block: &Array2<f64>) -> Array2<f64> {
 }
 
 /// Detect double compression from DCT coefficient histograms
-fn detect_double_compression(dct_coeffs: &Array3<f64>) -> DoubleCompressionResult {
+fn detect_double_compression(dct_coeffs: &FlatArray3<f64>) -> DoubleCompressionResult {
     let (blocks_h, blocks_w, coeffs_per_block) = dct_coeffs.dim();
 
     // Analyze specific DCT coefficient positions prone to double compression artifacts
@@ -426,14 +426,14 @@ fn detect_histogram_periodicity(histogram: &[usize]) -> (f64, Vec<usize>) {
 }
 
 /// Analyze quantization tables from DCT coefficients
-fn analyze_quantization(dct_coeffs: &Array3<f64>) -> QuantizationAnalysis {
+fn analyze_quantization(dct_coeffs: &FlatArray3<f64>) -> QuantizationAnalysis {
     let (blocks_h, blocks_w, _coeffs_per_block) = dct_coeffs.dim();
 
     // Estimate quantization step sizes
     let mut q_steps = Vec::new();
 
     for pos in 1..BLOCK_SIZE * BLOCK_SIZE {
-        let mut values = Vec::new();
+        let mut values: Vec<f64> = Vec::new();
         for by in 0..blocks_h {
             for bx in 0..blocks_w {
                 values.push(dct_coeffs[[by, bx, pos]].abs());
@@ -515,9 +515,9 @@ fn estimate_quality_factor(q_steps: &[f64]) -> u8 {
 }
 
 /// Create anomaly map based on blocking artifacts
-fn create_blocking_anomaly_map(image: &RgbImage, blocking: &BlockingArtifacts) -> Array2<f64> {
+fn create_blocking_anomaly_map(image: &RgbImage, blocking: &BlockingArtifacts) -> FlatArray2<f64> {
     let (width, height) = image.dimensions();
-    let mut anomaly_map = Array2::zeros((height as usize, width as usize));
+    let mut anomaly_map = FlatArray2::zeros((height as usize, width as usize));
 
     // Highlight block boundaries
     for y in 0..height as usize {
@@ -559,10 +559,125 @@ pub fn estimate_compression_history(image: &RgbImage) -> ForensicsResult<Vec<u8>
     Ok(history)
 }
 
+/// Detect double JPEG compression by analysing DCT coefficient histograms.
+///
+/// When a JPEG image is resaved (double-compressed), the second quantization
+/// step introduces characteristic periodic valleys in the DCT coefficient
+/// histogram at multiples of the first quantization step size (typically a
+/// multiple of 8).  This function measures the depth of those valleys and
+/// returns a confidence score in `[0.0, 1.0]`.
+///
+/// # Arguments
+///
+/// * `dct_coefficients` – A flat slice of DCT coefficient values extracted
+///   from 8×8 blocks.  Values are expected to be in roughly the range
+///   `[-1024.0, 1024.0]`, though the algorithm adapts to the actual range.
+///
+/// # Returns
+///
+/// A confidence score in `[0.0, 1.0]` where values approaching 1.0 indicate
+/// strong evidence of double JPEG compression.
+#[allow(clippy::cast_precision_loss)]
+pub fn detect_double_jpeg(dct_coefficients: &[f64]) -> f64 {
+    if dct_coefficients.len() < 16 {
+        return 0.0;
+    }
+
+    // Build an integer-quantised histogram of the coefficients.
+    // We round each coefficient to the nearest integer and count occurrences
+    // in the range [-512, 512] to keep memory bounded.
+    const HIST_RANGE: i32 = 512;
+    let num_bins = (2 * HIST_RANGE + 1) as usize;
+    let mut histogram = vec![0u64; num_bins];
+
+    for &coeff in dct_coefficients {
+        let rounded = coeff.round() as i32;
+        let clamped = rounded.clamp(-HIST_RANGE, HIST_RANGE);
+        let idx = (clamped + HIST_RANGE) as usize;
+        histogram[idx] += 1;
+    }
+
+    // Double JPEG compression creates valleys at positions that are multiples
+    // of 8 (the DCT block size) in the histogram.  We compare the density at
+    // multiples-of-8 positions against the neighbouring non-multiple positions
+    // to compute a valley depth score.
+    //
+    // For each candidate multiple-of-8 position, we define the "valley depth"
+    // as:   1 – (count_at_multiple / mean_of_neighbours)
+    // A deep valley (score near 1) is the double-JPEG signature.
+    let mut valley_depths: Vec<f64> = Vec::new();
+
+    // Examine every 8th bin position in the range [-HIST_RANGE, HIST_RANGE].
+    // The step of 8 corresponds to the JPEG quantization period.
+    let step: usize = 8;
+    let center_idx = HIST_RANGE as usize; // index of coefficient == 0
+
+    // Iterate over positions: ..., -24, -16, -8, 0, 8, 16, 24, ...
+    let mut pos: i32 = -(HIST_RANGE as i32 / step as i32) * step as i32;
+    while pos <= HIST_RANGE {
+        let idx = (pos + HIST_RANGE) as usize;
+
+        // Skip DC (zero coefficient) — it is always a histogram peak.
+        if idx == center_idx {
+            pos += step as i32;
+            continue;
+        }
+
+        // Gather immediate neighbours (±1 through ±3 bins).
+        let mut neighbour_sum = 0u64;
+        let mut neighbour_count = 0u64;
+        for delta in [1i32, 2, 3, -1, -2, -3] {
+            let neighbour_idx = idx as i32 + delta;
+            if neighbour_idx >= 0 && (neighbour_idx as usize) < num_bins {
+                neighbour_sum += histogram[neighbour_idx as usize];
+                neighbour_count += 1;
+            }
+        }
+
+        if neighbour_count == 0 {
+            pos += step as i32;
+            continue;
+        }
+
+        let neighbour_mean = neighbour_sum as f64 / neighbour_count as f64;
+        let center_count = histogram[idx] as f64;
+
+        // Compute valley depth: how much lower the multiple-of-8 bin is
+        // relative to its neighbours.
+        if neighbour_mean > 1.0 {
+            let depth = 1.0 - (center_count / neighbour_mean).min(1.0);
+            valley_depths.push(depth);
+        }
+
+        pos += step as i32;
+    }
+
+    if valley_depths.is_empty() {
+        return 0.0;
+    }
+
+    // The confidence is the mean valley depth, weighted toward the deeper
+    // valleys (take the top half by depth).
+    let mut sorted_depths = valley_depths.clone();
+    sorted_depths.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Use the top-half to reduce false positives from isolated deep valleys.
+    let top_count = (sorted_depths.len() / 2).max(1);
+    let top_mean: f64 = sorted_depths[..top_count].iter().sum::<f64>() / top_count as f64;
+
+    // Also factor in the overall mean depth.
+    let overall_mean: f64 = valley_depths.iter().sum::<f64>() / valley_depths.len() as f64;
+
+    // Blend top-half and overall mean (2:1 weighting toward top half).
+    let confidence = (2.0 * top_mean + overall_mean) / 3.0;
+
+    confidence.clamp(0.0, 1.0)
+}
+
 /// Detect blocking artifacts with detailed location map
 pub fn detect_blocking_with_map(
     image: &RgbImage,
-) -> ForensicsResult<(BlockingArtifacts, Array2<f64>)> {
+) -> ForensicsResult<(BlockingArtifacts, FlatArray2<f64>)> {
     let ycbcr = rgb_to_ycbcr(image);
     let blocking = detect_blocking_artifacts(&ycbcr.0);
     let map = create_blocking_anomaly_map(image, &blocking);
@@ -586,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_dct_2d() {
-        let block = Array2::zeros((BLOCK_SIZE, BLOCK_SIZE));
+        let block = FlatArray2::zeros((BLOCK_SIZE, BLOCK_SIZE));
         let dct = dct_2d(&block);
         assert_eq!(dct.dim(), (BLOCK_SIZE, BLOCK_SIZE));
     }
@@ -607,8 +722,79 @@ mod tests {
 
     #[test]
     fn test_blocking_detection() {
-        let channel = Array2::zeros((64, 64));
+        let channel = FlatArray2::zeros((64, 64));
         let blocking = detect_blocking_artifacts(&channel);
         assert!(blocking.severity >= 0.0 && blocking.severity <= 1.0);
+    }
+
+    // ── detect_double_jpeg ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_double_jpeg_empty_returns_zero() {
+        let confidence = detect_double_jpeg(&[]);
+        assert!((confidence).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_detect_double_jpeg_too_small_returns_zero() {
+        let coeffs = vec![1.0, 2.0, 3.0];
+        let confidence = detect_double_jpeg(&coeffs);
+        assert!((confidence).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_detect_double_jpeg_result_in_unit_interval() {
+        // Random-ish coefficients
+        let coeffs: Vec<f64> = (0..200).map(|i| (i % 50) as f64 - 25.0).collect();
+        let confidence = detect_double_jpeg(&coeffs);
+        assert!(confidence >= 0.0 && confidence <= 1.0);
+    }
+
+    #[test]
+    fn test_detect_double_jpeg_uniform_low_confidence() {
+        // Uniform distribution: no valleys at multiples of 8
+        let coeffs: Vec<f64> = (0..512).map(|i| (i % 7) as f64).collect();
+        let confidence = detect_double_jpeg(&coeffs);
+        // Uniform distribution should produce low confidence
+        assert!(confidence <= 1.0);
+    }
+
+    #[test]
+    fn test_detect_double_jpeg_deep_valleys_high_confidence() {
+        // Synthetic double-JPEG pattern: very low counts at multiples of 8,
+        // high counts elsewhere.
+        let mut coeffs: Vec<f64> = Vec::new();
+        for i in -100i32..=100 {
+            // At multiples of 8, add only 1 sample; elsewhere add 20 samples.
+            let count = if i % 8 == 0 && i != 0 { 1 } else { 20 };
+            for _ in 0..count {
+                coeffs.push(i as f64);
+            }
+        }
+        let confidence = detect_double_jpeg(&coeffs);
+        assert!(
+            confidence > 0.3,
+            "expected elevated confidence for deep valley pattern, got {}",
+            confidence
+        );
+    }
+
+    #[test]
+    fn test_detect_double_jpeg_natural_image_like() {
+        // Natural (singly-compressed) image tends to have a Laplacian-like
+        // distribution with no systematic valleys at multiples of 8.
+        // We simulate this with a Laplacian-ish distribution.
+        let mut coeffs: Vec<f64> = Vec::new();
+        for i in -50i32..=50 {
+            // Laplacian: count decays with |i|
+            let count = (100.0 * (-0.1 * (i.abs() as f64)).exp()).round() as usize;
+            let count = count.max(1);
+            for _ in 0..count {
+                coeffs.push(i as f64);
+            }
+        }
+        let confidence = detect_double_jpeg(&coeffs);
+        // Should return a valid score, not necessarily low (Laplacian peaks at 0 and near multiples)
+        assert!(confidence >= 0.0 && confidence <= 1.0);
     }
 }

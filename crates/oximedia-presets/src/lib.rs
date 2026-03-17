@@ -26,7 +26,7 @@
 //! let youtube_presets = library.find_by_category(PresetCategory::Platform("YouTube".to_string()));
 //!
 //! // Get a specific preset
-//! let preset = library.get("youtube-1080p-60fps")?;
+//! let preset = library.get("youtube-1080p-60fps");
 //! ```
 //!
 //! # Platform-Specific Presets
@@ -68,6 +68,7 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod archive;
+pub mod audio_only;
 pub mod broadcast;
 pub mod codec;
 pub mod color_preset;
@@ -84,6 +85,7 @@ pub mod preset_chain;
 pub mod preset_diff;
 pub mod preset_export;
 pub mod preset_import;
+pub mod preset_inheritance;
 pub mod preset_manager;
 pub mod preset_metadata;
 pub mod preset_override;
@@ -92,6 +94,7 @@ pub mod preset_scoring;
 pub mod preset_tags;
 pub mod preset_versioning;
 pub mod quality;
+pub mod scene_adaptive;
 pub mod social;
 pub mod streaming;
 pub mod validate;
@@ -332,6 +335,8 @@ impl AbrLadder {
 /// Main preset library.
 pub struct PresetLibrary {
     presets: HashMap<String, Preset>,
+    /// Optional inheritance registry for derived preset resolution.
+    inheritance: preset_inheritance::InheritanceRegistry,
 }
 
 impl PresetLibrary {
@@ -340,6 +345,7 @@ impl PresetLibrary {
     pub fn new() -> Self {
         let mut library = Self {
             presets: HashMap::new(),
+            inheritance: preset_inheritance::InheritanceRegistry::new(),
         };
         library.load_builtin_presets();
         library
@@ -355,6 +361,8 @@ impl PresetLibrary {
         self.load_tiktok_presets();
         self.load_twitter_presets();
         self.load_linkedin_presets();
+        self.load_twitch_presets();
+        self.load_dcp_presets();
 
         // Broadcast presets
         self.load_atsc_presets();
@@ -398,6 +406,10 @@ impl PresetLibrary {
         self.load_opus_presets();
         self.load_h264_presets();
         self.load_hevc_presets();
+
+        // Audio-only presets
+        self.load_flac_podcast_presets();
+        self.load_opus_podcast_presets();
     }
 
     /// Add a preset to the library.
@@ -449,6 +461,64 @@ impl PresetLibrary {
     #[must_use]
     pub fn count(&self) -> usize {
         self.presets.len()
+    }
+
+    // ── Inheritance API ───────────────────────────────────────────────────
+
+    /// Register a preset as a base (root) node in the inheritance graph.
+    ///
+    /// The `config` should capture all inheritable fields for this preset.
+    /// Subsequent derived registrations can then override individual fields.
+    pub fn register_inheritance_base(
+        &mut self,
+        preset_id: &str,
+        config: preset_inheritance::InheritedConfig,
+    ) {
+        self.inheritance.register_base(preset_id, config);
+    }
+
+    /// Register a derived preset that inherits all fields from `parent_id`
+    /// and overrides only the fields listed in `overrides`.
+    ///
+    /// Returns `false` if the parent ID is not yet registered (the record is
+    /// still stored and will be resolved once the parent is added).
+    pub fn register_inheritance_derived(
+        &mut self,
+        preset_id: &str,
+        parent_id: &str,
+        overrides: preset_inheritance::InheritedConfig,
+    ) -> bool {
+        self.inheritance
+            .register_derived(preset_id, parent_id, overrides)
+    }
+
+    /// Resolve the fully-merged [`InheritedConfig`] for `preset_id` by
+    /// walking the ancestor chain registered in the inheritance graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`InheritanceError`] if the ID is unknown, the chain is
+    /// circular, or the depth limit is exceeded.
+    ///
+    /// [`InheritedConfig`]: preset_inheritance::InheritedConfig
+    /// [`InheritanceError`]: preset_inheritance::InheritanceError
+    pub fn resolve_inheritance(
+        &self,
+        preset_id: &str,
+    ) -> std::result::Result<
+        preset_inheritance::InheritedConfig,
+        preset_inheritance::InheritanceError,
+    > {
+        self.inheritance.resolve(preset_id)
+    }
+
+    /// Return a reference to the underlying [`InheritanceRegistry`] for
+    /// advanced use cases (depth queries, cycle detection, etc.).
+    ///
+    /// [`InheritanceRegistry`]: preset_inheritance::InheritanceRegistry
+    #[must_use]
+    pub fn inheritance_registry(&self) -> &preset_inheritance::InheritanceRegistry {
+        &self.inheritance
     }
 
     // Preset loading methods (will be implemented by modules)
@@ -655,12 +725,108 @@ impl PresetLibrary {
             self.add(preset);
         }
     }
+
+    fn load_twitch_presets(&mut self) {
+        for preset in platform::twitch::all_presets() {
+            self.add(preset);
+        }
+    }
+
+    fn load_dcp_presets(&mut self) {
+        for preset in platform::dcp::all_presets() {
+            self.add(preset);
+        }
+    }
+
+    fn load_flac_podcast_presets(&mut self) {
+        for preset in audio_only::flac::all_presets() {
+            self.add(preset);
+        }
+    }
+
+    fn load_opus_podcast_presets(&mut self) {
+        for preset in audio_only::opus_podcast::all_presets() {
+            self.add(preset);
+        }
+    }
+
+    /// Add a derived preset that inherits from an existing preset in the library.
+    ///
+    /// The `overrides` closure receives a mutable clone of the base preset's config
+    /// and metadata so the caller can modify only the fields that differ.
+    /// Returns `None` if the `base_id` is not found.
+    pub fn derive_from(
+        &mut self,
+        base_id: &str,
+        new_id: &str,
+        new_name: &str,
+        apply_overrides: impl FnOnce(&mut crate::Preset),
+    ) -> Option<()> {
+        let base = self.presets.get(base_id)?.clone();
+        let mut derived = base;
+        derived.metadata.id = new_id.to_string();
+        derived.metadata.name = new_name.to_string();
+        apply_overrides(&mut derived);
+        self.presets.insert(new_id.to_string(), derived);
+        Some(())
+    }
 }
 
 impl Default for PresetLibrary {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ── Levenshtein distance (pure-Rust, no external deps) ────────────────────
+
+/// Compute the Levenshtein edit distance between two strings.
+///
+/// Uses a two-row DP approach with O(min(a,b)) space.
+/// Returns 0 when `a == b` and increases by 1 for each insertion, deletion,
+/// or substitution required to transform `a` into `b`.
+fn levenshtein_distance(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let la = a_chars.len();
+    let lb = b_chars.len();
+
+    if la == 0 {
+        return lb;
+    }
+    if lb == 0 {
+        return la;
+    }
+
+    // prev[j] = distance(a[0..i-1], b[0..j])
+    let mut prev: Vec<usize> = (0..=lb).collect();
+    let mut curr = vec![0usize; lb + 1];
+
+    for i in 1..=la {
+        curr[0] = i;
+        for j in 1..=lb {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1) // deletion
+                .min(curr[j - 1] + 1) // insertion
+                .min(prev[j - 1] + cost); // substitution
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    prev[lb]
+}
+
+/// Result of a fuzzy search, including the matched preset and its distance.
+#[derive(Debug, Clone)]
+pub struct FuzzyMatch<'a> {
+    /// The matched preset.
+    pub preset: &'a Preset,
+    /// Levenshtein edit distance from the query (lower = better).
+    pub distance: usize,
 }
 
 /// Preset registry supporting lookup by name or alias.
@@ -743,6 +909,75 @@ impl PresetRegistry {
     #[must_use]
     pub fn list_ids(&self) -> Vec<&str> {
         self.presets.keys().map(String::as_str).collect()
+    }
+
+    /// Fuzzy lookup: return all presets whose ID or name is within `max_distance`
+    /// Levenshtein edits of `query`, sorted by ascending distance.
+    ///
+    /// This is typo-tolerant — a `max_distance` of 2 will accept single
+    /// transpositions, missing characters, and minor spelling mistakes.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use oximedia_presets::{PresetRegistry, PresetLibrary};
+    /// let lib = PresetLibrary::new();
+    /// let reg = PresetRegistry::from_library(&lib);
+    /// // "yotube" is 1 edit away from "youtube"
+    /// let matches = reg.fuzzy_search("yotube-1080p", 2);
+    /// ```
+    #[must_use]
+    pub fn fuzzy_search(&self, query: &str, max_distance: usize) -> Vec<FuzzyMatch<'_>> {
+        let query_lower = query.to_lowercase();
+        let mut results: Vec<FuzzyMatch<'_>> = self
+            .presets
+            .values()
+            .filter_map(|preset| {
+                let id_dist =
+                    levenshtein_distance(&query_lower, &preset.metadata.id.to_lowercase());
+                let name_dist =
+                    levenshtein_distance(&query_lower, &preset.metadata.name.to_lowercase());
+                let dist = id_dist.min(name_dist);
+                // Also search through name_index aliases
+                let alias_dist = self
+                    .name_index
+                    .iter()
+                    .filter(|(_, canonical)| canonical.as_str() == preset.metadata.id.as_str())
+                    .map(|(alias, _)| levenshtein_distance(&query_lower, alias))
+                    .min()
+                    .unwrap_or(usize::MAX);
+                let best = dist.min(alias_dist);
+                if best <= max_distance {
+                    Some(FuzzyMatch {
+                        preset,
+                        distance: best,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        results.sort_by_key(|m| m.distance);
+        results
+    }
+
+    /// Fuzzy lookup: return the single best match within `max_distance` edits,
+    /// or `None` if no preset falls within the threshold.
+    ///
+    /// When multiple presets share the minimum distance the one with the
+    /// alphabetically-first ID is returned to ensure deterministic behaviour.
+    #[must_use]
+    pub fn fuzzy_lookup(&self, query: &str, max_distance: usize) -> Option<&Preset> {
+        let mut matches = self.fuzzy_search(query, max_distance);
+        if matches.is_empty() {
+            return None;
+        }
+        // Among those at the minimum distance, pick alphabetically-first ID
+        let min_dist = matches[0].distance;
+        matches.retain(|m| m.distance == min_dist);
+        matches.sort_by_key(|m| m.preset.metadata.id.as_str());
+        matches.into_iter().next().map(|m| m.preset)
     }
 }
 

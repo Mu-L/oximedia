@@ -225,7 +225,7 @@ pub fn transferable_frame_rgba(
 ///
 /// # Returns
 ///
-/// JSON string encoding a [`TransferFrameMeta`] object.
+/// JSON string encoding a `TransferFrameMeta` object.
 ///
 /// # Errors
 ///

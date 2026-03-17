@@ -8,15 +8,31 @@
 //! - Collection management with hierarchical organization
 //! - Asset ingest with metadata extraction
 //! - Advanced search capabilities including faceted and content-based search
-//! - Proxy and thumbnail generation
+//! - Proxy and thumbnail generation (including HLS/DASH ABR)
 //! - User management and RBAC
 //! - Cloud storage integration (S3, Azure, GCS)
 //! - Webhook and event system
 //! - Tag management with hierarchical tags
-//! - Audit logging
+//! - Audit logging with SIEM export (CEF/LEEF)
 //! - Folder structure and smart collections
+//! - Watch-folder batch ingest
+//! - Cold/glacier archive tier management
+//! - Real-time collaboration (comments, annotations, review markers)
+//! - Email/Slack/Teams notifications
+//! - User-defined custom metadata fields
+//! - Access request/approve workflows
+//! - Scheduled reporting
+//! - Federated search across multiple MAM instances
+//! - Soft-delete trash bin
 
+/// Request/approve access workflows for media assets.
+pub mod access_request;
+/// AI-powered metadata enrichment: rule-based and neural tag/caption/category generation.
+pub mod ai_enrichment;
+pub mod ai_tagging;
 pub mod api;
+/// Cold/glacier storage tier management with automatic demotion policies.
+pub mod archive_tier;
 pub mod asset;
 pub mod asset_collection;
 pub mod asset_lifecycle;
@@ -37,12 +53,22 @@ pub mod batch_ingest;
 pub mod bulk_operation;
 /// Catalog search filters, entries, searcher, and result sets.
 pub mod catalog_search;
+/// Real-time comments, annotations, and review markers on assets.
+pub mod collaboration;
 pub mod collection;
 pub mod collection_manager;
+/// User-defined metadata fields with type validation.
+pub mod custom_field;
 pub mod database;
 /// Delivery log for recording and querying asset delivery history.
 pub mod delivery_log;
+/// Perceptual hash-based duplicate asset detection.
+pub mod duplicate_detect;
+/// In-process publish/subscribe event bus for MAM domain events.
+pub mod event_bus;
 pub mod export_package;
+/// Federated search across multiple MAM instances.
+pub mod federated_search;
 /// Hierarchical folder tree for organising media assets.
 pub mod folder_hierarchy;
 pub mod folders;
@@ -58,19 +84,27 @@ pub mod media_linking;
 pub mod media_project;
 /// Metadata template definitions and template library.
 pub mod metadata_template;
+/// Email/Slack/Teams notifications for asset and workflow events.
+pub mod notification;
 pub mod permissions;
 pub mod proxy;
+/// Scheduled report generation (storage usage, asset stats, etc.).
+pub mod reporting;
 /// Data retention policy engine for automated asset lifecycle management.
 pub mod retention_policy;
 /// Rights coverage summary and builder for asset rights tracking.
 pub mod rights_summary;
 pub mod search;
 pub mod search_index;
+/// Enhanced search with BM25-inspired scoring, faceted filtering, and Jaccard similarity.
+pub mod smart_search;
 pub mod storage;
 pub mod tags;
 pub mod transcoding_profile;
 /// File transfer job manager with status tracking and retry support.
 pub mod transfer_manager;
+/// Soft-delete trash bin with configurable auto-purge TTL.
+pub mod trash_bin;
 /// Asset usage analytics and access pattern tracking.
 pub mod usage_analytics;
 pub mod version_control;

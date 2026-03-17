@@ -7,7 +7,7 @@
 //! - Peak hold and decay
 
 use crate::{MeteringError, MeteringResult};
-use rustfft::{num_complex::Complex, FftPlanner};
+use oxifft::Complex;
 use std::f64::consts::PI;
 
 /// Frequency weighting curve.
@@ -99,9 +99,7 @@ pub struct SpectrumAnalyzer {
     fft_size: usize,
     window_function: WindowFunction,
     weighting: WeightingCurve,
-    fft_planner: FftPlanner<f64>,
     input_buffer: Vec<f64>,
-    windowed_buffer: Vec<Complex<f64>>,
     spectrum: Vec<f64>,
     peak_hold: Vec<f64>,
     peak_hold_time: f64,
@@ -150,9 +148,7 @@ impl SpectrumAnalyzer {
             fft_size,
             window_function,
             weighting,
-            fft_planner: FftPlanner::new(),
             input_buffer: vec![0.0; fft_size],
-            windowed_buffer: vec![Complex::new(0.0, 0.0); fft_size],
             spectrum: vec![0.0; num_bins],
             peak_hold: vec![0.0; num_bins],
             peak_hold_time,
@@ -174,23 +170,22 @@ impl SpectrumAnalyzer {
         // Copy samples to input buffer
         self.input_buffer.copy_from_slice(&samples[..self.fft_size]);
 
-        // Apply window function
-        for (i, &sample) in self.input_buffer.iter().enumerate() {
-            let window_coeff = self.window_function.coefficient(i, self.fft_size);
-            self.windowed_buffer[i] = Complex::new(sample * window_coeff, 0.0);
-        }
-
-        // Perform FFT
-        let fft = self.fft_planner.plan_fft_forward(self.fft_size);
-        fft.process(&mut self.windowed_buffer);
-
-        // Calculate magnitude spectrum
-        for (i, &complex_value) in self
-            .windowed_buffer
+        // Apply window function and build complex input
+        let windowed_buffer: Vec<Complex<f64>> = self
+            .input_buffer
             .iter()
             .enumerate()
-            .take(self.spectrum.len())
-        {
+            .map(|(i, &sample)| {
+                let window_coeff = self.window_function.coefficient(i, self.fft_size);
+                Complex::new(sample * window_coeff, 0.0)
+            })
+            .collect();
+
+        // Perform FFT using OxiFFT
+        let fft_output = oxifft::fft(&windowed_buffer);
+
+        // Calculate magnitude spectrum
+        for (i, complex_value) in fft_output.iter().enumerate().take(self.spectrum.len()) {
             let magnitude = complex_value.norm();
             let frequency = i as f64 * self.sample_rate / self.fft_size as f64;
 

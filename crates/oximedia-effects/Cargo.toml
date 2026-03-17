@@ -1,6 +1,7 @@
 [package]
 name = "oximedia-effects"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -16,8 +17,8 @@ workspace = true
 oximedia-core.workspace = true
 oximedia-audio.workspace = true
 thiserror.workspace = true
-rustfft = "6"
+oxifft = { workspace = true }
 rubato = "1.0"
-rand.workspace = true
+scirs2-core = { workspace = true }
 
 [dev-dependencies]

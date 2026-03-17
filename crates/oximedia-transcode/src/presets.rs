@@ -38,6 +38,7 @@ pub fn h264_aac(width: u32, height: u32, video_bitrate: u64, audio_bitrate: u64)
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -54,6 +55,7 @@ pub fn vp9_opus(width: u32, height: u32, video_bitrate: u64, audio_bitrate: u64)
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -70,6 +72,7 @@ pub fn av1_opus(width: u32, height: u32, video_bitrate: u64, audio_bitrate: u64)
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -90,6 +93,7 @@ pub mod social {
             frame_rate: Some((30, 1)),
             quality_mode: Some(QualityMode::High),
             container: Some("mp4".to_string()),
+            audio_channel_layout: None,
         }
     }
 
@@ -106,6 +110,7 @@ pub mod social {
             frame_rate: Some((30, 1)),
             quality_mode: Some(QualityMode::High),
             container: Some("mp4".to_string()),
+            audio_channel_layout: None,
         }
     }
 
@@ -122,6 +127,7 @@ pub mod social {
             frame_rate: Some((30, 1)),
             quality_mode: Some(QualityMode::High),
             container: Some("mp4".to_string()),
+            audio_channel_layout: None,
         }
     }
 
@@ -138,6 +144,7 @@ pub mod social {
             frame_rate: Some((30, 1)),
             quality_mode: Some(QualityMode::High),
             container: Some("mp4".to_string()),
+            audio_channel_layout: None,
         }
     }
 
@@ -154,6 +161,7 @@ pub mod social {
             frame_rate: Some((30, 1)),
             quality_mode: Some(QualityMode::High),
             container: Some("mp4".to_string()),
+            audio_channel_layout: None,
         }
     }
 }

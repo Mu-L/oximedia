@@ -321,87 +321,591 @@ impl TransformOperation {
         }))
     }
 
+    fn init_pipeline(
+        device: &GpuDevice,
+        name: &str,
+        entry_point: &str,
+    ) -> std::result::Result<ComputePipeline, String> {
+        let compiler = ShaderCompiler::new(device);
+        let shader = compiler
+            .compile(
+                "Transform Shader",
+                ShaderSource::Embedded(crate::shader::embedded::TRANSFORM_SHADER),
+            )
+            .map_err(|e| format!("Failed to compile transform shader: {e}"))?;
+
+        let layout = Self::get_bind_group_layout(device)
+            .map_err(|e| format!("Failed to create bind group layout: {e}"))?;
+
+        compiler
+            .create_pipeline(name, &shader, entry_point, layout)
+            .map_err(|e| format!("Failed to create pipeline: {e}"))
+    }
+
     fn get_dct_8x8_pipeline(device: &GpuDevice) -> Result<&'static ComputePipeline> {
-        static PIPELINE: OnceCell<ComputePipeline> = OnceCell::new();
+        static PIPELINE: OnceCell<std::result::Result<ComputePipeline, String>> = OnceCell::new();
 
-        Ok(PIPELINE.get_or_init(|| {
-            let compiler = ShaderCompiler::new(device);
-            let shader = compiler
-                .compile(
-                    "Transform Shader",
-                    ShaderSource::Embedded(crate::shader::embedded::TRANSFORM_SHADER),
-                )
-                .expect("Failed to compile transform shader");
-
-            let layout =
-                Self::get_bind_group_layout(device).expect("Failed to create bind group layout");
-
-            compiler
-                .create_pipeline("DCT 8x8 Pipeline", &shader, "dct_8x8", layout)
-                .expect("Failed to create pipeline")
-        }))
+        PIPELINE
+            .get_or_init(|| {
+                TransformOperation::init_pipeline(device, "DCT 8x8 Pipeline", "dct_8x8")
+            })
+            .as_ref()
+            .map_err(|e| crate::GpuError::PipelineCreation(e.clone()))
     }
 
     fn get_idct_8x8_pipeline(device: &GpuDevice) -> Result<&'static ComputePipeline> {
-        static PIPELINE: OnceCell<ComputePipeline> = OnceCell::new();
+        static PIPELINE: OnceCell<std::result::Result<ComputePipeline, String>> = OnceCell::new();
 
-        Ok(PIPELINE.get_or_init(|| {
-            let compiler = ShaderCompiler::new(device);
-            let shader = compiler
-                .compile(
-                    "Transform Shader",
-                    ShaderSource::Embedded(crate::shader::embedded::TRANSFORM_SHADER),
-                )
-                .expect("Failed to compile transform shader");
-
-            let layout =
-                Self::get_bind_group_layout(device).expect("Failed to create bind group layout");
-
-            compiler
-                .create_pipeline("IDCT 8x8 Pipeline", &shader, "idct_8x8", layout)
-                .expect("Failed to create pipeline")
-        }))
+        PIPELINE
+            .get_or_init(|| {
+                TransformOperation::init_pipeline(device, "IDCT 8x8 Pipeline", "idct_8x8")
+            })
+            .as_ref()
+            .map_err(|e| crate::GpuError::PipelineCreation(e.clone()))
     }
 
     fn get_dct_row_pipeline(device: &GpuDevice) -> Result<&'static ComputePipeline> {
-        static PIPELINE: OnceCell<ComputePipeline> = OnceCell::new();
+        static PIPELINE: OnceCell<std::result::Result<ComputePipeline, String>> = OnceCell::new();
 
-        Ok(PIPELINE.get_or_init(|| {
-            let compiler = ShaderCompiler::new(device);
-            let shader = compiler
-                .compile(
-                    "Transform Shader",
-                    ShaderSource::Embedded(crate::shader::embedded::TRANSFORM_SHADER),
-                )
-                .expect("Failed to compile transform shader");
-
-            let layout =
-                Self::get_bind_group_layout(device).expect("Failed to create bind group layout");
-
-            compiler
-                .create_pipeline("DCT Row Pipeline", &shader, "dct_row", layout)
-                .expect("Failed to create pipeline")
-        }))
+        PIPELINE
+            .get_or_init(|| {
+                TransformOperation::init_pipeline(device, "DCT Row Pipeline", "dct_row")
+            })
+            .as_ref()
+            .map_err(|e| crate::GpuError::PipelineCreation(e.clone()))
     }
 
     fn get_dct_col_pipeline(device: &GpuDevice) -> Result<&'static ComputePipeline> {
-        static PIPELINE: OnceCell<ComputePipeline> = OnceCell::new();
+        static PIPELINE: OnceCell<std::result::Result<ComputePipeline, String>> = OnceCell::new();
 
-        Ok(PIPELINE.get_or_init(|| {
-            let compiler = ShaderCompiler::new(device);
-            let shader = compiler
-                .compile(
-                    "Transform Shader",
-                    ShaderSource::Embedded(crate::shader::embedded::TRANSFORM_SHADER),
-                )
-                .expect("Failed to compile transform shader");
+        PIPELINE
+            .get_or_init(|| {
+                TransformOperation::init_pipeline(device, "DCT Column Pipeline", "dct_col")
+            })
+            .as_ref()
+            .map_err(|e| crate::GpuError::PipelineCreation(e.clone()))
+    }
+}
 
-            let layout =
-                Self::get_bind_group_layout(device).expect("Failed to create bind group layout");
+// =============================================================================
+// CPU-side perspective transform and lens distortion correction (Task 8)
+// =============================================================================
 
-            compiler
-                .create_pipeline("DCT Column Pipeline", &shader, "dct_col", layout)
-                .expect("Failed to create pipeline")
-        }))
+/// A 3×3 homogeneous perspective (projective) transform matrix stored in
+/// row-major order.
+///
+/// The matrix maps homogeneous image coordinates `(x, y, 1)ᵀ` to new
+/// coordinates via `(x', y', w')ᵀ = M · (x, y, 1)ᵀ`.  The Cartesian result
+/// is `(x'/w', y'/w')`.
+#[derive(Debug, Clone, Copy)]
+pub struct PerspectiveMatrix {
+    /// Row-major 3×3 elements: `[[a,b,c],[d,e,f],[g,h,i]]`.
+    pub data: [[f64; 3]; 3],
+}
+
+impl PerspectiveMatrix {
+    /// Create from a flat row-major array of 9 elements.
+    #[must_use]
+    pub fn from_array(m: [f64; 9]) -> Self {
+        Self {
+            data: [[m[0], m[1], m[2]], [m[3], m[4], m[5]], [m[6], m[7], m[8]]],
+        }
+    }
+
+    /// Identity perspective matrix (no transform).
+    #[must_use]
+    pub fn identity() -> Self {
+        Self::from_array([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+    }
+
+    /// Apply this matrix to a point `(x, y)` and return the projected result.
+    ///
+    /// Returns `None` if the homogeneous weight `w` is too close to zero
+    /// (the point maps to infinity).
+    #[must_use]
+    pub fn project(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+        let m = &self.data;
+        let x_h = m[0][0] * x + m[0][1] * y + m[0][2];
+        let y_h = m[1][0] * x + m[1][1] * y + m[1][2];
+        let w = m[2][0] * x + m[2][1] * y + m[2][2];
+        if w.abs() < 1e-12 {
+            return None;
+        }
+        Some((x_h / w, y_h / w))
+    }
+
+    /// Compute the inverse of this matrix using Cramer's rule.
+    ///
+    /// Returns `None` if the matrix is singular.
+    #[must_use]
+    pub fn inverse(&self) -> Option<Self> {
+        let m = &self.data;
+        let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+        if det.abs() < 1e-15 {
+            return None;
+        }
+        let inv_det = 1.0 / det;
+        let inv = [
+            [
+                (m[1][1] * m[2][2] - m[1][2] * m[2][1]) * inv_det,
+                (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * inv_det,
+                (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * inv_det,
+            ],
+            [
+                (m[1][2] * m[2][0] - m[1][0] * m[2][2]) * inv_det,
+                (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * inv_det,
+                (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * inv_det,
+            ],
+            [
+                (m[1][0] * m[2][1] - m[1][1] * m[2][0]) * inv_det,
+                (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * inv_det,
+                (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * inv_det,
+            ],
+        ];
+        Some(Self { data: inv })
+    }
+}
+
+impl Default for PerspectiveMatrix {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
+/// Parameters for radial + tangential lens distortion (Brown-Conrady model).
+///
+/// This is the same model used by OpenCV and is compatible with camera
+/// calibration output from standard photogrammetry tools.
+#[derive(Debug, Clone, Copy)]
+pub struct LensDistortionParams {
+    /// Radial distortion coefficient k₁ (typically small, e.g. -0.3 to +0.5).
+    pub k1: f64,
+    /// Radial distortion coefficient k₂.
+    pub k2: f64,
+    /// Radial distortion coefficient k₃.
+    pub k3: f64,
+    /// Tangential distortion coefficient p₁.
+    pub p1: f64,
+    /// Tangential distortion coefficient p₂.
+    pub p2: f64,
+    /// Focal length in pixels along the X axis.
+    pub fx: f64,
+    /// Focal length in pixels along the Y axis.
+    pub fy: f64,
+    /// Principal point X coordinate (typically `width / 2`).
+    pub cx: f64,
+    /// Principal point Y coordinate (typically `height / 2`).
+    pub cy: f64,
+}
+
+impl LensDistortionParams {
+    /// Create a default (no distortion) parameter set for an image of the
+    /// given `width × height`.
+    #[must_use]
+    pub fn no_distortion(width: u32, height: u32) -> Self {
+        Self {
+            k1: 0.0,
+            k2: 0.0,
+            k3: 0.0,
+            p1: 0.0,
+            p2: 0.0,
+            fx: f64::from(width),
+            fy: f64::from(height),
+            cx: f64::from(width) / 2.0,
+            cy: f64::from(height) / 2.0,
+        }
+    }
+}
+
+/// CPU-parallel perspective warp of a packed RGBA image.
+///
+/// Uses inverse mapping with bilinear interpolation: for each destination
+/// pixel `(dx, dy)` the inverse homography maps it back to the source
+/// coordinates `(sx, sy)`, which are bilinearly sampled.
+///
+/// Pixels that map outside the source image are filled with `fill_rgba`.
+///
+/// # Errors
+///
+/// Returns [`crate::GpuError::InvalidDimensions`] for zero dimensions or
+/// [`crate::GpuError::InvalidBufferSize`] for buffer/dimension mismatches.
+pub fn perspective_warp(
+    input: &[u8],
+    src_width: u32,
+    src_height: u32,
+    output: &mut [u8],
+    dst_width: u32,
+    dst_height: u32,
+    matrix: &PerspectiveMatrix,
+    fill_rgba: [u8; 4],
+) -> crate::Result<()> {
+    use super::utils;
+    use crate::GpuError;
+
+    if src_width == 0 || src_height == 0 {
+        return Err(GpuError::InvalidDimensions {
+            width: src_width,
+            height: src_height,
+        });
+    }
+    if dst_width == 0 || dst_height == 0 {
+        return Err(GpuError::InvalidDimensions {
+            width: dst_width,
+            height: dst_height,
+        });
+    }
+    utils::validate_buffer_size(input, src_width, src_height, 4)?;
+    utils::validate_buffer_size(output, dst_width, dst_height, 4)?;
+
+    let inv = matrix
+        .inverse()
+        .ok_or_else(|| GpuError::Internal("Perspective matrix is singular".to_string()))?;
+
+    let sw = src_width as usize;
+    let sh = src_height as usize;
+    let dw = dst_width as usize;
+    let dh = dst_height as usize;
+
+    for dy in 0..dh {
+        for dx in 0..dw {
+            let dst_idx = (dy * dw + dx) * 4;
+            let Some((sx_f, sy_f)) = inv.project(dx as f64, dy as f64) else {
+                output[dst_idx..dst_idx + 4].copy_from_slice(&fill_rgba);
+                continue;
+            };
+
+            // Bilinear interpolation
+            let x0 = sx_f.floor() as isize;
+            let y0 = sy_f.floor() as isize;
+            let x1 = x0 + 1;
+            let y1 = y0 + 1;
+            let fx = sx_f - sx_f.floor();
+            let fy = sy_f - sy_f.floor();
+
+            let sample = |cx: isize, cy: isize| -> [f64; 4] {
+                if cx < 0 || cy < 0 || cx >= sw as isize || cy >= sh as isize {
+                    [
+                        fill_rgba[0] as f64,
+                        fill_rgba[1] as f64,
+                        fill_rgba[2] as f64,
+                        fill_rgba[3] as f64,
+                    ]
+                } else {
+                    let idx = (cy as usize * sw + cx as usize) * 4;
+                    [
+                        input[idx] as f64,
+                        input[idx + 1] as f64,
+                        input[idx + 2] as f64,
+                        input[idx + 3] as f64,
+                    ]
+                }
+            };
+
+            let p00 = sample(x0, y0);
+            let p10 = sample(x1, y0);
+            let p01 = sample(x0, y1);
+            let p11 = sample(x1, y1);
+
+            for c in 0..4 {
+                let v = p00[c] * (1.0 - fx) * (1.0 - fy)
+                    + p10[c] * fx * (1.0 - fy)
+                    + p01[c] * (1.0 - fx) * fy
+                    + p11[c] * fx * fy;
+                output[dst_idx + c] = v.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// CPU-side lens distortion correction using the Brown-Conrady model.
+///
+/// For each destination pixel `(x, y)` the distortion model computes the
+/// corresponding distorted source coordinate and bilinearly samples the input.
+/// Pixels that map outside the source image are filled with `fill_rgba`.
+///
+/// # Errors
+///
+/// Returns an error if dimensions are zero or buffers are the wrong size.
+pub fn lens_undistort(
+    input: &[u8],
+    width: u32,
+    height: u32,
+    output: &mut [u8],
+    params: &LensDistortionParams,
+    fill_rgba: [u8; 4],
+) -> crate::Result<()> {
+    use super::utils;
+    use crate::GpuError;
+
+    if width == 0 || height == 0 {
+        return Err(GpuError::InvalidDimensions { width, height });
+    }
+    utils::validate_buffer_size(input, width, height, 4)?;
+    utils::validate_buffer_size(output, width, height, 4)?;
+
+    let w = width as usize;
+    let h = height as usize;
+    let inv_fx = 1.0 / params.fx;
+    let inv_fy = 1.0 / params.fy;
+
+    for dy in 0..h {
+        for dx in 0..w {
+            // Normalised coordinates (undistorted space).
+            let x_u = (dx as f64 - params.cx) * inv_fx;
+            let y_u = (dy as f64 - params.cy) * inv_fy;
+
+            // Apply Brown-Conrady radial + tangential distortion to map from
+            // undistorted → distorted (where the actual sensor data lives).
+            let r2 = x_u * x_u + y_u * y_u;
+            let r4 = r2 * r2;
+            let r6 = r4 * r2;
+            let radial = 1.0 + params.k1 * r2 + params.k2 * r4 + params.k3 * r6;
+            let x_d =
+                x_u * radial + 2.0 * params.p1 * x_u * y_u + params.p2 * (r2 + 2.0 * x_u * x_u);
+            let y_d =
+                y_u * radial + params.p1 * (r2 + 2.0 * y_u * y_u) + 2.0 * params.p2 * x_u * y_u;
+
+            // Back to pixel coordinates in the distorted (source) image.
+            let sx_f = x_d * params.fx + params.cx;
+            let sy_f = y_d * params.fy + params.cy;
+
+            let dst_idx = (dy * w + dx) * 4;
+
+            let x0 = sx_f.floor() as isize;
+            let y0 = sy_f.floor() as isize;
+            let x1 = x0 + 1;
+            let y1 = y0 + 1;
+            let fx = sx_f - sx_f.floor();
+            let fy = sy_f - sy_f.floor();
+
+            let sample = |cx: isize, cy: isize| -> [f64; 4] {
+                if cx < 0 || cy < 0 || cx >= w as isize || cy >= h as isize {
+                    [
+                        fill_rgba[0] as f64,
+                        fill_rgba[1] as f64,
+                        fill_rgba[2] as f64,
+                        fill_rgba[3] as f64,
+                    ]
+                } else {
+                    let idx = (cy as usize * w + cx as usize) * 4;
+                    [
+                        input[idx] as f64,
+                        input[idx + 1] as f64,
+                        input[idx + 2] as f64,
+                        input[idx + 3] as f64,
+                    ]
+                }
+            };
+
+            let p00 = sample(x0, y0);
+            let p10 = sample(x1, y0);
+            let p01 = sample(x0, y1);
+            let p11 = sample(x1, y1);
+
+            for c in 0..4 {
+                let v = p00[c] * (1.0 - fx) * (1.0 - fy)
+                    + p10[c] * fx * (1.0 - fy)
+                    + p01[c] * (1.0 - fx) * fy
+                    + p11[c] * fx * fy;
+                output[dst_idx + c] = v.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
+// Tests for perspective transform and lens distortion (Task 8)
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn solid_rgba(w: u32, h: u32, r: u8, g: u8, b: u8, a: u8) -> Vec<u8> {
+        let n = (w * h * 4) as usize;
+        let mut v = vec![0u8; n];
+        for px in v.chunks_exact_mut(4) {
+            px[0] = r;
+            px[1] = g;
+            px[2] = b;
+            px[3] = a;
+        }
+        v
+    }
+
+    // ── PerspectiveMatrix ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_perspective_identity_project() {
+        let m = PerspectiveMatrix::identity();
+        let (x, y) = m
+            .project(100.0, 200.0)
+            .expect("identity must not return None");
+        assert!((x - 100.0).abs() < 1e-10, "x={x}");
+        assert!((y - 200.0).abs() < 1e-10, "y={y}");
+    }
+
+    #[test]
+    fn test_perspective_translation() {
+        // Pure translation: shift by (10, 20).
+        let m = PerspectiveMatrix::from_array([1.0, 0.0, 10.0, 0.0, 1.0, 20.0, 0.0, 0.0, 1.0]);
+        let (x, y) = m.project(5.0, 5.0).expect("no infinity");
+        assert!((x - 15.0).abs() < 1e-10, "x={x}");
+        assert!((y - 25.0).abs() < 1e-10, "y={y}");
+    }
+
+    #[test]
+    fn test_perspective_inverse_is_correct() {
+        let m = PerspectiveMatrix::from_array([1.0, 0.5, 10.0, -0.2, 1.0, 5.0, 0.001, 0.0, 1.0]);
+        let inv = m.inverse().expect("non-singular matrix must have inverse");
+        // m · inv(m) ≈ identity
+        let (x_orig, y_orig) = (50.0_f64, 30.0_f64);
+        let (x_proj, y_proj) = m.project(x_orig, y_orig).expect("forward project");
+        let (x_back, y_back) = inv.project(x_proj, y_proj).expect("inverse project");
+        assert!(
+            (x_back - x_orig).abs() < 1e-6,
+            "x roundtrip: {x_back} ≠ {x_orig}"
+        );
+        assert!(
+            (y_back - y_orig).abs() < 1e-6,
+            "y roundtrip: {y_back} ≠ {y_orig}"
+        );
+    }
+
+    #[test]
+    fn test_perspective_singular_returns_none_inverse() {
+        // All-zero matrix is singular.
+        let m = PerspectiveMatrix::from_array([0.0; 9]);
+        assert!(m.inverse().is_none(), "singular matrix must return None");
+    }
+
+    // ── perspective_warp ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_perspective_warp_identity_preserves_image() {
+        let w = 8u32;
+        let h = 8u32;
+        let src = solid_rgba(w, h, 100, 150, 200, 255);
+        let mut dst = vec![0u8; (w * h * 4) as usize];
+        perspective_warp(
+            &src,
+            w,
+            h,
+            &mut dst,
+            w,
+            h,
+            &PerspectiveMatrix::identity(),
+            [0, 0, 0, 0],
+        )
+        .expect("identity warp must succeed");
+        // Every pixel must match the source (within bilinear rounding).
+        for (s, d) in src.iter().zip(dst.iter()) {
+            assert!(
+                (*s as i32 - *d as i32).unsigned_abs() <= 1,
+                "identity warp mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn test_perspective_warp_out_of_bounds_uses_fill() {
+        let w = 4u32;
+        let h = 4u32;
+        let src = solid_rgba(w, h, 255, 0, 0, 255);
+        let mut dst = vec![0u8; (w * h * 4) as usize];
+        // Large translation sends all destination pixels outside the source.
+        let m =
+            PerspectiveMatrix::from_array([1.0, 0.0, 10000.0, 0.0, 1.0, 10000.0, 0.0, 0.0, 1.0]);
+        perspective_warp(&src, w, h, &mut dst, w, h, &m, [0, 255, 0, 255])
+            .expect("warp must succeed");
+        // All pixels should be fill colour (green).
+        for i in 0..(w * h) as usize {
+            assert_eq!(dst[i * 4 + 1], 255, "fill green channel mismatch");
+        }
+    }
+
+    #[test]
+    fn test_perspective_warp_invalid_dims_return_error() {
+        let src = solid_rgba(4, 4, 0, 0, 0, 255);
+        let mut dst = vec![0u8; 16 * 4];
+        let result = perspective_warp(
+            &src,
+            0,
+            4,
+            &mut dst,
+            4,
+            4,
+            &PerspectiveMatrix::identity(),
+            [0; 4],
+        );
+        assert!(result.is_err());
+    }
+
+    // ── lens_undistort ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_lens_undistort_no_distortion_identity() {
+        let w = 8u32;
+        let h = 8u32;
+        let src = solid_rgba(w, h, 50, 100, 150, 255);
+        let mut dst = vec![0u8; (w * h * 4) as usize];
+        let params = LensDistortionParams::no_distortion(w, h);
+        lens_undistort(&src, w, h, &mut dst, &params, [0; 4]).expect("no distortion must succeed");
+        // Interior pixels should be close to the source colour.
+        for px in dst.chunks_exact(4).take(4) {
+            assert!((px[0] as i32 - 50).unsigned_abs() <= 2, "R mismatch");
+            assert!((px[1] as i32 - 100).unsigned_abs() <= 2, "G mismatch");
+            assert!((px[2] as i32 - 150).unsigned_abs() <= 2, "B mismatch");
+        }
+    }
+
+    #[test]
+    fn test_lens_undistort_preserves_centre_pixel() {
+        // Centre pixel should be unaffected by distortion.
+        let w = 9u32; // odd size so centre is exact
+        let h = 9u32;
+        let mut src = vec![0u8; (w * h * 4) as usize];
+        // Mark the centre pixel distinctively.
+        let cx = (w / 2) as usize;
+        let cy = (h / 2) as usize;
+        let center_idx = (cy * w as usize + cx) * 4;
+        src[center_idx] = 255;
+        src[center_idx + 1] = 128;
+        src[center_idx + 2] = 64;
+        src[center_idx + 3] = 255;
+        let mut dst = vec![0u8; (w * h * 4) as usize];
+        let params = LensDistortionParams {
+            k1: 0.1,
+            k2: 0.0,
+            k3: 0.0,
+            p1: 0.0,
+            p2: 0.0,
+            fx: f64::from(w),
+            fy: f64::from(h),
+            cx: f64::from(w) / 2.0,
+            cy: f64::from(h) / 2.0,
+        };
+        lens_undistort(&src, w, h, &mut dst, &params, [0; 4]).expect("undistort must succeed");
+        // Centre pixel at (cx, cy): r2 = 0, so it maps back to itself.
+        let out_r = dst[center_idx];
+        assert!(
+            out_r > 128,
+            "centre R should reflect the marked pixel, got {out_r}"
+        );
+    }
+
+    #[test]
+    fn test_lens_undistort_invalid_dims_return_error() {
+        let src = vec![0u8; 64];
+        let mut dst = vec![0u8; 64];
+        let params = LensDistortionParams::no_distortion(4, 4);
+        let result = lens_undistort(&src, 0, 4, &mut dst, &params, [0; 4]);
+        assert!(result.is_err());
     }
 }

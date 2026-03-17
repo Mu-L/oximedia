@@ -4,7 +4,7 @@
 //! watermarks regardless of the embedding algorithm used.
 
 use crate::payload::SyncDetector;
-use rustfft::{num_complex::Complex, FftPlanner};
+use oxifft::Complex;
 
 /// Watermark detection result.
 #[derive(Debug, Clone)]
@@ -75,15 +75,12 @@ impl BlindDetector {
             return 0.0;
         }
 
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(frame_size);
-
-        let mut freq_data: Vec<Complex<f32>> = samples[..frame_size]
+        let freq_input: Vec<Complex<f32>> = samples[..frame_size]
             .iter()
             .map(|&s| Complex::new(s, 0.0))
             .collect();
 
-        fft.process(&mut freq_data);
+        let freq_data = oxifft::fft(&freq_input);
 
         // Calculate spectral flatness
         let flatness = self.calculate_spectral_flatness(&freq_data);
@@ -378,13 +375,11 @@ mod tests {
         let detector = BlindDetector::new(44100, None);
 
         let frame_size = 2048;
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(frame_size);
 
-        let mut freq_data: Vec<Complex<f32>> =
+        let freq_input: Vec<Complex<f32>> =
             (0..frame_size).map(|_| Complex::new(1.0, 0.0)).collect();
 
-        fft.process(&mut freq_data);
+        let freq_data = oxifft::fft(&freq_input);
 
         let flatness = detector.calculate_spectral_flatness(&freq_data);
         assert!(flatness >= 0.0 && flatness <= 1.0);

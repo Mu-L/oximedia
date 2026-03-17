@@ -39,6 +39,7 @@ pub fn ios_phone_sd() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -69,6 +70,7 @@ pub fn ios_phone_hd() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -99,6 +101,7 @@ pub fn ios_tablet_hd() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -129,6 +132,7 @@ pub fn ios_tablet_uhd() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

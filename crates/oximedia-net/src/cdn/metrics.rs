@@ -115,6 +115,7 @@ impl CacheStats {
     }
 
     /// Updates the hit rate.
+    #[allow(clippy::manual_checked_ops)]
     fn update_rate(&mut self) {
         if self.total_requests > 0 {
             self.hit_rate = self.hits as f64 / self.total_requests as f64;
@@ -150,9 +151,7 @@ impl BandwidthStats {
         }
 
         // Update average
-        if self.sample_count > 0 {
-            self.avg_bandwidth = self.total_bytes / self.sample_count;
-        }
+        self.avg_bandwidth = self.total_bytes.checked_div(self.sample_count).unwrap_or(0);
     }
 
     /// Resets the per-second counter.
@@ -301,6 +300,7 @@ impl PerformanceMetrics {
     }
 
     /// Updates error rate.
+    #[allow(clippy::manual_checked_ops)]
     fn update_error_rate(&mut self) {
         if self.total_requests > 0 {
             self.error_rate = self.failed_requests as f64 / self.total_requests as f64;
@@ -317,6 +317,7 @@ impl PerformanceMetrics {
 
     /// Gets success rate (0.0-1.0).
     #[must_use]
+    #[allow(clippy::manual_checked_ops)]
     pub fn success_rate(&self) -> f64 {
         if self.total_requests > 0 {
             self.successful_requests as f64 / self.total_requests as f64
@@ -327,6 +328,7 @@ impl PerformanceMetrics {
 
     /// Gets requests per second.
     #[must_use]
+    #[allow(clippy::manual_checked_ops)]
     pub fn requests_per_second(&self) -> f64 {
         if let (Some(first), Some(last)) = (self.first_request_at, self.last_request_at) {
             let duration = last.signed_duration_since(first);
@@ -372,6 +374,7 @@ impl CdnMetrics {
 
     /// Gets global success rate.
     #[must_use]
+    #[allow(clippy::manual_checked_ops)]
     pub fn global_success_rate(&self) -> f64 {
         let total_success: u64 = self.providers.values().map(|m| m.successful_requests).sum();
 

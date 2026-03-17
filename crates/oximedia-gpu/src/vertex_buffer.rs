@@ -160,7 +160,7 @@ impl std::error::Error for VertexBufferError {}
 ///
 /// // 1 vertex = 20 bytes
 /// let data = vec![0u8; 20];
-/// let vb = VertexBuffer::new(layout, data)?;
+/// let vb = VertexBuffer::new(layout, data).expect("valid vertex buffer");
 /// assert_eq!(vb.vertex_count(), 1);
 /// assert_eq!(vb.stride(), 20);
 /// ```
@@ -203,11 +203,7 @@ impl VertexBuffer {
     #[must_use]
     pub fn vertex_count(&self) -> usize {
         let s = self.stride();
-        if s == 0 {
-            0
-        } else {
-            self.data.len() / s
-        }
+        self.data.len().checked_div(s).unwrap_or(0)
     }
 
     /// Total size of the raw byte data.

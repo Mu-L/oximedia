@@ -387,3 +387,320 @@ mod tests {
         assert_eq!(MergeStrategy::KeepSmallest.label(), "keep-smallest");
     }
 }
+
+// ---------------------------------------------------------------------------
+// DuplicateGroup
+// ---------------------------------------------------------------------------
+
+/// A group of files that have been identified as duplicates, with one
+/// designated as the canonical representative to keep.
+#[derive(Debug, Clone)]
+pub struct DuplicateGroup {
+    /// All files in this duplicate group (including the representative).
+    pub files: Vec<PathBuf>,
+    /// The representative (canonical) file to retain.
+    pub representative: PathBuf,
+}
+
+impl DuplicateGroup {
+    /// Create a new `DuplicateGroup`.
+    ///
+    /// `representative` does not have to be a member of `files`; the caller
+    /// is responsible for consistency.
+    #[must_use]
+    pub fn new(files: Vec<PathBuf>, representative: PathBuf) -> Self {
+        Self {
+            files,
+            representative,
+        }
+    }
+
+    /// Number of files in this group.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Returns `true` if the group contains no files.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+
+    /// Returns references to files that are NOT the representative.
+    ///
+    /// These are the duplicates that can be removed, linked, or otherwise
+    /// disposed of according to a [`MergeStrategy`].
+    #[must_use]
+    pub fn duplicates(&self) -> Vec<&PathBuf> {
+        self.files
+            .iter()
+            .filter(|p| p.as_path() != self.representative.as_path())
+            .collect()
+    }
+
+    /// Returns `true` if `path` is the representative of this group.
+    #[must_use]
+    pub fn is_representative(&self, path: &Path) -> bool {
+        self.representative == path
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MergeResolver
+// ---------------------------------------------------------------------------
+
+/// Resolves a [`DuplicateGroup`] to a single canonical file using a
+/// configured [`MergeStrategy`] and [`LinkMode`].
+///
+/// Two resolution paths are provided:
+/// 1. [`MergeResolver::resolve`] — reads filesystem metadata for scoring.
+/// 2. [`MergeResolver::resolve_from_candidates`] — accepts pre-built
+///    [`FileCandidate`] data (no filesystem access required).
+#[derive(Debug, Clone)]
+pub struct MergeResolver {
+    strategy: MergeStrategy,
+    link_mode: LinkMode,
+}
+
+impl MergeResolver {
+    /// Create a new resolver.
+    #[must_use]
+    pub fn new(strategy: MergeStrategy, link_mode: LinkMode) -> Self {
+        Self {
+            strategy,
+            link_mode,
+        }
+    }
+
+    /// Create a resolver that deletes duplicates and keeps with `KeepLargest`.
+    #[must_use]
+    pub fn default_delete() -> Self {
+        Self::new(MergeStrategy::KeepLargest, LinkMode::Delete)
+    }
+
+    /// Returns the configured strategy.
+    #[must_use]
+    pub fn strategy(&self) -> MergeStrategy {
+        self.strategy
+    }
+
+    /// Returns the configured link mode.
+    #[must_use]
+    pub fn link_mode(&self) -> LinkMode {
+        self.link_mode
+    }
+
+    /// Resolve which file to keep by reading filesystem metadata.
+    ///
+    /// For each file in `group.files`, attempts to read its metadata (size,
+    /// mtime). Files whose metadata cannot be read are assigned zero values and
+    /// will lose to files with valid metadata under most strategies.
+    ///
+    /// Returns the path of the file to keep. Falls back to the first file when
+    /// `group.files` is empty.
+    #[must_use]
+    pub fn resolve(&self, group: &DuplicateGroup) -> PathBuf {
+        if group.files.is_empty() {
+            return group.representative.clone();
+        }
+
+        let candidates: Vec<FileCandidate> = group
+            .files
+            .iter()
+            .map(|path| {
+                let meta = std::fs::metadata(path);
+                let (size, modified, created) = meta
+                    .as_ref()
+                    .map(|m| {
+                        let size = m.len();
+                        let modified = m
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let created = m
+                            .created()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        (size, modified, created)
+                    })
+                    .unwrap_or((0, 0, 0));
+                FileCandidate::new(path.clone(), size, modified, created)
+            })
+            .collect();
+
+        self.resolve_from_candidates(&candidates)
+            .unwrap_or_else(|| group.files[0].clone())
+    }
+
+    /// Resolve from pre-built candidate metadata (no filesystem access).
+    ///
+    /// Returns the path of the winning candidate, or `None` if `candidates`
+    /// is empty.
+    #[must_use]
+    pub fn resolve_from_candidates(&self, candidates: &[FileCandidate]) -> Option<PathBuf> {
+        if candidates.is_empty() {
+            return None;
+        }
+        let resolution = resolve(candidates, self.strategy, self.link_mode);
+        resolution
+            .files
+            .iter()
+            .find(|f| f.action.is_keep())
+            .map(|f| f.candidate.path.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DuplicateGroup + MergeResolver tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod group_resolver_tests {
+    use super::*;
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(|n| PathBuf::from(n)).collect()
+    }
+
+    // ── DuplicateGroup ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_group_new_and_len() {
+        let g = DuplicateGroup::new(
+            paths(&["/a.mp4", "/b.mp4", "/c.mp4"]),
+            PathBuf::from("/a.mp4"),
+        );
+        assert_eq!(g.len(), 3);
+        assert!(!g.is_empty());
+    }
+
+    #[test]
+    fn test_group_empty() {
+        let g = DuplicateGroup::new(vec![], PathBuf::from("/none.mp4"));
+        assert!(g.is_empty());
+        assert_eq!(g.len(), 0);
+    }
+
+    #[test]
+    fn test_group_duplicates_excludes_representative() {
+        let g = DuplicateGroup::new(
+            paths(&["/a.mp4", "/b.mp4", "/c.mp4"]),
+            PathBuf::from("/a.mp4"),
+        );
+        let dups = g.duplicates();
+        assert_eq!(dups.len(), 2);
+        assert!(!dups.contains(&&PathBuf::from("/a.mp4")));
+        assert!(dups.contains(&&PathBuf::from("/b.mp4")));
+        assert!(dups.contains(&&PathBuf::from("/c.mp4")));
+    }
+
+    #[test]
+    fn test_group_is_representative() {
+        let g = DuplicateGroup::new(paths(&["/rep.mp4", "/dup.mp4"]), PathBuf::from("/rep.mp4"));
+        assert!(g.is_representative(Path::new("/rep.mp4")));
+        assert!(!g.is_representative(Path::new("/dup.mp4")));
+    }
+
+    #[test]
+    fn test_group_duplicates_all_are_duplicates_when_representative_absent() {
+        // Representative not in files list — all files are returned as duplicates.
+        let g = DuplicateGroup::new(paths(&["/b.mp4", "/c.mp4"]), PathBuf::from("/a.mp4"));
+        assert_eq!(g.duplicates().len(), 2);
+    }
+
+    // ── MergeResolver ──────────────────────────────────────────────────────
+
+    fn make_candidates() -> Vec<FileCandidate> {
+        vec![
+            FileCandidate::new(PathBuf::from("/small.mp4"), 500, 100, 90),
+            FileCandidate::new(PathBuf::from("/large.mp4"), 2000, 200, 80),
+            FileCandidate::new(PathBuf::from("/oldest.mp4"), 1000, 50, 100),
+        ]
+    }
+
+    #[test]
+    fn test_resolver_keep_largest_from_candidates() {
+        let r = MergeResolver::new(MergeStrategy::KeepLargest, LinkMode::Delete);
+        let result = r.resolve_from_candidates(&make_candidates());
+        assert_eq!(result, Some(PathBuf::from("/large.mp4")));
+    }
+
+    #[test]
+    fn test_resolver_keep_newest_from_candidates() {
+        let r = MergeResolver::new(MergeStrategy::KeepNewest, LinkMode::Delete);
+        let result = r.resolve_from_candidates(&make_candidates());
+        assert_eq!(result, Some(PathBuf::from("/large.mp4"))); // modified=200
+    }
+
+    #[test]
+    fn test_resolver_keep_oldest_from_candidates() {
+        let r = MergeResolver::new(MergeStrategy::KeepOldest, LinkMode::Delete);
+        let result = r.resolve_from_candidates(&make_candidates());
+        assert_eq!(result, Some(PathBuf::from("/oldest.mp4"))); // modified=50
+    }
+
+    #[test]
+    fn test_resolver_keep_smallest_from_candidates() {
+        let r = MergeResolver::new(MergeStrategy::KeepSmallest, LinkMode::Delete);
+        let result = r.resolve_from_candidates(&make_candidates());
+        assert_eq!(result, Some(PathBuf::from("/small.mp4"))); // size=500
+    }
+
+    #[test]
+    fn test_resolver_keep_highest_quality_from_candidates() {
+        let cs = vec![
+            FileCandidate::new(PathBuf::from("/low.mp4"), 100, 10, 10).with_quality(0.3),
+            FileCandidate::new(PathBuf::from("/high.mp4"), 100, 10, 10).with_quality(0.95),
+        ];
+        let r = MergeResolver::new(MergeStrategy::KeepHighestQuality, LinkMode::Delete);
+        let result = r.resolve_from_candidates(&cs);
+        assert_eq!(result, Some(PathBuf::from("/high.mp4")));
+    }
+
+    #[test]
+    fn test_resolver_empty_candidates_returns_none() {
+        let r = MergeResolver::new(MergeStrategy::KeepLargest, LinkMode::Delete);
+        assert!(r.resolve_from_candidates(&[]).is_none());
+    }
+
+    #[test]
+    fn test_resolver_strategy_and_link_mode_accessors() {
+        let r = MergeResolver::new(MergeStrategy::KeepSmallest, LinkMode::Symlink);
+        assert_eq!(r.strategy(), MergeStrategy::KeepSmallest);
+        assert_eq!(r.link_mode(), LinkMode::Symlink);
+    }
+
+    #[test]
+    fn test_resolver_default_delete() {
+        let r = MergeResolver::default_delete();
+        assert_eq!(r.strategy(), MergeStrategy::KeepLargest);
+        assert_eq!(r.link_mode(), LinkMode::Delete);
+    }
+
+    #[test]
+    fn test_resolver_resolve_filesystem_fallback() {
+        // Files do not exist → metadata reads fail → fallback to first file.
+        let group = DuplicateGroup::new(
+            paths(&["/nonexistent_a.mp4", "/nonexistent_b.mp4"]),
+            PathBuf::from("/nonexistent_a.mp4"),
+        );
+        let r = MergeResolver::new(MergeStrategy::KeepLargest, LinkMode::Delete);
+        // With all sizes=0 (metadata unavailable), pick_winner returns 0 → first file
+        let result = r.resolve(&group);
+        assert!(!result.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn test_resolver_resolve_empty_group() {
+        let group = DuplicateGroup::new(vec![], PathBuf::from("/rep.mp4"));
+        let r = MergeResolver::new(MergeStrategy::KeepLargest, LinkMode::Delete);
+        // Falls back to representative
+        let result = r.resolve(&group);
+        assert_eq!(result, PathBuf::from("/rep.mp4"));
+    }
+}

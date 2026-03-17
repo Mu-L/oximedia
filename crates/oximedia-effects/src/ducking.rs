@@ -6,6 +6,9 @@
 //! a voiceover or dialogue signal is detected. This module provides a
 //! level-follower / envelope approach suitable for podcast production,
 //! broadcast, and live-streaming scenarios.
+//!
+//! Supports both explicit sidechain buffer input (`process_buffers`) and
+//! stereo sidechain pairs (`process_stereo_sidechain`) for true stereo ducking.
 
 /// Configuration for the ducking effect.
 #[derive(Debug, Clone)]
@@ -109,6 +112,17 @@ fn time_constant(ms: f32, sample_rate: f32) -> f32 {
     (-1.0f32 / samples).exp()
 }
 
+/// Sidechain input mode for the ducker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidechainMode {
+    /// Use peak level of the sidechain signal.
+    Peak,
+    /// Use RMS level of the sidechain signal (smoother response).
+    Rms,
+    /// Use the maximum of left and right sidechain channels (stereo-aware).
+    StereoMax,
+}
+
 /// Real-time sidechain ducker.
 #[derive(Debug)]
 pub struct Ducker {
@@ -129,6 +143,16 @@ pub struct Ducker {
     hold_counter: u32,
     /// Hold duration in samples.
     hold_samples: u32,
+    /// Sidechain detection mode.
+    sidechain_mode: SidechainMode,
+    /// RMS accumulator for RMS mode.
+    rms_accumulator: f32,
+    /// RMS window counter.
+    rms_count: u32,
+    /// RMS window size in samples.
+    rms_window: u32,
+    /// Last computed RMS level.
+    rms_level: f32,
 }
 
 impl Ducker {
@@ -145,6 +169,8 @@ impl Ducker {
         let threshold_linear = db_to_linear(config.threshold_db);
         let duck_gain = db_to_linear(config.duck_amount_db);
         let hold_samples = (config.hold_ms * 0.001 * config.sample_rate) as u32;
+        // RMS window: ~3ms for responsive metering
+        let rms_window = (config.sample_rate * 0.003).max(1.0) as u32;
         Self {
             config,
             envelope: 0.0,
@@ -155,18 +181,51 @@ impl Ducker {
             duck_gain,
             hold_counter: 0,
             hold_samples,
+            sidechain_mode: SidechainMode::Peak,
+            rms_accumulator: 0.0,
+            rms_count: 0,
+            rms_window,
+            rms_level: 0.0,
+        }
+    }
+
+    /// Set the sidechain detection mode.
+    pub fn set_sidechain_mode(&mut self, mode: SidechainMode) {
+        self.sidechain_mode = mode;
+    }
+
+    /// Get the current sidechain mode.
+    #[must_use]
+    pub fn sidechain_mode(&self) -> SidechainMode {
+        self.sidechain_mode
+    }
+
+    /// Compute the detection level from a raw sidechain absolute value.
+    fn detect_level(&mut self, sidechain_abs: f32) -> f32 {
+        match self.sidechain_mode {
+            SidechainMode::Peak | SidechainMode::StereoMax => sidechain_abs,
+            SidechainMode::Rms => {
+                self.rms_accumulator += sidechain_abs * sidechain_abs;
+                self.rms_count += 1;
+                if self.rms_count >= self.rms_window {
+                    self.rms_level = (self.rms_accumulator / self.rms_window as f32).sqrt();
+                    self.rms_accumulator = 0.0;
+                    self.rms_count = 0;
+                }
+                self.rms_level
+            }
         }
     }
 
     /// Process one sample: given a sidechain level, return the gain to apply to the music track.
     pub fn process_sample(&mut self, sidechain_abs: f32) -> f32 {
+        let level = self.detect_level(sidechain_abs);
+
         // Envelope follower (peak)
-        if sidechain_abs > self.envelope {
-            self.envelope =
-                self.attack_coeff * self.envelope + (1.0 - self.attack_coeff) * sidechain_abs;
+        if level > self.envelope {
+            self.envelope = self.attack_coeff * self.envelope + (1.0 - self.attack_coeff) * level;
         } else {
-            self.envelope =
-                self.release_coeff * self.envelope + (1.0 - self.release_coeff) * sidechain_abs;
+            self.envelope = self.release_coeff * self.envelope + (1.0 - self.release_coeff) * level;
         }
 
         // Determine target gain
@@ -200,11 +259,41 @@ impl Ducker {
         }
     }
 
+    /// Apply ducking to stereo music using a stereo sidechain.
+    ///
+    /// Uses `StereoMax` detection: the louder of the two sidechain channels
+    /// drives the ducking. Both music channels receive the same gain reduction
+    /// to preserve stereo image.
+    pub fn process_stereo_sidechain(
+        &mut self,
+        music_l: &mut [f32],
+        music_r: &mut [f32],
+        sidechain_l: &[f32],
+        sidechain_r: &[f32],
+    ) {
+        let len = music_l
+            .len()
+            .min(music_r.len())
+            .min(sidechain_l.len())
+            .min(sidechain_r.len());
+
+        for i in 0..len {
+            // Take the louder of the two sidechain channels
+            let sc_abs = sidechain_l[i].abs().max(sidechain_r[i].abs());
+            let gain = self.process_sample(sc_abs);
+            music_l[i] *= gain;
+            music_r[i] *= gain;
+        }
+    }
+
     /// Reset internal state.
     pub fn reset(&mut self) {
         self.envelope = 0.0;
         self.gain = 1.0;
         self.hold_counter = 0;
+        self.rms_accumulator = 0.0;
+        self.rms_count = 0;
+        self.rms_level = 0.0;
     }
 
     /// Get the current envelope value.
@@ -236,6 +325,7 @@ impl Ducker {
         self.attack_coeff = time_constant(self.config.attack_ms, sr);
         self.release_coeff = time_constant(self.config.release_ms, sr);
         self.hold_samples = (self.config.hold_ms * 0.001 * sr) as u32;
+        self.rms_window = (sr * 0.003).max(1.0) as u32;
     }
 }
 
@@ -382,5 +472,87 @@ mod tests {
         let mut ducker = Ducker::new(DuckingConfig::new(48000.0));
         ducker.set_sample_rate(96000.0);
         assert!((ducker.config.sample_rate - 96000.0).abs() < 1e-5);
+    }
+
+    // --- Sidechain mode tests ---
+
+    #[test]
+    fn test_sidechain_mode_rms() {
+        let config = DuckingConfig {
+            threshold_db: -30.0,
+            duck_amount_db: -12.0,
+            attack_ms: 1.0,
+            release_ms: 50.0,
+            hold_ms: 0.0,
+            sample_rate: 48000.0,
+        };
+        let mut ducker = Ducker::new(config);
+        ducker.set_sidechain_mode(SidechainMode::Rms);
+        assert_eq!(ducker.sidechain_mode(), SidechainMode::Rms);
+
+        // Feed loud sidechain — should still duck
+        for _ in 0..4800 {
+            ducker.process_sample(0.9);
+        }
+        assert!(ducker.current_gain() < 0.5);
+    }
+
+    #[test]
+    fn test_stereo_sidechain_ducking() {
+        let config = DuckingConfig {
+            threshold_db: -30.0,
+            duck_amount_db: -12.0,
+            attack_ms: 1.0,
+            release_ms: 50.0,
+            hold_ms: 0.0,
+            sample_rate: 48000.0,
+        };
+        let mut ducker = Ducker::new(config);
+
+        let mut music_l = vec![1.0f32; 4800];
+        let mut music_r = vec![1.0f32; 4800];
+        let sc_l = vec![0.9f32; 4800]; // Loud left sidechain
+        let sc_r = vec![0.0f32; 4800]; // Silent right sidechain
+
+        ducker.process_stereo_sidechain(&mut music_l, &mut music_r, &sc_l, &sc_r);
+
+        // Both channels should be ducked (stereo max uses loud left channel)
+        let last_l = music_l[4799];
+        let last_r = music_r[4799];
+        assert!(last_l < 0.5, "Left should be ducked, got {last_l}");
+        assert!(last_r < 0.5, "Right should be ducked, got {last_r}");
+        // Both channels get same gain to preserve stereo image
+        assert!(
+            (last_l - last_r).abs() < 1e-5,
+            "Stereo image should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_stereo_sidechain_no_trigger() {
+        let config = DuckingConfig {
+            threshold_db: -30.0,
+            duck_amount_db: -12.0,
+            attack_ms: 1.0,
+            release_ms: 50.0,
+            hold_ms: 0.0,
+            sample_rate: 48000.0,
+        };
+        let mut ducker = Ducker::new(config);
+
+        let mut music_l = vec![1.0f32; 100];
+        let mut music_r = vec![1.0f32; 100];
+        let sc_l = vec![0.0f32; 100];
+        let sc_r = vec![0.0f32; 100];
+
+        ducker.process_stereo_sidechain(&mut music_l, &mut music_r, &sc_l, &sc_r);
+
+        // Silent sidechain: no ducking
+        for &s in &music_l {
+            assert!(s > 0.99);
+        }
+        for &s in &music_r {
+            assert!(s > 0.99);
+        }
     }
 }

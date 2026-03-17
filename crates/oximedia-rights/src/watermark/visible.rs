@@ -1,6 +1,8 @@
 //! Visible watermark application
 
-use crate::{database::RightsDatabase, watermark::WatermarkConfig, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::database::RightsDatabase;
+use crate::{watermark::WatermarkConfig, Result};
 use uuid::Uuid;
 
 /// Visible watermark applicator
@@ -19,6 +21,7 @@ impl VisibleWatermark {
         &self.config
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save watermark configuration to database
     pub async fn save_config(&self, db: &RightsDatabase, asset_id: &str) -> Result<()> {
         let config_json = serde_json::to_string(&self.config)

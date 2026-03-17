@@ -5,7 +5,7 @@
 
 use crate::error::{WatermarkError, WatermarkResult};
 use crate::payload::{pack_bits, unpack_bits, PayloadCodec};
-use rustfft::{num_complex::Complex, FftPlanner};
+use oxifft::Complex;
 use std::f32::consts::PI;
 
 /// Phase coding configuration.
@@ -72,9 +72,6 @@ impl PhaseEmbedder {
         }
 
         let mut watermarked = samples.to_vec();
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(self.config.frame_size);
-        let ifft = planner.plan_fft_inverse(self.config.frame_size);
 
         // Use non-overlapping frames so that writing IFFT output back to the
         // signal buffer does not corrupt previously embedded frames.
@@ -97,9 +94,9 @@ impl PhaseEmbedder {
             let windowed = self.apply_window(frame);
 
             // FFT
-            let mut freq_data: Vec<Complex<f32>> =
+            let freq_input: Vec<Complex<f32>> =
                 windowed.iter().map(|&s| Complex::new(s, 0.0)).collect();
-            fft.process(&mut freq_data);
+            let mut freq_data = oxifft::fft(&freq_input);
 
             // Store original magnitudes
             let magnitudes: Vec<f32> = freq_data.iter().map(|c| c.norm()).collect();
@@ -143,17 +140,14 @@ impl PhaseEmbedder {
             }
 
             // IFFT
-            ifft.process(&mut freq_data);
+            let ifft_result = oxifft::ifft(&freq_data);
 
-            // Write back without re-applying the window so that the detector's
-            // FFT (which applies its own analysis window) reads back the intended
-            // phase values without double-windowing distortion.
-            #[allow(clippy::cast_precision_loss)]
-            let scale = 1.0 / self.config.frame_size as f32;
-            for (i, c) in freq_data.iter().enumerate() {
+            // Write back without re-applying the window.  oxifft::ifft already
+            // normalises its output by 1/N, so no additional scaling is required.
+            for (i, c) in ifft_result.iter().enumerate() {
                 let idx = frame_start + i;
                 if idx < watermarked.len() {
-                    watermarked[idx] = c.re * scale;
+                    watermarked[idx] = c.re;
                 }
             }
         }
@@ -215,8 +209,6 @@ impl PhaseDetector {
     /// Returns error if watermark not detected or decoding fails.
     pub fn detect(&self, samples: &[f32], expected_bits: usize) -> WatermarkResult<Vec<u8>> {
         let mut bits = Vec::new();
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(self.config.frame_size);
 
         // Use non-overlapping frames to match the embedder's frame layout.
         let hop_size = self.config.frame_size;
@@ -235,9 +227,9 @@ impl PhaseDetector {
             // No windowing: the embedder applies analysis window and writes back
             // IFFT output without synthesis window, so FFT(frame) recovers the
             // embedded phases exactly.
-            let mut freq_data: Vec<Complex<f32>> =
+            let freq_input: Vec<Complex<f32>> =
                 frame.iter().map(|&s| Complex::new(s, 0.0)).collect();
-            fft.process(&mut freq_data);
+            let freq_data = oxifft::fft(&freq_input);
 
             // Extract bits from phases
             let bits_per_frame =
@@ -302,14 +294,9 @@ impl RelativePhaseEmbedder {
     /// Embed bit by relative phase shift.
     #[must_use]
     pub fn embed_bit(&self, samples: &[f32], bit: bool) -> Vec<f32> {
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(self.frame_size);
-        let ifft = planner.plan_fft_inverse(self.frame_size);
+        let freq_input: Vec<Complex<f32>> = samples.iter().map(|&s| Complex::new(s, 0.0)).collect();
 
-        let mut freq_data: Vec<Complex<f32>> =
-            samples.iter().map(|&s| Complex::new(s, 0.0)).collect();
-
-        fft.process(&mut freq_data);
+        let mut freq_data = oxifft::fft(&freq_input);
 
         // Apply relative phase shift
         let delta = if bit {
@@ -328,10 +315,10 @@ impl RelativePhaseEmbedder {
             freq_data[mirror] = freq_data[i].conj();
         }
 
-        ifft.process(&mut freq_data);
+        let ifft_result = oxifft::ifft(&freq_data);
 
         #[allow(clippy::cast_precision_loss)]
-        freq_data
+        ifft_result
             .iter()
             .map(|c| c.re / self.frame_size as f32)
             .collect()
@@ -349,14 +336,15 @@ mod tests {
         let embedder = PhaseEmbedder::new(config.clone());
         let detector = PhaseDetector::new(config);
 
-        // Use a non-zero varying signal; with a zero signal the FFT magnitudes
-        // are all zero, making phase detection unreliable.
-        // "Phase" (5 bytes) needs enough frames; with frame_size=2048, hop=1024,
-        // and bins_per_frame=(500-10)/5=98 bits per frame, just a few frames suffice.
-        // Use 50000 samples which gives ~48 frames * 98 bits = ~4700 bits capacity.
-        let samples: Vec<f32> = (0..50000)
-            .map(|i| (2.0 * PI * 1000.0 * i as f32 / 44100.0).sin() * 0.5)
-            .collect();
+        // Phase coding requires broadband signal energy across all embedding bins
+        // (bins 10-499 with this config).  A pure sine wave concentrates energy at
+        // a single bin, leaving most embedding bins with near-zero magnitude and
+        // unreliable phase detection.  Use pseudo-random noise instead.
+        // With frame_size=2048 (non-overlapping frames) and 50000 samples we get
+        // 24 frames × 98 bits/frame = 2352 bits of capacity, well above the
+        // encoded payload size.
+        let mut rng = scirs2_core::random::Random::seed(42);
+        let samples: Vec<f32> = (0..50000).map(|_| rng.random_f64() as f32 - 0.5).collect();
         let payload = b"Phase";
 
         let watermarked = embedder

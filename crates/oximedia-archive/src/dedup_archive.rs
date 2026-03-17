@@ -267,6 +267,209 @@ pub struct DedupStats {
     pub bytes_saved: u64,
 }
 
+// ---------------------------------------------------------------------------
+// Deduplication reporting
+// ---------------------------------------------------------------------------
+
+/// Information about a single duplicate group (files sharing the same content).
+#[derive(Debug, Clone)]
+pub struct DuplicateGroup {
+    /// The content fingerprint digest shared by all files in this group.
+    pub fingerprint_digest: String,
+    /// Size of each file in bytes.
+    pub size_bytes: u64,
+    /// The canonical (first-stored) path.
+    pub canonical_path: String,
+    /// All reference paths including the canonical one.
+    pub all_paths: Vec<String>,
+    /// Number of duplicate copies (total references - 1).
+    pub duplicate_count: u32,
+    /// Bytes wasted by duplicates (size * duplicate_count).
+    pub wasted_bytes: u64,
+}
+
+/// Comprehensive deduplication report with space savings analysis.
+#[derive(Debug, Clone)]
+pub struct DedupReport {
+    /// Total number of unique content items.
+    pub unique_count: usize,
+    /// Total number of references (unique + duplicates).
+    pub total_references: u64,
+    /// Total number of duplicate references (references - unique).
+    pub duplicate_count: u64,
+    /// Total bytes saved by deduplication.
+    pub total_bytes_saved: u64,
+    /// Total logical size (sum of all referenced content sizes).
+    pub total_logical_size: u64,
+    /// Total physical size (sum of unique content sizes only).
+    pub total_physical_size: u64,
+    /// Deduplication ratio (logical / physical). Higher = more savings.
+    pub dedup_ratio: f64,
+    /// Percentage of space saved (0.0 to 100.0).
+    pub savings_percentage: f64,
+    /// Groups of duplicate files, sorted by wasted bytes descending.
+    pub duplicate_groups: Vec<DuplicateGroup>,
+    /// Top N duplicate groups by wasted bytes.
+    pub top_wasters: Vec<DuplicateGroup>,
+    /// Distribution of reference counts (refcount -> number of entries with that refcount).
+    pub refcount_distribution: Vec<(u32, usize)>,
+}
+
+impl DedupReport {
+    /// Format the report as a human-readable string.
+    #[must_use]
+    pub fn to_summary_string(&self) -> String {
+        let mut out = String::new();
+        out.push_str("=== Deduplication Report ===\n");
+        out.push_str(&format!("Unique items:       {}\n", self.unique_count));
+        out.push_str(&format!("Total references:   {}\n", self.total_references));
+        out.push_str(&format!("Duplicate refs:     {}\n", self.duplicate_count));
+        out.push_str(&format!(
+            "Logical size:       {} bytes\n",
+            self.total_logical_size
+        ));
+        out.push_str(&format!(
+            "Physical size:      {} bytes\n",
+            self.total_physical_size
+        ));
+        out.push_str(&format!(
+            "Space saved:        {} bytes ({:.1}%)\n",
+            self.total_bytes_saved, self.savings_percentage
+        ));
+        out.push_str(&format!("Dedup ratio:        {:.2}x\n", self.dedup_ratio));
+
+        if !self.top_wasters.is_empty() {
+            out.push_str("\nTop duplicate groups by wasted space:\n");
+            for (i, group) in self.top_wasters.iter().enumerate() {
+                out.push_str(&format!(
+                    "  {}. {} — {} bytes x {} copies = {} bytes wasted\n",
+                    i + 1,
+                    group.canonical_path,
+                    group.size_bytes,
+                    group.duplicate_count,
+                    group.wasted_bytes,
+                ));
+            }
+        }
+
+        if !self.refcount_distribution.is_empty() {
+            out.push_str("\nReference count distribution:\n");
+            for (refcount, count) in &self.refcount_distribution {
+                out.push_str(&format!("  {refcount} refs: {count} entries\n"));
+            }
+        }
+
+        out
+    }
+}
+
+/// Enhanced dedup index with reporting capabilities.
+impl DedupIndex {
+    /// Generate a comprehensive deduplication report.
+    #[must_use]
+    pub fn generate_report(&self, top_n: usize) -> DedupReport {
+        let mut duplicate_groups = Vec::new();
+        let mut total_logical_size: u64 = 0;
+        let mut total_physical_size: u64 = 0;
+        let mut refcount_map: HashMap<u32, usize> = HashMap::new();
+
+        for entry in self.entries.values() {
+            let size = entry.fingerprint.size_bytes();
+            let refs = entry.refcount;
+            total_physical_size += size;
+            total_logical_size += size * u64::from(refs);
+
+            *refcount_map.entry(refs).or_insert(0) += 1;
+
+            if refs > 1 {
+                let duplicate_count = refs - 1;
+                let wasted = size * u64::from(duplicate_count);
+
+                duplicate_groups.push(DuplicateGroup {
+                    fingerprint_digest: entry.fingerprint.digest().to_string(),
+                    size_bytes: size,
+                    canonical_path: entry.canonical_path.clone(),
+                    all_paths: vec![entry.canonical_path.clone()],
+                    duplicate_count,
+                    wasted_bytes: wasted,
+                });
+            }
+        }
+
+        // Sort by wasted bytes descending
+        duplicate_groups.sort_by(|a, b| b.wasted_bytes.cmp(&a.wasted_bytes));
+
+        let top_wasters: Vec<DuplicateGroup> =
+            duplicate_groups.iter().take(top_n).cloned().collect();
+
+        let total_refs: u64 = self.entries.values().map(|e| u64::from(e.refcount)).sum();
+        let duplicate_count = total_refs.saturating_sub(self.entries.len() as u64);
+
+        let dedup_ratio = if total_physical_size == 0 {
+            1.0
+        } else {
+            total_logical_size as f64 / total_physical_size as f64
+        };
+
+        let savings_percentage = if total_logical_size == 0 {
+            0.0
+        } else {
+            (self.bytes_saved as f64 / total_logical_size as f64) * 100.0
+        };
+
+        let mut refcount_distribution: Vec<(u32, usize)> = refcount_map.into_iter().collect();
+        refcount_distribution.sort_by_key(|(rc, _)| *rc);
+
+        DedupReport {
+            unique_count: self.entries.len(),
+            total_references: total_refs,
+            duplicate_count,
+            total_bytes_saved: self.bytes_saved,
+            total_logical_size,
+            total_physical_size,
+            dedup_ratio,
+            savings_percentage,
+            duplicate_groups,
+            top_wasters,
+            refcount_distribution,
+        }
+    }
+
+    /// Get a list of all duplicate file paths grouped by fingerprint.
+    #[must_use]
+    pub fn list_duplicates(&self) -> Vec<(&str, u32, u64)> {
+        self.entries
+            .values()
+            .filter(|e| e.refcount > 1)
+            .map(|e| {
+                (
+                    e.canonical_path.as_str(),
+                    e.refcount,
+                    e.fingerprint.size_bytes(),
+                )
+            })
+            .collect()
+    }
+
+    /// Estimate total storage needed if dedup is applied.
+    #[must_use]
+    pub fn estimated_physical_storage(&self) -> u64 {
+        self.entries
+            .values()
+            .map(|e| e.fingerprint.size_bytes())
+            .sum()
+    }
+
+    /// Estimate total logical storage (without dedup).
+    #[must_use]
+    pub fn estimated_logical_storage(&self) -> u64 {
+        self.entries
+            .values()
+            .map(|e| e.fingerprint.size_bytes() * u64::from(e.refcount))
+            .sum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,5 +590,166 @@ mod tests {
         let stats = idx.stats();
         assert_eq!(stats.unique_entries, 2);
         assert_eq!(stats.total_references, 3); // 2 refs for one, 1 for other
+    }
+
+    // --- Dedup reporting tests ---
+
+    #[test]
+    fn test_report_empty_index() {
+        let idx = DedupIndex::with_defaults();
+        let report = idx.generate_report(5);
+        assert_eq!(report.unique_count, 0);
+        assert_eq!(report.total_references, 0);
+        assert_eq!(report.duplicate_count, 0);
+        assert!((report.dedup_ratio - 1.0).abs() < f64::EPSILON);
+        assert!(report.duplicate_groups.is_empty());
+    }
+
+    #[test]
+    fn test_report_no_duplicates() {
+        let mut idx = DedupIndex::with_defaults();
+        idx.ingest(b"unique_a", "/a.mxf");
+        idx.ingest(b"unique_b", "/b.mxf");
+        idx.ingest(b"unique_c", "/c.mxf");
+
+        let report = idx.generate_report(5);
+        assert_eq!(report.unique_count, 3);
+        assert_eq!(report.duplicate_count, 0);
+        assert!(report.duplicate_groups.is_empty());
+        assert_eq!(report.total_bytes_saved, 0);
+    }
+
+    #[test]
+    fn test_report_with_duplicates() {
+        let mut idx = DedupIndex::with_defaults();
+        idx.ingest(b"content_dup", "/archive/a.mxf");
+        idx.ingest(b"content_dup", "/archive/b.mxf");
+        idx.ingest(b"content_dup", "/archive/c.mxf");
+        idx.ingest(b"content_unique", "/archive/d.mxf");
+
+        let report = idx.generate_report(5);
+        assert_eq!(report.unique_count, 2);
+        assert_eq!(report.total_references, 4);
+        assert_eq!(report.duplicate_count, 2);
+        assert!(report.total_bytes_saved > 0);
+        assert_eq!(report.duplicate_groups.len(), 1);
+        assert_eq!(report.duplicate_groups[0].duplicate_count, 2);
+    }
+
+    #[test]
+    fn test_report_top_wasters_limit() {
+        let mut idx = DedupIndex::with_defaults();
+        // Create several duplicate groups
+        idx.ingest(b"small_dup", "/s1.mxf");
+        idx.ingest(b"small_dup", "/s2.mxf");
+        idx.ingest(b"medium_dup_data!", "/m1.mxf");
+        idx.ingest(b"medium_dup_data!", "/m2.mxf");
+        idx.ingest(b"large_duplicate_content_here", "/l1.mxf");
+        idx.ingest(b"large_duplicate_content_here", "/l2.mxf");
+        idx.ingest(b"large_duplicate_content_here", "/l3.mxf");
+
+        let report = idx.generate_report(2);
+        assert_eq!(report.top_wasters.len(), 2);
+        // Top waster should have more wasted bytes than second
+        assert!(report.top_wasters[0].wasted_bytes >= report.top_wasters[1].wasted_bytes);
+    }
+
+    #[test]
+    fn test_report_dedup_ratio() {
+        let mut idx = DedupIndex::with_defaults();
+        idx.ingest(b"aaaaaaaaaa", "/a.bin"); // 10 bytes
+        idx.ingest(b"aaaaaaaaaa", "/b.bin"); // duplicate
+
+        let report = idx.generate_report(5);
+        // Logical = 10 * 2 = 20, Physical = 10, ratio = 2.0
+        assert!((report.dedup_ratio - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_report_savings_percentage() {
+        let mut idx = DedupIndex::with_defaults();
+        let content = b"test_content";
+        idx.ingest(content, "/a.bin");
+        idx.ingest(content, "/b.bin");
+
+        let report = idx.generate_report(5);
+        assert!(report.savings_percentage > 0.0);
+        assert!(report.savings_percentage <= 100.0);
+    }
+
+    #[test]
+    fn test_report_refcount_distribution() {
+        let mut idx = DedupIndex::with_defaults();
+        idx.ingest(b"once", "/a.bin");
+        idx.ingest(b"twice", "/b.bin");
+        idx.ingest(b"twice", "/c.bin");
+        idx.ingest(b"thrice", "/d.bin");
+        idx.ingest(b"thrice", "/e.bin");
+        idx.ingest(b"thrice", "/f.bin");
+
+        let report = idx.generate_report(5);
+        // Should have entries for refcount 1, 2, and 3
+        assert!(!report.refcount_distribution.is_empty());
+        let rc_map: HashMap<u32, usize> = report.refcount_distribution.into_iter().collect();
+        assert_eq!(rc_map.get(&1), Some(&1)); // 1 item with refcount 1
+        assert_eq!(rc_map.get(&2), Some(&1)); // 1 item with refcount 2
+        assert_eq!(rc_map.get(&3), Some(&1)); // 1 item with refcount 3
+    }
+
+    #[test]
+    fn test_report_summary_string() {
+        let mut idx = DedupIndex::with_defaults();
+        idx.ingest(b"content", "/a.mxf");
+        idx.ingest(b"content", "/b.mxf");
+
+        let report = idx.generate_report(5);
+        let summary = report.to_summary_string();
+        assert!(summary.contains("Deduplication Report"));
+        assert!(summary.contains("Unique items"));
+        assert!(summary.contains("Space saved"));
+        assert!(summary.contains("Dedup ratio"));
+    }
+
+    #[test]
+    fn test_list_duplicates() {
+        let mut idx = DedupIndex::with_defaults();
+        idx.ingest(b"unique", "/a.bin");
+        idx.ingest(b"dup_content", "/b.bin");
+        idx.ingest(b"dup_content", "/c.bin");
+
+        let dups = idx.list_duplicates();
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].1, 2); // refcount
+    }
+
+    #[test]
+    fn test_estimated_storage() {
+        let mut idx = DedupIndex::with_defaults();
+        let content_a = b"aaaa"; // 4 bytes
+        let content_b = b"bbbb"; // 4 bytes
+        idx.ingest(content_a, "/a.bin");
+        idx.ingest(content_a, "/a2.bin");
+        idx.ingest(content_b, "/b.bin");
+
+        // Physical = 4 + 4 = 8
+        assert_eq!(idx.estimated_physical_storage(), 8);
+        // Logical = 4*2 + 4*1 = 12
+        assert_eq!(idx.estimated_logical_storage(), 12);
+    }
+
+    #[test]
+    fn test_report_sorted_by_wasted() {
+        let mut idx = DedupIndex::with_defaults();
+        idx.ingest(b"aa", "/s.bin");
+        idx.ingest(b"aa", "/s2.bin");
+        idx.ingest(b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "/l.bin");
+        idx.ingest(b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "/l2.bin");
+
+        let report = idx.generate_report(10);
+        if report.duplicate_groups.len() >= 2 {
+            assert!(
+                report.duplicate_groups[0].wasted_bytes >= report.duplicate_groups[1].wasted_bytes
+            );
+        }
     }
 }

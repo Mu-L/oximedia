@@ -190,6 +190,157 @@ impl SaliencyMap {
     }
 }
 
+/// Content type hint used to select appropriate saliency model weights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentTypeHint {
+    /// General-purpose content (default weights).
+    General,
+    /// Face-heavy content (portrait, interview).
+    Face,
+    /// Sports / fast-action content.
+    Sports,
+    /// Documentary / talking-head content.
+    Documentary,
+    /// Screen capture / UI content.
+    ScreenCapture,
+    /// Landscape / nature content.
+    Nature,
+}
+
+impl ContentTypeHint {
+    /// Return a label string for the content type.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Face => "face",
+            Self::Sports => "sports",
+            Self::Documentary => "documentary",
+            Self::ScreenCapture => "screen_capture",
+            Self::Nature => "nature",
+        }
+    }
+}
+
+/// Saliency model weights for a specific content type.
+///
+/// Each weight is in `[0.0, 1.0]` and controls how strongly each cue
+/// contributes to the final saliency map.  Weights do not need to sum to 1.0;
+/// the analyzer normalises them internally.
+#[derive(Debug, Clone)]
+pub struct SaliencyModelWeights {
+    /// Weight for center-surround (local contrast) cue.
+    pub center_surround: f32,
+    /// Weight for high-frequency edge/texture cue.
+    pub edge_texture: f32,
+    /// Weight for color distinctiveness cue (requires UV planes).
+    pub color_distinctiveness: f32,
+    /// Weight for spatial center bias (center of frame tends to be salient).
+    pub center_bias: f32,
+}
+
+impl SaliencyModelWeights {
+    /// Default (general-purpose) weights.
+    #[must_use]
+    pub fn general() -> Self {
+        Self {
+            center_surround: 0.40,
+            edge_texture: 0.30,
+            color_distinctiveness: 0.20,
+            center_bias: 0.10,
+        }
+    }
+
+    /// Weights tuned for face-heavy content: strong center bias and color cue.
+    #[must_use]
+    pub fn face() -> Self {
+        Self {
+            center_surround: 0.25,
+            edge_texture: 0.20,
+            color_distinctiveness: 0.30,
+            center_bias: 0.25,
+        }
+    }
+
+    /// Weights tuned for sports content: emphasise local contrast and edges.
+    #[must_use]
+    pub fn sports() -> Self {
+        Self {
+            center_surround: 0.45,
+            edge_texture: 0.40,
+            color_distinctiveness: 0.10,
+            center_bias: 0.05,
+        }
+    }
+
+    /// Weights tuned for documentary / talking-head content.
+    #[must_use]
+    pub fn documentary() -> Self {
+        Self {
+            center_surround: 0.30,
+            edge_texture: 0.25,
+            color_distinctiveness: 0.20,
+            center_bias: 0.25,
+        }
+    }
+
+    /// Weights tuned for screen-capture content: prioritise edges/text over blobs.
+    #[must_use]
+    pub fn screen_capture() -> Self {
+        Self {
+            center_surround: 0.20,
+            edge_texture: 0.60,
+            color_distinctiveness: 0.15,
+            center_bias: 0.05,
+        }
+    }
+
+    /// Weights tuned for nature / landscape content.
+    #[must_use]
+    pub fn nature() -> Self {
+        Self {
+            center_surround: 0.35,
+            edge_texture: 0.25,
+            color_distinctiveness: 0.30,
+            center_bias: 0.10,
+        }
+    }
+
+    /// Return the preset weights for the given `ContentTypeHint`.
+    #[must_use]
+    pub fn for_content(hint: ContentTypeHint) -> Self {
+        match hint {
+            ContentTypeHint::General => Self::general(),
+            ContentTypeHint::Face => Self::face(),
+            ContentTypeHint::Sports => Self::sports(),
+            ContentTypeHint::Documentary => Self::documentary(),
+            ContentTypeHint::ScreenCapture => Self::screen_capture(),
+            ContentTypeHint::Nature => Self::nature(),
+        }
+    }
+
+    /// Validate that all weights are non-negative and return the weight sum.
+    #[must_use]
+    pub fn weight_sum(&self) -> f32 {
+        self.center_surround + self.edge_texture + self.color_distinctiveness + self.center_bias
+    }
+
+    /// Normalise weights so they sum to 1.0.  Returns `None` if sum is zero.
+    #[must_use]
+    pub fn normalised(&self) -> Option<Self> {
+        let s = self.weight_sum();
+        if s < f32::EPSILON {
+            return None;
+        }
+        Some(Self {
+            center_surround: self.center_surround / s,
+            edge_texture: self.edge_texture / s,
+            color_distinctiveness: self.color_distinctiveness / s,
+            center_bias: self.center_bias / s,
+        })
+    }
+}
+
 /// Configuration for the saliency analyzer.
 #[derive(Debug, Clone)]
 pub struct SaliencyAnalyzerConfig {
@@ -201,6 +352,10 @@ pub struct SaliencyAnalyzerConfig {
     pub top_region_count: usize,
     /// Block size used when computing top regions.
     pub block_size: u32,
+    /// Content type hint used to select model weights.
+    pub content_hint: ContentTypeHint,
+    /// Custom model weights (overrides `content_hint` when set).
+    pub custom_weights: Option<SaliencyModelWeights>,
 }
 
 impl Default for SaliencyAnalyzerConfig {
@@ -210,6 +365,8 @@ impl Default for SaliencyAnalyzerConfig {
             saliency_threshold: 0.5,
             top_region_count: 5,
             block_size: 32,
+            content_hint: ContentTypeHint::General,
+            custom_weights: None,
         }
     }
 }

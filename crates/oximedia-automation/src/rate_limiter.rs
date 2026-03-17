@@ -150,7 +150,7 @@ pub struct RateLimitStats {
 impl RateLimitStats {
     /// Returns the rejection rate as a fraction (0.0-1.0).
     #[must_use]
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss, clippy::manual_checked_ops)]
     pub fn rejection_rate(&self) -> f64 {
         if self.total_checked == 0 {
             return 0.0;
@@ -260,8 +260,9 @@ impl RateLimiterEngine {
 
         // Refill tokens
         let elapsed = now_ms.saturating_sub(state.last_refill_ms);
-        if self.config.window_ms > 0 {
-            let refill = elapsed * self.config.max_commands / self.config.window_ms;
+        if let Some(refill) =
+            (elapsed * self.config.max_commands).checked_div(self.config.window_ms)
+        {
             state.tokens = (state.tokens + refill).min(self.config.burst_size);
         }
         state.last_refill_ms = now_ms;

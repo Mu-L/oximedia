@@ -1,8 +1,11 @@
 //! Usage reporting
 
-use crate::{database::RightsDatabase, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::database::RightsDatabase;
+use crate::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use sqlx::Row;
 use std::collections::HashMap;
 

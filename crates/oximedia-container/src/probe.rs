@@ -58,7 +58,7 @@ const TS_PACKET_SIZE: usize = 188;
 ///
 /// // WebM/Matroska header
 /// let data = [0x1A, 0x45, 0xDF, 0xA3, 0x01, 0x00, 0x00, 0x00];
-/// let result = probe_format(&data)?;
+/// let result = probe_format(&data).expect("valid header");
 /// assert_eq!(result.format, ContainerFormat::Matroska);
 /// ```
 pub fn probe_format(data: &[u8]) -> Result<ProbeResult, OxiError> {

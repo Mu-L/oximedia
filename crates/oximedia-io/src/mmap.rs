@@ -1,7 +1,8 @@
 //! Memory-mapped I/O simulation.
 //!
 //! Provides in-process simulation of memory-mapped file I/O, including
-//! region-based slicing, typed reads, and page-aligned buffer allocation.
+//! region-based slicing, typed reads, page-aligned buffer allocation, and
+//! huge page configuration metadata for large-file mappings on Linux.
 
 #![allow(dead_code)]
 
@@ -303,5 +304,335 @@ mod tests {
         // Zero size should still allocate one page.
         let buf = PageAlignedBuffer::new(0);
         assert_eq!(buf.aligned_len(), 4096);
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// HugePageConfig — huge page support metadata
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Huge page size variants available on Linux.
+///
+/// On Linux, huge pages can be configured via `madvise(MADV_HUGEPAGE)` or
+/// `MAP_HUGETLB`. This enum captures the most common sizes and is used to
+/// annotate `MmapFile` regions for large-file optimisations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HugePageSize {
+    /// 2 MiB huge pages (most common on x86-64 Linux).
+    TwoMib,
+    /// 1 GiB huge pages (requires kernel huge-page pool pre-allocation).
+    OneGib,
+    /// Custom size in bytes (must be a multiple of the system base page size).
+    Custom(usize),
+}
+
+impl HugePageSize {
+    /// Return the size in bytes.
+    #[must_use]
+    pub fn bytes(self) -> usize {
+        match self {
+            Self::TwoMib => 2 * 1024 * 1024,
+            Self::OneGib => 1024 * 1024 * 1024,
+            Self::Custom(n) => n,
+        }
+    }
+}
+
+impl std::fmt::Display for HugePageSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TwoMib => write!(f, "2MiB"),
+            Self::OneGib => write!(f, "1GiB"),
+            Self::Custom(n) => write!(f, "custom-{}B", n),
+        }
+    }
+}
+
+/// Policy for requesting huge pages on a mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HugePagePolicy {
+    /// Do not request huge pages (default small-page behaviour).
+    #[default]
+    Disabled,
+    /// Request transparent huge pages via `madvise(MADV_HUGEPAGE)`.
+    ///
+    /// The kernel may promote pages to huge pages at any point; this is a
+    /// best-effort hint only (Linux-specific).
+    Transparent,
+    /// Require explicit huge pages via `MAP_HUGETLB`.
+    ///
+    /// The mapping must be backed by pre-allocated huge pages from the kernel
+    /// huge-page pool. Falls back to `Disabled` on non-Linux platforms.
+    Explicit(HugePageSize),
+}
+
+impl HugePagePolicy {
+    /// Returns `true` if huge pages are requested in any form.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    /// Returns the explicit huge page size, if configured.
+    #[must_use]
+    pub fn explicit_size(&self) -> Option<HugePageSize> {
+        match self {
+            Self::Explicit(sz) => Some(*sz),
+            _ => None,
+        }
+    }
+
+    /// Return a human-readable description.
+    #[must_use]
+    pub fn description(&self) -> String {
+        match self {
+            Self::Disabled => "disabled".to_string(),
+            Self::Transparent => "transparent (MADV_HUGEPAGE)".to_string(),
+            Self::Explicit(sz) => format!("explicit MAP_HUGETLB ({})", sz),
+        }
+    }
+}
+
+/// Minimum file-size threshold (in bytes) above which huge pages are recommended.
+///
+/// Files smaller than this are generally not worth the overhead of huge page
+/// setup; the threshold here corresponds to a single 2 MiB huge page.
+pub const HUGE_PAGE_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024;
+
+/// A memory-mapped file region annotated with huge-page configuration.
+///
+/// On Linux, `MmapRegionHuge` carries metadata that would be passed to
+/// `madvise(2)` or `mmap(2)` with `MAP_HUGETLB` when creating the actual
+/// OS mapping. In this pure-Rust simulation the data is backed by a `Vec<u8>`.
+#[derive(Debug, Clone)]
+pub struct MmapRegionHuge {
+    /// The base simulated region.
+    pub region: MmapRegion,
+    /// Huge-page policy for this region.
+    pub policy: HugePagePolicy,
+    /// Whether the effective mapping is backed by huge pages (simulation flag).
+    pub huge_pages_active: bool,
+}
+
+impl MmapRegionHuge {
+    /// Create a new huge-page-enabled region.
+    ///
+    /// `huge_pages_active` is set to `true` when `policy` is not `Disabled`
+    /// and the region is large enough (`>= HUGE_PAGE_THRESHOLD_BYTES`).
+    #[must_use]
+    pub fn new(data: Vec<u8>, offset: u64, policy: HugePagePolicy) -> Self {
+        let large_enough = data.len() as u64 >= HUGE_PAGE_THRESHOLD_BYTES;
+        let huge_pages_active = policy.is_enabled() && large_enough;
+        let region = MmapRegion::new(data, offset);
+        Self {
+            region,
+            policy,
+            huge_pages_active,
+        }
+    }
+
+    /// Return the number of huge pages that would be required to back this region.
+    ///
+    /// Returns `None` if huge pages are not configured or if the region is not
+    /// large enough.
+    #[must_use]
+    pub fn required_huge_pages(&self) -> Option<usize> {
+        let sz = match self.policy {
+            HugePagePolicy::Explicit(sz) => sz,
+            _ => return None,
+        };
+        let page_bytes = sz.bytes();
+        if page_bytes == 0 {
+            return None;
+        }
+        Some(self.region.length.div_ceil(page_bytes as u64) as usize)
+    }
+
+    /// Return a slice of the underlying data.
+    #[must_use]
+    pub fn slice(&self, start: u64, len: usize) -> Option<&[u8]> {
+        self.region.slice(start, len)
+    }
+}
+
+/// A `MmapFile` that supports huge page annotations on individual regions.
+#[derive(Debug, Default)]
+pub struct MmapFileHuge {
+    /// Logical path of the file.
+    pub path: String,
+    /// Regions with huge-page metadata.
+    pub regions: Vec<MmapRegionHuge>,
+    /// Running total of bytes.
+    pub total_size: u64,
+    /// Default policy applied to new regions when the file exceeds the threshold.
+    pub default_policy: HugePagePolicy,
+}
+
+impl MmapFileHuge {
+    /// Create an empty `MmapFileHuge`.
+    #[must_use]
+    pub fn new(path: impl Into<String>, default_policy: HugePagePolicy) -> Self {
+        Self {
+            path: path.into(),
+            regions: Vec::new(),
+            total_size: 0,
+            default_policy,
+        }
+    }
+
+    /// Map a region with the default policy.
+    pub fn map_region(&mut self, data: Vec<u8>, offset: u64) -> usize {
+        let policy = if data.len() as u64 >= HUGE_PAGE_THRESHOLD_BYTES {
+            self.default_policy
+        } else {
+            HugePagePolicy::Disabled
+        };
+        self.map_region_with_policy(data, offset, policy)
+    }
+
+    /// Map a region with an explicit policy override.
+    pub fn map_region_with_policy(
+        &mut self,
+        data: Vec<u8>,
+        offset: u64,
+        policy: HugePagePolicy,
+    ) -> usize {
+        let region = MmapRegionHuge::new(data, offset, policy);
+        self.total_size += region.region.length;
+        self.regions.push(region);
+        self.regions.len() - 1
+    }
+
+    /// Count regions that have huge pages active.
+    #[must_use]
+    pub fn huge_page_region_count(&self) -> usize {
+        self.regions.iter().filter(|r| r.huge_pages_active).count()
+    }
+
+    /// Total bytes backed by huge pages.
+    #[must_use]
+    pub fn huge_page_bytes(&self) -> u64 {
+        self.regions
+            .iter()
+            .filter(|r| r.huge_pages_active)
+            .map(|r| r.region.length)
+            .sum()
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tests — huge page additions
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod huge_page_tests {
+    use super::*;
+
+    #[test]
+    fn test_huge_page_size_bytes() {
+        assert_eq!(HugePageSize::TwoMib.bytes(), 2 * 1024 * 1024);
+        assert_eq!(HugePageSize::OneGib.bytes(), 1024 * 1024 * 1024);
+        assert_eq!(HugePageSize::Custom(4096).bytes(), 4096);
+    }
+
+    #[test]
+    fn test_huge_page_size_display() {
+        assert_eq!(HugePageSize::TwoMib.to_string(), "2MiB");
+        assert_eq!(HugePageSize::OneGib.to_string(), "1GiB");
+        assert_eq!(HugePageSize::Custom(8192).to_string(), "custom-8192B");
+    }
+
+    #[test]
+    fn test_huge_page_policy_disabled() {
+        let p = HugePagePolicy::Disabled;
+        assert!(!p.is_enabled());
+        assert!(p.explicit_size().is_none());
+    }
+
+    #[test]
+    fn test_huge_page_policy_transparent() {
+        let p = HugePagePolicy::Transparent;
+        assert!(p.is_enabled());
+        assert!(p.explicit_size().is_none());
+        assert!(p.description().contains("MADV_HUGEPAGE"));
+    }
+
+    #[test]
+    fn test_huge_page_policy_explicit() {
+        let p = HugePagePolicy::Explicit(HugePageSize::TwoMib);
+        assert!(p.is_enabled());
+        assert_eq!(p.explicit_size(), Some(HugePageSize::TwoMib));
+        assert!(p.description().contains("MAP_HUGETLB"));
+    }
+
+    #[test]
+    fn test_mmap_region_huge_small_data_disabled() {
+        // Small region: huge_pages_active should be false even with policy enabled
+        let data = vec![0u8; 1024]; // only 1 KiB — below threshold
+        let region = MmapRegionHuge::new(data, 0, HugePagePolicy::Transparent);
+        assert!(!region.huge_pages_active);
+    }
+
+    #[test]
+    fn test_mmap_region_huge_large_data_transparent() {
+        // Large region (2 MiB): huge pages should activate
+        let data = vec![0u8; 2 * 1024 * 1024];
+        let region = MmapRegionHuge::new(data, 0, HugePagePolicy::Transparent);
+        assert!(region.huge_pages_active);
+    }
+
+    #[test]
+    fn test_mmap_region_huge_required_pages() {
+        let data = vec![0u8; 4 * 1024 * 1024]; // 4 MiB = 2 × 2MiB huge pages
+        let region = MmapRegionHuge::new(data, 0, HugePagePolicy::Explicit(HugePageSize::TwoMib));
+        assert_eq!(region.required_huge_pages(), Some(2));
+    }
+
+    #[test]
+    fn test_mmap_region_huge_required_pages_none_when_transparent() {
+        let data = vec![0u8; 4 * 1024 * 1024];
+        let region = MmapRegionHuge::new(data, 0, HugePagePolicy::Transparent);
+        assert_eq!(region.required_huge_pages(), None);
+    }
+
+    #[test]
+    fn test_mmap_region_huge_slice() {
+        let data = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
+        let region = MmapRegionHuge::new(data, 0, HugePagePolicy::Disabled);
+        assert_eq!(region.slice(2, 3), Some([3u8, 4, 5].as_slice()));
+    }
+
+    #[test]
+    fn test_mmap_file_huge_map_regions() {
+        let mut f = MmapFileHuge::new("big.raw", HugePagePolicy::Transparent);
+        // Small region: policy disabled due to size
+        let idx0 = f.map_region(vec![0u8; 512], 0);
+        // Large region: transparent policy applied
+        let large = vec![0u8; 2 * 1024 * 1024];
+        let idx1 = f.map_region(large, 512);
+        assert_eq!(idx0, 0);
+        assert_eq!(idx1, 1);
+        assert_eq!(f.huge_page_region_count(), 1);
+    }
+
+    #[test]
+    fn test_mmap_file_huge_bytes() {
+        let mut f = MmapFileHuge::new("x", HugePagePolicy::Explicit(HugePageSize::TwoMib));
+        let large = vec![0u8; 2 * 1024 * 1024];
+        f.map_region(large, 0);
+        assert_eq!(f.huge_page_bytes(), 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_mmap_file_huge_policy_override() {
+        let mut f = MmapFileHuge::new("x", HugePagePolicy::Disabled);
+        // Override: force huge pages even on this small region
+        f.map_region_with_policy(
+            vec![0u8; 16],
+            0,
+            HugePagePolicy::Explicit(HugePageSize::TwoMib),
+        );
+        // small: huge_pages_active = false (not big enough)
+        assert_eq!(f.huge_page_region_count(), 0);
     }
 }

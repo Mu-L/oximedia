@@ -260,8 +260,17 @@ impl Backend for CpuBackend {
 }
 
 impl Default for CpuBackend {
+    /// Creates a CPU backend with default settings.
+    ///
+    /// # Panics
+    ///
+    /// Panics if CPU backend initialization fails. Prefer
+    /// [`CpuBackend::new()`] for fallible construction.
     fn default() -> Self {
-        Self::new().expect("Failed to initialize CPU backend")
+        match Self::new() {
+            Ok(backend) => backend,
+            Err(e) => panic!("Failed to initialize CPU backend: {e}"),
+        }
     }
 }
 

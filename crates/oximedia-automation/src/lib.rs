@@ -77,10 +77,12 @@
 
 pub mod action_catalog;
 pub mod audit_trail;
+pub mod automation_log;
 pub mod channel;
 pub mod compliance_checker;
 pub mod condition_eval;
 pub mod config;
+pub mod cue_trigger;
 pub mod device;
 pub mod device_control;
 pub mod eas;
@@ -90,6 +92,7 @@ pub mod examples;
 pub mod execution_log;
 pub mod failover;
 pub mod health_probe;
+pub mod interlock;
 pub mod live;
 pub mod logging;
 pub mod macro_ops;

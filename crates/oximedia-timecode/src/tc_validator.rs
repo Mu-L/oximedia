@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use crate::{FrameRateInfo, Timecode};
+use crate::Timecode;
 
 // ── Validation rules ──────────────────────────────────────────────────────────
 
@@ -218,17 +218,7 @@ impl TimecodeValidator {
 
 /// Build a `Timecode` directly without the safe constructor (for tests).
 fn raw_timecode(hours: u8, minutes: u8, seconds: u8, frames: u8, fps: u8, drop: bool) -> Timecode {
-    Timecode {
-        hours,
-        minutes,
-        seconds,
-        frames,
-        frame_rate: FrameRateInfo {
-            fps,
-            drop_frame: drop,
-        },
-        user_bits: 0,
-    }
+    Timecode::from_raw_fields(hours, minutes, seconds, frames, fps, drop, 0)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

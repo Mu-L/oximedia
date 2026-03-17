@@ -49,6 +49,7 @@ mod sctp;
 mod sdp;
 mod srtp;
 mod stun;
+pub mod whip_whep;
 
 // Re-export main API types
 pub use datachannel::{DataChannel, DataChannelConfig, DataChannelState, Message, MessageType};
@@ -62,3 +63,7 @@ pub use peer_connection::{
 pub use rtcp::{Packet as RtcpPacket, ReceiverReport, SenderReport};
 pub use rtp::{Packet as RtpPacket, Session as RtpSession, Statistics as RtpStatistics};
 pub use sdp::{Attribute, Direction, Fingerprint, MediaDescription, MediaType, SessionDescription};
+pub use whip_whep::{
+    EndpointConfig, IceServerConfig, LayerSelection, WhepSession, WhepState, WhipSession,
+    WhipState, WhipWhepEndpoint,
+};

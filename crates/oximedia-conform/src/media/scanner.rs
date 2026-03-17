@@ -230,6 +230,72 @@ impl MediaScanner {
 
         Ok(media)
     }
+
+    /// Scan a directory for media files with a custom extension filter, using
+    /// rayon for parallel processing.
+    ///
+    /// Unlike `scan`, this function accepts an explicit list of file
+    /// extensions (without leading dot, e.g. `&["mov", "mp4"]`) and walks the
+    /// directory tree sequentially before processing files in parallel via
+    /// rayon.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the root directory cannot be read.
+    pub fn scan_parallel<P: AsRef<Path>>(
+        &self,
+        root: P,
+        extensions: &[&str],
+    ) -> ConformResult<Vec<MediaFile>> {
+        let root = root.as_ref();
+        info!(
+            "scan_parallel: walking {} for {:?}",
+            root.display(),
+            extensions
+        );
+
+        // Phase 1 — sequential directory walk (WalkDir is not Send).
+        let paths: Vec<PathBuf> = {
+            let mut walker = WalkDir::new(root).follow_links(self.follow_links);
+            if self.max_depth > 0 {
+                walker = walker.max_depth(self.max_depth);
+            }
+            walker
+                .into_iter()
+                .filter_map(std::result::Result::ok)
+                .filter(|entry| entry.file_type().is_file())
+                .filter(|entry| {
+                    if let Some(ext) = entry.path().extension() {
+                        let ext_lc = ext.to_string_lossy().to_lowercase();
+                        extensions.iter().any(|e| *e == ext_lc.as_str())
+                    } else {
+                        false
+                    }
+                })
+                .map(|entry| entry.path().to_path_buf())
+                .collect()
+        };
+
+        info!("scan_parallel: found {} candidate paths", paths.len());
+
+        // Phase 2 — parallel processing via rayon.
+        let media_files: Vec<MediaFile> = paths
+            .par_iter()
+            .filter_map(|path| match self.process_file(path) {
+                Ok(media) => Some(media),
+                Err(e) => {
+                    warn!("scan_parallel: failed to process {}: {}", path.display(), e);
+                    None
+                }
+            })
+            .collect();
+
+        info!(
+            "scan_parallel: successfully processed {} files",
+            media_files.len()
+        );
+        Ok(media_files)
+    }
 }
 
 impl Default for MediaScanner {
@@ -302,5 +368,72 @@ mod tests {
         let mut scanner = MediaScanner::new();
         scanner.add_extension("custom".to_string());
         assert!(scanner.is_media_file(Path::new("test.custom")));
+    }
+
+    // ── scan_parallel tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_scan_parallel_empty_directory() {
+        let temp_dir = TempDir::new().expect("temp_dir should be valid");
+        let scanner = MediaScanner::new();
+        let result = scanner
+            .scan_parallel(temp_dir.path(), &["mov", "mp4"])
+            .expect("scan_parallel should succeed on empty dir");
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_scan_parallel_finds_matching_extensions() {
+        let temp_dir = TempDir::new().expect("temp_dir should be valid");
+
+        fs::write(temp_dir.path().join("clip1.mov"), b"dummy").expect("write should succeed");
+        fs::write(temp_dir.path().join("clip2.mp4"), b"dummy").expect("write should succeed");
+        // Should be ignored
+        fs::write(temp_dir.path().join("readme.txt"), b"ignore").expect("write should succeed");
+        fs::write(temp_dir.path().join("audio.wav"), b"ignore").expect("write should succeed");
+
+        let scanner = MediaScanner::new();
+        let result = scanner
+            .scan_parallel(temp_dir.path(), &["mov", "mp4"])
+            .expect("scan_parallel should succeed");
+
+        assert_eq!(
+            result.len(),
+            2,
+            "only .mov and .mp4 should be returned, got {}",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn test_scan_parallel_case_insensitive_extensions() {
+        let temp_dir = TempDir::new().expect("temp_dir should be valid");
+
+        fs::write(temp_dir.path().join("clip.MOV"), b"dummy").expect("write should succeed");
+        fs::write(temp_dir.path().join("clip.Mp4"), b"dummy").expect("write should succeed");
+
+        let scanner = MediaScanner::new();
+        let result = scanner
+            .scan_parallel(temp_dir.path(), &["mov", "mp4"])
+            .expect("scan_parallel should succeed");
+
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_scan_parallel_recursive() {
+        let temp_dir = TempDir::new().expect("temp_dir should be valid");
+        let sub = temp_dir.path().join("subdir");
+        fs::create_dir(&sub).expect("mkdir should succeed");
+
+        fs::write(temp_dir.path().join("top.mov"), b"dummy").expect("write should succeed");
+        fs::write(sub.join("nested.mov"), b"dummy").expect("write should succeed");
+
+        let scanner = MediaScanner::new();
+        let result = scanner
+            .scan_parallel(temp_dir.path(), &["mov"])
+            .expect("scan_parallel should succeed");
+
+        assert_eq!(result.len(), 2);
     }
 }

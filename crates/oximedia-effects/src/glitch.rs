@@ -8,8 +8,6 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 
-use rand::Rng;
-
 /// Configuration for the [`GlitchEngine`].
 #[derive(Debug, Clone)]
 pub struct GlitchConfig {
@@ -40,7 +38,7 @@ pub struct GlitchEngine {
     config: GlitchConfig,
     held_sample: f32,
     hold_counter: usize,
-    rng: rand::prelude::ThreadRng,
+    rng: scirs2_core::random::StdRng,
 }
 
 impl GlitchEngine {
@@ -51,7 +49,7 @@ impl GlitchEngine {
             config,
             held_sample: 0.0,
             hold_counter: 0,
-            rng: rand::rng(),
+            rng: scirs2_core::random::Random::seed(0xDEAD_BEEF),
         }
     }
 
@@ -59,7 +57,7 @@ impl GlitchEngine {
     pub fn process_sample(&mut self, input: f32) -> f32 {
         // Dropout: silence the sample
         if self.config.dropout_probability > 0.0
-            && self.rng.random::<f32>() < self.config.dropout_probability
+            && (self.rng.random_f64() as f32) < self.config.dropout_probability
         {
             return 0.0;
         }
@@ -72,7 +70,7 @@ impl GlitchEngine {
 
         // Trigger a new glitch
         if self.config.glitch_probability > 0.0
-            && self.rng.random::<f32>() < self.config.glitch_probability
+            && (self.rng.random_f64() as f32) < self.config.glitch_probability
         {
             self.held_sample = input;
             self.hold_counter = self.config.hold_duration;
@@ -149,10 +147,10 @@ pub fn reverse_segment(buffer: &mut [f32], offset: usize, len: usize) {
 /// Each sample has `probability` chance of being replaced by the most
 /// recently held value. When a new hold triggers, the current sample is frozen.
 pub fn random_sample_hold(buffer: &mut [f32], probability: f32) {
-    let mut rng = rand::rng();
+    let mut rng = scirs2_core::random::Random::seed(0xCAFE_BABE);
     let mut held = 0.0_f32;
     for sample in buffer.iter_mut() {
-        if rng.random::<f32>() < probability {
+        if (rng.random_f64() as f32) < probability {
             *sample = held;
         } else {
             held = *sample;

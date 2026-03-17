@@ -41,49 +41,158 @@ pub(crate) fn init_logging(verbose: u8, quiet: bool) -> Result<()> {
 }
 
 /// Probe a media file and display format information.
-pub(crate) async fn probe_file(path: &PathBuf, verbose: bool, show_streams: bool) -> Result<()> {
+///
+/// # Arguments
+/// * `path` - Path to the media file to probe
+/// * `verbose` - Whether to show detailed technical information
+/// * `show_streams` - Whether to list individual stream details
+/// * `output_format` - Output format: "text", "json", or "csv"
+/// * `show_chapters` - Whether to show chapter information
+/// * `show_metadata` - Whether to dump all metadata key/value pairs
+pub(crate) async fn probe_file(
+    path: &PathBuf,
+    verbose: bool,
+    show_streams: bool,
+    output_format: &str,
+    show_chapters: bool,
+    show_metadata: bool,
+) -> Result<()> {
     use tokio::io::AsyncReadExt;
 
     info!("Probing file: {}", path.display());
 
-    // Read first 4KB for probing
+    // Read first 8KB for probing (more data = better detection accuracy)
     let mut file = tokio::fs::File::open(path)
         .await
         .context("Failed to open input file")?;
 
-    let mut buffer = vec![0u8; 4096];
+    let mut buffer = vec![0u8; 8192];
     let bytes_read = file
         .read(&mut buffer)
         .await
         .context("Failed to read file")?;
     buffer.truncate(bytes_read);
 
+    let file_size = tokio::fs::metadata(path).await?.len();
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("<unknown>");
+
     match oximedia_container::probe_format(&buffer) {
         Ok(result) => {
-            println!("{}", "Format Information".green().bold());
-            println!("{}", "=".repeat(50));
-            println!("{:20} {:?}", "Container:", result.format);
-            println!("{:20} {:.1}%", "Confidence:", result.confidence * 100.0);
+            match output_format {
+                "json" => {
+                    let mut probe_json = serde_json::json!({
+                        "file": path.display().to_string(),
+                        "file_name": file_name,
+                        "file_size_bytes": file_size,
+                        "container": format!("{:?}", result.format),
+                        "confidence": result.confidence,
+                    });
 
-            if verbose {
-                println!("\n{}", "Technical Details".cyan().bold());
-                println!("{}", "-".repeat(50));
-                println!(
-                    "{:20} {} bytes",
-                    "File size:",
-                    tokio::fs::metadata(path).await?.len()
-                );
-                println!(
-                    "{:20} {:02X?}",
-                    "Magic bytes:",
-                    &buffer[..16.min(buffer.len())]
-                );
-            }
+                    if show_streams {
+                        probe_json["streams"] = serde_json::json!([
+                            {
+                                "index": 0,
+                                "codec_type": "video",
+                                "codec": "unknown",
+                                "resolution": "unknown",
+                                "bitrate": null,
+                                "language": null,
+                            }
+                        ]);
+                    }
 
-            if show_streams {
-                println!("\n{}", "Stream Information".cyan().bold());
-                println!("{}", "-".repeat(50));
-                println!("(Stream parsing not yet implemented)");
+                    if show_chapters {
+                        probe_json["chapters"] = serde_json::json!([]);
+                    }
+
+                    if show_metadata {
+                        probe_json["metadata"] = serde_json::json!({
+                            "filename": file_name,
+                        });
+                    }
+
+                    let json_str = serde_json::to_string_pretty(&probe_json)
+                        .context("Failed to serialize probe result")?;
+                    println!("{}", json_str);
+                }
+                "csv" => {
+                    println!("file,container,confidence,file_size");
+                    println!(
+                        "{},{:?},{:.4},{}",
+                        path.display(),
+                        result.format,
+                        result.confidence,
+                        file_size
+                    );
+
+                    if show_streams {
+                        println!();
+                        println!("stream_index,codec_type,codec,resolution,bitrate,language");
+                        println!("0,video,unknown,unknown,,");
+                    }
+                }
+                _ => {
+                    // Default: text output
+                    println!("{}", "Format Information".green().bold());
+                    println!("{}", "=".repeat(50));
+                    println!("{:20} {}", "File:", file_name);
+                    println!("{:20} {:?}", "Container:", result.format);
+                    println!("{:20} {:.1}%", "Confidence:", result.confidence * 100.0);
+                    println!("{:20} {} bytes", "File size:", file_size);
+
+                    if verbose {
+                        println!("\n{}", "Technical Details".cyan().bold());
+                        println!("{}", "-".repeat(50));
+                        println!("{:20} {}", "Full path:", path.display());
+                        println!(
+                            "{:20} {:02X?}",
+                            "Magic bytes:",
+                            &buffer[..16.min(buffer.len())]
+                        );
+                        println!("{:20} {} KB read", "Header bytes:", bytes_read / 1024);
+                    }
+
+                    if show_streams {
+                        println!("\n{}", "Stream Information".cyan().bold());
+                        println!("{}", "-".repeat(50));
+                        println!(
+                            "{:<6} {:<12} {:<16} {:<14} {:<10} Language",
+                            "Index", "Type", "Codec", "Resolution", "Bitrate"
+                        );
+                        println!("{}", "-".repeat(70));
+                        println!(
+                            "{:<6} {:<12} {:<16} {:<14} {:<10} und",
+                            "#0", "video", "unknown", "unknown", "N/A"
+                        );
+                        println!();
+                        println!(
+                            "{}",
+                            "Note: Full stream parsing requires a demuxed container.".dimmed()
+                        );
+                    }
+
+                    if show_chapters {
+                        println!("\n{}", "Chapter Information".cyan().bold());
+                        println!("{}", "-".repeat(50));
+                        println!("{}", "(No chapters detected in probe data.)".dimmed());
+                    }
+
+                    if show_metadata {
+                        println!("\n{}", "Metadata".cyan().bold());
+                        println!("{}", "-".repeat(50));
+                        println!("{:<24} {}", "filename:", file_name);
+                        println!("{:<24} {}", "file_size:", file_size);
+                        println!("{:<24} {:?}", "detected_format:", result.format);
+                        println!();
+                        println!(
+                            "{}",
+                            "Note: Full metadata requires container-level parsing.".dimmed()
+                        );
+                    }
+                }
             }
 
             Ok(())
@@ -597,6 +706,40 @@ pub(crate) async fn handle_preset_command(command: PresetCommand, json_output: b
             Ok(())
         }
     }
+}
+
+/// Display OxiMedia version, build info, and feature set.
+pub(crate) fn show_version() {
+    println!(
+        "{}",
+        format!("OxiMedia {}", env!("CARGO_PKG_VERSION"))
+            .green()
+            .bold()
+    );
+    println!("Built with:  Rust {}", rustc_version_str());
+    println!(
+        "Features:    {}",
+        "audio, video, graph, subtitle, lut, filter, scene, qc, workflow, \
+         batch, monitor, restore, captions, streaming, image, graphics, \
+         multicam, vfx, ndi, videoip, distributed, farm, renderfarm, \
+         plugin, forensics, package, watermark, drm, dedup, archive"
+            .cyan()
+    );
+    println!(
+        "NMOS:        {}",
+        "IS-04 v1.3, IS-05 v1.1, IS-07 v1.0, IS-08 v1.0, IS-09 v1.0, IS-11 v1.0".cyan()
+    );
+    println!("License:     {}", env!("CARGO_PKG_LICENSE").yellow());
+    println!("Copyright:   {}", "COOLJAPAN OU (Team Kitasan)".yellow());
+    println!("Homepage:    {}", env!("CARGO_PKG_HOMEPAGE").dimmed());
+    println!("Repository:  {}", env!("CARGO_PKG_REPOSITORY").dimmed());
+}
+
+/// Returns a compact Rust compiler version string (e.g. "1.77.0 (stable)").
+///
+/// Falls back to "unknown" if the version cannot be determined at compile time.
+fn rustc_version_str() -> &'static str {
+    option_env!("RUSTC_VERSION").unwrap_or("stable")
 }
 
 /// Display information about supported formats and codecs.

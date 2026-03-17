@@ -117,6 +117,10 @@ pub struct TexturePool {
     allocated_bytes: usize,
     /// Maximum bytes the pool may use
     max_bytes: usize,
+    /// Monotonic clock for LRU tracking (incremented on each touch/allocate)
+    access_clock: u64,
+    /// Last-access timestamp per slot (parallel to `descriptors`)
+    last_access: Vec<u64>,
 }
 
 impl TexturePool {
@@ -127,6 +131,8 @@ impl TexturePool {
             descriptors: Vec::new(),
             allocated_bytes: 0,
             max_bytes: (max_gb * 1024.0 * 1024.0 * 1024.0) as usize,
+            access_clock: 0,
+            last_access: Vec::new(),
         }
     }
 
@@ -140,19 +146,62 @@ impl TexturePool {
             return None;
         }
         // Reuse a freed slot if possible
+        self.access_clock += 1;
+        let ts = self.access_clock;
         if let Some(idx) = self
             .descriptors
             .iter()
             .position(std::option::Option::is_none)
         {
             self.descriptors[idx] = Some(desc);
+            self.last_access[idx] = ts;
             self.allocated_bytes += bytes;
             return Some(idx);
         }
         let idx = self.descriptors.len();
         self.descriptors.push(Some(desc));
+        self.last_access.push(ts);
         self.allocated_bytes += bytes;
         Some(idx)
+    }
+
+    /// Allocate a texture, evicting the LRU slot if the budget is exceeded.
+    ///
+    /// Returns `Some(handle)` on success, or `None` if all live textures are
+    /// too large to free enough space for the new allocation.
+    pub fn allocate_with_lru_eviction(&mut self, desc: TextureDescriptor) -> Option<usize> {
+        let bytes = desc.size_bytes();
+        // Try ordinary allocation first.
+        if self.allocated_bytes + bytes <= self.max_bytes {
+            return self.allocate(desc);
+        }
+        // Evict LRU entries until enough space is reclaimed.
+        loop {
+            if self.allocated_bytes + bytes <= self.max_bytes {
+                return self.allocate(desc);
+            }
+            let lru = self.lru_handle()?;
+            self.free(lru);
+        }
+    }
+
+    /// Return the handle of the least-recently-used allocated texture, or
+    /// `None` if the pool is empty.
+    #[must_use]
+    pub fn lru_handle(&self) -> Option<usize> {
+        self.descriptors
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.as_ref().map(|_| i))
+            .min_by_key(|&i| self.last_access[i])
+    }
+
+    /// Update the access timestamp of `handle` to mark it as recently used.
+    pub fn touch(&mut self, handle: usize) {
+        if handle < self.descriptors.len() && self.descriptors[handle].is_some() {
+            self.access_clock += 1;
+            self.last_access[handle] = self.access_clock;
+        }
     }
 
     /// Free a texture by handle
@@ -161,6 +210,7 @@ impl TexturePool {
             if let Some(desc) = slot.take() {
                 let bytes = desc.size_bytes();
                 self.allocated_bytes = self.allocated_bytes.saturating_sub(bytes);
+                self.last_access[id] = 0;
             }
         }
     }
@@ -297,5 +347,109 @@ mod tests {
         pool.allocate(desc).expect("allocation should succeed");
         let util = pool.utilization();
         assert!((util - 0.5).abs() < 1e-6, "expected 0.5, got {util}");
+    }
+
+    // --- LRU eviction tests ---
+
+    #[test]
+    fn test_lru_handle_on_empty_pool() {
+        let pool = TexturePool::new(1.0);
+        assert!(pool.lru_handle().is_none());
+    }
+
+    #[test]
+    fn test_lru_handle_returns_oldest() {
+        let mut pool = TexturePool::new(1.0);
+        let h0 = pool
+            .allocate(TextureDescriptor::new(4, 4, TextureFormat::R8))
+            .expect("alloc");
+        let h1 = pool
+            .allocate(TextureDescriptor::new(4, 4, TextureFormat::R8))
+            .expect("alloc");
+        // h0 was allocated first → lower timestamp → LRU
+        assert_eq!(pool.lru_handle(), Some(h0));
+        // Touch h0 — now h1 becomes LRU
+        pool.touch(h0);
+        assert_eq!(pool.lru_handle(), Some(h1));
+        let _ = h1; // suppress unused warning
+    }
+
+    #[test]
+    fn test_touch_updates_lru_order() {
+        let mut pool = TexturePool::new(1.0);
+        let h0 = pool
+            .allocate(TextureDescriptor::new(4, 4, TextureFormat::R8))
+            .expect("alloc");
+        let h1 = pool
+            .allocate(TextureDescriptor::new(4, 4, TextureFormat::R8))
+            .expect("alloc");
+        let h2 = pool
+            .allocate(TextureDescriptor::new(4, 4, TextureFormat::R8))
+            .expect("alloc");
+        // Insertion order: h0 < h1 < h2 → LRU is h0
+        assert_eq!(pool.lru_handle(), Some(h0));
+        pool.touch(h0);
+        pool.touch(h1);
+        // Now order is: h2 < h0 < h1 → LRU is h2
+        assert_eq!(pool.lru_handle(), Some(h2));
+    }
+
+    #[test]
+    fn test_allocate_with_lru_eviction_makes_space() {
+        let mut pool = TexturePool::new(0.0);
+        // Budget = 64 bytes (one 4×4 Rgba8 texture)
+        pool.max_bytes = 64;
+        let h0 = pool
+            .allocate(TextureDescriptor::new(4, 4, TextureFormat::Rgba8))
+            .expect("first alloc should succeed");
+        assert_eq!(pool.live_count(), 1);
+        // Normal allocate fails — budget exhausted
+        assert!(pool
+            .allocate(TextureDescriptor::new(4, 4, TextureFormat::Rgba8))
+            .is_none());
+        // LRU eviction allocate should evict h0 and succeed
+        let h1 = pool
+            .allocate_with_lru_eviction(TextureDescriptor::new(4, 4, TextureFormat::Rgba8))
+            .expect("lru eviction alloc should succeed");
+        assert_eq!(pool.live_count(), 1);
+        // The evicted slot is reused
+        assert_eq!(h0, h1);
+    }
+
+    #[test]
+    fn test_allocate_with_lru_eviction_preserves_mru() {
+        let mut pool = TexturePool::new(0.0);
+        // Budget = 128 bytes (two 4×4 Rgba8 textures = 64 each)
+        pool.max_bytes = 128;
+        let h0 = pool
+            .allocate(TextureDescriptor::new(4, 4, TextureFormat::Rgba8))
+            .expect("alloc h0");
+        let _h1 = pool
+            .allocate(TextureDescriptor::new(4, 4, TextureFormat::Rgba8))
+            .expect("alloc h1");
+        // Touch h0 so h1 becomes LRU
+        pool.touch(h0);
+        // Now request a third texture — must evict h1 (LRU)
+        let h2 = pool
+            .allocate_with_lru_eviction(TextureDescriptor::new(4, 4, TextureFormat::Rgba8))
+            .expect("lru eviction");
+        // h1 index should be reused by h2
+        assert_eq!(h2, _h1);
+        // h0 must still be alive
+        assert_eq!(pool.live_count(), 2);
+    }
+
+    #[test]
+    fn test_lru_eviction_returns_none_when_budget_impossible() {
+        let mut pool = TexturePool::new(0.0);
+        // Budget only fits 16 bytes but we want a 64-byte texture
+        pool.max_bytes = 16;
+        // Put a 16-byte 4×4 R8 texture in
+        pool.allocate(TextureDescriptor::new(4, 4, TextureFormat::R8))
+            .expect("alloc small");
+        // Request 64-byte texture — cannot fit even after evicting the 16-byte one
+        let result =
+            pool.allocate_with_lru_eviction(TextureDescriptor::new(4, 4, TextureFormat::Rgba8));
+        assert!(result.is_none());
     }
 }

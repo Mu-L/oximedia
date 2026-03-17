@@ -83,6 +83,24 @@ pub mod workgroup;
 pub use error::{AccelError, AccelResult};
 pub use traits::{HardwareAccel, ScaleFilter};
 
+// Re-export new feature types
+pub use accel_stats::{AccelProfiler, ProfileEntry};
+pub use memory_arena::{MemoryPressureMonitor, MemoryPressurePolicy, PressureLevel};
+pub use ops::convolution::{ConvolutionConfig, ConvolutionFilter, EdgeMode};
+pub use ops::deinterlace::{DeinterlaceConfig, DeinterlaceMethod, FieldOrder};
+
+// Re-export colour / HDR operations
+pub use ops::color::{
+    hlg_to_sdr_tonemap, pq_to_sdr_tonemap, rgb_to_yuv420, yuv420_to_rgb, YuvRange, YuvStandard,
+};
+pub use ops::{alpha_blend, alpha_blend_rgba};
+
+// Re-export workgroup auto-tuning
+pub use workgroup::{compute_optimal_workgroup, OpType};
+
+// Re-export descriptor pool
+pub mod descriptor_pool;
+
 use device::DeviceSelector;
 use std::sync::Arc;
 use vulkan::VulkanAccel;

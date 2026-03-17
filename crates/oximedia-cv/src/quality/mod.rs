@@ -15,11 +15,12 @@
 //!
 //! # Examples
 //!
-//! ```
+//! ```no_run
 //! use oximedia_cv::quality::{calculate_metrics, QualityMetrics};
 //! use oximedia_codec::VideoFrame;
 //! use oximedia_core::PixelFormat;
 //!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create reference and distorted frames
 //! let mut reference = VideoFrame::new(PixelFormat::Yuv420p, 1920, 1080);
 //! reference.allocate();
@@ -31,6 +32,8 @@
 //! println!("PSNR: {:.2} dB", metrics.psnr);
 //! println!("SSIM: {:.4}", metrics.ssim);
 //! println!("VMAF: {:.2}", metrics.vmaf);
+//! Ok(())
+//! }
 //! ```
 
 pub mod psnr;
@@ -155,11 +158,12 @@ impl Default for QualityMetrics {
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use oximedia_cv::quality::calculate_metrics;
 /// use oximedia_codec::VideoFrame;
 /// use oximedia_core::PixelFormat;
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut reference = VideoFrame::new(PixelFormat::Yuv420p, 1280, 720);
 /// reference.allocate();
 /// let mut distorted = VideoFrame::new(PixelFormat::Yuv420p, 1280, 720);
@@ -168,6 +172,8 @@ impl Default for QualityMetrics {
 /// let metrics = calculate_metrics(&reference, &distorted)?;
 /// assert!(metrics.psnr >= 0.0);
 /// assert!(metrics.ssim >= 0.0 && metrics.ssim <= 1.0);
+/// Ok(())
+/// }
 /// ```
 pub fn calculate_metrics(
     reference: &VideoFrame,

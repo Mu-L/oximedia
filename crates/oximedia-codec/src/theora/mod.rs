@@ -67,6 +67,7 @@ pub mod rate_ctrl;
 pub mod stats;
 pub mod tables;
 pub mod transform;
+pub mod two_pass;
 
 use crate::error::{CodecError, CodecResult};
 use crate::frame::{FrameType, VideoFrame};

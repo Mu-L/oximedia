@@ -1,7 +1,7 @@
 //! Utility functions for MIR analysis.
 
 use crate::{MirError, MirResult};
-use rustfft::{num_complex::Complex, FftPlanner};
+use oxifft::Complex;
 use std::f32::consts::PI;
 
 /// Apply Hann window to signal.
@@ -54,8 +54,6 @@ pub fn stft(
     }
 
     let window = hann_window(window_size);
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(window_size);
 
     let num_frames = (signal.len().saturating_sub(window_size)) / hop_size + 1;
     let mut result = Vec::with_capacity(num_frames);
@@ -68,14 +66,14 @@ pub fn stft(
             break;
         }
 
-        let mut buffer: Vec<Complex<f32>> = signal[start..end]
+        let buffer: Vec<Complex<f32>> = signal[start..end]
             .iter()
             .zip(&window)
             .map(|(s, w)| Complex::new(s * w, 0.0))
             .collect();
 
-        fft.process(&mut buffer);
-        result.push(buffer);
+        let fft_result = oxifft::fft(&buffer);
+        result.push(fft_result);
     }
 
     Ok(result)
@@ -91,10 +89,7 @@ pub fn magnitude_spectrum(fft_output: &[Complex<f32>]) -> Vec<f32> {
 #[must_use]
 #[allow(dead_code)]
 pub fn power_spectrum(fft_output: &[Complex<f32>]) -> Vec<f32> {
-    fft_output
-        .iter()
-        .map(rustfft::num_complex::Complex::norm_sqr)
-        .collect()
+    fft_output.iter().map(|c| c.norm_sqr()).collect()
 }
 
 /// Compute mel filterbank.
@@ -179,12 +174,8 @@ pub fn autocorrelation(signal: &[f32]) -> MirResult<Vec<f32>> {
     let n = signal.len();
     let fft_size = n.next_power_of_two() * 2;
 
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(fft_size);
-    let ifft = planner.plan_fft_inverse(fft_size);
-
     // Zero-padded signal
-    let mut buffer: Vec<Complex<f32>> = signal
+    let buffer: Vec<Complex<f32>> = signal
         .iter()
         .map(|&s| Complex::new(s, 0.0))
         .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
@@ -192,21 +183,21 @@ pub fn autocorrelation(signal: &[f32]) -> MirResult<Vec<f32>> {
         .collect();
 
     // Forward FFT
-    fft.process(&mut buffer);
+    let mut fft_result = oxifft::fft(&buffer);
 
     // Compute power spectrum
-    for x in &mut buffer {
+    for x in &mut fft_result {
         let mag_sq = x.norm_sqr();
         *x = Complex::new(mag_sq, 0.0);
     }
 
     // Inverse FFT
-    ifft.process(&mut buffer);
+    let ifft_result = oxifft::ifft(&fft_result);
 
     // Normalize and extract real part
     #[allow(clippy::cast_precision_loss)]
     let scale = fft_size as f32;
-    let result: Vec<f32> = buffer[..n].iter().map(|c| c.re / scale).collect();
+    let result: Vec<f32> = ifft_result[..n].iter().map(|c| c.re / scale).collect();
 
     Ok(result)
 }

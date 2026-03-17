@@ -2,6 +2,7 @@
 name = "oximedia-mam"
 description = "Media Asset Management system for organizing and tracking media files"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -27,7 +28,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 
 # Search Engine
-tantivy = "0.22"
+tantivy = "0.25"
 
 # Web Framework
 actix-web = { version = "4", features = ["rustls-0_23"] }
@@ -38,7 +39,7 @@ async-graphql = { version = "7", features = ["uuid", "chrono"] }
 async-graphql-actix-web = "7"
 
 # Authentication
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 bcrypt = "0.19"
 
 # Async
@@ -59,3 +60,6 @@ sha2 = { workspace = true }
 
 # HTTP client
 reqwest = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -79,6 +79,22 @@ impl PixelFormat {
     pub fn from_rust(inner: RustPixelFormat) -> Self {
         Self { inner }
     }
+
+    /// Public Rust-facing constructor (mirrors the `#[new]` pymethods fn).
+    pub fn new_rust(format: &str) -> PyResult<Self> {
+        let inner = match format {
+            "yuv420p" => RustPixelFormat::Yuv420p,
+            "yuv422p" => RustPixelFormat::Yuv422p,
+            "yuv444p" => RustPixelFormat::Yuv444p,
+            "gray8" => RustPixelFormat::Gray8,
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown pixel format: {format}"
+                )))
+            }
+        };
+        Ok(Self { inner })
+    }
 }
 
 /// Audio sample format.
@@ -136,6 +152,20 @@ impl SampleFormat {
     #[must_use]
     pub fn from_rust(inner: RustSampleFormat) -> Self {
         Self { inner }
+    }
+
+    /// Public Rust-facing constructor (mirrors the `#[new]` pymethods fn).
+    pub fn new_rust(format: &str) -> PyResult<Self> {
+        let inner = match format {
+            "f32" => RustSampleFormat::F32,
+            "i16" => RustSampleFormat::I16,
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Unknown sample format: {format}"
+                )))
+            }
+        };
+        Ok(Self { inner })
     }
 }
 
@@ -230,6 +260,11 @@ impl Rational {
         f64::from(self.num) / f64::from(self.den)
     }
 
+    /// Pickle support: return constructor arguments.
+    fn __getnewargs__(&self) -> (i32, i32) {
+        (self.num, self.den)
+    }
+
     fn __str__(&self) -> String {
         format!("{}/{}", self.num, self.den)
     }
@@ -296,7 +331,7 @@ impl VideoFrame {
 
     /// Get presentation timestamp.
     #[getter]
-    fn pts(&self) -> i64 {
+    pub fn pts(&self) -> i64 {
         self.inner.timestamp.pts
     }
 
@@ -364,6 +399,31 @@ impl VideoFrame {
     pub fn inner(&self) -> &RustVideoFrame {
         &self.inner
     }
+
+    /// Public Rust-facing constructor (mirrors the `#[new]` pymethods fn).
+    #[must_use]
+    pub fn new_rust(width: u32, height: u32, format: PixelFormat) -> Self {
+        Self {
+            inner: RustVideoFrame::new(format.inner(), width, height),
+        }
+    }
+
+    /// Public Rust-facing width accessor.
+    #[must_use]
+    pub fn width_rust(&self) -> u32 {
+        self.inner.width
+    }
+
+    /// Public Rust-facing height accessor.
+    #[must_use]
+    pub fn height_rust(&self) -> u32 {
+        self.inner.height
+    }
+
+    /// Public Rust-facing PTS setter.
+    pub fn set_pts_rust(&mut self, pts: i64) {
+        self.inner.timestamp.pts = pts;
+    }
 }
 
 /// Audio frame containing decoded PCM samples.
@@ -410,19 +470,19 @@ impl AudioFrame {
 
     /// Get number of samples per channel.
     #[getter]
-    fn sample_count(&self) -> usize {
+    pub fn sample_count(&self) -> usize {
         self.inner.sample_count
     }
 
     /// Get sample rate in Hz.
     #[getter]
-    fn sample_rate(&self) -> u32 {
+    pub fn sample_rate(&self) -> u32 {
         self.inner.sample_rate
     }
 
     /// Get number of channels.
     #[getter]
-    fn channels(&self) -> usize {
+    pub fn channels(&self) -> usize {
         self.inner.channels
     }
 
@@ -444,7 +504,7 @@ impl AudioFrame {
     }
 
     /// Convert samples to f32 array.
-    fn to_f32(&self) -> PyResult<Vec<f32>> {
+    pub fn to_f32(&self) -> PyResult<Vec<f32>> {
         self.inner.to_f32().map_err(crate::error::from_codec_error)
     }
 
@@ -614,6 +674,29 @@ impl EncoderConfig {
     #[getter]
     fn keyint(&self) -> u32 {
         self.inner.keyint
+    }
+
+    /// Pickle support: reduce to constructor args.
+    fn __getstate__(&self) -> (u32, u32, (i32, i32), u32) {
+        (
+            self.inner.width,
+            self.inner.height,
+            (
+                self.inner.framerate.num as i32,
+                self.inner.framerate.den as i32,
+            ),
+            self.inner.keyint,
+        )
+    }
+
+    /// Pickle support: restore from constructor args.
+    fn __setstate__(&mut self, state: (u32, u32, (i32, i32), u32)) -> PyResult<()> {
+        let (width, height, (fps_num, fps_den), keyint) = state;
+        self.inner.width = width;
+        self.inner.height = height;
+        self.inner.framerate = oximedia_core::Rational::new(i64::from(fps_num), i64::from(fps_den));
+        self.inner.keyint = keyint;
+        Ok(())
     }
 
     fn __str__(&self) -> String {

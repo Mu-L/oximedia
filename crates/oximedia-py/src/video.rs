@@ -74,6 +74,24 @@ impl Av1Decoder {
         self.inner.dimensions()
     }
 
+    /// Context manager __enter__: return self.
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Context manager __exit__: flush and reset the decoder.
+    #[pyo3(signature = (_exc_type, _exc_val, _exc_tb))]
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_val: Option<Py<PyAny>>,
+        _exc_tb: Option<Py<PyAny>>,
+    ) -> PyResult<bool> {
+        let _ = self.flush();
+        self.reset();
+        Ok(false)
+    }
+
     fn __str__(&self) -> String {
         "Av1Decoder".to_string()
     }
@@ -164,6 +182,23 @@ impl Av1Encoder {
         self.inner.flush().map_err(crate::error::from_codec_error)
     }
 
+    /// Context manager __enter__: return self.
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Context manager __exit__: flush the encoder.
+    #[pyo3(signature = (_exc_type, _exc_val, _exc_tb))]
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_val: Option<Py<PyAny>>,
+        _exc_tb: Option<Py<PyAny>>,
+    ) -> PyResult<bool> {
+        let _ = self.flush();
+        Ok(false)
+    }
+
     fn __str__(&self) -> String {
         "Av1Encoder".to_string()
     }
@@ -240,6 +275,24 @@ impl Vp9Decoder {
         self.inner.dimensions()
     }
 
+    /// Context manager __enter__: return self.
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Context manager __exit__: flush and reset.
+    #[pyo3(signature = (_exc_type, _exc_val, _exc_tb))]
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_val: Option<Py<PyAny>>,
+        _exc_tb: Option<Py<PyAny>>,
+    ) -> PyResult<bool> {
+        let _ = self.flush();
+        self.reset();
+        Ok(false)
+    }
+
     fn __str__(&self) -> String {
         "Vp9Decoder".to_string()
     }
@@ -314,6 +367,24 @@ impl Vp8Decoder {
     /// Get output dimensions (width, height) if known.
     fn dimensions(&self) -> Option<(u32, u32)> {
         self.inner.dimensions()
+    }
+
+    /// Context manager __enter__: return self.
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Context manager __exit__: flush and reset.
+    #[pyo3(signature = (_exc_type, _exc_val, _exc_tb))]
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_val: Option<Py<PyAny>>,
+        _exc_tb: Option<Py<PyAny>>,
+    ) -> PyResult<bool> {
+        let _ = self.flush();
+        self.reset();
+        Ok(false)
     }
 
     fn __str__(&self) -> String {

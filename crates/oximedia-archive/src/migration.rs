@@ -569,3 +569,699 @@ mod migration_plan_tests {
         assert!(plan.high_risk_tasks().is_empty());
     }
 }
+
+// ── Dry-run and rollback support ──────────────────────────────────────────────
+
+/// Outcome of a single dry-run migration step.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DryRunOutcome {
+    /// Migration would succeed.
+    WouldSucceed,
+    /// Migration would fail with the given reason.
+    WouldFail(String),
+    /// Migration was skipped (e.g. source format is already preferred).
+    Skipped(String),
+}
+
+impl DryRunOutcome {
+    /// Returns `true` if the outcome indicates success.
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::WouldSucceed)
+    }
+
+    /// Returns `true` if the outcome indicates failure.
+    #[must_use]
+    pub fn is_failure(&self) -> bool {
+        matches!(self, Self::WouldFail(_))
+    }
+}
+
+impl std::fmt::Display for DryRunOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WouldSucceed => write!(f, "WOULD_SUCCEED"),
+            Self::WouldFail(reason) => write!(f, "WOULD_FAIL: {reason}"),
+            Self::Skipped(reason) => write!(f, "SKIPPED: {reason}"),
+        }
+    }
+}
+
+/// A single dry-run result entry.
+#[derive(Clone, Debug)]
+pub struct DryRunEntry {
+    /// Asset identifier.
+    pub asset_id: String,
+    /// Source format.
+    pub source_format: String,
+    /// Target format.
+    pub target_format: String,
+    /// Predicted outcome.
+    pub outcome: DryRunOutcome,
+    /// Estimated duration in hours.
+    pub estimated_hours: f64,
+    /// Estimated output size in GB.
+    pub estimated_output_size_gb: f64,
+    /// Warnings (non-fatal issues).
+    pub warnings: Vec<String>,
+}
+
+/// Report from a dry-run migration simulation.
+#[derive(Clone, Debug)]
+pub struct DryRunReport {
+    /// Description of the migration plan.
+    pub plan_description: String,
+    /// Individual entries.
+    pub entries: Vec<DryRunEntry>,
+    /// Total estimated duration.
+    pub total_estimated_hours: f64,
+    /// Total estimated output size in GB.
+    pub total_estimated_size_gb: f64,
+}
+
+impl DryRunReport {
+    /// Number of entries that would succeed.
+    #[must_use]
+    pub fn success_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.outcome.is_success())
+            .count()
+    }
+
+    /// Number of entries that would fail.
+    #[must_use]
+    pub fn failure_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| e.outcome.is_failure())
+            .count()
+    }
+
+    /// Number of entries that were skipped.
+    #[must_use]
+    pub fn skipped_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|e| matches!(e.outcome, DryRunOutcome::Skipped(_)))
+            .count()
+    }
+
+    /// Collect all warnings from all entries.
+    #[must_use]
+    pub fn all_warnings(&self) -> Vec<&str> {
+        self.entries
+            .iter()
+            .flat_map(|e| e.warnings.iter().map(|w| w.as_str()))
+            .collect()
+    }
+
+    /// Whether the overall dry-run passed (no failures).
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.failure_count() == 0
+    }
+}
+
+/// Asset descriptor for dry-run validation.
+#[derive(Clone, Debug)]
+pub struct DryRunAsset {
+    /// Asset identifier.
+    pub asset_id: String,
+    /// Source format.
+    pub source: FileFormat,
+    /// Size in GB.
+    pub size_gb: f64,
+    /// Whether the file is readable.
+    pub is_readable: bool,
+    /// Whether sufficient disk space is available for the output.
+    pub has_disk_space: bool,
+}
+
+/// Run a dry-run simulation of a migration plan.
+///
+/// This does not modify any files. It validates each asset against the
+/// migration plan and predicts outcomes, sizes, and durations.
+pub fn dry_run_migration(assets: &[DryRunAsset], plan_description: &str) -> DryRunReport {
+    let mut entries = Vec::with_capacity(assets.len());
+    let mut total_hours = 0.0;
+    let mut total_size = 0.0;
+
+    for asset in assets {
+        let migration_path = MigrationPlanner::plan_migration(&asset.source);
+
+        let (outcome, target_format, est_hours, est_size, warnings) = match migration_path {
+            None => {
+                let reason = format!(
+                    "format '{}' is {} — no migration needed",
+                    asset.source.name,
+                    asset.source.risk.label()
+                );
+                (
+                    DryRunOutcome::Skipped(reason),
+                    asset.source.name.clone(),
+                    0.0,
+                    0.0,
+                    Vec::new(),
+                )
+            }
+            Some(ref path) => {
+                let mut warns = Vec::new();
+
+                // Check readability
+                if !asset.is_readable {
+                    (
+                        DryRunOutcome::WouldFail(format!(
+                            "source file for asset '{}' is not readable",
+                            asset.asset_id
+                        )),
+                        path.target.name.clone(),
+                        0.0,
+                        0.0,
+                        warns,
+                    )
+                } else if !asset.has_disk_space {
+                    (
+                        DryRunOutcome::WouldFail(format!(
+                            "insufficient disk space for asset '{}'",
+                            asset.asset_id
+                        )),
+                        path.target.name.clone(),
+                        0.0,
+                        0.0,
+                        warns,
+                    )
+                } else {
+                    let hours = MigrationPlanner::estimate_cost_gb(&asset.source, asset.size_gb);
+                    // Estimate output size: lossless migrations are roughly 1:1,
+                    // but format overhead can vary.
+                    let output_size = asset.size_gb * if path.quality_loss { 0.3 } else { 1.05 };
+
+                    if path.quality_loss {
+                        warns.push("migration involves quality loss".to_string());
+                    }
+                    if asset.size_gb > 100.0 {
+                        warns.push(format!(
+                            "large asset ({:.1} GB) — migration may take {:.1} hours",
+                            asset.size_gb, hours
+                        ));
+                    }
+                    if asset.source.risk == FormatRisk::Obsolete {
+                        warns.push(
+                            "source format is OBSOLETE — verify migration output carefully"
+                                .to_string(),
+                        );
+                    }
+
+                    (
+                        DryRunOutcome::WouldSucceed,
+                        path.target.name.clone(),
+                        hours,
+                        output_size,
+                        warns,
+                    )
+                }
+            }
+        };
+
+        total_hours += est_hours;
+        total_size += est_size;
+
+        entries.push(DryRunEntry {
+            asset_id: asset.asset_id.clone(),
+            source_format: asset.source.name.clone(),
+            target_format,
+            outcome,
+            estimated_hours: est_hours,
+            estimated_output_size_gb: est_size,
+            warnings,
+        });
+    }
+
+    DryRunReport {
+        plan_description: plan_description.to_string(),
+        entries,
+        total_estimated_hours: total_hours,
+        total_estimated_size_gb: total_size,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rollback tracking
+// ---------------------------------------------------------------------------
+
+/// Tracks the state of a migration for potential rollback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MigrationStepStatus {
+    /// Not yet started.
+    Pending,
+    /// Currently executing.
+    InProgress,
+    /// Completed successfully.
+    Completed,
+    /// Failed with the given error.
+    Failed(String),
+    /// Rolled back.
+    RolledBack,
+}
+
+impl std::fmt::Display for MigrationStepStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "PENDING"),
+            Self::InProgress => write!(f, "IN_PROGRESS"),
+            Self::Completed => write!(f, "COMPLETED"),
+            Self::Failed(reason) => write!(f, "FAILED: {reason}"),
+            Self::RolledBack => write!(f, "ROLLED_BACK"),
+        }
+    }
+}
+
+/// A single migration step with rollback information.
+#[derive(Clone, Debug)]
+pub struct MigrationStep {
+    /// Step identifier.
+    pub step_id: String,
+    /// Asset identifier.
+    pub asset_id: String,
+    /// Source path.
+    pub source_path: String,
+    /// Backup path (where the original is preserved before migration).
+    pub backup_path: Option<String>,
+    /// Target path (where the migrated file will be written).
+    pub target_path: String,
+    /// Source format.
+    pub source_format: String,
+    /// Target format.
+    pub target_format: String,
+    /// Current status.
+    pub status: MigrationStepStatus,
+}
+
+/// Journal that tracks migration steps for rollback support.
+#[derive(Debug, Default)]
+pub struct RollbackJournal {
+    /// Steps in execution order.
+    steps: Vec<MigrationStep>,
+}
+
+impl RollbackJournal {
+    /// Create a new empty journal.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a new step as pending.
+    pub fn record_step(&mut self, step: MigrationStep) {
+        self.steps.push(step);
+    }
+
+    /// Mark a step as in-progress.
+    pub fn mark_in_progress(&mut self, step_id: &str) -> bool {
+        if let Some(step) = self.steps.iter_mut().find(|s| s.step_id == step_id) {
+            step.status = MigrationStepStatus::InProgress;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Mark a step as completed, recording the backup path.
+    pub fn mark_completed(&mut self, step_id: &str, backup_path: Option<String>) -> bool {
+        if let Some(step) = self.steps.iter_mut().find(|s| s.step_id == step_id) {
+            step.status = MigrationStepStatus::Completed;
+            step.backup_path = backup_path;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Mark a step as failed.
+    pub fn mark_failed(&mut self, step_id: &str, reason: &str) -> bool {
+        if let Some(step) = self.steps.iter_mut().find(|s| s.step_id == step_id) {
+            step.status = MigrationStepStatus::Failed(reason.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Mark a step as rolled back.
+    pub fn mark_rolled_back(&mut self, step_id: &str) -> bool {
+        if let Some(step) = self.steps.iter_mut().find(|s| s.step_id == step_id) {
+            step.status = MigrationStepStatus::RolledBack;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get all completed steps (for potential rollback).
+    #[must_use]
+    pub fn completed_steps(&self) -> Vec<&MigrationStep> {
+        self.steps
+            .iter()
+            .filter(|s| s.status == MigrationStepStatus::Completed)
+            .collect()
+    }
+
+    /// Get all steps that need rollback (completed or in-progress).
+    #[must_use]
+    pub fn steps_needing_rollback(&self) -> Vec<&MigrationStep> {
+        self.steps
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.status,
+                    MigrationStepStatus::Completed | MigrationStepStatus::InProgress
+                )
+            })
+            .rev() // Reverse order for rollback
+            .collect()
+    }
+
+    /// Total number of steps.
+    #[must_use]
+    pub fn step_count(&self) -> usize {
+        self.steps.len()
+    }
+
+    /// Get a step by its ID.
+    #[must_use]
+    pub fn get_step(&self, step_id: &str) -> Option<&MigrationStep> {
+        self.steps.iter().find(|s| s.step_id == step_id)
+    }
+
+    /// Summary of step statuses.
+    #[must_use]
+    pub fn summary(&self) -> RollbackSummary {
+        let mut pending = 0;
+        let mut in_progress = 0;
+        let mut completed = 0;
+        let mut failed = 0;
+        let mut rolled_back = 0;
+
+        for step in &self.steps {
+            match &step.status {
+                MigrationStepStatus::Pending => pending += 1,
+                MigrationStepStatus::InProgress => in_progress += 1,
+                MigrationStepStatus::Completed => completed += 1,
+                MigrationStepStatus::Failed(_) => failed += 1,
+                MigrationStepStatus::RolledBack => rolled_back += 1,
+            }
+        }
+
+        RollbackSummary {
+            total: self.steps.len(),
+            pending,
+            in_progress,
+            completed,
+            failed,
+            rolled_back,
+        }
+    }
+}
+
+/// Summary counts of migration step statuses.
+#[derive(Debug, Clone)]
+pub struct RollbackSummary {
+    pub total: usize,
+    pub pending: usize,
+    pub in_progress: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub rolled_back: usize,
+}
+
+impl RollbackSummary {
+    /// Whether all steps completed successfully.
+    #[must_use]
+    pub fn all_succeeded(&self) -> bool {
+        self.failed == 0 && self.pending == 0 && self.in_progress == 0
+    }
+}
+
+#[cfg(test)]
+mod dry_run_rollback_tests {
+    use super::*;
+
+    fn make_asset(
+        id: &str,
+        format: FileFormat,
+        size_gb: f64,
+        readable: bool,
+        space: bool,
+    ) -> DryRunAsset {
+        DryRunAsset {
+            asset_id: id.to_string(),
+            source: format,
+            size_gb,
+            is_readable: readable,
+            has_disk_space: space,
+        }
+    }
+
+    // --- Dry-run tests ---
+
+    #[test]
+    fn test_dry_run_preferred_format_skipped() {
+        let assets = vec![make_asset("a1", FileFormat::dpx(), 10.0, true, true)];
+        let report = dry_run_migration(&assets, "test");
+        assert_eq!(report.skipped_count(), 1);
+        assert_eq!(report.success_count(), 0);
+        assert!(report.passed());
+    }
+
+    #[test]
+    fn test_dry_run_at_risk_succeeds() {
+        let assets = vec![make_asset("a2", FileFormat::mpeg2(), 5.0, true, true)];
+        let report = dry_run_migration(&assets, "migrate mpeg2");
+        assert_eq!(report.success_count(), 1);
+        assert!(report.total_estimated_hours > 0.0);
+        assert!(report.total_estimated_size_gb > 0.0);
+        assert!(report.passed());
+    }
+
+    #[test]
+    fn test_dry_run_unreadable_fails() {
+        let assets = vec![make_asset("a3", FileFormat::dv(), 1.0, false, true)];
+        let report = dry_run_migration(&assets, "test");
+        assert_eq!(report.failure_count(), 1);
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn test_dry_run_no_disk_space_fails() {
+        let assets = vec![make_asset("a4", FileFormat::dv(), 1.0, true, false)];
+        let report = dry_run_migration(&assets, "test");
+        assert_eq!(report.failure_count(), 1);
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn test_dry_run_mixed_results() {
+        let assets = vec![
+            make_asset("ok", FileFormat::mpeg2(), 2.0, true, true),
+            make_asset("skip", FileFormat::dpx(), 3.0, true, true),
+            make_asset("fail", FileFormat::dv(), 1.0, false, true),
+        ];
+        let report = dry_run_migration(&assets, "mixed");
+        assert_eq!(report.success_count(), 1);
+        assert_eq!(report.skipped_count(), 1);
+        assert_eq!(report.failure_count(), 1);
+        assert!(!report.passed());
+    }
+
+    #[test]
+    fn test_dry_run_large_asset_warning() {
+        let assets = vec![make_asset("big", FileFormat::mpeg2(), 200.0, true, true)];
+        let report = dry_run_migration(&assets, "big batch");
+        let warnings = report.all_warnings();
+        assert!(!warnings.is_empty());
+        assert!(warnings.iter().any(|w| w.contains("large asset")));
+    }
+
+    #[test]
+    fn test_dry_run_obsolete_format_warning() {
+        let assets = vec![make_asset("old", FileFormat::betacam(), 10.0, true, true)];
+        let report = dry_run_migration(&assets, "obsolete");
+        let warnings = report.all_warnings();
+        assert!(warnings.iter().any(|w| w.contains("OBSOLETE")));
+    }
+
+    #[test]
+    fn test_dry_run_empty_assets() {
+        let report = dry_run_migration(&[], "empty");
+        assert!(report.passed());
+        assert_eq!(report.entries.len(), 0);
+        assert!((report.total_estimated_hours).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_dry_run_outcome_display() {
+        assert_eq!(DryRunOutcome::WouldSucceed.to_string(), "WOULD_SUCCEED");
+        assert!(DryRunOutcome::WouldFail("reason".into())
+            .to_string()
+            .contains("reason"));
+        assert!(DryRunOutcome::Skipped("ok".into())
+            .to_string()
+            .contains("ok"));
+    }
+
+    // --- Rollback journal tests ---
+
+    fn make_step(id: &str, asset: &str) -> MigrationStep {
+        MigrationStep {
+            step_id: id.to_string(),
+            asset_id: asset.to_string(),
+            source_path: format!("/source/{asset}.dv"),
+            backup_path: None,
+            target_path: format!("/target/{asset}.dpx"),
+            source_format: "DV".to_string(),
+            target_format: "DPX".to_string(),
+            status: MigrationStepStatus::Pending,
+        }
+    }
+
+    #[test]
+    fn test_rollback_journal_record_and_query() {
+        let mut journal = RollbackJournal::new();
+        journal.record_step(make_step("s1", "video_a"));
+        journal.record_step(make_step("s2", "video_b"));
+        assert_eq!(journal.step_count(), 2);
+    }
+
+    #[test]
+    fn test_rollback_journal_lifecycle() {
+        let mut journal = RollbackJournal::new();
+        journal.record_step(make_step("s1", "video_a"));
+
+        assert!(journal.mark_in_progress("s1"));
+        let step = journal.get_step("s1");
+        assert_eq!(
+            step.map(|s| &s.status),
+            Some(&MigrationStepStatus::InProgress)
+        );
+
+        assert!(journal.mark_completed("s1", Some("/backup/video_a.dv".to_string())));
+        let step = journal.get_step("s1");
+        assert_eq!(
+            step.map(|s| &s.status),
+            Some(&MigrationStepStatus::Completed)
+        );
+        assert_eq!(
+            step.and_then(|s| s.backup_path.as_deref()),
+            Some("/backup/video_a.dv")
+        );
+    }
+
+    #[test]
+    fn test_rollback_journal_failed_step() {
+        let mut journal = RollbackJournal::new();
+        journal.record_step(make_step("s1", "video_a"));
+        assert!(journal.mark_in_progress("s1"));
+        assert!(journal.mark_failed("s1", "disk full"));
+
+        let step = journal.get_step("s1");
+        assert!(matches!(
+            step.map(|s| &s.status),
+            Some(MigrationStepStatus::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn test_rollback_journal_steps_needing_rollback() {
+        let mut journal = RollbackJournal::new();
+        journal.record_step(make_step("s1", "a"));
+        journal.record_step(make_step("s2", "b"));
+        journal.record_step(make_step("s3", "c"));
+
+        journal.mark_in_progress("s1");
+        journal.mark_completed("s1", None);
+        journal.mark_in_progress("s2");
+        journal.mark_completed("s2", None);
+        journal.mark_in_progress("s3");
+        // s3 is still in-progress (crash scenario)
+
+        let needing = journal.steps_needing_rollback();
+        assert_eq!(needing.len(), 3);
+        // Should be in reverse order
+        assert_eq!(needing[0].step_id, "s3");
+        assert_eq!(needing[1].step_id, "s2");
+        assert_eq!(needing[2].step_id, "s1");
+    }
+
+    #[test]
+    fn test_rollback_journal_mark_rolled_back() {
+        let mut journal = RollbackJournal::new();
+        journal.record_step(make_step("s1", "a"));
+        journal.mark_in_progress("s1");
+        journal.mark_completed("s1", None);
+        assert!(journal.mark_rolled_back("s1"));
+
+        let step = journal.get_step("s1");
+        assert_eq!(
+            step.map(|s| &s.status),
+            Some(&MigrationStepStatus::RolledBack)
+        );
+    }
+
+    #[test]
+    fn test_rollback_journal_summary() {
+        let mut journal = RollbackJournal::new();
+        journal.record_step(make_step("s1", "a"));
+        journal.record_step(make_step("s2", "b"));
+        journal.record_step(make_step("s3", "c"));
+        journal.record_step(make_step("s4", "d"));
+
+        journal.mark_in_progress("s1");
+        journal.mark_completed("s1", None);
+        journal.mark_in_progress("s2");
+        journal.mark_failed("s2", "error");
+        journal.mark_in_progress("s3");
+        journal.mark_completed("s3", None);
+        journal.mark_rolled_back("s3");
+        // s4 stays pending
+
+        let summary = journal.summary();
+        assert_eq!(summary.total, 4);
+        assert_eq!(summary.completed, 1);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.rolled_back, 1);
+        assert_eq!(summary.pending, 1);
+        assert!(!summary.all_succeeded());
+    }
+
+    #[test]
+    fn test_rollback_summary_all_succeeded() {
+        let mut journal = RollbackJournal::new();
+        journal.record_step(make_step("s1", "a"));
+        journal.mark_in_progress("s1");
+        journal.mark_completed("s1", None);
+
+        let summary = journal.summary();
+        assert!(summary.all_succeeded());
+    }
+
+    #[test]
+    fn test_rollback_journal_missing_step_id() {
+        let mut journal = RollbackJournal::new();
+        assert!(!journal.mark_in_progress("nonexistent"));
+        assert!(!journal.mark_completed("nonexistent", None));
+        assert!(!journal.mark_failed("nonexistent", "err"));
+        assert!(!journal.mark_rolled_back("nonexistent"));
+    }
+
+    #[test]
+    fn test_migration_step_status_display() {
+        assert_eq!(MigrationStepStatus::Pending.to_string(), "PENDING");
+        assert_eq!(MigrationStepStatus::InProgress.to_string(), "IN_PROGRESS");
+        assert_eq!(MigrationStepStatus::Completed.to_string(), "COMPLETED");
+        assert_eq!(MigrationStepStatus::RolledBack.to_string(), "ROLLED_BACK");
+        assert!(MigrationStepStatus::Failed("err".into())
+            .to_string()
+            .contains("err"));
+    }
+}

@@ -65,6 +65,7 @@ fn scan_chunk(chunk: &[u8], base_offset: u64) -> Result<Vec<Issue>> {
                 description: format!("Large run of zeros ({} bytes)", length),
                 location: Some(base_offset + offset as u64),
                 fixable: true,
+                confidence: 0.8,
             });
         }
     }
@@ -82,6 +83,7 @@ fn scan_chunk(chunk: &[u8], base_offset: u64) -> Result<Vec<Issue>> {
                 ),
                 location: Some(base_offset + offset as u64),
                 fixable: true,
+                confidence: 0.8,
             });
         }
     }
@@ -131,6 +133,7 @@ fn detect_sync_loss(chunk: &[u8], base_offset: u64) -> Result<Vec<Issue>> {
                         description: format!("Large gap between sync bytes ({} bytes)", i - last),
                         location: Some(base_offset + last as u64),
                         fixable: true,
+                        confidence: 0.8,
                     });
                 }
             }
@@ -163,6 +166,7 @@ fn detect_packet_corruption(chunk: &[u8], base_offset: u64) -> Result<Vec<Issue>
                 description: format!("Invalid packet size: {}", size),
                 location: Some(base_offset + i as u64),
                 fixable: true,
+                confidence: 0.8,
             });
         }
 
@@ -193,6 +197,7 @@ fn check_truncation(file: &mut File) -> Result<Option<Issue>> {
             description: "File ends with zeros, likely truncated".to_string(),
             location: Some(file_size - read_size),
             fixable: true,
+            confidence: 0.8,
         }));
     }
 

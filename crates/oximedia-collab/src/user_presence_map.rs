@@ -154,7 +154,7 @@ impl Default for PresenceMapConfig {
     fn default() -> Self {
         Self {
             idle_threshold: Duration::from_secs(30),
-            expiry_threshold: Duration::from_secs(300),
+            expiry_threshold: Duration::from_mins(5),
         }
     }
 }

@@ -64,6 +64,7 @@
 //! This implementation uses no unsafe code and is fully memory-safe.
 //! All input data is validated, including CRC checks on all chunks.
 
+pub mod apng;
 mod decoder;
 mod encoder;
 mod filter;

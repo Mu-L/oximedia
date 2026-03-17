@@ -377,7 +377,7 @@ mod tests {
     fn test_gap_duration() {
         let gap = Gap::new(10_000, 25_000);
         assert_eq!(gap.duration_ms(), 15_000);
-        assert_eq!(gap.duration(), Duration::from_millis(15_000));
+        assert_eq!(gap.duration(), Duration::from_secs(15));
     }
 
     #[test]

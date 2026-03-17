@@ -46,6 +46,27 @@ pub enum BlendMode {
     Darken,
     /// Lighten: `max(src, dst)` per channel.
     Lighten,
+    /// Vivid Light: combines Color Dodge and Color Burn.
+    /// Dodges (brightens) if src > 0.5, burns (darkens) if src <= 0.5.
+    VividLight,
+    /// Pin Light: replaces dark pixels with darker of src/dst, light with lighter.
+    /// If src > 0.5: max(dst, 2*(src-0.5)), else min(dst, 2*src).
+    PinLight,
+    /// Hard Mix: quantises output to 0 or 1 per channel based on Vivid Light result.
+    HardMix,
+    /// Linear Light: combines Linear Dodge and Linear Burn.
+    /// dst + 2*src - 1.
+    LinearLight,
+    /// Linear Burn: dst + src - 1.
+    LinearBurn,
+    /// Linear Dodge (Add): dst + src (same as Add but included for Photoshop parity).
+    LinearDodge,
+    /// Darker Color: picks the darker pixel overall (by luminance).
+    DarkerColor,
+    /// Lighter Color: picks the lighter pixel overall (by luminance).
+    LighterColor,
+    /// Divide: dst / src.
+    Divide,
 }
 
 impl BlendMode {
@@ -71,6 +92,15 @@ impl BlendMode {
             Self::Subtract => "Subtract",
             Self::Darken => "Darken",
             Self::Lighten => "Lighten",
+            Self::VividLight => "Vivid Light",
+            Self::PinLight => "Pin Light",
+            Self::HardMix => "Hard Mix",
+            Self::LinearLight => "Linear Light",
+            Self::LinearBurn => "Linear Burn",
+            Self::LinearDodge => "Linear Dodge",
+            Self::DarkerColor => "Darker Color",
+            Self::LighterColor => "Lighter Color",
+            Self::Divide => "Divide",
         }
     }
 
@@ -126,6 +156,56 @@ impl BlendMode {
             Self::Subtract => (dst - src).max(0.0),
             Self::Darken => src.min(dst),
             Self::Lighten => src.max(dst),
+            Self::VividLight => {
+                if src <= 0.5 {
+                    // Color Burn with 2*src
+                    let s2 = 2.0 * src;
+                    if s2 > 0.0 {
+                        1.0 - ((1.0 - dst) / s2).min(1.0)
+                    } else {
+                        0.0
+                    }
+                } else {
+                    // Color Dodge with 2*(src-0.5)
+                    let s2 = 2.0 * (src - 0.5);
+                    if s2 < 1.0 {
+                        (dst / (1.0 - s2)).min(1.0)
+                    } else {
+                        1.0
+                    }
+                }
+            }
+            Self::PinLight => {
+                if src > 0.5 {
+                    dst.max(2.0 * (src - 0.5))
+                } else {
+                    dst.min(2.0 * src)
+                }
+            }
+            Self::HardMix => {
+                // Use Vivid Light result, then threshold at 0.5
+                let vl = Self::VividLight.blend_channel(src, dst);
+                if vl < 0.5 {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+            Self::LinearLight => {
+                // dst + 2*src - 1
+                (dst + 2.0 * src - 1.0).clamp(0.0, 1.0)
+            }
+            Self::LinearBurn => (dst + src - 1.0).max(0.0),
+            Self::LinearDodge => (dst + src).min(1.0),
+            // DarkerColor / LighterColor need full pixel context; per-channel fallback
+            Self::DarkerColor | Self::LighterColor => src,
+            Self::Divide => {
+                if src > 0.0 {
+                    (dst / src).min(1.0)
+                } else {
+                    1.0
+                }
+            }
         };
         result.clamp(0.0, 1.0)
     }
@@ -147,7 +227,7 @@ impl BlendMode {
             return dst_rgba;
         }
 
-        // For HSL modes we need full RGB context.
+        // For HSL modes and whole-pixel modes we need full RGB context.
         let (br, bg, bb) = match self {
             Self::Hue => {
                 let b_hsl = rgb_to_hsl(dr, dg, db);
@@ -168,6 +248,24 @@ impl BlendMode {
                 let b_hsl = rgb_to_hsl(dr, dg, db);
                 let s_hsl = rgb_to_hsl(sr, sg, sb);
                 hsl_to_rgb(b_hsl.0, b_hsl.1, s_hsl.2)
+            }
+            Self::DarkerColor => {
+                let src_lum = 0.299 * sr + 0.587 * sg + 0.114 * sb;
+                let dst_lum = 0.299 * dr + 0.587 * dg + 0.114 * db;
+                if src_lum < dst_lum {
+                    (sr, sg, sb)
+                } else {
+                    (dr, dg, db)
+                }
+            }
+            Self::LighterColor => {
+                let src_lum = 0.299 * sr + 0.587 * sg + 0.114 * sb;
+                let dst_lum = 0.299 * dr + 0.587 * dg + 0.114 * db;
+                if src_lum > dst_lum {
+                    (sr, sg, sb)
+                } else {
+                    (dr, dg, db)
+                }
             }
             _ => (
                 self.blend_channel(sr, dr),
@@ -443,6 +541,140 @@ mod tests {
             "a unchanged: expected {}, got {oa}",
             dst.3
         );
+    }
+
+    #[test]
+    fn test_vivid_light_bright_src() {
+        // With src=0.8 (> 0.5), acts like Dodge
+        let ch = BlendMode::VividLight.blend_channel(0.8, 0.3);
+        assert!(ch > 0.3, "vivid light dodge should brighten, got {ch}");
+    }
+
+    #[test]
+    fn test_vivid_light_dark_src() {
+        // With src=0.2 (< 0.5), acts like Burn
+        let ch = BlendMode::VividLight.blend_channel(0.2, 0.8);
+        assert!(ch < 0.8, "vivid light burn should darken, got {ch}");
+    }
+
+    #[test]
+    fn test_pin_light_bright_src() {
+        // src=0.8 > 0.5: max(dst, 2*(0.8-0.5)) = max(0.3, 0.6) = 0.6
+        let ch = BlendMode::PinLight.blend_channel(0.8, 0.3);
+        assert!(
+            (ch - 0.6).abs() < 0.01,
+            "pin light bright: expected 0.6, got {ch}"
+        );
+    }
+
+    #[test]
+    fn test_pin_light_dark_src() {
+        // src=0.2 <= 0.5: min(dst, 2*0.2) = min(0.7, 0.4) = 0.4
+        let ch = BlendMode::PinLight.blend_channel(0.2, 0.7);
+        assert!(
+            (ch - 0.4).abs() < 0.01,
+            "pin light dark: expected 0.4, got {ch}"
+        );
+    }
+
+    #[test]
+    fn test_hard_mix_quantizes() {
+        // Hard Mix should output only 0 or 1
+        for s in [0.1, 0.3, 0.5, 0.7, 0.9] {
+            for d in [0.1, 0.3, 0.5, 0.7, 0.9] {
+                let ch = BlendMode::HardMix.blend_channel(s, d);
+                assert!(
+                    ch == 0.0 || ch == 1.0,
+                    "hard mix should be 0 or 1, got {ch} for src={s}, dst={d}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_linear_light() {
+        // dst + 2*src - 1 = 0.4 + 2*0.6 - 1 = 0.6
+        let ch = BlendMode::LinearLight.blend_channel(0.6, 0.4);
+        assert!(
+            (ch - 0.6).abs() < 0.01,
+            "linear light: expected 0.6, got {ch}"
+        );
+    }
+
+    #[test]
+    fn test_linear_burn() {
+        // dst + src - 1 = 0.7 + 0.5 - 1 = 0.2
+        let ch = BlendMode::LinearBurn.blend_channel(0.5, 0.7);
+        assert!(
+            (ch - 0.2).abs() < 0.01,
+            "linear burn: expected 0.2, got {ch}"
+        );
+    }
+
+    #[test]
+    fn test_linear_dodge_same_as_add() {
+        let ch_add = BlendMode::Add.blend_channel(0.3, 0.4);
+        let ch_ld = BlendMode::LinearDodge.blend_channel(0.3, 0.4);
+        assert!(
+            (ch_add - ch_ld).abs() < 0.01,
+            "linear dodge should match add: {ch_add} vs {ch_ld}"
+        );
+    }
+
+    #[test]
+    fn test_divide() {
+        // dst / src = 0.5 / 1.0 = 0.5
+        let ch = BlendMode::Divide.blend_channel(1.0, 0.5);
+        assert!((ch - 0.5).abs() < 0.01, "divide: expected 0.5, got {ch}");
+    }
+
+    #[test]
+    fn test_divide_by_zero() {
+        let ch = BlendMode::Divide.blend_channel(0.0, 0.5);
+        assert!(
+            (ch - 1.0).abs() < 0.01,
+            "divide by zero should return 1.0, got {ch}"
+        );
+    }
+
+    #[test]
+    fn test_darker_color_pixel() {
+        // src is darker (lower luminance) than dst
+        let (or, og, ob, _) =
+            BlendMode::DarkerColor.blend_pixel((0.1, 0.1, 0.1, 1.0), (0.9, 0.9, 0.9, 1.0));
+        assert!(or < 0.5, "darker color should pick src, got r={or}");
+        assert!(og < 0.5, "darker color should pick src, got g={og}");
+        assert!(ob < 0.5, "darker color should pick src, got b={ob}");
+    }
+
+    #[test]
+    fn test_lighter_color_pixel() {
+        let (or, og, ob, _) =
+            BlendMode::LighterColor.blend_pixel((0.9, 0.9, 0.9, 1.0), (0.1, 0.1, 0.1, 1.0));
+        assert!(or > 0.5, "lighter color should pick src, got r={or}");
+        assert!(og > 0.5, "lighter color should pick src, got g={og}");
+        assert!(ob > 0.5, "lighter color should pick src, got b={ob}");
+    }
+
+    #[test]
+    fn test_all_new_blend_modes_have_names() {
+        let modes = [
+            BlendMode::VividLight,
+            BlendMode::PinLight,
+            BlendMode::HardMix,
+            BlendMode::LinearLight,
+            BlendMode::LinearBurn,
+            BlendMode::LinearDodge,
+            BlendMode::DarkerColor,
+            BlendMode::LighterColor,
+            BlendMode::Divide,
+        ];
+        let mut names = std::collections::HashSet::new();
+        for mode in &modes {
+            let name = mode.name();
+            assert!(!name.is_empty());
+            assert!(names.insert(name), "duplicate name: {name}");
+        }
     }
 
     #[test]

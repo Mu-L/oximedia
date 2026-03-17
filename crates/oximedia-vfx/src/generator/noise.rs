@@ -1,7 +1,7 @@
 //! Noise generator.
 
 use crate::{EffectParams, Frame, VfxResult, VideoEffect};
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 /// Noise type.

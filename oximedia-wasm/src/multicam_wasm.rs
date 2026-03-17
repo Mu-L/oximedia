@@ -163,11 +163,7 @@ impl WasmMultiCamCompositor {
             return Err(crate::utils::js_err("PIP frame is empty"));
         }
         let pip_src_w = (pip_pixel_count as f64).sqrt() as u32;
-        let pip_src_h = if pip_src_w > 0 {
-            (pip_pixel_count as u32) / pip_src_w
-        } else {
-            1
-        };
+        let pip_src_h = (pip_pixel_count as u32).checked_div(pip_src_w).unwrap_or(1);
 
         // Blit PIP overlay
         blit_scaled(
@@ -231,11 +227,7 @@ pub fn wasm_composite_pip(
         return Err(crate::utils::js_err("Overlay frame is empty"));
     }
     let ov_w = (ov_pixel_count as f64).sqrt() as u32;
-    let ov_h = if ov_w > 0 {
-        (ov_pixel_count as u32) / ov_w
-    } else {
-        1
-    };
+    let ov_h = (ov_pixel_count as u32).checked_div(ov_w).unwrap_or(1);
 
     blit_scaled(
         overlay,

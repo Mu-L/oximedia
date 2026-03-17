@@ -17,20 +17,24 @@ impl KnnCalculator {
         Self { k }
     }
 
-    /// Find similar users based on rating patterns
+    /// Find similar users based on rating patterns.
+    ///
+    /// Returns an empty list when `user_id` is not yet present in the matrix
+    /// (cold-start case) so that callers can gracefully proceed with no neighbours.
     ///
     /// # Errors
     ///
-    /// Returns an error if user not found or computation fails
+    /// Returns an error only if an internal computation error occurs.
     pub fn find_similar_users(
         &self,
         matrix: &UserItemMatrix,
         user_id: Uuid,
         limit: usize,
     ) -> RecommendResult<Vec<(Uuid, f32)>> {
-        let user_ratings = matrix
-            .get_user_ratings(user_id)
-            .ok_or(RecommendError::UserNotFound(user_id))?;
+        let user_ratings = match matrix.get_user_ratings(user_id) {
+            Some(ratings) => ratings,
+            None => return Ok(Vec::new()),
+        };
 
         let mut similarities = Vec::new();
 

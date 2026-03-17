@@ -407,6 +407,438 @@ fn test_periodic_pattern(observed: &[bool], template: &[bool]) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// Pulldown Pattern Recognition (public API)
+// ---------------------------------------------------------------------------
+
+/// Simplified frame cadence descriptor used for pulldown pattern detection.
+///
+/// Each entry records whether a frame is a duplicate of the previous one and
+/// the measured inter-frame similarity, allowing the caller to feed data
+/// from any source (live analysis, cached metadata, etc.).
+#[derive(Debug, Clone, Copy)]
+pub struct FrameCadence {
+    /// Frame index.
+    pub index: usize,
+    /// Whether this frame was detected as a duplicate of the previous frame.
+    pub is_duplicate: bool,
+    /// Similarity to the previous frame in the range `[0.0, 1.0]`.
+    pub similarity: f64,
+}
+
+/// Recognised pulldown (telecine) patterns.
+///
+/// These describe how film frames at one rate are repeated to produce output
+/// at a higher frame rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PulldownPattern {
+    /// No pulldown detected — content appears to be native progressive.
+    None,
+    /// 3:2 pulldown — NTSC telecine converting 24 fps film to ~29.97 fps.
+    /// Every 5-frame group contains 2 duplicated frames in a repeating pattern.
+    Pulldown32,
+    /// 2:2 pulldown — PAL telecine converting 25 fps film to 50 fields/sec (25 fps
+    /// interlaced), or converting 24 fps to 48 fps.  Every other frame is duplicated.
+    Pulldown22,
+    /// Unrecognised or irregular cadence pattern.
+    Unknown,
+}
+
+impl std::fmt::Display for PulldownPattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "None (Progressive)"),
+            Self::Pulldown32 => write!(f, "3:2 Pulldown (NTSC Telecine)"),
+            Self::Pulldown22 => write!(f, "2:2 Pulldown (PAL Telecine)"),
+            Self::Unknown => write!(f, "Unknown / Irregular"),
+        }
+    }
+}
+
+/// Detect the dominant pulldown pattern from a slice of cadence history entries.
+///
+/// The function examines the `is_duplicate` sequence and attempts to match it
+/// against the periodic templates for 3:2 and 2:2 pulldown. A confidence
+/// threshold of 0.70 is required for a positive match; below that, the pattern
+/// is reported as `PulldownPattern::Unknown`.
+///
+/// # Arguments
+///
+/// * `cadence_history` - Ordered slice of `FrameCadence` records, one per frame.
+///   Must contain at least 10 entries for reliable detection.
+///
+/// # Returns
+///
+/// The dominant `PulldownPattern` for the provided history, or
+/// `PulldownPattern::None` when fewer than 10 frames are supplied and no
+/// duplicates are found, `PulldownPattern::Unknown` for ambiguous short sequences.
+#[must_use]
+pub fn detect_pulldown_pattern(cadence_history: &[FrameCadence]) -> PulldownPattern {
+    const MIN_FRAMES: usize = 10;
+    const CONFIDENCE_THRESHOLD: f64 = 0.70;
+
+    if cadence_history.is_empty() {
+        return PulldownPattern::None;
+    }
+
+    let total_dups = cadence_history.iter().filter(|f| f.is_duplicate).count();
+
+    // No duplicates at all → progressive content.
+    if total_dups == 0 {
+        return PulldownPattern::None;
+    }
+
+    if cadence_history.len() < MIN_FRAMES {
+        // Too short to reliably classify, but there are duplicates.
+        return PulldownPattern::Unknown;
+    }
+
+    let observed: Vec<bool> = cadence_history.iter().map(|f| f.is_duplicate).collect();
+
+    // 3:2 pulldown: period-5 patterns — 2 duplicates in every 5 frames.
+    // The canonical pattern (and all its cyclic rotations) are tested.
+    // Template: U U D U D  (D = duplicate, U = unique)
+    let score_32 = score_periodic_template(&observed, &[false, false, true, false, true]);
+
+    // 2:2 pulldown: period-4 — every other frame is a duplicate.
+    // Template: U D U D
+    let score_22 = score_periodic_template(&observed, &[false, true, false, true]);
+
+    // Select best match above threshold.
+    if score_32 >= CONFIDENCE_THRESHOLD && score_32 >= score_22 {
+        return PulldownPattern::Pulldown32;
+    }
+    if score_22 >= CONFIDENCE_THRESHOLD {
+        return PulldownPattern::Pulldown22;
+    }
+
+    // Duplicates exist but no recognised pattern.
+    PulldownPattern::Unknown
+}
+
+/// Score how well an observed bool sequence matches a periodic template.
+///
+/// All cyclic rotations of the template are tested and the best score is
+/// returned. Score is the fraction of positions that agree with the template,
+/// in `[0.0, 1.0]`.
+fn score_periodic_template(observed: &[bool], template: &[bool]) -> f64 {
+    let period = template.len();
+    if period == 0 || observed.is_empty() {
+        return 0.0;
+    }
+
+    let mut best = 0.0f64;
+    for rotation in 0..period {
+        let mut matches = 0usize;
+        for (i, &obs) in observed.iter().enumerate() {
+            if obs == template[(i + rotation) % period] {
+                matches += 1;
+            }
+        }
+        let score = matches as f64 / observed.len() as f64;
+        if score > best {
+            best = score;
+        }
+    }
+    best
+}
+
+// ---------------------------------------------------------------------------
+// Interlacing / Combing Detection
+// ---------------------------------------------------------------------------
+
+/// Interlacing status classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InterlaceStatus {
+    /// Frame is progressive (no combing).
+    Progressive,
+    /// Frame is interlaced with top-field-first (TFF).
+    InterlacedTff,
+    /// Frame is interlaced with bottom-field-first (BFF).
+    InterlacedBff,
+    /// Frame is interlaced, field order unknown.
+    InterlacedUnknown,
+}
+
+impl std::fmt::Display for InterlaceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Progressive => write!(f, "Progressive"),
+            Self::InterlacedTff => write!(f, "Interlaced (TFF)"),
+            Self::InterlacedBff => write!(f, "Interlaced (BFF)"),
+            Self::InterlacedUnknown => write!(f, "Interlaced"),
+        }
+    }
+}
+
+/// Per-frame combing analysis result.
+#[derive(Debug, Clone, Copy)]
+pub struct CombingInfo {
+    /// Frame index.
+    pub index: usize,
+    /// Combing metric — high values indicate strong combing artifacts.
+    /// Normalised to approximately 0.0..1.0 range.
+    pub combing_score: f64,
+    /// Whether the frame is classified as combed.
+    pub is_combed: bool,
+}
+
+/// Configuration for interlacing detection.
+#[derive(Debug, Clone)]
+pub struct InterlaceConfig {
+    /// Combing threshold: per-pixel gradient threshold to count as a combing
+    /// artifact. Default 15.
+    pub gradient_threshold: i32,
+    /// Fraction of scanlines exhibiting combing needed to flag a frame.
+    /// Range 0.0-1.0. Default 0.10.
+    pub line_ratio_threshold: f64,
+    /// Minimum number of frames to analyse before determining status.
+    pub min_frames: usize,
+}
+
+impl Default for InterlaceConfig {
+    fn default() -> Self {
+        Self {
+            gradient_threshold: 15,
+            line_ratio_threshold: 0.10,
+            min_frames: 5,
+        }
+    }
+}
+
+/// Aggregated interlacing analysis result.
+#[derive(Debug, Clone)]
+pub struct InterlaceAnalysisResult {
+    /// Dominant interlace status.
+    pub status: InterlaceStatus,
+    /// Confidence in the detected status (0.0-1.0).
+    pub confidence: f64,
+    /// Per-frame combing info.
+    pub frame_info: Vec<CombingInfo>,
+    /// Average combing score across all frames.
+    pub avg_combing_score: f64,
+    /// Total number of combed frames.
+    pub combed_frame_count: usize,
+    /// Total frames analysed.
+    pub total_frames: usize,
+}
+
+/// Stateful interlacing detector.
+///
+/// Uses a vertical combing metric to detect interlacing artifacts.
+/// The algorithm examines adjacent-line luminance differences: in
+/// interlaced content the odd and even scanlines come from different
+/// temporal fields, producing a characteristic "tooth" pattern in the
+/// vertical gradient.
+#[derive(Debug)]
+pub struct InterlaceDetector {
+    config: InterlaceConfig,
+    frames: Vec<CombingInfo>,
+    /// Store last two frames for field-order detection.
+    prev_even_mean: Option<f64>,
+    prev_odd_mean: Option<f64>,
+    tff_votes: usize,
+    bff_votes: usize,
+}
+
+impl InterlaceDetector {
+    /// Create a new interlacing detector.
+    #[must_use]
+    pub fn new(config: InterlaceConfig) -> Self {
+        Self {
+            config,
+            frames: Vec::new(),
+            prev_even_mean: None,
+            prev_odd_mean: None,
+            tff_votes: 0,
+            bff_votes: 0,
+        }
+    }
+
+    /// Process a Y-plane frame for combing artifacts.
+    pub fn push_frame(&mut self, y_plane: &[u8], width: usize, height: usize) {
+        if width == 0 || height < 3 || y_plane.len() < width * height {
+            let index = self.frames.len();
+            self.frames.push(CombingInfo {
+                index,
+                combing_score: 0.0,
+                is_combed: false,
+            });
+            return;
+        }
+
+        // Compute combing metric:
+        // For each pixel (x, y) where y ∈ [1, height-2], compute:
+        //   combing = |2*L(x,y) - L(x,y-1) - L(x,y+1)|
+        // If combing > gradient_threshold, it is a combing hit.
+        // Count the fraction of scanlines with significant combing.
+
+        let gt = self.config.gradient_threshold;
+        let mut combed_lines = 0usize;
+        let interior_lines = height.saturating_sub(2);
+        if interior_lines == 0 {
+            let index = self.frames.len();
+            self.frames.push(CombingInfo {
+                index,
+                combing_score: 0.0,
+                is_combed: false,
+            });
+            return;
+        }
+
+        let mut total_combing_energy = 0.0f64;
+        let mut total_pixels = 0usize;
+
+        for y in 1..height - 1 {
+            let mut line_combing = 0usize;
+            for x in 0..width {
+                let above = i32::from(y_plane[(y - 1) * width + x]);
+                let center = i32::from(y_plane[y * width + x]);
+                let below = i32::from(y_plane[(y + 1) * width + x]);
+
+                let comb = (2 * center - above - below).abs();
+                if comb > gt {
+                    line_combing += 1;
+                }
+                total_combing_energy += comb as f64;
+                total_pixels += 1;
+            }
+
+            // If more than 30% of pixels in this line show combing, count the line
+            if width > 0 && (line_combing as f64 / width as f64) > 0.30 {
+                combed_lines += 1;
+            }
+        }
+
+        let combing_score = if total_pixels > 0 {
+            // Normalise: typical max energy per pixel is ~510 (extreme case)
+            // A practical normalisation factor: divide by (gradient_threshold * 4)
+            let norm = (gt as f64) * 4.0;
+            (total_combing_energy / total_pixels as f64 / norm).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        let line_ratio = combed_lines as f64 / interior_lines as f64;
+        let is_combed = line_ratio >= self.config.line_ratio_threshold;
+
+        // Field-order heuristic: compare even-line mean vs odd-line mean to
+        // previous frame's fields. In TFF, even lines (0, 2, 4, ...) come
+        // first; in BFF, odd lines come first. Whichever field correlates
+        // more with the previous same-parity field is likely the "earlier" field.
+        let (even_mean, odd_mean) = compute_field_means(y_plane, width, height);
+
+        if let (Some(prev_even), Some(prev_odd)) = (self.prev_even_mean, self.prev_odd_mean) {
+            // If even field changed less than odd, even field is temporally first (TFF)
+            let even_diff = (even_mean - prev_even).abs();
+            let odd_diff = (odd_mean - prev_odd).abs();
+            if is_combed {
+                if even_diff < odd_diff {
+                    self.tff_votes += 1;
+                } else {
+                    self.bff_votes += 1;
+                }
+            }
+        }
+        self.prev_even_mean = Some(even_mean);
+        self.prev_odd_mean = Some(odd_mean);
+
+        let index = self.frames.len();
+        self.frames.push(CombingInfo {
+            index,
+            combing_score,
+            is_combed,
+        });
+    }
+
+    /// Finalize and produce the analysis result.
+    #[must_use]
+    pub fn finalize(self) -> InterlaceAnalysisResult {
+        let total = self.frames.len();
+        if total == 0 {
+            return InterlaceAnalysisResult {
+                status: InterlaceStatus::Progressive,
+                confidence: 0.0,
+                frame_info: Vec::new(),
+                avg_combing_score: 0.0,
+                combed_frame_count: 0,
+                total_frames: 0,
+            };
+        }
+
+        let combed_count = self.frames.iter().filter(|f| f.is_combed).count();
+        let combed_ratio = combed_count as f64 / total as f64;
+        let avg_score = self.frames.iter().map(|f| f.combing_score).sum::<f64>() / total as f64;
+
+        let (status, confidence) = if combed_ratio < 0.05 {
+            // Very few combed frames => progressive
+            (InterlaceStatus::Progressive, 1.0 - combed_ratio)
+        } else if combed_ratio > 0.30 {
+            // Clearly interlaced
+            let field_order = if self.tff_votes > self.bff_votes + 2 {
+                InterlaceStatus::InterlacedTff
+            } else if self.bff_votes > self.tff_votes + 2 {
+                InterlaceStatus::InterlacedBff
+            } else {
+                InterlaceStatus::InterlacedUnknown
+            };
+            (field_order, combed_ratio)
+        } else {
+            // Ambiguous
+            (InterlaceStatus::InterlacedUnknown, combed_ratio)
+        };
+
+        InterlaceAnalysisResult {
+            status,
+            confidence,
+            frame_info: self.frames,
+            avg_combing_score: avg_score,
+            combed_frame_count: combed_count,
+            total_frames: total,
+        }
+    }
+}
+
+/// Compute mean luminance of even and odd scanlines.
+fn compute_field_means(y_plane: &[u8], width: usize, height: usize) -> (f64, f64) {
+    let mut even_sum = 0u64;
+    let mut even_count = 0u64;
+    let mut odd_sum = 0u64;
+    let mut odd_count = 0u64;
+
+    for y in 0..height {
+        let row_start = y * width;
+        let row_end = row_start + width;
+        if row_end > y_plane.len() {
+            break;
+        }
+        let row_sum: u64 = y_plane[row_start..row_end]
+            .iter()
+            .map(|&p| u64::from(p))
+            .sum();
+        if y % 2 == 0 {
+            even_sum += row_sum;
+            even_count += width as u64;
+        } else {
+            odd_sum += row_sum;
+            odd_count += width as u64;
+        }
+    }
+
+    let even_mean = if even_count > 0 {
+        even_sum as f64 / even_count as f64
+    } else {
+        0.0
+    };
+    let odd_mean = if odd_count > 0 {
+        odd_sum as f64 / odd_count as f64
+    } else {
+        0.0
+    };
+
+    (even_mean, odd_mean)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -569,5 +1001,197 @@ mod tests {
         }
         let result = a.finalize();
         assert!((result.unique_ratio - 0.5).abs() < 0.01);
+    }
+
+    // -----------------------------------------------------------------------
+    // Interlacing / combing detection tests
+    // -----------------------------------------------------------------------
+
+    /// Create a progressive frame (smooth vertical gradients).
+    fn make_progressive_frame(width: usize, height: usize) -> Vec<u8> {
+        let mut frame = vec![0u8; width * height];
+        for y in 0..height {
+            let val = ((y as f64 / height as f64) * 255.0) as u8;
+            for x in 0..width {
+                frame[y * width + x] = val;
+            }
+        }
+        frame
+    }
+
+    /// Create a combed/interlaced frame: even lines get one value,
+    /// odd lines get a very different value, simulating temporal field mismatch.
+    fn make_combed_frame(width: usize, height: usize) -> Vec<u8> {
+        let mut frame = vec![0u8; width * height];
+        for y in 0..height {
+            let val = if y % 2 == 0 { 200u8 } else { 40u8 };
+            for x in 0..width {
+                frame[y * width + x] = val;
+            }
+        }
+        frame
+    }
+
+    #[test]
+    fn test_interlace_config_defaults() {
+        let cfg = InterlaceConfig::default();
+        assert_eq!(cfg.gradient_threshold, 15);
+        assert!((cfg.line_ratio_threshold - 0.10).abs() < 0.001);
+        assert_eq!(cfg.min_frames, 5);
+    }
+
+    #[test]
+    fn test_interlace_progressive_content() {
+        let mut det = InterlaceDetector::new(InterlaceConfig::default());
+        for _ in 0..20 {
+            let frame = make_progressive_frame(64, 64);
+            det.push_frame(&frame, 64, 64);
+        }
+        let result = det.finalize();
+        assert_eq!(result.status, InterlaceStatus::Progressive);
+        assert!(result.combed_frame_count == 0 || result.avg_combing_score < 0.2);
+    }
+
+    #[test]
+    fn test_interlace_combed_content() {
+        let mut det = InterlaceDetector::new(InterlaceConfig::default());
+        for _ in 0..20 {
+            let frame = make_combed_frame(64, 64);
+            det.push_frame(&frame, 64, 64);
+        }
+        let result = det.finalize();
+        assert_ne!(result.status, InterlaceStatus::Progressive);
+        assert!(result.combed_frame_count > 10);
+        assert!(result.avg_combing_score > 0.1);
+    }
+
+    #[test]
+    fn test_interlace_empty() {
+        let det = InterlaceDetector::new(InterlaceConfig::default());
+        let result = det.finalize();
+        assert_eq!(result.total_frames, 0);
+        assert_eq!(result.status, InterlaceStatus::Progressive);
+    }
+
+    #[test]
+    fn test_interlace_status_display() {
+        assert_eq!(InterlaceStatus::Progressive.to_string(), "Progressive");
+        assert_eq!(
+            InterlaceStatus::InterlacedTff.to_string(),
+            "Interlaced (TFF)"
+        );
+        assert_eq!(
+            InterlaceStatus::InterlacedBff.to_string(),
+            "Interlaced (BFF)"
+        );
+        assert_eq!(InterlaceStatus::InterlacedUnknown.to_string(), "Interlaced");
+    }
+
+    #[test]
+    fn test_interlace_tiny_frame() {
+        let mut det = InterlaceDetector::new(InterlaceConfig::default());
+        // Very small frame — should not panic
+        let frame = vec![128u8; 4 * 2];
+        det.push_frame(&frame, 4, 2);
+        let result = det.finalize();
+        assert_eq!(result.total_frames, 1);
+    }
+
+    #[test]
+    fn test_interlace_combing_score_range() {
+        let mut det = InterlaceDetector::new(InterlaceConfig::default());
+        let frame = make_combed_frame(32, 32);
+        det.push_frame(&frame, 32, 32);
+        let result = det.finalize();
+        assert!(result.frame_info[0].combing_score >= 0.0);
+        assert!(result.frame_info[0].combing_score <= 1.0);
+    }
+
+    #[test]
+    fn test_field_means_symmetric() {
+        let frame = vec![100u8; 64 * 64];
+        let (even, odd) = compute_field_means(&frame, 64, 64);
+        assert!((even - 100.0).abs() < 0.01);
+        assert!((odd - 100.0).abs() < 0.01);
+    }
+
+    // -----------------------------------------------------------------------
+    // detect_pulldown_pattern tests
+    // -----------------------------------------------------------------------
+
+    fn make_cadence(dups: &[bool]) -> Vec<FrameCadence> {
+        dups.iter()
+            .enumerate()
+            .map(|(i, &d)| FrameCadence {
+                index: i,
+                is_duplicate: d,
+                similarity: if d { 0.99 } else { 0.5 },
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_pulldown_empty() {
+        let result = detect_pulldown_pattern(&[]);
+        assert_eq!(result, PulldownPattern::None);
+    }
+
+    #[test]
+    fn test_pulldown_no_duplicates() {
+        // All unique frames → None (progressive)
+        let cadence = make_cadence(&[false; 20]);
+        assert_eq!(detect_pulldown_pattern(&cadence), PulldownPattern::None);
+    }
+
+    #[test]
+    fn test_pulldown_32_detected() {
+        // 3:2 pattern (period 5): U U D U D  (repeated 4 times = 20 frames)
+        let pattern = [false, false, true, false, true];
+        let dups: Vec<bool> = (0..20).map(|i| pattern[i % 5]).collect();
+        let cadence = make_cadence(&dups);
+        assert_eq!(
+            detect_pulldown_pattern(&cadence),
+            PulldownPattern::Pulldown32
+        );
+    }
+
+    #[test]
+    fn test_pulldown_22_detected() {
+        // 2:2 pattern (period 4): U D U D  (repeated 5 times = 20 frames)
+        let pattern = [false, true, false, true];
+        let dups: Vec<bool> = (0..20).map(|i| pattern[i % 4]).collect();
+        let cadence = make_cadence(&dups);
+        assert_eq!(
+            detect_pulldown_pattern(&cadence),
+            PulldownPattern::Pulldown22
+        );
+    }
+
+    #[test]
+    fn test_pulldown_short_sequence_unknown() {
+        // Fewer than MIN_FRAMES with duplicates → Unknown
+        let dups = vec![false, true, false, true, false]; // 5 frames
+        let cadence = make_cadence(&dups);
+        assert_eq!(detect_pulldown_pattern(&cadence), PulldownPattern::Unknown);
+    }
+
+    #[test]
+    fn test_pulldown_display() {
+        assert!(PulldownPattern::None.to_string().contains("Progressive"));
+        assert!(PulldownPattern::Pulldown32.to_string().contains("3:2"));
+        assert!(PulldownPattern::Pulldown22.to_string().contains("2:2"));
+        assert!(PulldownPattern::Unknown.to_string().contains("Unknown"));
+    }
+
+    #[test]
+    fn test_pulldown_irregular_pattern() {
+        // Random duplicates — should not match any clean pattern
+        let dups = [
+            false, true, false, false, true, true, false, true, false, false, false, true, false,
+            true, true, false, true, false, false, true,
+        ];
+        let cadence = make_cadence(&dups);
+        // Result is either Unknown or one of the patterns — just ensure no panic
+        let _ = detect_pulldown_pattern(&cadence);
     }
 }

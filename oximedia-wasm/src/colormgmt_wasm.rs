@@ -148,7 +148,7 @@ pub fn wasm_list_tone_map_operators() -> Result<String, JsValue> {
     serde_json::to_string(&ops).map_err(|e| js_err(format!("JSON error: {e}")))
 }
 
-/// Check whether an RGB triplet is inside a named color-space gamut ([0,1]).
+/// Check whether an RGB triplet is inside a named color-space gamut (\[0,1\]).
 #[wasm_bindgen]
 pub fn wasm_gamut_check(r: f64, g: f64, b: f64, colorspace: &str) -> Result<bool, JsValue> {
     let _cs = resolve_cs(colorspace)?;

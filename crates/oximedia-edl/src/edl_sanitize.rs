@@ -141,18 +141,17 @@ pub fn sanitize_edl(input: &str, opts: &SanitizeOptions) -> EdlResult<(String, S
 }
 
 /// Uppercase known EDL keywords in a line.
-fn uppercase_edl_keywords(
-    line: &str,
-    _original: &str,
-    _report: &mut SanitizeReport,
-) -> String {
+fn uppercase_edl_keywords(line: &str, _original: &str, _report: &mut SanitizeReport) -> String {
     let trimmed = line.trim_start();
     // FCM line
     if trimmed.starts_with("fcm:") || trimmed.starts_with("FCM:") {
         return line.to_uppercase();
     }
     // TITLE line
-    if let Some(rest) = trimmed.strip_prefix("title:").or_else(|| trimmed.strip_prefix("TITLE:")) {
+    if let Some(rest) = trimmed
+        .strip_prefix("title:")
+        .or_else(|| trimmed.strip_prefix("TITLE:"))
+    {
         return format!("TITLE:{rest}");
     }
     line.to_string()
@@ -167,7 +166,9 @@ pub fn validate_edl_structure(text: &str) -> EdlResult<usize> {
     let mut event_count = 0;
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('*') || trimmed.starts_with("TITLE")
+        if trimmed.is_empty()
+            || trimmed.starts_with('*')
+            || trimmed.starts_with("TITLE")
             || trimmed.starts_with("FCM")
         {
             continue;
@@ -203,7 +204,8 @@ mod tests {
     #[test]
     fn test_sanitize_basic() {
         let input = "TITLE: Test\nFCM: NON-DROP FRAME\n\n001  AX  V  C  01:00:00:00 01:00:05:00 01:00:00:00 01:00:05:00\n";
-        let (out, report) = sanitize_edl(input, &SanitizeOptions::default()).expect("operation should succeed");
+        let (out, report) =
+            sanitize_edl(input, &SanitizeOptions::default()).expect("operation should succeed");
         assert!(out.contains("TITLE:"));
         assert!(report.lines_processed > 0);
     }
@@ -211,14 +213,17 @@ mod tests {
     #[test]
     fn test_sanitize_crlf() {
         let input = "TITLE: Test\r\nFCM: DROP FRAME\r\n001  AX  V  C  01:00:00:00 01:00:05:00 01:00:00:00 01:00:05:00\r\n";
-        let (out, _) = sanitize_edl(input, &SanitizeOptions::default()).expect("operation should succeed");
+        let (out, _) =
+            sanitize_edl(input, &SanitizeOptions::default()).expect("operation should succeed");
         assert!(!out.contains('\r'));
     }
 
     #[test]
     fn test_sanitize_collapse_blanks() {
-        let input = "TITLE: A\n\n\n\n001  AX  V  C  01:00:00:00 01:00:05:00 01:00:00:00 01:00:05:00\n";
-        let (out, report) = sanitize_edl(input, &SanitizeOptions::default()).expect("operation should succeed");
+        let input =
+            "TITLE: A\n\n\n\n001  AX  V  C  01:00:00:00 01:00:05:00 01:00:00:00 01:00:05:00\n";
+        let (out, report) =
+            sanitize_edl(input, &SanitizeOptions::default()).expect("operation should succeed");
         assert!(report.blank_lines_removed > 0);
         // At most one blank line in a row
         assert!(!out.contains("\n\n\n"));
@@ -235,7 +240,8 @@ mod tests {
     fn test_sanitize_strip_non_ascii() {
         let mut opts = SanitizeOptions::default();
         opts.strip_non_ascii = true;
-        let input = "TITLE: T\u{00e9}st\n001  AX  V  C  01:00:00:00 01:00:05:00 01:00:00:00 01:00:05:00\n";
+        let input =
+            "TITLE: T\u{00e9}st\n001  AX  V  C  01:00:00:00 01:00:05:00 01:00:00:00 01:00:05:00\n";
         let (out, report) = sanitize_edl(input, &opts).expect("operation should succeed");
         assert!(!out.contains('\u{00e9}'));
         assert!(report.non_ascii_stripped > 0);
@@ -255,8 +261,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_trim_trailing() {
-        let input = "TITLE: Test   \n001  AX  V  C  01:00:00:00 01:00:05:00 01:00:00:00 01:00:05:00   \n";
-        let (out, _) = sanitize_edl(input, &SanitizeOptions::default()).expect("operation should succeed");
+        let input =
+            "TITLE: Test   \n001  AX  V  C  01:00:00:00 01:00:05:00 01:00:00:00 01:00:05:00   \n";
+        let (out, _) =
+            sanitize_edl(input, &SanitizeOptions::default()).expect("operation should succeed");
         for line in out.lines() {
             assert_eq!(line, line.trim_end());
         }
@@ -293,8 +301,10 @@ mod tests {
 
     #[test]
     fn test_uppercase_fcm_line() {
-        let input = "fcm: drop frame\n001  AX  V  C  01:00:00:00 01:00:05:00 01:00:00:00 01:00:05:00\n";
-        let (out, _) = sanitize_edl(input, &SanitizeOptions::default()).expect("operation should succeed");
+        let input =
+            "fcm: drop frame\n001  AX  V  C  01:00:00:00 01:00:05:00 01:00:00:00 01:00:05:00\n";
+        let (out, _) =
+            sanitize_edl(input, &SanitizeOptions::default()).expect("operation should succeed");
         assert!(out.contains("FCM: DROP FRAME"));
     }
 }

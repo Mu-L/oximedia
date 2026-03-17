@@ -1,9 +1,14 @@
 //! Playlist playout engine.
 
-use crate::Result;
+use crate::channel::preroll_verifier::{
+    PlaylistItem as PreRollItem, PreRollResult, PreRollVerifier,
+};
+use crate::{AutomationError, Result};
 use oximedia_timecode::Timecode;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -150,6 +155,71 @@ impl PlayoutEngine {
     /// Get total frame count.
     pub async fn frame_count(&self) -> u64 {
         *self.frame_count.read().await
+    }
+
+    /// Verify a playlist item before it goes to air.
+    ///
+    /// Runs the [`PreRollVerifier`] on the supplied item descriptor.  Returns
+    /// the verification result so the caller can decide whether to allow the
+    /// item to air, skip it, or raise an alarm.
+    ///
+    /// This is intentionally synchronous under the hood (filesystem metadata
+    /// check) so it must be called from a context that can tolerate a brief
+    /// blocking call — or wrapped with `tokio::task::spawn_blocking` when
+    /// latency is critical.
+    pub async fn verify_preroll(
+        &self,
+        item_id: &str,
+        file_path: impl Into<PathBuf>,
+        declared_duration_secs: Option<f64>,
+        preroll_lead_time: Duration,
+    ) -> Result<PreRollResult> {
+        let item = PreRollItem::new(item_id, file_path, declared_duration_secs);
+        let verifier = PreRollVerifier::new(preroll_lead_time, 100 * 1024 * 1024);
+
+        let result = verifier.verify(&item);
+
+        if !result.is_ready() {
+            warn!(
+                "Pre-roll verification failed for item '{}' on channel {}: {}",
+                item_id, self.channel_id, result.failure_reason
+            );
+        } else {
+            info!(
+                "Pre-roll verified for item '{}' on channel {} (estimated ready in {:?})",
+                item_id, self.channel_id, result.estimated_ready_time
+            );
+        }
+
+        Ok(result)
+    }
+
+    /// Load next item with mandatory pre-roll verification.
+    ///
+    /// Attempts to verify that the media file exists and is broadcast-safe
+    /// before loading it.  If verification fails and `require_verified` is
+    /// `true`, returns an error rather than loading the item.
+    pub async fn load_verified_item(
+        &mut self,
+        item: PlayoutItem,
+        file_path: impl Into<PathBuf>,
+        declared_duration_secs: Option<f64>,
+        require_verified: bool,
+    ) -> Result<PreRollResult> {
+        let preroll_lead = Duration::from_secs(5);
+        let result = self
+            .verify_preroll(&item.id, file_path, declared_duration_secs, preroll_lead)
+            .await?;
+
+        if !result.is_ready() && require_verified {
+            return Err(AutomationError::PlaylistExecution(format!(
+                "Pre-roll verification failed for item '{}': {}",
+                item.id, result.failure_reason
+            )));
+        }
+
+        self.load_next_item(item).await?;
+        Ok(result)
     }
 }
 

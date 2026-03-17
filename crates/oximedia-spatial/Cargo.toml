@@ -1,0 +1,20 @@
+[package]
+name = "oximedia-spatial"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Spatial audio processing for OxiMedia — Ambisonics, binaural rendering, and room acoustics simulation"
+keywords = ["spatial-audio", "ambisonics", "binaural", "hrtf", "room-acoustics"]
+categories = ["multimedia::audio", "science"]
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]

@@ -29,6 +29,7 @@ pub mod auto_key;
 pub mod composite;
 pub mod keyer;
 pub mod matte;
+pub mod matting;
 pub mod spill;
 
 use crate::error::{CvError, CvResult};

@@ -448,9 +448,8 @@ mod tests {
         assert!((semitones - 12.0).abs() < 1e-6);
 
         // Round-trip
-        let rt = TapeSpeedCorrector::ratio_to_semitones(
-            TapeSpeedCorrector::semitones_to_ratio(7.0),
-        );
+        let rt =
+            TapeSpeedCorrector::ratio_to_semitones(TapeSpeedCorrector::semitones_to_ratio(7.0));
         assert!((rt - 7.0).abs() < 1e-6);
     }
 

@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn test_noise_profile_learn() {
         // Create noise signal
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
         let samples: Vec<f32> = (0..8192).map(|_| rng.random_range(-0.1..0.1)).collect();
 
@@ -268,7 +268,7 @@ mod tests {
     fn test_noise_profile_update() {
         let mut profile = NoiseProfile::new(2048);
 
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
         let samples: Vec<f32> = (0..4096).map(|_| rng.random_range(-0.1..0.1)).collect();
 
@@ -294,7 +294,7 @@ mod tests {
     fn test_auto_learn_noise_profile() {
         let mut samples = vec![0.0; 20000];
         // Add quiet noise to first part
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
         for i in 0..10000 {
             samples[i] = rng.random_range(-0.05..0.05);

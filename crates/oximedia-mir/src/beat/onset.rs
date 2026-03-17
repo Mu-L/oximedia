@@ -53,10 +53,7 @@ impl OnsetDetector {
     }
 
     /// Compute spectral flux onset detection function.
-    fn compute_spectral_flux(
-        &self,
-        frames: &[Vec<rustfft::num_complex::Complex<f32>>],
-    ) -> Vec<f32> {
+    fn compute_spectral_flux(&self, frames: &[Vec<oxifft::Complex<f32>>]) -> Vec<f32> {
         let mut flux = Vec::with_capacity(frames.len());
         let mut prev_mag = vec![0.0; self.window_size / 2 + 1];
 
@@ -78,10 +75,7 @@ impl OnsetDetector {
     }
 
     /// Compute high frequency content onset detection function.
-    fn compute_high_frequency_content(
-        &self,
-        frames: &[Vec<rustfft::num_complex::Complex<f32>>],
-    ) -> Vec<f32> {
+    fn compute_high_frequency_content(&self, frames: &[Vec<oxifft::Complex<f32>>]) -> Vec<f32> {
         frames
             .iter()
             .map(|frame| {

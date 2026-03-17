@@ -2,6 +2,7 @@
 name = "oximedia-monitor"
 description = "Real-time media pipeline monitoring and health checking"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -14,7 +15,6 @@ workspace = true
 [dependencies]
 # Workspace dependencies
 oximedia-core = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["full"] }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -25,14 +25,6 @@ bytes = { workspace = true }
 async-trait = { workspace = true }
 
 # Additional dependencies for monitoring
-rusqlite = { workspace = true }
-sysinfo = "0.36"
-axum = { version = "0.8", features = ["ws", "macros"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
-hyper = { workspace = true }
-reqwest = { workspace = true }
-lettre = { version = "0.11", features = ["tokio1", "tokio1-native-tls"] }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
 flume = "0.12"
@@ -42,18 +34,31 @@ once_cell = "1"
 anyhow = "1"
 futures = "0.3"
 futures-util = "0.3"
-http-body-util = { workspace = true }
 nvml-wrapper = { version = "0.12", optional = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true, features = ["full"] }
+rusqlite = { workspace = true, optional = true }
+sysinfo = "0.38"
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+hyper = { workspace = true }
+reqwest = { workspace = true }
+lettre = { version = "0.11", default-features = false, features = ["tokio1", "tokio1-rustls-tls", "builder", "smtp-transport"], optional = true }
+http-body-util = { workspace = true }
+
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 mockito = "1"
 
 [features]
 default = []
 gpu = ["nvml-wrapper"]
 integrations = ["oximedia-core"]
-full = ["gpu", "integrations"]
+email = ["lettre"]
+sqlite = ["rusqlite"]
+full = ["gpu", "integrations", "email", "sqlite"]
 
 [[test]]
 name = "integration"

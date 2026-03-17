@@ -38,6 +38,7 @@ pub fn twitter_video_sd() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -67,6 +68,7 @@ pub fn twitter_video_720p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -96,6 +98,7 @@ pub fn twitter_video_1080p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -125,6 +128,7 @@ pub fn twitter_ad_720p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -154,6 +158,7 @@ pub fn twitter_ad_1080p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

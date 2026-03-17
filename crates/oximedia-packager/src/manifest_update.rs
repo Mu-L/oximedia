@@ -92,6 +92,28 @@ impl ManifestSegmentEntry {
     }
 }
 
+/// Represents the delta produced by an incremental manifest update.
+///
+/// Contains the newly added segment, any removed segment (from sliding window
+/// trimming), and updated sequence/version counters. This allows consumers
+/// to patch an existing manifest file on disk rather than regenerating it
+/// from scratch.
+#[derive(Debug, Clone)]
+pub struct ManifestDelta {
+    /// The segment that was added.
+    pub added: ManifestSegmentEntry,
+    /// The segment that was removed from the window (if any).
+    pub removed: Option<ManifestSegmentEntry>,
+    /// Updated media sequence number after this delta.
+    pub new_media_sequence: u64,
+    /// Updated manifest version after this delta.
+    pub new_version: u64,
+    /// Current target duration in seconds (may have increased).
+    pub target_duration_secs: u64,
+    /// Whether this segment introduces a discontinuity.
+    pub is_discontinuity: bool,
+}
+
 /// A live manifest update tracker.
 #[derive(Debug, Clone)]
 pub struct ManifestUpdater {
@@ -209,6 +231,121 @@ impl ManifestUpdater {
     #[must_use]
     pub fn discontinuity_sequence(&self) -> u64 {
         self.discontinuity_sequence
+    }
+
+    /// Apply an incremental update to the manifest without full regeneration.
+    ///
+    /// This adds a new segment and optionally trims the oldest, returning
+    /// only the delta (new lines to append) for efficient live streaming.
+    /// This avoids re-rendering the entire playlist on each segment arrival.
+    pub fn incremental_update(&mut self, entry: ManifestSegmentEntry) -> ManifestDelta {
+        let trimmed_sequence =
+            if self.max_window_size > 0 && self.window.len() >= self.max_window_size {
+                let old = self.window.front().cloned();
+                self.window.pop_front();
+                self.media_sequence += 1;
+                old
+            } else {
+                None
+            };
+
+        if entry.duration > self.target_duration {
+            self.target_duration = entry.duration;
+        }
+        let is_discontinuity = entry.discontinuity;
+        if is_discontinuity {
+            self.discontinuity_sequence += 1;
+        }
+
+        let new_entry = entry.clone();
+        self.window.push_back(entry);
+        self.version += 1;
+
+        ManifestDelta {
+            added: new_entry,
+            removed: trimmed_sequence,
+            new_media_sequence: self.media_sequence,
+            new_version: self.version,
+            target_duration_secs: self.target_duration_secs(),
+            is_discontinuity,
+        }
+    }
+
+    /// Apply a batch of segments as an incremental update.
+    /// Returns all deltas produced.
+    pub fn incremental_batch_update(
+        &mut self,
+        entries: Vec<ManifestSegmentEntry>,
+    ) -> Vec<ManifestDelta> {
+        let mut deltas = Vec::with_capacity(entries.len());
+        for entry in entries {
+            deltas.push(self.incremental_update(entry));
+        }
+        deltas
+    }
+
+    /// Render just the new segment lines for appending to an existing playlist file.
+    /// This is useful for live HLS where we patch the file rather than rewriting.
+    #[must_use]
+    pub fn render_incremental_hls(&self, delta: &ManifestDelta) -> String {
+        let mut out = String::new();
+        if delta.is_discontinuity {
+            out.push_str("#EXT-X-DISCONTINUITY\n");
+        }
+        if let Some(ref pdt) = delta.added.program_date_time {
+            out.push_str(&format!("#EXT-X-PROGRAM-DATE-TIME:{pdt}\n"));
+        }
+        out.push_str(&delta.added.extinf_line());
+        out.push('\n');
+        if let Some((offset, length)) = delta.added.byte_range {
+            out.push_str(&format!("#EXT-X-BYTERANGE:{length}@{offset}\n"));
+        }
+        out.push_str(&delta.added.uri);
+        out.push('\n');
+        out
+    }
+
+    /// Render a minimal DASH MPD period string for the current segments.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn render_dash_mpd(&self) -> String {
+        let mut out = String::new();
+        out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        out.push_str("<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" ");
+        if self.is_live() {
+            out.push_str("type=\"dynamic\" ");
+            out.push_str(&format!(
+                "minimumUpdatePeriod=\"PT{}S\" ",
+                self.target_duration_secs()
+            ));
+        } else {
+            out.push_str("type=\"static\" ");
+        }
+
+        // Calculate total duration
+        let total_ms: u128 = self.window.iter().map(|e| e.duration.as_millis()).sum();
+        let total_secs = total_ms as f64 / 1000.0;
+        out.push_str(&format!(
+            "mediaPresentationDuration=\"PT{total_secs:.3}S\">\n"
+        ));
+
+        out.push_str("  <Period>\n");
+        out.push_str("    <AdaptationSet mimeType=\"video/mp4\">\n");
+        out.push_str("      <SegmentList>\n");
+
+        for entry in &self.window {
+            let dur_secs = entry.duration.as_secs_f64();
+            out.push_str(&format!(
+                "        <SegmentURL media=\"{}\" duration=\"{dur_secs:.6}\"/>\n",
+                entry.uri
+            ));
+        }
+
+        out.push_str("      </SegmentList>\n");
+        out.push_str("    </AdaptationSet>\n");
+        out.push_str("  </Period>\n");
+        out.push_str("</MPD>\n");
+        out
     }
 
     /// Render a minimal HLS media playlist string.
@@ -427,5 +564,193 @@ mod tests {
         // unlimited window, no trimming
         assert_eq!(u.segment_count(), 10);
         assert_eq!(u.media_sequence(), 0);
+    }
+
+    // --- Incremental update tests ---
+
+    #[test]
+    fn test_incremental_update_adds_segment() {
+        let mut u = ManifestUpdater::new(ManifestType::HlsMedia, 5);
+        let delta = u.incremental_update(ManifestSegmentEntry::new(
+            0,
+            Duration::from_secs(6),
+            "s0.m4s",
+        ));
+        assert_eq!(delta.added.uri, "s0.m4s");
+        assert!(delta.removed.is_none());
+        assert_eq!(delta.new_version, 1);
+        assert_eq!(u.segment_count(), 1);
+    }
+
+    #[test]
+    fn test_incremental_update_sliding_window() {
+        let mut u = ManifestUpdater::new(ManifestType::HlsMedia, 3);
+        for i in 0..3_u64 {
+            u.incremental_update(ManifestSegmentEntry::new(
+                i,
+                Duration::from_secs(6),
+                format!("s{i}.m4s"),
+            ));
+        }
+        // Window is now full, next add should trim
+        let delta = u.incremental_update(ManifestSegmentEntry::new(
+            3,
+            Duration::from_secs(6),
+            "s3.m4s",
+        ));
+        assert!(delta.removed.is_some());
+        assert_eq!(
+            delta.removed.as_ref().map(|r| r.uri.as_str()),
+            Some("s0.m4s")
+        );
+        assert_eq!(delta.new_media_sequence, 1);
+        assert_eq!(u.segment_count(), 3);
+    }
+
+    #[test]
+    fn test_incremental_update_discontinuity() {
+        let mut u = ManifestUpdater::new(ManifestType::HlsMedia, 10);
+        let delta = u.incremental_update(
+            ManifestSegmentEntry::new(0, Duration::from_secs(6), "s0.m4s").with_discontinuity(),
+        );
+        assert!(delta.is_discontinuity);
+        assert_eq!(u.discontinuity_sequence(), 1);
+    }
+
+    #[test]
+    fn test_incremental_batch_update() {
+        let mut u = ManifestUpdater::new(ManifestType::HlsMedia, 5);
+        let entries: Vec<ManifestSegmentEntry> = (0..4)
+            .map(|i| ManifestSegmentEntry::new(i, Duration::from_secs(6), format!("s{i}.m4s")))
+            .collect();
+        let deltas = u.incremental_batch_update(entries);
+        assert_eq!(deltas.len(), 4);
+        assert_eq!(u.segment_count(), 4);
+        assert_eq!(u.version(), 4);
+    }
+
+    #[test]
+    fn test_incremental_batch_with_trimming() {
+        let mut u = ManifestUpdater::new(ManifestType::HlsMedia, 2);
+        let entries: Vec<ManifestSegmentEntry> = (0..5)
+            .map(|i| ManifestSegmentEntry::new(i, Duration::from_secs(6), format!("s{i}.m4s")))
+            .collect();
+        let deltas = u.incremental_batch_update(entries);
+        assert_eq!(deltas.len(), 5);
+        // Window size is 2, so 3 segments trimmed
+        let removed_count = deltas.iter().filter(|d| d.removed.is_some()).count();
+        assert_eq!(removed_count, 3);
+        assert_eq!(u.segment_count(), 2);
+        assert_eq!(u.media_sequence(), 3);
+    }
+
+    #[test]
+    fn test_render_incremental_hls_basic() {
+        let mut u = ManifestUpdater::new(ManifestType::HlsMedia, 10);
+        let delta = u.incremental_update(ManifestSegmentEntry::new(
+            0,
+            Duration::from_secs(6),
+            "s0.m4s",
+        ));
+        let lines = u.render_incremental_hls(&delta);
+        assert!(lines.contains("#EXTINF:6"));
+        assert!(lines.contains("s0.m4s"));
+    }
+
+    #[test]
+    fn test_render_incremental_hls_with_discontinuity() {
+        let mut u = ManifestUpdater::new(ManifestType::HlsMedia, 10);
+        let delta = u.incremental_update(
+            ManifestSegmentEntry::new(0, Duration::from_secs(6), "s0.m4s").with_discontinuity(),
+        );
+        let lines = u.render_incremental_hls(&delta);
+        assert!(lines.contains("#EXT-X-DISCONTINUITY"));
+    }
+
+    #[test]
+    fn test_render_incremental_hls_with_byte_range() {
+        let mut u = ManifestUpdater::new(ManifestType::HlsMedia, 10);
+        let delta = u.incremental_update(
+            ManifestSegmentEntry::new(0, Duration::from_secs(6), "s0.m4s")
+                .with_byte_range(1000, 5000),
+        );
+        let lines = u.render_incremental_hls(&delta);
+        assert!(lines.contains("#EXT-X-BYTERANGE:5000@1000"));
+    }
+
+    #[test]
+    fn test_render_dash_mpd_static() {
+        let mut u = ManifestUpdater::new(ManifestType::DashMpd, 0);
+        u.add_segment(ManifestSegmentEntry::new(
+            0,
+            Duration::from_secs(6),
+            "seg0.m4s",
+        ));
+        let mpd = u.render_dash_mpd();
+        assert!(mpd.contains("type=\"static\""));
+        assert!(mpd.contains("seg0.m4s"));
+        assert!(mpd.contains("</MPD>"));
+    }
+
+    #[test]
+    fn test_render_dash_mpd_dynamic() {
+        let mut u = ManifestUpdater::new(ManifestType::DashMpd, 5);
+        u.add_segment(ManifestSegmentEntry::new(
+            0,
+            Duration::from_secs(6),
+            "seg0.m4s",
+        ));
+        let mpd = u.render_dash_mpd();
+        assert!(mpd.contains("type=\"dynamic\""));
+        assert!(mpd.contains("minimumUpdatePeriod"));
+    }
+
+    #[test]
+    fn test_render_dash_mpd_multiple_segments() {
+        let mut u = ManifestUpdater::new(ManifestType::DashMpd, 10);
+        for i in 0..3_u64 {
+            u.add_segment(ManifestSegmentEntry::new(
+                i,
+                Duration::from_secs(6),
+                format!("seg{i}.m4s"),
+            ));
+        }
+        let mpd = u.render_dash_mpd();
+        assert!(mpd.contains("seg0.m4s"));
+        assert!(mpd.contains("seg1.m4s"));
+        assert!(mpd.contains("seg2.m4s"));
+    }
+
+    #[test]
+    fn test_manifest_delta_target_duration_update() {
+        let mut u = ManifestUpdater::new(ManifestType::HlsMedia, 10);
+        u.incremental_update(ManifestSegmentEntry::new(
+            0,
+            Duration::from_millis(5500),
+            "s0.m4s",
+        ));
+        let delta = u.incremental_update(ManifestSegmentEntry::new(
+            1,
+            Duration::from_millis(7200),
+            "s1.m4s",
+        ));
+        // 7.2s rounds up to 8
+        assert_eq!(delta.target_duration_secs, 8);
+    }
+
+    #[test]
+    fn test_incremental_update_version_monotonic() {
+        let mut u = ManifestUpdater::new(ManifestType::HlsMedia, 10);
+        let d1 = u.incremental_update(ManifestSegmentEntry::new(
+            0,
+            Duration::from_secs(6),
+            "s0.m4s",
+        ));
+        let d2 = u.incremental_update(ManifestSegmentEntry::new(
+            1,
+            Duration::from_secs(6),
+            "s1.m4s",
+        ));
+        assert!(d2.new_version > d1.new_version);
     }
 }

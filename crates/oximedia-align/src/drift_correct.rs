@@ -249,6 +249,235 @@ impl DriftCorrector {
     }
 }
 
+/// Genlock drift estimator for multi-camera recording synchronisation.
+///
+/// In multi-camera setups, cameras nominally run at the same frame rate but
+/// their internal clocks drift relative to each other.  Genlock drift
+/// estimation measures this drift over long durations (hours) by periodically
+/// comparing synchronisation markers (e.g. audio cross-correlation offsets,
+/// timecode differences, or flash events).
+///
+/// The estimator fits a linear model to the observed offset-vs-time data,
+/// yielding a drift rate in PPM (parts per million) plus a constant offset.
+/// It also provides an uncertainty estimate based on the residuals of the fit.
+///
+/// # Usage
+///
+/// 1. Create with `GenlockDriftEstimator::new(camera_count)`.
+/// 2. Feed periodic offset measurements via `add_observation()`.
+/// 3. Query the drift model with `drift_ppm()`, `predicted_offset()`, etc.
+#[derive(Debug, Clone)]
+pub struct GenlockDriftEstimator {
+    /// Number of cameras in the multi-camera rig.
+    camera_count: usize,
+    /// Per-camera-pair observations: (time_seconds, offset_samples).
+    observations: Vec<Vec<(f64, f64)>>,
+    /// Maximum observations to keep per pair.
+    max_observations: usize,
+}
+
+/// Result of a genlock drift analysis for a single camera pair.
+#[derive(Debug, Clone)]
+pub struct GenlockDriftResult {
+    /// Camera index A.
+    pub camera_a: usize,
+    /// Camera index B.
+    pub camera_b: usize,
+    /// Estimated drift rate in parts per million.
+    pub drift_ppm: f64,
+    /// Constant offset at t=0 (in samples).
+    pub offset_at_zero: f64,
+    /// R-squared goodness of fit (1.0 = perfect linear drift).
+    pub r_squared: f64,
+    /// Root mean square residual (in samples).
+    pub rms_residual: f64,
+    /// Number of observations used.
+    pub num_observations: usize,
+}
+
+impl GenlockDriftEstimator {
+    /// Create a new genlock drift estimator for `camera_count` cameras.
+    ///
+    /// This creates storage for all `C(camera_count, 2)` unique pairs.
+    #[must_use]
+    pub fn new(camera_count: usize, max_observations: usize) -> Self {
+        let num_pairs = if camera_count >= 2 {
+            camera_count * (camera_count - 1) / 2
+        } else {
+            0
+        };
+        Self {
+            camera_count,
+            observations: vec![Vec::new(); num_pairs],
+            max_observations,
+        }
+    }
+
+    /// Add an observation of the offset between camera `cam_a` and `cam_b`
+    /// at time `time_seconds`. The offset is in samples.
+    ///
+    /// Returns `false` if the camera indices are invalid or equal.
+    pub fn add_observation(
+        &mut self,
+        cam_a: usize,
+        cam_b: usize,
+        time_seconds: f64,
+        offset_samples: f64,
+    ) -> bool {
+        if let Some(pair_idx) = self.pair_index(cam_a, cam_b) {
+            let obs = &mut self.observations[pair_idx];
+            obs.push((time_seconds, offset_samples));
+            if obs.len() > self.max_observations {
+                obs.remove(0);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Compute the drift estimate for a specific camera pair.
+    ///
+    /// Returns `None` if the pair is invalid or has fewer than 2 observations.
+    pub fn estimate_pair(&self, cam_a: usize, cam_b: usize) -> Option<GenlockDriftResult> {
+        let pair_idx = self.pair_index(cam_a, cam_b)?;
+        let obs = &self.observations[pair_idx];
+        if obs.len() < 2 {
+            return None;
+        }
+
+        let (slope, intercept, r_sq, rms) = linear_regression_with_stats(obs);
+
+        // Convert slope (samples/second) to PPM.
+        // If sample_rate is unknown, we express PPM as slope * 1e6 / nominal_rate.
+        // For a general-purpose estimator, report raw slope and let the caller
+        // convert. Here we assume 48000 Hz as a common default.
+        let drift_ppm = slope / 48.0; // slope / (48000 / 1_000_000)
+
+        Some(GenlockDriftResult {
+            camera_a: cam_a.min(cam_b),
+            camera_b: cam_a.max(cam_b),
+            drift_ppm,
+            offset_at_zero: intercept,
+            r_squared: r_sq,
+            rms_residual: rms,
+            num_observations: obs.len(),
+        })
+    }
+
+    /// Compute drift estimates for all camera pairs that have sufficient data.
+    pub fn estimate_all(&self) -> Vec<GenlockDriftResult> {
+        let mut results = Vec::new();
+        for a in 0..self.camera_count {
+            for b in (a + 1)..self.camera_count {
+                if let Some(result) = self.estimate_pair(a, b) {
+                    results.push(result);
+                }
+            }
+        }
+        results
+    }
+
+    /// Predict the offset at a future time for a camera pair.
+    ///
+    /// Returns `None` if the pair has insufficient data for a drift model.
+    pub fn predicted_offset(&self, cam_a: usize, cam_b: usize, time_seconds: f64) -> Option<f64> {
+        let pair_idx = self.pair_index(cam_a, cam_b)?;
+        let obs = &self.observations[pair_idx];
+        if obs.len() < 2 {
+            return None;
+        }
+        let (slope, intercept, _, _) = linear_regression_with_stats(obs);
+        Some(slope * time_seconds + intercept)
+    }
+
+    /// Number of observations for a camera pair.
+    pub fn observation_count(&self, cam_a: usize, cam_b: usize) -> usize {
+        self.pair_index(cam_a, cam_b)
+            .map(|i| self.observations[i].len())
+            .unwrap_or(0)
+    }
+
+    /// Number of cameras.
+    #[must_use]
+    pub fn camera_count(&self) -> usize {
+        self.camera_count
+    }
+
+    /// Clear all observations.
+    pub fn clear(&mut self) {
+        for obs in &mut self.observations {
+            obs.clear();
+        }
+    }
+
+    // -- Internal helpers --
+
+    /// Map (cam_a, cam_b) to a pair index. Returns None if invalid.
+    fn pair_index(&self, cam_a: usize, cam_b: usize) -> Option<usize> {
+        if cam_a >= self.camera_count || cam_b >= self.camera_count || cam_a == cam_b {
+            return None;
+        }
+        let (lo, hi) = if cam_a < cam_b {
+            (cam_a, cam_b)
+        } else {
+            (cam_b, cam_a)
+        };
+        // Triangular index: sum of (camera_count - 1) + (camera_count - 2) + ... for rows < lo
+        // plus (hi - lo - 1).
+        let idx = lo * (2 * self.camera_count - lo - 1) / 2 + (hi - lo - 1);
+        if idx < self.observations.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+}
+
+/// Fit y = slope * x + intercept via least squares, and return
+/// (slope, intercept, r_squared, rms_residual).
+fn linear_regression_with_stats(data: &[(f64, f64)]) -> (f64, f64, f64, f64) {
+    let n = data.len() as f64;
+    if n < 2.0 {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+
+    let sum_x: f64 = data.iter().map(|(x, _)| x).sum();
+    let sum_y: f64 = data.iter().map(|(_, y)| y).sum();
+    let sum_xx: f64 = data.iter().map(|(x, _)| x * x).sum();
+    let sum_xy: f64 = data.iter().map(|(x, y)| x * y).sum();
+
+    let denom = n * sum_xx - sum_x * sum_x;
+    if denom.abs() < f64::EPSILON {
+        let mean_y = sum_y / n;
+        return (0.0, mean_y, 0.0, 0.0);
+    }
+
+    let slope = (n * sum_xy - sum_x * sum_y) / denom;
+    let intercept = (sum_y - slope * sum_x) / n;
+
+    // R-squared
+    let mean_y = sum_y / n;
+    let ss_tot: f64 = data.iter().map(|(_, y)| (y - mean_y).powi(2)).sum();
+    let ss_res: f64 = data
+        .iter()
+        .map(|(x, y)| {
+            let pred = slope * x + intercept;
+            (y - pred).powi(2)
+        })
+        .sum();
+
+    let r_sq = if ss_tot > 1e-15 {
+        1.0 - ss_res / ss_tot
+    } else {
+        1.0
+    };
+
+    let rms = (ss_res / n).sqrt();
+
+    (slope, intercept, r_sq, rms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +620,127 @@ mod tests {
         let mut dc = DriftCorrector::new(48000);
         let correction = dc.update_pll(10.0, 0.0);
         assert!(correction.abs() > 0.0);
+    }
+
+    // ── GenlockDriftEstimator ────────────────────────────────────────────────
+
+    #[test]
+    fn test_genlock_creation() {
+        let est = GenlockDriftEstimator::new(4, 1000);
+        assert_eq!(est.camera_count(), 4);
+        // 4 cameras => 6 pairs
+        assert_eq!(est.observations.len(), 6);
+    }
+
+    #[test]
+    fn test_genlock_add_observation() {
+        let mut est = GenlockDriftEstimator::new(3, 100);
+        assert!(est.add_observation(0, 1, 0.0, 0.0));
+        assert!(est.add_observation(0, 1, 1.0, 48.0));
+        assert_eq!(est.observation_count(0, 1), 2);
+        // Symmetry: (1, 0) should give same count
+        assert_eq!(est.observation_count(1, 0), 2);
+    }
+
+    #[test]
+    fn test_genlock_invalid_pair() {
+        let mut est = GenlockDriftEstimator::new(2, 100);
+        assert!(!est.add_observation(0, 0, 0.0, 0.0)); // same camera
+        assert!(!est.add_observation(0, 5, 0.0, 0.0)); // out of bounds
+    }
+
+    #[test]
+    fn test_genlock_linear_drift() {
+        let mut est = GenlockDriftEstimator::new(2, 1000);
+        // Feed perfectly linear drift: 10 samples/second
+        for i in 0..100 {
+            let t = i as f64;
+            est.add_observation(0, 1, t, t * 10.0);
+        }
+        let result = est.estimate_pair(0, 1).expect("should have enough data");
+        // slope = 10 samples/s => PPM = 10 / 48 ≈ 0.2083
+        assert!(
+            (result.drift_ppm - 10.0 / 48.0).abs() < 0.01,
+            "drift_ppm={}",
+            result.drift_ppm
+        );
+        assert!(result.r_squared > 0.999, "r²={}", result.r_squared);
+        assert!(result.rms_residual < 0.01, "rms={}", result.rms_residual);
+    }
+
+    #[test]
+    fn test_genlock_predicted_offset() {
+        let mut est = GenlockDriftEstimator::new(2, 1000);
+        est.add_observation(0, 1, 0.0, 0.0);
+        est.add_observation(0, 1, 10.0, 100.0);
+        // slope = 10, intercept = 0
+        let pred = est.predicted_offset(0, 1, 20.0).expect("should predict");
+        assert!((pred - 200.0).abs() < 1.0, "pred={pred}");
+    }
+
+    #[test]
+    fn test_genlock_insufficient_data() {
+        let mut est = GenlockDriftEstimator::new(2, 100);
+        est.add_observation(0, 1, 0.0, 0.0);
+        assert!(est.estimate_pair(0, 1).is_none());
+        assert!(est.predicted_offset(0, 1, 5.0).is_none());
+    }
+
+    #[test]
+    fn test_genlock_estimate_all() {
+        let mut est = GenlockDriftEstimator::new(3, 100);
+        // Only add data for pair (0,1)
+        est.add_observation(0, 1, 0.0, 0.0);
+        est.add_observation(0, 1, 1.0, 5.0);
+        let results = est.estimate_all();
+        assert_eq!(results.len(), 1); // only one pair has data
+        assert_eq!(results[0].camera_a, 0);
+        assert_eq!(results[0].camera_b, 1);
+    }
+
+    #[test]
+    fn test_genlock_clear() {
+        let mut est = GenlockDriftEstimator::new(2, 100);
+        est.add_observation(0, 1, 0.0, 0.0);
+        est.add_observation(0, 1, 1.0, 10.0);
+        assert_eq!(est.observation_count(0, 1), 2);
+        est.clear();
+        assert_eq!(est.observation_count(0, 1), 0);
+    }
+
+    #[test]
+    fn test_genlock_max_observations() {
+        let mut est = GenlockDriftEstimator::new(2, 5);
+        for i in 0..10 {
+            est.add_observation(0, 1, i as f64, i as f64 * 2.0);
+        }
+        assert_eq!(est.observation_count(0, 1), 5);
+    }
+
+    // ── linear_regression_with_stats ─────────────────────────────────────────
+
+    #[test]
+    fn test_linear_regression_perfect_line() {
+        let data: Vec<(f64, f64)> = (0..10).map(|i| (i as f64, 3.0 * i as f64 + 2.0)).collect();
+        let (slope, intercept, r_sq, rms) = linear_regression_with_stats(&data);
+        assert!((slope - 3.0).abs() < 1e-10);
+        assert!((intercept - 2.0).abs() < 1e-10);
+        assert!((r_sq - 1.0).abs() < 1e-10);
+        assert!(rms < 1e-10);
+    }
+
+    #[test]
+    fn test_linear_regression_constant() {
+        let data: Vec<(f64, f64)> = (0..5).map(|i| (i as f64, 7.0)).collect();
+        let (slope, intercept, _, _) = linear_regression_with_stats(&data);
+        assert!(slope.abs() < 1e-10);
+        assert!((intercept - 7.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_linear_regression_single_point() {
+        let data = vec![(1.0, 2.0)];
+        let (slope, _, _, _) = linear_regression_with_stats(&data);
+        assert_eq!(slope, 0.0);
     }
 }

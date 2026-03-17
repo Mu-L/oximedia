@@ -261,6 +261,53 @@ impl TaskPriorityQueue {
     pub fn capacity(&self) -> usize {
         self.capacity
     }
+
+    /// Attempt to preempt (replace) the lowest-priority task if `incoming`
+    /// has strictly higher effective weight.
+    ///
+    /// Returns the displaced task if preemption occurred, or `None` when the
+    /// queue is not full, the queue is empty, or `incoming` does not outrank
+    /// the current minimum.
+    ///
+    /// Preemption is only meaningful when the queue is at capacity; callers
+    /// should call `push` directly when capacity has not been reached.
+    pub fn try_preempt(&mut self, incoming: PriorityTask) -> Option<PriorityTask> {
+        if self.capacity == 0 || self.heap.len() < self.capacity {
+            // Not at capacity — no preemption needed.
+            return None;
+        }
+        // Find the minimum-priority task in the heap.
+        let min_weight = self.heap.iter().map(|t| t.effective_weight()).min()?;
+
+        if incoming.effective_weight() <= min_weight {
+            // Incoming task is not strictly better — do not preempt.
+            return None;
+        }
+
+        // Extract all tasks, remove the first minimum-weight one, put the
+        // rest back, then add the incoming task.
+        let mut items: Vec<PriorityTask> = self.heap.drain().collect();
+        let victim_idx = items
+            .iter()
+            .position(|t| t.effective_weight() == min_weight)?;
+        let victim = items.remove(victim_idx);
+        for task in items {
+            self.heap.push(task);
+        }
+        self.heap.push(incoming);
+        Some(victim)
+    }
+
+    /// Check whether the given task would preempt the current lowest-priority
+    /// occupant without actually performing the preemption.
+    #[must_use]
+    pub fn would_preempt(&self, incoming: &PriorityTask) -> bool {
+        if self.capacity == 0 || self.heap.len() < self.capacity {
+            return false;
+        }
+        let min_weight = self.heap.iter().map(|t| t.effective_weight()).min();
+        min_weight.is_some_and(|m| incoming.effective_weight() > m)
+    }
 }
 
 impl Default for TaskPriorityQueue {
@@ -420,5 +467,66 @@ mod tests {
     fn test_with_estimated_duration() {
         let task = PriorityTask::new("t1", Priority::Normal, 100).with_estimated_duration(5000);
         assert_eq!(task.estimated_duration_ms, 5000);
+    }
+
+    // ── Preemption ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_preempt_replaces_lowest_priority() {
+        let mut q = TaskPriorityQueue::with_capacity(2);
+        q.push(PriorityTask::new("low", Priority::Low, 100));
+        q.push(PriorityTask::new("normal", Priority::Normal, 100));
+        assert_eq!(q.len(), 2);
+
+        // A Critical task should preempt the Low task.
+        let victim = q
+            .try_preempt(PriorityTask::new("crit", Priority::Critical, 200))
+            .expect("preemption should succeed");
+        assert_eq!(victim.task_id, "low");
+        assert_eq!(q.len(), 2);
+        // Queue should now contain normal + crit.
+        let first = q.pop().expect("pop should return a value");
+        assert_eq!(first.task_id, "crit");
+    }
+
+    #[test]
+    fn test_preempt_not_triggered_when_not_at_capacity() {
+        let mut q = TaskPriorityQueue::with_capacity(5);
+        q.push(PriorityTask::new("t1", Priority::Low, 100));
+
+        // Queue has space; preemption should not fire.
+        let result = q.try_preempt(PriorityTask::new("crit", Priority::Critical, 200));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_preempt_not_triggered_equal_priority() {
+        let mut q = TaskPriorityQueue::with_capacity(1);
+        q.push(PriorityTask::new("existing", Priority::High, 100));
+
+        // Incoming has same weight as minimum — should not preempt.
+        let result = q.try_preempt(PriorityTask::new("newcomer", Priority::High, 200));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_would_preempt_logic() {
+        let mut q = TaskPriorityQueue::with_capacity(1);
+        q.push(PriorityTask::new("low", Priority::Low, 100));
+
+        let crit = PriorityTask::new("crit", Priority::Critical, 200);
+        let low2 = PriorityTask::new("low2", Priority::Low, 300);
+
+        assert!(q.would_preempt(&crit));
+        assert!(!q.would_preempt(&low2));
+    }
+
+    #[test]
+    fn test_preempt_unlimited_queue_returns_none() {
+        let mut q = TaskPriorityQueue::new(); // no capacity limit
+        q.push(PriorityTask::new("t1", Priority::Low, 100));
+
+        let result = q.try_preempt(PriorityTask::new("crit", Priority::Critical, 200));
+        assert!(result.is_none());
     }
 }

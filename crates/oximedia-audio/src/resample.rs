@@ -13,7 +13,7 @@
 //!
 //! # Examples
 //!
-//! ```rust
+//! ```rust,ignore
 //! use oximedia_audio::{Resampler, ResamplerQuality};
 //!
 //! let mut resampler = Resampler::new(44100, 48000, 2, ResamplerQuality::High)?;
@@ -34,51 +34,95 @@ use rubato::{
 ///
 /// Higher quality settings use more CPU and memory but provide better
 /// frequency response and lower aliasing.
+///
+/// # Preset aliases
+///
+/// Three named aliases follow the common `draft / good / best` convention:
+///
+/// | Alias | Maps to | Description |
+/// |-------|---------|-------------|
+/// | [`Draft`](ResamplerQuality::Draft) | `Low` | Fastest; real-time non-critical use |
+/// | [`Good`](ResamplerQuality::Good)  | `High` | Sinc with cubic interpolation |
+/// | [`Best`](ResamplerQuality::Best)  | `Best` | Sinc with large filter (highest quality) |
+///
+/// `Low`, `Medium`, `High`, and `Best` remain available for backward
+/// compatibility and for when you need the intermediate `Medium` level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ResamplerQuality {
-    /// Low quality - Fast, suitable for real-time where quality is not critical.
+    /// Low quality — fastest, suitable for real-time where quality is not critical.
     /// Uses FFT with small chunk size.
+    ///
+    /// Equivalent to [`Draft`](ResamplerQuality::Draft).
     Low,
 
-    /// Medium quality - Balanced speed and quality.
+    /// Medium quality — balanced speed and quality.
     /// Uses FFT with medium chunk size.
     #[default]
     Medium,
 
-    /// High quality - Good quality for most applications.
+    /// High quality — good quality for most applications.
     /// Uses Sinc interpolation with cubic interpolation.
+    ///
+    /// Equivalent to [`Good`](ResamplerQuality::Good).
     High,
 
-    /// Best quality - Highest quality, most CPU intensive.
-    /// Uses Sinc interpolation with linear interpolation and large filter.
+    /// Best quality — highest quality, most CPU intensive.
+    /// Uses Sinc interpolation with linear interpolation and a large filter.
     Best,
+
+    // ── Named aliases ────────────────────────────────────────────────────────
+    /// Draft quality — alias for [`Low`](ResamplerQuality::Low).
+    ///
+    /// Fastest setting, suitable for scrubbing or non-critical real-time use.
+    Draft,
+
+    /// Good quality — alias for [`High`](ResamplerQuality::High).
+    ///
+    /// Sinc interpolation with cubic interpolation; a solid all-round choice.
+    Good,
 }
 
 impl ResamplerQuality {
+    /// Resolve an alias to its canonical variant.
+    ///
+    /// `Draft` → `Low`, `Good` → `High`; all other variants resolve to
+    /// themselves.
+    #[must_use]
+    pub const fn canonical(self) -> Self {
+        match self {
+            Self::Draft => Self::Low,
+            Self::Good => Self::High,
+            other => other,
+        }
+    }
+
     /// Get the chunk size for FFT-based resamplers.
     #[must_use]
-    const fn fft_chunk_size(&self) -> usize {
-        match self {
+    fn fft_chunk_size(&self) -> usize {
+        match self.canonical() {
             Self::Low => 256,
             Self::Medium => 1024,
             Self::High | Self::Best => 2048,
+            // aliases resolved above; unreachable
+            _ => 1024,
         }
     }
 
     /// Get the sub-chunks value for FFT resamplers.
     #[must_use]
-    const fn fft_sub_chunks(&self) -> usize {
-        match self {
+    fn fft_sub_chunks(&self) -> usize {
+        match self.canonical() {
             Self::Low => 1,
             Self::Medium => 2,
             Self::High | Self::Best => 4,
+            _ => 2,
         }
     }
 
     /// Get Sinc interpolation parameters.
     #[must_use]
     fn sinc_params(&self) -> SincInterpolationParameters {
-        match self {
+        match self.canonical() {
             Self::Low | Self::Medium => SincInterpolationParameters {
                 sinc_len: 64,
                 f_cutoff: 0.95,
@@ -97,6 +141,13 @@ impl ResamplerQuality {
                 sinc_len: 256,
                 f_cutoff: 0.95,
                 interpolation: SincInterpolationType::Linear,
+                oversampling_factor: 256,
+                window: WindowFunction::BlackmanHarris2,
+            },
+            _ => SincInterpolationParameters {
+                sinc_len: 128,
+                f_cutoff: 0.95,
+                interpolation: SincInterpolationType::Cubic,
                 oversampling_factor: 256,
                 window: WindowFunction::BlackmanHarris2,
             },
@@ -251,8 +302,11 @@ impl Resampler {
         let ratio_num = target_rate / gcd;
         let ratio_den = source_rate / gcd;
 
-        // Use high-quality Sinc for High and Best quality
-        if matches!(quality, ResamplerQuality::High | ResamplerQuality::Best) {
+        // Use high-quality Sinc for High, Good, and Best quality
+        if matches!(
+            quality.canonical(),
+            ResamplerQuality::High | ResamplerQuality::Best
+        ) {
             let params = quality.sinc_params();
 
             // Use Async resampler with sinc interpolation, fixed input

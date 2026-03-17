@@ -1,4 +1,5 @@
 #![allow(unexpected_cfgs)]
+#![allow(deprecated)]
 //! Python bindings for `OxiMedia` using `PyO3`.
 //!
 //! This crate provides Python bindings for the `OxiMedia` multimedia framework,
@@ -73,6 +74,8 @@ pub mod batch;
 pub mod batch_bindings;
 /// Batch processing bindings (job queuing, scheduling, execution).
 pub mod batch_py;
+/// `oximedia.benchmark` submodule — Python-accessible performance profiling.
+pub mod benchmark_py;
 /// Broadcast automation: PlayoutScheduler and BroadcastValidator.
 pub mod broadcast;
 /// Color calibration and matching bindings.
@@ -139,6 +142,8 @@ pub mod image_py;
 pub mod imf_py;
 /// Jupyter notebook integration (inline display of frames and waveforms).
 pub mod jupyter;
+/// Python logging bridge — route Rust tracing events to Python logging module.
+pub mod logging_py;
 /// LUT (Look-Up Table) color grading operations.
 pub mod lut;
 /// Media Asset Management bindings (catalog, ingest, search, tag, export).
@@ -159,6 +164,8 @@ pub mod multicam_py;
 pub mod ndi_py;
 /// Codec optimization bindings (complexity analysis, CRF sweep, quality ladder).
 pub mod optimize_py;
+/// `oximedia.io` submodule — file open, probe, transcode operations.
+pub mod oximedia_io_py;
 pub mod pipeline_bindings;
 pub mod pipeline_builder;
 /// Broadcast playout server bindings (schedule, control, status).
@@ -212,6 +219,8 @@ pub mod stream_reader;
 pub mod streaming_py;
 /// Live production video switcher bindings (sources, transitions, macros).
 pub mod switcher_py;
+/// `oximedia.test` submodule — synthetic test media generators.
+pub mod test_media;
 /// Timecode manipulation bindings (SMPTE frame rates, TC arithmetic).
 pub mod timecode_py;
 pub mod timeline;
@@ -223,6 +232,8 @@ pub mod transcode_options;
 /// Transcoding bindings (presets, ABR ladders, codec listing).
 pub mod transcode_py;
 mod types;
+/// `oximedia.utils` submodule — common media helper functions.
+pub mod utils_py;
 /// Visual effects bindings (effects, chroma key, transitions, generators).
 pub mod vfx_py;
 mod video;
@@ -541,6 +552,21 @@ fn oximedia(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let cv2_module = PyModule::new(m.py(), "cv2")?;
     cv2_compat::register_cv2(&cv2_module)?;
     m.add_submodule(&cv2_module)?;
+
+    // oximedia.io submodule
+    oximedia_io_py::register_submodule(m)?;
+
+    // oximedia.logging submodule
+    logging_py::register_submodule(m)?;
+
+    // oximedia.utils submodule
+    utils_py::register_submodule(m)?;
+
+    // oximedia.benchmark submodule
+    benchmark_py::register_submodule(m)?;
+
+    // oximedia.test submodule
+    test_media::register_submodule(m)?;
 
     Ok(())
 }

@@ -3,10 +3,12 @@
 pub mod export;
 pub mod format;
 pub mod generate;
+pub mod readability;
 
 pub use export::TranscriptExporter;
 pub use format::{TranscriptFormat, TranscriptFormatter};
 pub use generate::TranscriptGenerator;
+pub use readability::{TargetAudience, TranscriptReadability, TranscriptReadabilityAssessor};
 
 use serde::{Deserialize, Serialize};
 

@@ -178,35 +178,35 @@ impl EchoDetector {
     /// Calculate cepstrum for echo detection.
     #[allow(dead_code)]
     fn cepstrum(&self, samples: &[f32]) -> Vec<f32> {
-        use rustfft::{num_complex::Complex, FftPlanner};
+        use oxifft::Complex;
 
         let fft_size = samples.len().next_power_of_two();
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(fft_size);
-        let ifft = planner.plan_fft_inverse(fft_size);
 
         // FFT
-        let mut freq_data: Vec<Complex<f32>> = samples
+        let freq_input: Vec<Complex<f32>> = samples
             .iter()
             .map(|&s| Complex::new(s, 0.0))
             .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
             .take(fft_size)
             .collect();
 
-        fft.process(&mut freq_data);
+        let fft_result = oxifft::fft(&freq_input);
 
         // Log magnitude
-        for c in &mut freq_data {
-            let mag = c.norm().max(1e-10);
-            *c = Complex::new(mag.ln(), 0.0);
-        }
+        let log_mag: Vec<Complex<f32>> = fft_result
+            .iter()
+            .map(|c| {
+                let mag = c.norm().max(1e-10);
+                Complex::new(mag.ln(), 0.0)
+            })
+            .collect();
 
         // IFFT
-        ifft.process(&mut freq_data);
+        let ifft_result = oxifft::ifft(&log_mag);
 
         // Return real part
         #[allow(clippy::cast_precision_loss)]
-        freq_data.iter().map(|c| c.re / fft_size as f32).collect()
+        ifft_result.iter().map(|c| c.re / fft_size as f32).collect()
     }
 }
 
@@ -347,11 +347,8 @@ mod tests {
         // the raw autocorrelation at non-zero lags is O(sqrt(N)) while the echo
         // contribution is O(N * amplitude), so the SNR is O(amplitude * sqrt(N)).
         // With amplitude=0.5 and N=10000, SNR ≈ 50 → reliable detection.
-        use rand::{rngs::SmallRng, Rng, SeedableRng};
-        let mut rng = SmallRng::seed_from_u64(42);
-        let samples: Vec<f32> = (0..10000)
-            .map(|_| rng.random_range(-0.5f32..0.5f32))
-            .collect();
+        let mut rng = scirs2_core::random::Random::seed(42);
+        let samples: Vec<f32> = (0..10000).map(|_| rng.random_f64() as f32 - 0.5).collect();
 
         for symbol in 0..3 {
             let watermarked = embedder.embed_symbol(&samples, symbol);

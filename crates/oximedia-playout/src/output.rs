@@ -1046,10 +1046,11 @@ impl Output {
         state.stats.bytes_sent += bytes;
 
         // Calculate bitrate using the configured video format's frame rate
-        if state.stats.frames_sent > 0 {
+        {
             let frame_rate = self.config.video_format.fps();
-            state.stats.avg_bitrate_bps =
-                (state.stats.bytes_sent * 8 * frame_rate as u64) / state.stats.frames_sent;
+            state.stats.avg_bitrate_bps = (state.stats.bytes_sent * 8 * frame_rate as u64)
+                .checked_div(state.stats.frames_sent)
+                .unwrap_or(0);
         }
     }
 

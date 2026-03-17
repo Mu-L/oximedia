@@ -69,6 +69,7 @@
 #![allow(dead_code)]
 
 pub mod ab_test;
+pub mod als;
 pub mod bandits;
 pub mod calibration;
 pub mod cold_start;
@@ -90,6 +91,7 @@ pub mod history;
 pub mod hybrid;
 pub mod impression_tracker;
 pub mod item_similarity;
+pub mod lsh;
 pub mod personalize;
 pub mod popularity_bias;
 pub mod profile;
@@ -100,6 +102,7 @@ pub mod recommendation_score;
 pub mod score_cache;
 pub mod sequence_model;
 pub mod session;
+pub mod svd_pp;
 pub mod trending;
 pub mod user_profile;
 
@@ -325,6 +328,11 @@ impl RecommendationEngine {
 
     /// Get recommendations for a user
     ///
+    /// For the `Hybrid` strategy, all sub-strategies are evaluated in parallel
+    /// via rayon.  The resulting candidate lists are merged and deduplicated by
+    /// content ID, taking the maximum score for any item that appeared in
+    /// multiple strategy outputs.
+    ///
     /// # Errors
     ///
     /// Returns an error if recommendation generation fails
@@ -332,9 +340,12 @@ impl RecommendationEngine {
         &self,
         request: &RecommendationRequest,
     ) -> RecommendResult<RecommendationResults> {
+        use std::collections::HashMap;
+
         let start = std::time::Instant::now();
 
-        // Get candidates based on strategy
+        // Get candidates based on strategy.
+        // For Hybrid, all strategies are evaluated in parallel with rayon.
         let candidates = match request.strategy {
             RecommendationStrategy::ContentBased => {
                 self.get_content_based_recommendations(request)?
@@ -342,11 +353,33 @@ impl RecommendationEngine {
             RecommendationStrategy::Collaborative => {
                 self.get_collaborative_recommendations(request)?
             }
-            RecommendationStrategy::Hybrid => self.get_hybrid_recommendations(request)?,
+            RecommendationStrategy::Hybrid => self.get_hybrid_parallel(request)?,
             RecommendationStrategy::Personalized => {
                 self.get_personalized_recommendations(request)?
             }
             RecommendationStrategy::Trending => self.get_trending_recommendations(request)?,
+        };
+
+        // Deduplicate merged candidates: keep highest score per content_id
+        let candidates = {
+            let mut best: HashMap<uuid::Uuid, Recommendation> = HashMap::new();
+            for rec in candidates {
+                let entry = best.entry(rec.content_id);
+                entry
+                    .and_modify(|existing| {
+                        if rec.score > existing.score {
+                            *existing = rec.clone();
+                        }
+                    })
+                    .or_insert(rec);
+            }
+            let mut deduped: Vec<Recommendation> = best.into_values().collect();
+            deduped.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            deduped
         };
 
         // Apply diversity if enabled
@@ -399,12 +432,62 @@ impl RecommendationEngine {
         self.collaborative_engine.recommend(request)
     }
 
-    /// Get hybrid recommendations
+    /// Get hybrid recommendations (single-threaded, delegates to HybridCombiner)
     fn get_hybrid_recommendations(
         &self,
         request: &RecommendationRequest,
     ) -> RecommendResult<Vec<Recommendation>> {
         self.hybrid_combiner.recommend(request)
+    }
+
+    /// Evaluate all non-Hybrid strategies in parallel via rayon and merge results.
+    ///
+    /// Each strategy is run concurrently; any strategy that fails is silently
+    /// dropped so that a single sub-strategy error never blocks results from
+    /// the others.
+    fn get_hybrid_parallel(
+        &self,
+        request: &RecommendationRequest,
+    ) -> RecommendResult<Vec<Recommendation>> {
+        use rayon::prelude::*;
+
+        // List of strategy labels to evaluate in parallel.
+        // We exclude Hybrid itself to avoid recursion.
+        let strategies: &[RecommendationStrategy] = &[
+            RecommendationStrategy::ContentBased,
+            RecommendationStrategy::Collaborative,
+            RecommendationStrategy::Personalized,
+            RecommendationStrategy::Trending,
+        ];
+
+        // Evaluate strategies in parallel; collect successful results.
+        let parallel_results: Vec<Vec<Recommendation>> = strategies
+            .par_iter()
+            .filter_map(|strategy| {
+                let result = match strategy {
+                    RecommendationStrategy::ContentBased => {
+                        self.get_content_based_recommendations(request)
+                    }
+                    RecommendationStrategy::Collaborative => {
+                        self.get_collaborative_recommendations(request)
+                    }
+                    RecommendationStrategy::Personalized => {
+                        self.get_personalized_recommendations(request)
+                    }
+                    RecommendationStrategy::Trending => self.get_trending_recommendations(request),
+                    RecommendationStrategy::Hybrid => return None,
+                };
+                result.ok()
+            })
+            .collect();
+
+        // Also get the HybridCombiner result (which has its own weighting logic)
+        let combiner_result = self.hybrid_combiner.recommend(request).unwrap_or_default();
+
+        // Merge all candidate lists
+        let mut merged: Vec<Recommendation> = parallel_results.into_iter().flatten().collect();
+        merged.extend(combiner_result);
+        Ok(merged)
     }
 
     /// Get personalized recommendations
@@ -582,5 +665,42 @@ mod tests {
             RecommendationStrategy::Trending,
         ];
         assert_eq!(strategies.len(), 5);
+    }
+
+    #[test]
+    fn test_recommend_hybrid_parallel_succeeds() {
+        let engine = RecommendationEngine::new();
+        let request = RecommendationRequest {
+            strategy: RecommendationStrategy::Hybrid,
+            limit: 10,
+            ..Default::default()
+        };
+        // Hybrid should run in parallel without panicking and return Ok
+        let result = engine.recommend(&request);
+        assert!(result.is_ok());
+        assert!(matches!(
+            result.expect("hybrid recommend should succeed").strategy,
+            RecommendationStrategy::Hybrid
+        ));
+    }
+
+    #[test]
+    fn test_recommend_all_strategies_run() {
+        let engine = RecommendationEngine::new();
+        for strategy in [
+            RecommendationStrategy::ContentBased,
+            RecommendationStrategy::Collaborative,
+            RecommendationStrategy::Hybrid,
+            RecommendationStrategy::Personalized,
+            RecommendationStrategy::Trending,
+        ] {
+            let request = RecommendationRequest {
+                strategy,
+                limit: 5,
+                ..Default::default()
+            };
+            let result = engine.recommend(&request);
+            assert!(result.is_ok(), "strategy {strategy:?} failed");
+        }
     }
 }

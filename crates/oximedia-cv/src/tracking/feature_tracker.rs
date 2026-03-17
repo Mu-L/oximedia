@@ -122,9 +122,12 @@ impl FeatureTracker {
     /// ```
     /// use oximedia_cv::tracking::FeatureTracker;
     ///
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut tracker = FeatureTracker::new(100);
     /// let frame = vec![100u8; 10000];
     /// let features = tracker.track(&frame, 100, 100)?;
+    /// Ok(())
+    /// }
     /// ```
     pub fn track(&mut self, frame: &[u8], w: u32, h: u32) -> CvResult<Vec<TrackedFeature>> {
         if w == 0 || h == 0 {

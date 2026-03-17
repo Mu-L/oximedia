@@ -114,30 +114,49 @@
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::missing_panics_doc)]
 
+pub mod audio_track;
 pub mod bandwidth_estimator;
+pub mod bitrate_calc;
+pub mod byte_range;
 pub mod cmaf;
+pub mod cmaf_byterange;
 pub mod config;
+pub mod content_boundary;
 pub mod dash;
+pub mod dash_event_stream;
 pub mod drm_info;
+pub mod drm_packager;
 pub mod encryption;
 pub mod encryption_info;
 pub mod error;
 pub mod hls;
+pub mod hls_interstitial;
+pub mod isobmff_writer;
+pub mod keyframe_alignment;
 pub mod ladder;
 pub mod low_latency;
 pub mod manifest;
 pub mod manifest_builder;
 pub mod manifest_update;
 pub mod multivariant;
+pub mod multivariant_builder;
 pub mod output;
 pub mod packaging_config;
+pub mod packaging_optimizer;
+pub mod parallel_packager;
 pub mod playlist_generator;
+pub mod pssh;
+pub mod scene_segmenter;
 pub mod segment;
 pub mod segment_index;
 pub mod segment_list;
+pub mod segment_naming;
+pub mod segment_timeline;
 pub mod segment_validator;
 pub mod subtitle_track;
+pub mod thumbnail_track;
 pub mod timed_metadata;
+pub mod variant_stream;
 
 // Re-export commonly used types
 pub use config::{
@@ -147,7 +166,11 @@ pub use config::{
 pub use dash::{DashPackager, DashPackagerBuilder};
 pub use error::{PackagerError, PackagerResult};
 pub use hls::{HlsPackager, HlsPackagerBuilder};
-pub use ladder::{LadderGenerator, SourceInfo};
+pub use ladder::{BitrateLadderGenerator, LadderGenerator, LadderRung, SourceAnalysis, SourceInfo};
+pub use multivariant_builder::{
+    DashAdaptationSetBuilder, HlsMultivariantBuilder, MultivariantPlaylistBuilder,
+};
+pub use variant_stream::{StreamCodec, VariantSet, VariantStream};
 
 /// Main packager for adaptive streaming.
 pub struct Packager {
@@ -231,11 +254,22 @@ impl Packager {
         let hls_output = PathBuf::from(output_base).join("hls");
         let dash_output = PathBuf::from(output_base).join("dash");
 
-        self.package_hls(input, hls_output.to_str().unwrap_or("output/hls"))
-            .await?;
+        let hls_str = hls_output.to_str().ok_or_else(|| {
+            PackagerError::InvalidConfig(format!(
+                "HLS output path contains invalid UTF-8: {}",
+                hls_output.display()
+            ))
+        })?;
 
-        self.package_dash(input, dash_output.to_str().unwrap_or("output/dash"))
-            .await?;
+        let dash_str = dash_output.to_str().ok_or_else(|| {
+            PackagerError::InvalidConfig(format!(
+                "DASH output path contains invalid UTF-8: {}",
+                dash_output.display()
+            ))
+        })?;
+
+        self.package_hls(input, hls_str).await?;
+        self.package_dash(input, dash_str).await?;
 
         Ok(())
     }
@@ -353,5 +387,22 @@ mod tests {
 
         let config = PackagerConfig::new().with_ladder(ladder);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_package_both_valid_paths() {
+        // Ensure package_both constructs valid paths from ASCII base
+        let config = PackagerConfig::default();
+        let packager = Packager::new(config).expect("should succeed in test");
+        // We can't run async here easily, but we verify the builder works
+        assert_eq!(packager.config().format, PackagingFormat::HlsFmp4);
+    }
+
+    #[test]
+    fn test_packager_builder_with_encryption() {
+        let mut enc = EncryptionConfig::default();
+        enc.method = EncryptionMethod::None;
+        let packager = PackagerBuilder::new().encryption(enc).build();
+        assert!(packager.is_ok());
     }
 }

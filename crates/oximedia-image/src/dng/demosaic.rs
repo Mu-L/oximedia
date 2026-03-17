@@ -125,11 +125,7 @@ fn interpolate_green_at_rb(raw: &[u16], x: usize, y: usize, w: usize, h: usize) 
         count += 1;
     }
 
-    if count > 0 {
-        (sum / count) as u16
-    } else {
-        0
-    }
+    sum.checked_div(count).unwrap_or(0) as u16
 }
 
 /// Interpolate using horizontal neighbors.
@@ -146,11 +142,7 @@ fn interpolate_horizontal(raw: &[u16], x: usize, y: usize, w: usize, _h: usize) 
         count += 1;
     }
 
-    if count > 0 {
-        (sum / count) as u16
-    } else {
-        0
-    }
+    sum.checked_div(count).unwrap_or(0) as u16
 }
 
 /// Interpolate using vertical neighbors.
@@ -167,11 +159,7 @@ fn interpolate_vertical(raw: &[u16], x: usize, y: usize, w: usize, h: usize) -> 
         count += 1;
     }
 
-    if count > 0 {
-        (sum / count) as u16
-    } else {
-        0
-    }
+    sum.checked_div(count).unwrap_or(0) as u16
 }
 
 /// Interpolate using diagonal neighbors.
@@ -196,9 +184,5 @@ fn interpolate_diagonal(raw: &[u16], x: usize, y: usize, w: usize, h: usize) -> 
         count += 1;
     }
 
-    if count > 0 {
-        (sum / count) as u16
-    } else {
-        0
-    }
+    sum.checked_div(count).unwrap_or(0) as u16
 }

@@ -92,12 +92,7 @@ impl NamingTemplate {
     /// * `format` - Segment format to determine extension.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
-    pub fn segment_name(
-        &self,
-        index: u64,
-        timestamp_ms: u64,
-        format: SegmentFormat,
-    ) -> String {
+    pub fn segment_name(&self, index: u64, timestamp_ms: u64, format: SegmentFormat) -> String {
         let variable = match self.strategy {
             NamingStrategy::Sequential => {
                 if self.zero_pad > 0 {
@@ -106,9 +101,7 @@ impl NamingTemplate {
                     index.to_string()
                 }
             }
-            NamingStrategy::Timestamp => {
-                timestamp_ms.to_string()
-            }
+            NamingStrategy::Timestamp => timestamp_ms.to_string(),
             NamingStrategy::Duration => {
                 let secs = timestamp_ms as f64 / 1000.0;
                 format!("t{secs:.3}")
@@ -120,10 +113,7 @@ impl NamingTemplate {
             .as_deref()
             .unwrap_or_else(|| extension_for_format(format));
 
-        format!(
-            "{}{}{}.{}",
-            self.prefix, self.separator, variable, ext
-        )
+        format!("{}{}{}.{}", self.prefix, self.separator, variable, ext)
     }
 
     /// Generate an init segment file name.

@@ -269,6 +269,107 @@ impl fmt::Display for ConversionReport {
 }
 
 // ---------------------------------------------------------------------------
+// Profile 8 → 8.4 conversion (HDR10/PQ → HLG)
+// ---------------------------------------------------------------------------
+
+/// Convert a Profile 8 (PQ/HDR10) RPU to Profile 8.4 (HLG).
+///
+/// This adjusts the transfer characteristics by rescaling luminance values
+/// from the PQ domain to the HLG domain. Level 1 PQ code values are
+/// linearly rescaled from the [0, 4095] PQ code range to equivalent HLG
+/// code values based on the ratio of the mastering peak luminance to the
+/// HLG nominal system white of 1000 nits. Level 6 and Level 9 metadata are
+/// preserved unchanged (they describe the mastering display, not the signal).
+///
+/// # Algorithm
+///
+/// HLG uses a scene-referred transfer function rather than PQ's
+/// display-referred absolute encoding. The rescaling maps:
+///
+/// ```text
+/// hlg_code = pq_code * (hlg_peak_nits / pq_peak_nits)^{-0.5}
+/// ```
+///
+/// where the luminance ratio accounts for HLG's square-root scene-light
+/// non-linearity. Values are clamped to [0, 4095].
+///
+/// # Returns
+///
+/// A new `DolbyVisionRpu` with `profile` set to `Profile::Profile8_4` and
+/// all PQ-domain values rescaled.
+#[must_use]
+pub fn convert_profile8_to_8_4(rpu: &crate::DolbyVisionRpu) -> crate::DolbyVisionRpu {
+    use crate::{metadata::Level1Metadata, DolbyVisionRpu, Profile};
+
+    // Determine source peak luminance from Level 6 mastering data or a
+    // sensible default (1000 nits for HDR10).
+    let pq_peak_nits = rpu
+        .level6
+        .as_ref()
+        .map(|l6| f64::from(l6.max_display_mastering_luminance))
+        .unwrap_or(1000.0)
+        .max(1.0);
+
+    // HLG nominal peak: 1000 nits per ITU-R BT.2100.
+    const HLG_NOMINAL_PEAK_NITS: f64 = 1000.0;
+
+    // The HLG OOTF operates on scene-linear light (E ≈ sqrt(L_d / L_w)).
+    // Rescale coefficient: sqrt(hlg_peak / pq_peak) normalised to [0,1].
+    // Since PQ 4095 = 10,000 nits and HLG 4095 ≈ 1000 nits under reference
+    // conditions, we rescale by ratio^0.5 to preserve the perceptual midpoint.
+    let scale = (HLG_NOMINAL_PEAK_NITS / pq_peak_nits).sqrt().min(1.0);
+
+    /// Rescale a PQ code value to an HLG code value.
+    fn rescale_pq(pq: u16, scale: f64) -> u16 {
+        let rescaled = f64::from(pq) * scale;
+        rescaled.round().clamp(0.0, 4095.0) as u16
+    }
+
+    // Clone the source RPU and update the profile.
+    let mut out = DolbyVisionRpu {
+        profile: Profile::Profile8_4,
+        header: crate::rpu::RpuHeader::default_for_profile(Profile::Profile8_4),
+        vdr_dm_data: rpu.vdr_dm_data.clone(),
+        level1: rpu.level1.clone(),
+        level2: rpu.level2.clone(),
+        level4: rpu.level4.clone(),
+        level5: rpu.level5.clone(),
+        level6: rpu.level6.clone(),
+        level7: rpu.level7.clone(),
+        level8: rpu.level8.clone(),
+        level9: rpu.level9.clone(),
+        level11: rpu.level11.clone(),
+    };
+
+    // Rescale Level 1 PQ codes to HLG domain.
+    if let Some(ref l1) = rpu.level1 {
+        out.level1 = Some(Level1Metadata {
+            min_pq: rescale_pq(l1.min_pq, scale),
+            avg_pq: rescale_pq(l1.avg_pq, scale),
+            max_pq: rescale_pq(l1.max_pq, scale),
+        });
+    }
+
+    // Rescale Level 9 source display PQ codes if present.
+    if let Some(ref l9) = rpu.level9 {
+        use crate::metadata::Level9Metadata;
+        out.level9 = Some(Level9Metadata {
+            source_primary_index: l9.source_primary_index,
+            source_max_pq: rescale_pq(l9.source_max_pq, scale),
+            source_min_pq: rescale_pq(l9.source_min_pq, scale),
+            source_diagonal: l9.source_diagonal,
+        });
+    }
+
+    // Update Level 8 target EOTF to HLG (2).
+    if let Some(ref mut l8) = out.level8 {
+        l8.target_eotf = 2; // HLG
+    }
+
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -408,5 +509,78 @@ mod tests {
         let report = conv.report();
         let s = format!("{report}");
         assert!(s.contains("actions"));
+    }
+
+    // ── convert_profile8_to_8_4 ──────────────────────────────────────────────
+
+    #[test]
+    fn test_convert_profile8_to_8_4_sets_profile() {
+        use crate::{DolbyVisionRpu, Profile};
+        let rpu = DolbyVisionRpu::new(Profile::Profile8);
+        let converted = super::convert_profile8_to_8_4(&rpu);
+        assert_eq!(
+            converted.profile,
+            Profile::Profile8_4,
+            "Converted RPU must have Profile 8.4"
+        );
+    }
+
+    #[test]
+    fn test_convert_profile8_to_8_4_rescales_l1() {
+        use crate::{metadata::Level1Metadata, DolbyVisionRpu, Profile};
+        let mut rpu = DolbyVisionRpu::new(Profile::Profile8);
+        rpu.level1 = Some(Level1Metadata {
+            min_pq: 0,
+            avg_pq: 2000,
+            max_pq: 4000,
+        });
+        let converted = super::convert_profile8_to_8_4(&rpu);
+        let l1 = converted
+            .level1
+            .as_ref()
+            .expect("Level 1 must be present after conversion");
+        // Rescaling should reduce PQ values (HLG nominal < typical HDR10 peak)
+        assert!(
+            l1.max_pq <= 4000,
+            "max_pq should not exceed original or be clamped above 4095"
+        );
+        // Order must be preserved: min <= avg <= max
+        assert!(
+            l1.min_pq <= l1.avg_pq,
+            "min_pq ({}) <= avg_pq ({}) after conversion",
+            l1.min_pq,
+            l1.avg_pq
+        );
+        assert!(
+            l1.avg_pq <= l1.max_pq,
+            "avg_pq ({}) <= max_pq ({}) after conversion",
+            l1.avg_pq,
+            l1.max_pq
+        );
+    }
+
+    #[test]
+    fn test_convert_profile8_to_8_4_sets_hlg_eotf() {
+        use crate::{metadata::Level8Metadata, DolbyVisionRpu, Profile};
+        let mut rpu = DolbyVisionRpu::new(Profile::Profile8);
+        rpu.level8 = Some(Level8Metadata::hdr_1000());
+        let converted = super::convert_profile8_to_8_4(&rpu);
+        let l8 = converted
+            .level8
+            .as_ref()
+            .expect("Level 8 must be present after conversion");
+        assert_eq!(
+            l8.target_eotf, 2,
+            "target_eotf must be HLG (2) after conversion"
+        );
+    }
+
+    #[test]
+    fn test_convert_profile8_to_8_4_no_l1_is_fine() {
+        use crate::{DolbyVisionRpu, Profile};
+        let rpu = DolbyVisionRpu::new(Profile::Profile8);
+        let converted = super::convert_profile8_to_8_4(&rpu);
+        assert_eq!(converted.profile, Profile::Profile8_4);
+        assert!(converted.level1.is_none(), "No L1 in, no L1 out");
     }
 }

@@ -185,10 +185,9 @@ impl PayloadCodec {
 /// Generate pseudorandom bit sequence for spreading.
 #[must_use]
 pub fn generate_pn_sequence(length: usize, seed: u64) -> Vec<i8> {
-    use rand::{rngs::SmallRng, Rng, SeedableRng};
-    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut rng = scirs2_core::random::Random::seed(seed);
     (0..length)
-        .map(|_| if rng.random_bool(0.5) { 1 } else { -1 })
+        .map(|_| if rng.random_f64() < 0.5 { 1 } else { -1 })
         .collect()
 }
 

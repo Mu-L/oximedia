@@ -218,6 +218,94 @@ impl MergeResult {
     }
 }
 
+// ── CPL Diff ─────────────────────────────────────────────────────────────────
+
+/// The structural difference between two [`MergeCpl`] compositions.
+///
+/// `CplDiff::compute(a, b)` identifies:
+/// - segments present only in `b` (additions),
+/// - segments present only in `a` (removals), and
+/// - segments present in both but with differing content (modifications).
+///
+/// Segment identity is determined by the [`MergeSegment::id`] field.
+#[derive(Clone, Debug)]
+pub struct CplDiff {
+    /// Segments that exist in `b` but not in `a`.
+    pub added_segments: Vec<MergeSegment>,
+    /// Segments that exist in `a` but not in `b`.
+    pub removed_segments: Vec<MergeSegment>,
+    /// Segments present in both `a` and `b` but with different content.
+    ///
+    /// Each tuple is `(segment_in_a, segment_in_b)`.
+    pub modified_segments: Vec<(MergeSegment, MergeSegment)>,
+}
+
+impl CplDiff {
+    /// Compute the diff between two compositions.
+    ///
+    /// Two segments are considered the same when their `id` strings match.
+    /// They are considered *modified* when the id matches but any of
+    /// `duration`, `edit_rate_num`, `edit_rate_den`, or `resource_ids` differ.
+    pub fn compute(a: &MergeCpl, b: &MergeCpl) -> Self {
+        // Build lookup maps keyed by segment ID.
+        let a_map: HashMap<&str, &MergeSegment> =
+            a.segments.iter().map(|s| (s.id.as_str(), s)).collect();
+        let b_map: HashMap<&str, &MergeSegment> =
+            b.segments.iter().map(|s| (s.id.as_str(), s)).collect();
+
+        let mut added_segments = Vec::new();
+        let mut removed_segments = Vec::new();
+        let mut modified_segments = Vec::new();
+
+        // Walk segments in `b`: find added and modified.
+        for b_seg in &b.segments {
+            match a_map.get(b_seg.id.as_str()) {
+                None => added_segments.push(b_seg.clone()),
+                Some(a_seg) => {
+                    if !segments_equal(a_seg, b_seg) {
+                        modified_segments.push(((*a_seg).clone(), b_seg.clone()));
+                    }
+                }
+            }
+        }
+
+        // Walk segments in `a`: find removed.
+        for a_seg in &a.segments {
+            if !b_map.contains_key(a_seg.id.as_str()) {
+                removed_segments.push(a_seg.clone());
+            }
+        }
+
+        Self {
+            added_segments,
+            removed_segments,
+            modified_segments,
+        }
+    }
+
+    /// Returns `true` when there are no differences between the two CPLs.
+    pub fn is_empty(&self) -> bool {
+        self.added_segments.is_empty()
+            && self.removed_segments.is_empty()
+            && self.modified_segments.is_empty()
+    }
+
+    /// Total number of changed segments (additions + removals + modifications).
+    pub fn change_count(&self) -> usize {
+        self.added_segments.len() + self.removed_segments.len() + self.modified_segments.len()
+    }
+}
+
+/// Returns `true` when two segments with the same ID have identical content.
+fn segments_equal(a: &MergeSegment, b: &MergeSegment) -> bool {
+    a.duration == b.duration
+        && a.edit_rate_num == b.edit_rate_num
+        && a.edit_rate_den == b.edit_rate_den
+        && a.resource_ids == b.resource_ids
+}
+
+// ── Merge ─────────────────────────────────────────────────────────────────────
+
 /// Merges two CPLs according to the given conflict strategy.
 ///
 /// The `base` CPL is treated as the primary, and `supplemental` provides
@@ -484,5 +572,119 @@ mod tests {
         let s = format!("{c}");
         assert!(s.contains("Warning"));
         assert!(s.contains("seg-001"));
+    }
+
+    // ── CplDiff tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_diff_identical_cpls_no_changes() {
+        let base = make_base_cpl();
+        let diff = CplDiff::compute(&base, &base);
+        assert!(diff.is_empty());
+        assert_eq!(diff.change_count(), 0);
+    }
+
+    #[test]
+    fn test_diff_added_segment() {
+        let base = make_base_cpl();
+        let mut extended = make_base_cpl();
+        extended.add_segment(MergeSegment::new("seg-999", 3, 24, 1, 120));
+
+        let diff = CplDiff::compute(&base, &extended);
+        assert_eq!(diff.added_segments.len(), 1);
+        assert_eq!(diff.added_segments[0].id, "seg-999");
+        assert!(diff.removed_segments.is_empty());
+        assert!(diff.modified_segments.is_empty());
+    }
+
+    #[test]
+    fn test_diff_removed_segment() {
+        let mut a = MergeCpl::new("cpl-a", "CPL A", 24, 1);
+        a.add_segment(MergeSegment::new("seg-001", 1, 24, 1, 240));
+        a.add_segment(MergeSegment::new("seg-002", 2, 24, 1, 480));
+
+        let mut b = MergeCpl::new("cpl-b", "CPL B", 24, 1);
+        b.add_segment(MergeSegment::new("seg-001", 1, 24, 1, 240));
+        // seg-002 is removed
+
+        let diff = CplDiff::compute(&a, &b);
+        assert!(diff.added_segments.is_empty());
+        assert_eq!(diff.removed_segments.len(), 1);
+        assert_eq!(diff.removed_segments[0].id, "seg-002");
+        assert!(diff.modified_segments.is_empty());
+    }
+
+    #[test]
+    fn test_diff_modified_segment_duration_change() {
+        let mut a = MergeCpl::new("cpl-a", "A", 24, 1);
+        a.add_segment(MergeSegment::new("seg-001", 1, 24, 1, 240));
+
+        let mut b = MergeCpl::new("cpl-b", "B", 24, 1);
+        b.add_segment(MergeSegment::new("seg-001", 1, 24, 1, 480)); // different duration
+
+        let diff = CplDiff::compute(&a, &b);
+        assert!(diff.added_segments.is_empty());
+        assert!(diff.removed_segments.is_empty());
+        assert_eq!(diff.modified_segments.len(), 1);
+        let (seg_a, seg_b) = &diff.modified_segments[0];
+        assert_eq!(seg_a.duration, 240);
+        assert_eq!(seg_b.duration, 480);
+    }
+
+    #[test]
+    fn test_diff_modified_segment_resources_change() {
+        let mut a = MergeCpl::new("a", "A", 24, 1);
+        let mut seg_a = MergeSegment::new("seg-001", 1, 24, 1, 240);
+        seg_a.add_resource("video-v1");
+        a.add_segment(seg_a);
+
+        let mut b = MergeCpl::new("b", "B", 24, 1);
+        let mut seg_b = MergeSegment::new("seg-001", 1, 24, 1, 240);
+        seg_b.add_resource("video-v2"); // different resource
+        b.add_segment(seg_b);
+
+        let diff = CplDiff::compute(&a, &b);
+        assert_eq!(diff.modified_segments.len(), 1);
+    }
+
+    #[test]
+    fn test_diff_complex_changes() {
+        let base = make_base_cpl(); // seg-001, seg-002
+
+        let mut modified = MergeCpl::new("m", "Modified", 24, 1);
+        // seg-001: same
+        let mut seg1 = MergeSegment::new("seg-001", 1, 24, 1, 240);
+        seg1.add_resource("video-001");
+        seg1.add_resource("audio-001");
+        modified.add_segment(seg1);
+        // seg-002: changed duration
+        modified.add_segment(MergeSegment::new("seg-002", 2, 24, 1, 960));
+        // seg-003: new
+        modified.add_segment(MergeSegment::new("seg-003", 3, 24, 1, 120));
+
+        let diff = CplDiff::compute(&base, &modified);
+        assert_eq!(diff.added_segments.len(), 1);
+        assert_eq!(diff.added_segments[0].id, "seg-003");
+        assert!(diff.removed_segments.is_empty());
+        assert_eq!(diff.modified_segments.len(), 1);
+        assert_eq!(diff.modified_segments[0].0.id, "seg-002");
+        assert_eq!(diff.change_count(), 2);
+    }
+
+    #[test]
+    fn test_diff_completely_replaced() {
+        let mut a = MergeCpl::new("a", "A", 24, 1);
+        a.add_segment(MergeSegment::new("seg-a1", 1, 24, 1, 100));
+        a.add_segment(MergeSegment::new("seg-a2", 2, 24, 1, 200));
+
+        let mut b = MergeCpl::new("b", "B", 24, 1);
+        b.add_segment(MergeSegment::new("seg-b1", 1, 24, 1, 100));
+        b.add_segment(MergeSegment::new("seg-b2", 2, 24, 1, 200));
+
+        let diff = CplDiff::compute(&a, &b);
+        assert_eq!(diff.added_segments.len(), 2);
+        assert_eq!(diff.removed_segments.len(), 2);
+        assert!(diff.modified_segments.is_empty());
+        assert_eq!(diff.change_count(), 4);
     }
 }

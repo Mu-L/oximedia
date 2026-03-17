@@ -4,7 +4,7 @@
 //! a recorded impulse response (IR) of a real or synthetic space.
 
 use crate::{AudioEffect, EffectError, Result};
-use rustfft::{num_complex::Complex, FftPlanner};
+use oxifft::Complex;
 
 /// Convolution reverb using frequency-domain convolution.
 ///
@@ -66,10 +66,6 @@ impl ConvolutionReverb {
         // Choose FFT size (next power of 2 >= IR length * 2)
         let fft_size = (ir_length * 2).next_power_of_two();
 
-        // Create FFT planner
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(fft_size);
-
         // Convert impulse response to frequency domain
         let mut ir_padded: Vec<Complex<f32>> = impulse_response
             .iter()
@@ -77,8 +73,7 @@ impl ConvolutionReverb {
             .collect();
         ir_padded.resize(fft_size, Complex::new(0.0, 0.0));
 
-        let mut ir_fft = ir_padded.clone();
-        fft.process(&mut ir_fft);
+        let ir_fft = oxifft::fft(&ir_padded);
 
         Ok(Self {
             ir_fft,
@@ -108,29 +103,23 @@ impl ConvolutionReverb {
 
     /// Process a block of samples.
     fn process_block(&mut self) {
-        // Perform FFT on input
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(self.fft_size);
-        let ifft = planner.plan_fft_inverse(self.fft_size);
-
         // Copy input to complex buffer
         for (i, &sample) in self.input_buffer.iter().enumerate() {
             self.input_fft[i] = Complex::new(sample, 0.0);
         }
 
         // Forward FFT
-        fft.process(&mut self.input_fft);
+        let fft_result = oxifft::fft(&self.input_fft);
 
         // Complex multiplication (convolution in frequency domain)
-        let mut result_fft: Vec<Complex<f32>> = self
-            .input_fft
+        let result_fft_freq: Vec<Complex<f32>> = fft_result
             .iter()
             .zip(self.ir_fft.iter())
             .map(|(&a, &b)| a * b)
             .collect();
 
         // Inverse FFT
-        ifft.process(&mut result_fft);
+        let result_fft = oxifft::ifft(&result_fft_freq);
 
         // Extract real part and normalize
         #[allow(clippy::cast_precision_loss)]

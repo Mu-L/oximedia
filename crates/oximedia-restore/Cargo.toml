@@ -2,6 +2,7 @@
 name = "oximedia-restore"
 description = "Media restoration tools for damaged or degraded content"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

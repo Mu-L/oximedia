@@ -21,20 +21,23 @@
 //! use oximedia_graph::node::NodeId;
 //! use oximedia_graph::port::PortId;
 //!
-//! // Create a simple graph: source -> sink
-//! let source = PassthroughFilter::new_source(NodeId(0), "source");
-//! let sink = NullSink::new(NodeId(0), "sink");
+//! fn build_graph() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Create a simple graph: source -> sink
+//!     let source = PassthroughFilter::new_source(NodeId(0), "source");
+//!     let sink = NullSink::new(NodeId(0), "sink");
 //!
-//! let (builder, source_id) = GraphBuilder::new().add_node(Box::new(source));
-//! let (builder, sink_id) = builder.add_node(Box::new(sink));
+//!     let (builder, source_id) = GraphBuilder::new().add_node(Box::new(source));
+//!     let (builder, sink_id) = builder.add_node(Box::new(sink));
 //!
-//! let graph = builder
-//!     .connect(source_id, PortId(0), sink_id, PortId(0))
-//!     ?
-//!     .build()
-//!     ?;
+//!     let graph = builder
+//!         .connect(source_id, PortId(0), sink_id, PortId(0))?
+//!         .build()?;
 //!
-//! assert_eq!(graph.node_count(), 2);
+//!     assert_eq!(graph.node_count(), 2);
+//!     Ok(())
+//! }
+//!
+//! build_graph().expect("graph construction should succeed");
 //! ```
 //!
 //! # Node Types
@@ -101,6 +104,9 @@ pub mod topological;
 pub mod dependency_graph;
 pub mod graph_partition;
 pub mod node_cache;
+
+// Graph DSL parser
+pub mod dsl;
 
 // Re-export commonly used items
 pub use context::{GraphContext, ProcessingStats};

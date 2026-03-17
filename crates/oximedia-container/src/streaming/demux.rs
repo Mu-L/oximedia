@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use oximedia_core::{OxiError, OxiResult};
 use std::collections::VecDeque;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
 
 use crate::{Demuxer, Packet, ProbeResult, StreamInfo};
@@ -226,11 +227,13 @@ impl<D: Demuxer> Demuxer for StreamingDemuxer<D> {
 }
 
 /// Async packet receiver for background demuxing.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct PacketReceiver {
     rx: mpsc::UnboundedReceiver<OxiResult<Packet>>,
     streams: Vec<StreamInfo>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl PacketReceiver {
     /// Creates a new packet receiver.
     fn new(rx: mpsc::UnboundedReceiver<OxiResult<Packet>>, streams: Vec<StreamInfo>) -> Self {
@@ -289,6 +292,7 @@ impl PacketReceiver {
 ///     }
 /// }
 /// ```
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn spawn_demuxer<D: Demuxer + Send + 'static>(
     mut demuxer: D,
 ) -> OxiResult<PacketReceiver> {

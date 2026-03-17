@@ -140,6 +140,18 @@ pub struct OutputSpec {
     pub duration: Option<String>,
     /// Metadata key/value pairs (`-metadata key=value`).
     pub metadata: HashMap<String, String>,
+    /// Encoding preset (e.g. `"medium"`, `"fast"`, `"veryslow"`).
+    pub preset: Option<String>,
+    /// Encoding tune (e.g. `"film"`, `"animation"`, `"grain"`).
+    pub tune: Option<String>,
+    /// Encoding profile (e.g. `"baseline"`, `"main"`, `"high"`).
+    pub profile: Option<String>,
+    /// Two-pass encoding pass number (1 or 2).
+    pub pass: Option<u8>,
+    /// Passlogfile prefix for two-pass encoding.
+    pub passlogfile: Option<String>,
+    /// Muxer options (e.g. `movflags`, `fflags`).
+    pub muxer_options: Vec<(String, String)>,
     /// Unrecognised option key/value pairs.
     pub extra_args: Vec<(String, String)>,
 }
@@ -495,6 +507,81 @@ impl FfmpegArgs {
                 }
                 "-sn" => {
                     pending_output.no_subtitle = true;
+                }
+
+                // ── Preset / Tune / Profile ───────────────────────────────────
+                "-preset" => {
+                    let val = next_arg!("-preset").clone();
+                    pending_output.preset = Some(val);
+                }
+                "-tune" => {
+                    let val = next_arg!("-tune").clone();
+                    pending_output.tune = Some(val);
+                }
+                "-profile" | "-profile:v" => {
+                    let val = next_arg!(arg).clone();
+                    pending_output.profile = Some(val);
+                }
+
+                // ── Two-pass encoding ────────────────────────────────────────
+                "-pass" => {
+                    let val = next_arg!("-pass");
+                    pending_output.pass = val.parse::<u8>().ok();
+                }
+                "-passlogfile" => {
+                    let val = next_arg!("-passlogfile").clone();
+                    pending_output.passlogfile = Some(val);
+                }
+
+                // ── Muxer options ────────────────────────────────────────────
+                "-movflags" => {
+                    let val = next_arg!("-movflags").clone();
+                    pending_output
+                        .muxer_options
+                        .push(("movflags".to_string(), val));
+                }
+                "-fflags" => {
+                    let val = next_arg!("-fflags").clone();
+                    pending_output
+                        .muxer_options
+                        .push(("fflags".to_string(), val));
+                }
+                "-brand" => {
+                    let val = next_arg!("-brand").clone();
+                    pending_output
+                        .muxer_options
+                        .push(("brand".to_string(), val));
+                }
+                "-write_tmcd" => {
+                    let val = next_arg!("-write_tmcd").clone();
+                    pending_output
+                        .muxer_options
+                        .push(("write_tmcd".to_string(), val));
+                }
+                "-moov_size" => {
+                    let val = next_arg!("-moov_size").clone();
+                    pending_output
+                        .muxer_options
+                        .push(("moov_size".to_string(), val));
+                }
+                "-fragment_index" => {
+                    let val = next_arg!("-fragment_index").clone();
+                    pending_output
+                        .muxer_options
+                        .push(("fragment_index".to_string(), val));
+                }
+                "-movflags:v" => {
+                    let val = next_arg!("-movflags:v").clone();
+                    pending_output
+                        .muxer_options
+                        .push(("movflags".to_string(), val));
+                }
+
+                // ── To position ──────────────────────────────────────────────
+                "-to" => {
+                    let val = next_arg!("-to").clone();
+                    // FFmpeg -to sets end position; we store it as duration context
+                    pending_output.extra_args.push(("-to".to_string(), val));
                 }
 
                 // ── Misc output flags ─────────────────────────────────────────
@@ -1052,5 +1139,166 @@ mod tests {
         let parsed = FfmpegArgs::parse(&args).expect("parse");
         assert_eq!(parsed.inputs.len(), 1);
         assert_eq!(parsed.outputs.len(), 1);
+    }
+
+    // ── Preset / Tune / Profile tests ───────────────────────────────────────
+
+    #[test]
+    fn test_preset_parsing() {
+        let args = vec![
+            s("-i"),
+            s("in.mkv"),
+            s("-preset"),
+            s("medium"),
+            s("out.webm"),
+        ];
+        let parsed = FfmpegArgs::parse(&args).expect("parse");
+        assert_eq!(parsed.outputs[0].preset.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn test_tune_parsing() {
+        let args = vec![s("-i"), s("in.mkv"), s("-tune"), s("film"), s("out.webm")];
+        let parsed = FfmpegArgs::parse(&args).expect("parse");
+        assert_eq!(parsed.outputs[0].tune.as_deref(), Some("film"));
+    }
+
+    #[test]
+    fn test_profile_parsing() {
+        let args = vec![
+            s("-i"),
+            s("in.mkv"),
+            s("-profile:v"),
+            s("main"),
+            s("out.webm"),
+        ];
+        let parsed = FfmpegArgs::parse(&args).expect("parse");
+        assert_eq!(parsed.outputs[0].profile.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn test_preset_tune_profile_combined() {
+        let args = vec![
+            s("-i"),
+            s("in.mkv"),
+            s("-preset"),
+            s("slow"),
+            s("-tune"),
+            s("grain"),
+            s("-profile"),
+            s("high"),
+            s("-c:v"),
+            s("libx264"),
+            s("out.webm"),
+        ];
+        let parsed = FfmpegArgs::parse(&args).expect("parse");
+        let out = &parsed.outputs[0];
+        assert_eq!(out.preset.as_deref(), Some("slow"));
+        assert_eq!(out.tune.as_deref(), Some("grain"));
+        assert_eq!(out.profile.as_deref(), Some("high"));
+    }
+
+    // ── Two-pass encoding tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_two_pass_first_pass() {
+        let args = vec![
+            s("-i"),
+            s("in.mkv"),
+            s("-c:v"),
+            s("libaom-av1"),
+            s("-b:v"),
+            s("2M"),
+            s("-pass"),
+            s("1"),
+            s("-passlogfile"),
+            s("/tmp/ffpass"),
+            s("out.webm"),
+        ];
+        let parsed = FfmpegArgs::parse(&args).expect("parse");
+        let out = &parsed.outputs[0];
+        assert_eq!(out.pass, Some(1));
+        assert_eq!(out.passlogfile.as_deref(), Some("/tmp/ffpass"));
+    }
+
+    #[test]
+    fn test_two_pass_second_pass() {
+        let args = vec![
+            s("-i"),
+            s("in.mkv"),
+            s("-c:v"),
+            s("libaom-av1"),
+            s("-b:v"),
+            s("2M"),
+            s("-pass"),
+            s("2"),
+            s("out.webm"),
+        ];
+        let parsed = FfmpegArgs::parse(&args).expect("parse");
+        assert_eq!(parsed.outputs[0].pass, Some(2));
+    }
+
+    // ── Muxer options tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_movflags_parsing() {
+        let args = vec![
+            s("-i"),
+            s("in.mkv"),
+            s("-movflags"),
+            s("+faststart"),
+            s("out.mp4"),
+        ];
+        let parsed = FfmpegArgs::parse(&args).expect("parse");
+        let muxer = &parsed.outputs[0].muxer_options;
+        assert_eq!(muxer.len(), 1);
+        assert_eq!(muxer[0].0, "movflags");
+        assert_eq!(muxer[0].1, "+faststart");
+    }
+
+    #[test]
+    fn test_fflags_parsing() {
+        let args = vec![
+            s("-i"),
+            s("in.mkv"),
+            s("-fflags"),
+            s("+genpts"),
+            s("out.mp4"),
+        ];
+        let parsed = FfmpegArgs::parse(&args).expect("parse");
+        let muxer = &parsed.outputs[0].muxer_options;
+        assert_eq!(muxer.len(), 1);
+        assert_eq!(muxer[0].0, "fflags");
+        assert_eq!(muxer[0].1, "+genpts");
+    }
+
+    #[test]
+    fn test_multiple_muxer_options() {
+        let args = vec![
+            s("-i"),
+            s("in.mkv"),
+            s("-movflags"),
+            s("+faststart"),
+            s("-fflags"),
+            s("+genpts"),
+            s("-brand"),
+            s("mp42"),
+            s("out.mp4"),
+        ];
+        let parsed = FfmpegArgs::parse(&args).expect("parse");
+        let muxer = &parsed.outputs[0].muxer_options;
+        assert_eq!(muxer.len(), 3);
+    }
+
+    #[test]
+    fn test_to_position_parsing() {
+        let args = vec![s("-i"), s("in.mkv"), s("-to"), s("00:05:00"), s("out.webm")];
+        let parsed = FfmpegArgs::parse(&args).expect("parse");
+        let to_entry = parsed.outputs[0]
+            .extra_args
+            .iter()
+            .find(|(k, _)| k == "-to");
+        assert!(to_entry.is_some());
+        assert_eq!(to_entry.map(|(_, v)| v.as_str()), Some("00:05:00"));
     }
 }

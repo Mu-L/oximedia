@@ -246,6 +246,149 @@ impl ClusterBuilder {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Transitive closure grouping
+// ---------------------------------------------------------------------------
+
+/// Group items by transitive closure over similarity pairs.
+///
+/// If A is similar to B and B is similar to C, all three are placed into the
+/// same group {A, B, C}, even if A and C were never directly compared.
+///
+/// This uses Union-Find with path compression and union-by-rank for O(n * alpha(n))
+/// amortized performance, where alpha is the inverse Ackermann function.
+///
+/// # Arguments
+/// * `pairs` - Similarity pairs `(path_a, path_b, score)` with score in [0.0, 1.0].
+/// * `threshold` - Minimum similarity score for two items to be considered linked.
+///
+/// # Returns
+/// A list of `DuplicateCluster` instances, each containing all transitively
+/// connected members. Only clusters with 2+ members are returned.
+#[must_use]
+pub fn transitive_closure_groups(
+    pairs: &[(PathBuf, PathBuf, f64)],
+    threshold: f64,
+) -> Vec<DuplicateCluster> {
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+
+    // Collect all unique paths and assign indices.
+    let mut path_to_idx: HashMap<&PathBuf, usize> = HashMap::new();
+    let mut idx_to_path: Vec<&PathBuf> = Vec::new();
+
+    for (a, b, _) in pairs {
+        if !path_to_idx.contains_key(a) {
+            let idx = idx_to_path.len();
+            path_to_idx.insert(a, idx);
+            idx_to_path.push(a);
+        }
+        if !path_to_idx.contains_key(b) {
+            let idx = idx_to_path.len();
+            path_to_idx.insert(b, idx);
+            idx_to_path.push(b);
+        }
+    }
+
+    let n = idx_to_path.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    let mut rank: Vec<usize> = vec![0; n];
+
+    // Union-Find with path compression and union-by-rank.
+    fn find_root(parent: &mut [usize], x: usize) -> usize {
+        let mut root = x;
+        while parent[root] != root {
+            root = parent[root];
+        }
+        // Path compression
+        let mut cur = x;
+        while cur != root {
+            let next = parent[cur];
+            parent[cur] = root;
+            cur = next;
+        }
+        root
+    }
+
+    fn union(parent: &mut [usize], rank: &mut [usize], a: usize, b: usize) {
+        let ra = find_root(parent, a);
+        let rb = find_root(parent, b);
+        if ra == rb {
+            return;
+        }
+        match rank[ra].cmp(&rank[rb]) {
+            std::cmp::Ordering::Less => parent[ra] = rb,
+            std::cmp::Ordering::Greater => parent[rb] = ra,
+            std::cmp::Ordering::Equal => {
+                parent[rb] = ra;
+                rank[ra] += 1;
+            }
+        }
+    }
+
+    // Filter pairs by threshold and union them.
+    let mut valid_edges: Vec<(usize, usize, f64)> = Vec::new();
+    for (a, b, score) in pairs {
+        if *score >= threshold {
+            let ia = path_to_idx[a];
+            let ib = path_to_idx[b];
+            union(&mut parent, &mut rank, ia, ib);
+            valid_edges.push((ia, ib, *score));
+        }
+    }
+
+    // Group indices by root.
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        let root = find_root(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+
+    // Build DuplicateCluster per group with >= 2 members.
+    let mut clusters = Vec::new();
+    for (cid, (_, members)) in groups.iter().filter(|(_, m)| m.len() >= 2).enumerate() {
+        let mut cluster = DuplicateCluster::new(cid);
+        let local_idx: HashMap<usize, usize> = members
+            .iter()
+            .enumerate()
+            .map(|(local, &global)| (global, local))
+            .collect();
+
+        for &gi in members {
+            cluster.add_member(idx_to_path[gi].clone());
+        }
+
+        // Attach edges within this group.
+        for &(ea, eb, score) in &valid_edges {
+            if let (Some(&la), Some(&lb)) = (local_idx.get(&ea), local_idx.get(&eb)) {
+                cluster.add_edge(la, lb, score);
+            }
+        }
+
+        cluster.select_representative();
+        clusters.push(cluster);
+    }
+
+    clusters
+}
+
+/// Build transitive groups from `SimilarityPair` slices.
+///
+/// Convenience wrapper around [`transitive_closure_groups`] that accepts
+/// the same `SimilarityPair` type used by `ClusterBuilder`.
+#[must_use]
+pub fn transitive_groups_from_pairs(
+    pairs: &[SimilarityPair],
+    threshold: f64,
+) -> Vec<DuplicateCluster> {
+    let triples: Vec<(PathBuf, PathBuf, f64)> = pairs
+        .iter()
+        .map(|p| (p.path_a.clone(), p.path_b.clone(), p.score))
+        .collect();
+    transitive_closure_groups(&triples, threshold)
+}
+
 /// Merge two clusters into one.
 #[must_use]
 pub fn merge_clusters(mut a: DuplicateCluster, b: DuplicateCluster) -> DuplicateCluster {
@@ -452,5 +595,122 @@ mod tests {
         assert_eq!(p.score, 0.75);
         assert_eq!(p.path_a, pb("a.mp4"));
         assert_eq!(p.path_b, pb("b.mp4"));
+    }
+
+    // ---- Transitive closure grouping tests ----
+
+    #[test]
+    fn test_transitive_closure_empty() {
+        let groups = transitive_closure_groups(&[], 0.5);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn test_transitive_closure_single_pair() {
+        let pairs = vec![(pb("a.mp4"), pb("b.mp4"), 0.95)];
+        let groups = transitive_closure_groups(&pairs, 0.9);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].size(), 2);
+    }
+
+    #[test]
+    fn test_transitive_closure_chain() {
+        // A~B, B~C => {A, B, C}
+        let pairs = vec![
+            (pb("a.mp4"), pb("b.mp4"), 0.95),
+            (pb("b.mp4"), pb("c.mp4"), 0.92),
+        ];
+        let groups = transitive_closure_groups(&pairs, 0.9);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].size(), 3);
+        // All three should be in the group
+        let members: HashSet<_> = groups[0].members.iter().collect();
+        assert!(members.contains(&pb("a.mp4")));
+        assert!(members.contains(&pb("b.mp4")));
+        assert!(members.contains(&pb("c.mp4")));
+    }
+
+    #[test]
+    fn test_transitive_closure_two_components() {
+        // {A, B} and {X, Y} are separate components
+        let pairs = vec![
+            (pb("a.mp4"), pb("b.mp4"), 0.95),
+            (pb("x.mp4"), pb("y.mp4"), 0.93),
+        ];
+        let groups = transitive_closure_groups(&pairs, 0.9);
+        assert_eq!(groups.len(), 2);
+    }
+
+    #[test]
+    fn test_transitive_closure_long_chain() {
+        // A~B, B~C, C~D, D~E => {A, B, C, D, E}
+        let pairs = vec![
+            (pb("a.mp4"), pb("b.mp4"), 0.95),
+            (pb("b.mp4"), pb("c.mp4"), 0.94),
+            (pb("c.mp4"), pb("d.mp4"), 0.93),
+            (pb("d.mp4"), pb("e.mp4"), 0.92),
+        ];
+        let groups = transitive_closure_groups(&pairs, 0.9);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].size(), 5);
+    }
+
+    #[test]
+    fn test_transitive_closure_threshold_filters() {
+        // A~B at 0.95, B~C at 0.80 (below threshold)
+        let pairs = vec![
+            (pb("a.mp4"), pb("b.mp4"), 0.95),
+            (pb("b.mp4"), pb("c.mp4"), 0.80),
+        ];
+        let groups = transitive_closure_groups(&pairs, 0.9);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].size(), 2); // Only A and B; C is excluded
+    }
+
+    #[test]
+    fn test_transitive_closure_star_topology() {
+        // Hub~A, Hub~B, Hub~C, Hub~D => {Hub, A, B, C, D}
+        let pairs = vec![
+            (pb("hub.mp4"), pb("a.mp4"), 0.96),
+            (pb("hub.mp4"), pb("b.mp4"), 0.94),
+            (pb("hub.mp4"), pb("c.mp4"), 0.93),
+            (pb("hub.mp4"), pb("d.mp4"), 0.91),
+        ];
+        let groups = transitive_closure_groups(&pairs, 0.9);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].size(), 5);
+    }
+
+    #[test]
+    fn test_transitive_closure_selects_representative() {
+        let pairs = vec![
+            (pb("a.mp4"), pb("b.mp4"), 0.95),
+            (pb("b.mp4"), pb("c.mp4"), 0.93),
+        ];
+        let groups = transitive_closure_groups(&pairs, 0.9);
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].representative.is_some());
+    }
+
+    #[test]
+    fn test_transitive_groups_from_pairs_convenience() {
+        let pairs = vec![
+            SimilarityPair::new(pb("a.mp4"), pb("b.mp4"), 0.95),
+            SimilarityPair::new(pb("b.mp4"), pb("c.mp4"), 0.93),
+            SimilarityPair::new(pb("x.mp4"), pb("y.mp4"), 0.40), // below threshold
+        ];
+        let groups = transitive_groups_from_pairs(&pairs, 0.9);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].size(), 3);
+    }
+
+    #[test]
+    fn test_transitive_closure_edges_attached() {
+        let pairs = vec![
+            (pb("a.mp4"), pb("b.mp4"), 0.95),
+            (pb("b.mp4"), pb("c.mp4"), 0.93),
+        ];
+        let groups = transitive_closure_groups(&pairs, 0.9);
+        assert_eq!(groups[0].edges.len(), 2);
     }
 }

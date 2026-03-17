@@ -4,7 +4,10 @@ pub mod prosody;
 pub mod synthesize;
 pub mod voice;
 
-pub use prosody::{ProsodyConfig, ProsodyControl};
+pub use prosody::{
+    BreakStrength, EmphasisLevel, ProsodyConfig, ProsodyControl, SayAsInterpret, SsmlBuilder,
+    SsmlElement,
+};
 pub use synthesize::TextToSpeech;
 pub use voice::{Voice, VoiceGender, VoiceRegistry};
 

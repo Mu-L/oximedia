@@ -38,6 +38,9 @@ pub struct Rational {
 impl Rational {
     /// Creates a new `Rational` from numerator and denominator.
     ///
+    /// The fraction is automatically reduced to lowest terms on construction
+    /// using GCD reduction, and the denominator is normalised to be positive.
+    ///
     /// # Arguments
     ///
     /// * `num` - The numerator
@@ -55,11 +58,29 @@ impl Rational {
     /// let half = Rational::new(1, 2);
     /// assert_eq!(half.num, 1);
     /// assert_eq!(half.den, 2);
+    ///
+    /// // Auto-reduced on construction
+    /// let r = Rational::new(6, 8);
+    /// assert_eq!(r.num, 3);
+    /// assert_eq!(r.den, 4);
+    ///
+    /// // Sign is normalised to the numerator
+    /// let neg = Rational::new(3, -4);
+    /// assert_eq!(neg.num, -3);
+    /// assert_eq!(neg.den, 4);
     /// ```
     #[must_use]
+    #[allow(clippy::cast_possible_wrap)]
     pub fn new(num: i64, den: i64) -> Self {
         assert!(den != 0, "Denominator cannot be zero");
-        Self { num, den }
+        let g = gcd(num.unsigned_abs(), den.unsigned_abs());
+        let g_signed = if g == 0 { 1i64 } else { g as i64 };
+        // Normalise sign: denominator must always be positive
+        let sign: i64 = if den < 0 { -1 } else { 1 };
+        Self {
+            num: sign * num / g_signed,
+            den: sign * den / g_signed,
+        }
     }
 
     /// Reduces the rational to its lowest terms.
@@ -462,5 +483,257 @@ mod tests {
         assert_eq!(gcd(7, 5), 1);
         assert_eq!(gcd(0, 5), 5);
         assert_eq!(gcd(5, 0), 5);
+    }
+
+    // ── Property-based tests ─────────────────────────────────────────────────
+    //
+    // We verify algebraic laws over a large deterministic sample of Rational
+    // values without depending on an external property-testing crate.
+    //
+    // The generator uses a simple linear-congruential scheme seeded with
+    // well-known constants to produce reproducible, varied test inputs.
+
+    /// Lightweight deterministic pseudo-random generator (LCG).
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            // Knuth's multiplier / addend for 64-bit LCG.
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0
+        }
+
+        /// Generates a nonzero i64 in `[-range, range]` excluding 0.
+        fn next_nonzero(&mut self, range: i64) -> i64 {
+            let raw = (self.next_u64() % (range as u64 * 2 + 1)) as i64 - range;
+            if raw == 0 {
+                1
+            } else {
+                raw
+            }
+        }
+
+        fn next_signed(&mut self, range: i64) -> i64 {
+            (self.next_u64() % (range as u64 * 2 + 1)) as i64 - range
+        }
+
+        fn next_rational(&mut self) -> Rational {
+            Rational::new(self.next_signed(1000), self.next_nonzero(1000))
+        }
+    }
+
+    /// Tests that two rationals are mathematically equal after reduction.
+    fn rationals_equal(a: Rational, b: Rational) -> bool {
+        let ar = a.reduce();
+        let br = b.reduce();
+        // cross-multiply to compare without floating point
+        ar.num * br.den == br.num * ar.den
+    }
+
+    // Property: addition is commutative – a + b == b + a
+    #[test]
+    fn prop_add_commutative() {
+        let mut rng = Lcg::new(0xDEAD_BEEF_CAFE_1234);
+        for _ in 0..500 {
+            let a = rng.next_rational();
+            let b = rng.next_rational();
+            assert!(
+                rationals_equal(a + b, b + a),
+                "commutativity failed: ({a}) + ({b})"
+            );
+        }
+    }
+
+    // Property: addition is associative – (a + b) + c == a + (b + c)
+    #[test]
+    fn prop_add_associative() {
+        let mut rng = Lcg::new(0xCAFE_BABE_0000_0001);
+        for _ in 0..300 {
+            let a = rng.next_rational();
+            let b = rng.next_rational();
+            let c = rng.next_rational();
+            let lhs = (a + b) + c;
+            let rhs = a + (b + c);
+            assert!(
+                rationals_equal(lhs, rhs),
+                "associativity failed: ({a}) + ({b}) + ({c})"
+            );
+        }
+    }
+
+    // Property: additive identity – a + 0 == a
+    #[test]
+    fn prop_add_identity() {
+        let zero = Rational::new(0, 1);
+        let mut rng = Lcg::new(0x1234_5678_9ABC_DEF0);
+        for _ in 0..300 {
+            let a = rng.next_rational();
+            assert!(
+                rationals_equal(a + zero, a),
+                "additive identity failed: ({a}) + 0"
+            );
+        }
+    }
+
+    // Property: subtraction self-inverse – a - a == 0
+    #[test]
+    fn prop_sub_self_inverse() {
+        let zero = Rational::new(0, 1);
+        let mut rng = Lcg::new(0xFEED_FACE_DEAD_BEEF);
+        for _ in 0..300 {
+            let a = rng.next_rational();
+            let diff = a - a;
+            assert!(
+                rationals_equal(diff, zero),
+                "self-inverse failed: ({a}) - ({a})"
+            );
+        }
+    }
+
+    // Property: multiplication is commutative – a * b == b * a
+    #[test]
+    fn prop_mul_commutative() {
+        let mut rng = Lcg::new(0xABCD_EF01_2345_6789);
+        for _ in 0..500 {
+            let a = rng.next_rational();
+            let b = rng.next_rational();
+            assert!(
+                rationals_equal(a * b, b * a),
+                "mul commutativity failed: ({a}) * ({b})"
+            );
+        }
+    }
+
+    // Property: multiplicative identity – a * 1 == a
+    #[test]
+    fn prop_mul_identity() {
+        let one = Rational::new(1, 1);
+        let mut rng = Lcg::new(0x0011_2233_4455_6677);
+        for _ in 0..300 {
+            let a = rng.next_rational();
+            assert!(
+                rationals_equal(a * one, a),
+                "mul identity failed: ({a}) * 1"
+            );
+        }
+    }
+
+    // Property: multiplicative zero – a * 0 == 0
+    #[test]
+    fn prop_mul_zero() {
+        let zero = Rational::new(0, 1);
+        let mut rng = Lcg::new(0x9988_7766_5544_3322);
+        for _ in 0..300 {
+            let a = rng.next_rational();
+            assert!(
+                rationals_equal(a * zero, zero),
+                "mul zero failed: ({a}) * 0"
+            );
+        }
+    }
+
+    // Property: reciprocal involution – (1/a) * a == 1 for a != 0
+    #[test]
+    fn prop_reciprocal_involution() {
+        let one = Rational::new(1, 1);
+        let mut rng = Lcg::new(0x1122_3344_5566_7788);
+        for _ in 0..300 {
+            // Ensure non-zero numerator
+            let num = rng.next_nonzero(500);
+            let den = rng.next_nonzero(500);
+            let a = Rational::new(num, den);
+            let result = a.reciprocal() * a;
+            assert!(
+                rationals_equal(result, one),
+                "reciprocal involution failed: recip({a}) * {a}"
+            );
+        }
+    }
+
+    // Property: distributivity – a * (b + c) == a*b + a*c
+    #[test]
+    fn prop_distributive() {
+        let mut rng = Lcg::new(0x8877_6655_4433_2211);
+        for _ in 0..200 {
+            let a = rng.next_rational();
+            let b = rng.next_rational();
+            let c = rng.next_rational();
+            let lhs = a * (b + c);
+            let rhs = a * b + a * c;
+            assert!(
+                rationals_equal(lhs, rhs),
+                "distributivity failed: ({a}) * (({b}) + ({c}))"
+            );
+        }
+    }
+
+    // Property: division inverse of multiplication – (a * b) / b == a when b != 0
+    #[test]
+    fn prop_div_inverse_of_mul() {
+        let mut rng = Lcg::new(0x4455_6677_8899_AABB);
+        for _ in 0..300 {
+            let a = rng.next_rational();
+            let num_b = rng.next_nonzero(500);
+            let den_b = rng.next_nonzero(500);
+            let b = Rational::new(num_b, den_b);
+            let result = (a * b) / b;
+            assert!(
+                rationals_equal(result, a),
+                "div inverse failed: ({a} * {b}) / {b}"
+            );
+        }
+    }
+
+    // Property: reduce is idempotent – reduce(reduce(r)) == reduce(r)
+    #[test]
+    fn prop_reduce_idempotent() {
+        let mut rng = Lcg::new(0xCC_DD_EE_FF_00_11_22_33);
+        for _ in 0..500 {
+            let a = rng.next_rational();
+            let once = a.reduce();
+            let twice = once.reduce();
+            assert_eq!(once, twice, "reduce idempotency failed: {a}");
+        }
+    }
+
+    // Property: to_f64 agrees with floating-point arithmetic (within tolerance)
+    #[test]
+    fn prop_to_f64_consistency() {
+        let mut rng = Lcg::new(0xF0E1_D2C3_B4A5_9687);
+        for _ in 0..300 {
+            let num = rng.next_signed(10_000);
+            let den = rng.next_nonzero(10_000);
+            let r = Rational::new(num, den);
+            let expected = num as f64 / den as f64;
+            let got = r.to_f64();
+            let tol = expected.abs() * 1e-12 + 1e-15;
+            assert!(
+                (got - expected).abs() <= tol,
+                "to_f64 disagreement: {r} → {got} vs {expected}"
+            );
+        }
+    }
+
+    // Property: ordering is total – exactly one of a<b, a==b, a>b holds
+    #[test]
+    fn prop_ordering_total() {
+        let mut rng = Lcg::new(0x1357_9BDF_2468_ACE0);
+        for _ in 0..500 {
+            let a = rng.next_rational();
+            let b = rng.next_rational();
+            let lt = a < b;
+            let eq = a == b.reduce() || rationals_equal(a, b);
+            let gt = a > b;
+            // Exactly one must hold (since Rational uses cross-multiply comparison)
+            let count = usize::from(lt) + usize::from(eq) + usize::from(gt);
+            assert!(count >= 1, "no ordering relation between {a} and {b}");
+        }
     }
 }

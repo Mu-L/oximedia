@@ -282,6 +282,20 @@ impl Flanger {
         self.lfo_phase
     }
 
+    /// Set the wet/dry mix ratio via the `AudioEffect` trait.
+    ///
+    /// Delegates to [`set_mix`](Self::set_mix) so the internal `config.mix` field
+    /// is the single source of truth.
+    pub fn set_wet_dry_mix(&mut self, wet: f32) {
+        self.set_mix(wet);
+    }
+
+    /// Return the current wet level.
+    #[must_use]
+    pub fn wet_level(&self) -> f32 {
+        self.config.mix
+    }
+
     /// Return a snapshot of the internal state.
     #[must_use]
     pub fn state(&self) -> FlangerState {
@@ -289,6 +303,35 @@ impl Flanger {
             lfo_phase: self.lfo_phase,
             feedback_sample: self.feedback_memory,
         }
+    }
+}
+
+impl crate::AudioEffect for Flanger {
+    fn process_sample(&mut self, input: f32) -> f32 {
+        self.apply_sample(input)
+    }
+
+    fn process_sample_stereo(&mut self, left: f32, right: f32) -> (f32, f32) {
+        (self.apply_sample(left), self.apply_sample(right))
+    }
+
+    fn reset(&mut self) {
+        self.reset();
+    }
+
+    fn set_sample_rate(&mut self, sample_rate: f32) {
+        self.sample_rate = sample_rate;
+        self.lfo_inc = 2.0 * std::f32::consts::PI * self.config.rate_hz / sample_rate;
+        self.min_delay_samples = self.config.min_delay_ms * 0.001 * sample_rate;
+        self.max_delay_samples = self.config.max_delay_ms * 0.001 * sample_rate;
+    }
+
+    fn set_wet_dry(&mut self, wet: f32) {
+        self.set_mix(wet);
+    }
+
+    fn wet_dry(&self) -> f32 {
+        self.config.mix
     }
 }
 

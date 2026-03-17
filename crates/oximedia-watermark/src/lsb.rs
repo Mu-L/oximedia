@@ -140,15 +140,14 @@ impl LsbEmbedder {
 
     /// Generate random embedding positions.
     fn generate_random_positions(&self, max_pos: usize, count: usize) -> Vec<usize> {
-        use rand::{rngs::SmallRng, Rng, SeedableRng};
-
-        let mut rng = SmallRng::seed_from_u64(self.config.key);
+        let mut rng = scirs2_core::random::Random::seed(self.config.key);
 
         let mut positions = Vec::new();
         let mut used = vec![false; max_pos];
 
         while positions.len() < count && positions.len() < max_pos {
-            let pos = rng.random_range(0..max_pos);
+            let pos = (rng.random_f64() * max_pos as f64) as usize;
+            let pos = pos.min(max_pos.saturating_sub(1));
             if !used[pos] {
                 positions.push(pos);
                 used[pos] = true;
@@ -160,14 +159,13 @@ impl LsbEmbedder {
 
     /// Apply dithering to reduce quantization artifacts.
     fn apply_dithering(&self, samples: &mut [i16]) {
-        use rand::{rngs::SmallRng, Rng, SeedableRng};
-
-        let mut rng = SmallRng::seed_from_u64(self.config.key.wrapping_add(1));
+        let mut rng = scirs2_core::random::Random::seed(self.config.key.wrapping_add(1));
 
         let dither_range = 1 << self.config.bits_per_sample;
 
         for sample in samples {
-            let dither = rng.random_range(0..dither_range) as i16 - (dither_range / 2) as i16;
+            let dither =
+                (rng.random_f64() * dither_range as f64) as i16 - (dither_range / 2) as i16;
             *sample = sample.saturating_add(dither);
         }
     }

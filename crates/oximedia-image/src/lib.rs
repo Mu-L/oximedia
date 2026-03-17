@@ -43,6 +43,7 @@
     clippy::pedantic
 )]
 
+pub mod advanced_morphology;
 pub mod blend_mode;
 pub mod color_adjust;
 pub mod color_balance;
@@ -56,22 +57,29 @@ pub mod exif_parser;
 pub mod exr;
 pub mod filter;
 pub mod filters;
+pub mod focus_stack;
 pub mod format_detect;
+pub mod frequency_domain;
 pub mod hdr_merge;
 pub mod histogram_ops;
 pub mod icc_embed;
+pub mod image_pyramid;
 pub mod inpaint;
+pub mod inpainting;
 pub mod lens_correct;
 pub mod metadata_xmp;
 pub mod morphology;
 pub mod mosaic;
+pub mod noise_estimation;
 pub mod noise_gen;
 pub mod pixel_pipeline;
 pub mod pyramid;
 pub mod raw;
 pub mod raw_decode;
+pub mod segmentation;
 pub mod sequence;
 pub mod stitch;
+pub mod texture_synthesis;
 pub mod thumbnail_cache;
 pub mod tiff;
 pub mod tone_curve;

@@ -86,8 +86,17 @@ impl Backend for VulkanBackend {
 }
 
 impl Default for VulkanBackend {
+    /// Creates a Vulkan backend with default settings.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no Vulkan-capable GPU device is available. Prefer
+    /// [`VulkanBackend::new()`] for fallible construction.
     fn default() -> Self {
-        Self::new().expect("Failed to initialize Vulkan backend")
+        match Self::new() {
+            Ok(backend) => backend,
+            Err(e) => panic!("Failed to initialize Vulkan backend: {e}"),
+        }
     }
 }
 

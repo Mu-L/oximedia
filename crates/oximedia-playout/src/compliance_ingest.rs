@@ -320,6 +320,72 @@ impl DeliveryJob {
     }
 }
 
+// ── Retention policy ──────────────────────────────────────────────────────────
+
+/// Rule that governs how long compliance recordings are kept on disk.
+#[derive(Debug, Clone)]
+pub struct RetentionPolicy {
+    /// Human-readable policy name.
+    pub name: String,
+    /// How long to retain recordings (0 = keep forever).
+    pub retain_duration: Duration,
+    /// Maximum storage consumed by this policy tier (bytes, 0 = unlimited).
+    pub max_storage_bytes: u64,
+    /// Whether to automatically delete recordings that exceed the retain window.
+    pub auto_delete: bool,
+    /// Destination for archival before deletion (empty = discard).
+    pub archive_path: String,
+}
+
+impl RetentionPolicy {
+    /// Create a "keep for N days" policy.
+    pub fn keep_for_days(name: &str, days: u64, auto_delete: bool) -> Self {
+        Self {
+            name: name.to_string(),
+            retain_duration: Duration::from_secs(days * 86_400),
+            max_storage_bytes: 0,
+            auto_delete,
+            archive_path: String::new(),
+        }
+    }
+
+    /// Create a "keep forever" policy.
+    pub fn keep_forever(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            retain_duration: Duration::ZERO,
+            max_storage_bytes: 0,
+            auto_delete: false,
+            archive_path: String::new(),
+        }
+    }
+
+    /// Check whether a recording has exceeded the retention window.
+    ///
+    /// Returns `true` if the recording should be deleted / archived.
+    /// A zero `retain_duration` means keep forever → always returns `false`.
+    pub fn is_expired(&self, stop_time: SystemTime, now: SystemTime) -> bool {
+        if self.retain_duration == Duration::ZERO {
+            return false;
+        }
+        match now.duration_since(stop_time) {
+            Ok(age) => age > self.retain_duration,
+            Err(_) => false, // stop_time is in the future
+        }
+    }
+}
+
+/// Result of a retention enforcement run.
+#[derive(Debug, Clone, Default)]
+pub struct RetentionEnforcementResult {
+    /// IDs of recordings that were marked for deletion.
+    pub expired_ids: Vec<String>,
+    /// IDs of recordings that were archived before deletion.
+    pub archived_ids: Vec<String>,
+    /// Total bytes that would be reclaimed.
+    pub bytes_to_reclaim: u64,
+}
+
 // ── Compliance ingest coordinator ─────────────────────────────────────────────
 
 /// Central coordinator for compliance recording and file delivery
@@ -328,6 +394,10 @@ pub struct ComplianceIngestCoordinator {
     recordings: HashMap<String, ComplianceRecording>,
     delivery_queue: Vec<DeliveryJob>,
     verification_config: SignalVerificationConfig,
+    /// Named retention policies (policy name → policy).
+    retention_policies: HashMap<String, RetentionPolicy>,
+    /// Mapping from recording ID to its assigned policy name (empty = default).
+    recording_policies: HashMap<String, String>,
 }
 
 impl ComplianceIngestCoordinator {
@@ -345,6 +415,13 @@ impl ComplianceIngestCoordinator {
 
     /// Register a compliance recording
     pub fn register(&mut self, rec: ComplianceRecording) {
+        self.recordings.insert(rec.id.clone(), rec);
+    }
+
+    /// Register a compliance recording and associate it with a retention policy.
+    pub fn register_with_policy(&mut self, rec: ComplianceRecording, policy_name: &str) {
+        self.recording_policies
+            .insert(rec.id.clone(), policy_name.to_string());
         self.recordings.insert(rec.id.clone(), rec);
     }
 
@@ -382,6 +459,84 @@ impl ComplianceIngestCoordinator {
             .iter()
             .filter(|j| matches!(j.state, DeliveryState::Queued | DeliveryState::Transferring))
             .collect()
+    }
+
+    // ── Retention policy management ──────────────────────────────────────────
+
+    /// Add a named retention policy.
+    pub fn add_policy(&mut self, policy: RetentionPolicy) {
+        self.retention_policies.insert(policy.name.clone(), policy);
+    }
+
+    /// Remove a retention policy by name.
+    pub fn remove_policy(&mut self, name: &str) -> bool {
+        self.retention_policies.remove(name).is_some()
+    }
+
+    /// Look up a retention policy by name.
+    pub fn policy(&self, name: &str) -> Option<&RetentionPolicy> {
+        self.retention_policies.get(name)
+    }
+
+    /// Evaluate all completed recordings against their retention policies.
+    ///
+    /// Returns a `RetentionEnforcementResult` describing which recordings have
+    /// expired.  Does NOT actually delete any files; the caller is responsible
+    /// for invoking file-system operations based on the returned IDs.
+    pub fn enforce_retention(&self, now: SystemTime) -> RetentionEnforcementResult {
+        let mut result = RetentionEnforcementResult::default();
+
+        for rec in self.recordings.values() {
+            // Only evaluate completed recordings.
+            if rec.state != ComplianceRecordingState::Completed {
+                continue;
+            }
+            let stop_time = match rec.stop_time {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let policy_name = self
+                .recording_policies
+                .get(&rec.id)
+                .map(String::as_str)
+                .unwrap_or("");
+
+            let expired = if policy_name.is_empty() {
+                // No policy: never expires.
+                false
+            } else {
+                match self.retention_policies.get(policy_name) {
+                    Some(p) => p.is_expired(stop_time, now),
+                    None => false,
+                }
+            };
+
+            if expired {
+                let policy = self
+                    .retention_policies
+                    .get(policy_name)
+                    .expect("checked above");
+                if !policy.archive_path.is_empty() {
+                    result.archived_ids.push(rec.id.clone());
+                }
+                result.expired_ids.push(rec.id.clone());
+                result.bytes_to_reclaim += rec.bytes_written;
+            }
+        }
+
+        result
+    }
+
+    /// Purge recordings from the registry that have been marked as expired by
+    /// `enforce_retention`.  Returns the number of recordings removed.
+    pub fn purge_expired(&mut self, expired_ids: &[String]) -> usize {
+        let before = self.recordings.len();
+        for id in expired_ids {
+            self.recordings.remove(id.as_str());
+            self.recording_policies.remove(id.as_str());
+        }
+        before - self.recordings.len()
     }
 }
 
@@ -430,7 +585,7 @@ mod tests {
         assert!(rec.arm());
         assert!(rec.start(SystemTime::UNIX_EPOCH));
         rec.write_bytes(1024 * 1024);
-        assert!(rec.stop(SystemTime::UNIX_EPOCH + Duration::from_secs(60)));
+        assert!(rec.stop(SystemTime::UNIX_EPOCH + Duration::from_mins(1)));
         assert_eq!(rec.state, ComplianceRecordingState::Completed);
         assert_eq!(rec.bytes_written, 1024 * 1024);
     }
@@ -440,7 +595,7 @@ mod tests {
         let mut rec = ComplianceRecording::new("r1", "ch1", ComplianceFormat::Mp4, "/tmp");
         rec.arm();
         rec.start(SystemTime::UNIX_EPOCH);
-        rec.stop(SystemTime::UNIX_EPOCH + Duration::from_secs(3600));
+        rec.stop(SystemTime::UNIX_EPOCH + Duration::from_hours(1));
         let dur = rec.recorded_duration().expect("should succeed in test");
         assert_eq!(dur.as_secs(), 3600);
     }

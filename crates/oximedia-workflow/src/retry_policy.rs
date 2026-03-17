@@ -561,19 +561,19 @@ mod tests {
 
     #[test]
     fn test_jitter_full() {
-        let config = RetryPolicyConfig::fixed("test", Duration::from_millis(1000), 3)
+        let config = RetryPolicyConfig::fixed("test", Duration::from_secs(1), 3)
             .with_jitter(JitterMode::Full);
         let state = RetryState::new(config);
-        let delay = state.apply_jitter(Duration::from_millis(1000), 0.5);
+        let delay = state.apply_jitter(Duration::from_secs(1), 0.5);
         assert_eq!(delay, Duration::from_millis(500));
     }
 
     #[test]
     fn test_jitter_equal() {
-        let config = RetryPolicyConfig::fixed("test", Duration::from_millis(1000), 3)
+        let config = RetryPolicyConfig::fixed("test", Duration::from_secs(1), 3)
             .with_jitter(JitterMode::Equal);
         let state = RetryState::new(config);
-        let delay = state.apply_jitter(Duration::from_millis(1000), 0.5);
+        let delay = state.apply_jitter(Duration::from_secs(1), 0.5);
         // 500 + 500*0.5 = 750
         assert_eq!(delay, Duration::from_millis(750));
     }
@@ -629,5 +629,335 @@ mod tests {
     fn test_default_registry() {
         let registry = RetryPolicyRegistry::default();
         assert_eq!(registry.count(), 0);
+    }
+}
+
+// ============================================================================
+// Simple flat API: ExponentialRetryPolicy / RetryDecision / RetryPolicyState
+// ============================================================================
+
+/// Decision returned by [`RetryPolicyState::next_delay`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryDecision {
+    /// Retry after the given delay.
+    Retry(Duration),
+    /// No more retries — give up.
+    GiveUp,
+}
+
+/// A simple, self-contained exponential backoff policy.
+///
+/// Unlike the richer [`RetryPolicyConfig`] / [`RetryState`] API this struct
+/// uses a flat set of fields that are easy to construct from configuration
+/// files or environment variables.
+#[derive(Debug, Clone)]
+pub struct ExponentialRetryPolicy {
+    /// Maximum number of retry attempts (0 = no retries).
+    pub max_attempts: u32,
+    /// Delay before the first retry, in milliseconds.
+    pub initial_delay_ms: u64,
+    /// Multiplicative factor applied to the delay after each attempt.
+    pub multiplier: f64,
+    /// Hard cap on the delay, in milliseconds.
+    pub max_delay_ms: u64,
+    /// Whether to apply ±50 % splitmix64 jitter to each computed delay.
+    pub jitter: bool,
+}
+
+impl ExponentialRetryPolicy {
+    /// Create a new policy with explicit parameters.
+    #[must_use]
+    pub fn new(
+        max_attempts: u32,
+        initial_delay_ms: u64,
+        multiplier: f64,
+        max_delay_ms: u64,
+        jitter: bool,
+    ) -> Self {
+        Self {
+            max_attempts,
+            initial_delay_ms,
+            multiplier,
+            max_delay_ms,
+            jitter,
+        }
+    }
+
+    /// Sensible defaults: 3 attempts, 100 ms base, ×2, 30 s cap, with jitter.
+    #[must_use]
+    pub fn default_policy() -> Self {
+        Self::new(3, 100, 2.0, 30_000, true)
+    }
+
+    /// Policy that never retries.
+    #[must_use]
+    pub fn no_retry() -> Self {
+        Self::new(0, 0, 1.0, 0, false)
+    }
+
+    /// Fixed-delay policy.
+    #[must_use]
+    pub fn fixed(delay_ms: u64, max_attempts: u32) -> Self {
+        Self::new(max_attempts, delay_ms, 1.0, delay_ms, false)
+    }
+
+    /// Create a [`RetryPolicyState`] that tracks progress against this policy.
+    #[must_use]
+    pub fn start(&self) -> RetryPolicyState {
+        RetryPolicyState::new(self.clone())
+    }
+}
+
+impl Default for ExponentialRetryPolicy {
+    fn default() -> Self {
+        Self::default_policy()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// splitmix64 PRNG (no rand crate dependency)
+// ---------------------------------------------------------------------------
+
+#[inline]
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// Return a pseudo-random f64 in `[0.0, 1.0)` using splitmix64.
+#[inline]
+fn splitmix64_f64(state: &mut u64) -> f64 {
+    let raw = splitmix64(state);
+    // Use the top 53 bits for a double in [0, 1).
+    (raw >> 11) as f64 / (1u64 << 53) as f64
+}
+
+// ---------------------------------------------------------------------------
+// RetryPolicyState
+// ---------------------------------------------------------------------------
+
+/// Tracks retry progress for an [`ExponentialRetryPolicy`].
+pub struct RetryPolicyState {
+    policy: ExponentialRetryPolicy,
+    attempt: u32,
+    last_delay_ms: u64,
+    seed: u64,
+}
+
+impl RetryPolicyState {
+    /// Create a new state.  The PRNG seed is derived from the current wall
+    /// clock so that different instances produce different jitter sequences.
+    #[must_use]
+    pub fn new(policy: ExponentialRetryPolicy) -> Self {
+        // Seed from system time nanos; fall back to a fixed value.
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(0xdead_beef_cafe_babe);
+        Self {
+            policy,
+            attempt: 0,
+            last_delay_ms: 0,
+            seed,
+        }
+    }
+
+    /// Compute and return the delay for the next retry attempt, or
+    /// [`RetryDecision::GiveUp`] if the attempt budget is exhausted.
+    ///
+    /// This method advances the internal attempt counter on each call.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn next_delay(&mut self) -> RetryDecision {
+        if self.attempt >= self.policy.max_attempts {
+            return RetryDecision::GiveUp;
+        }
+
+        // Exponential base delay.
+        let base = self.policy.initial_delay_ms as f64;
+        let computed = base * self.policy.multiplier.powi(self.attempt as i32);
+        let mut delay_ms = computed.min(self.policy.max_delay_ms as f64) as u64;
+
+        // Optional jitter: scale delay by a factor in [0.5, 1.5].
+        if self.policy.jitter && delay_ms > 0 {
+            let r = splitmix64_f64(&mut self.seed); // [0, 1)
+            let factor = 0.5 + r; // [0.5, 1.5)
+            delay_ms = ((delay_ms as f64 * factor) as u64).min(self.policy.max_delay_ms);
+        }
+
+        self.last_delay_ms = delay_ms;
+        self.attempt += 1;
+
+        RetryDecision::Retry(Duration::from_millis(delay_ms))
+    }
+
+    /// Reset the attempt counter and last-delay record so the policy can be
+    /// reused from scratch.
+    pub fn reset(&mut self) {
+        self.attempt = 0;
+        self.last_delay_ms = 0;
+    }
+
+    /// Return the number of attempts consumed so far.
+    #[must_use]
+    pub fn attempts_used(&self) -> u32 {
+        self.attempt
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for the new API
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod exponential_tests {
+    use super::*;
+
+    #[test]
+    fn no_retry_gives_up_immediately() {
+        let mut state = ExponentialRetryPolicy::no_retry().start();
+        assert_eq!(state.next_delay(), RetryDecision::GiveUp);
+    }
+
+    #[test]
+    fn fixed_policy_same_delay() {
+        let mut state = ExponentialRetryPolicy::fixed(200, 3).start();
+        for _ in 0..3 {
+            match state.next_delay() {
+                RetryDecision::Retry(d) => assert_eq!(d.as_millis(), 200),
+                RetryDecision::GiveUp => panic!("should not give up yet"),
+            }
+        }
+        assert_eq!(state.next_delay(), RetryDecision::GiveUp);
+    }
+
+    #[test]
+    fn exponential_increases_correctly() {
+        // multiplier=2, base=100ms, no jitter → 100, 200, 400
+        let policy = ExponentialRetryPolicy::new(3, 100, 2.0, 10_000, false);
+        let mut state = policy.start();
+        let d0 = state.next_delay();
+        let d1 = state.next_delay();
+        let d2 = state.next_delay();
+        assert_eq!(d0, RetryDecision::Retry(Duration::from_millis(100)));
+        assert_eq!(d1, RetryDecision::Retry(Duration::from_millis(200)));
+        assert_eq!(d2, RetryDecision::Retry(Duration::from_millis(400)));
+        assert_eq!(state.next_delay(), RetryDecision::GiveUp);
+    }
+
+    #[test]
+    fn max_delay_cap_honored() {
+        let policy = ExponentialRetryPolicy::new(5, 1000, 10.0, 3000, false);
+        let mut state = policy.start();
+        for _ in 0..5 {
+            if let RetryDecision::Retry(d) = state.next_delay() {
+                assert!(d.as_millis() <= 3000, "delay exceeds cap: {d:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_within_expected_range() {
+        let policy = ExponentialRetryPolicy::new(10, 1000, 1.0, 10_000, true);
+        let mut state = policy.start();
+        for _ in 0..10 {
+            if let RetryDecision::Retry(d) = state.next_delay() {
+                let ms = d.as_millis() as f64;
+                // With factor in [0.5, 1.5], delay should be in [500, 1500].
+                assert!(
+                    ms >= 500.0 && ms <= 1500.0,
+                    "jittered delay {ms} out of range"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reset_restarts_from_zero() {
+        let policy = ExponentialRetryPolicy::new(2, 100, 2.0, 10_000, false);
+        let mut state = policy.start();
+        state.next_delay();
+        state.next_delay();
+        assert_eq!(state.next_delay(), RetryDecision::GiveUp);
+        state.reset();
+        assert_eq!(state.attempts_used(), 0);
+        // After reset, first delay should be base delay again.
+        assert_eq!(
+            state.next_delay(),
+            RetryDecision::Retry(Duration::from_millis(100))
+        );
+    }
+
+    #[test]
+    fn multiplier_one_acts_like_fixed() {
+        let policy = ExponentialRetryPolicy::new(4, 500, 1.0, 10_000, false);
+        let mut state = policy.start();
+        for _ in 0..4 {
+            assert_eq!(
+                state.next_delay(),
+                RetryDecision::Retry(Duration::from_millis(500))
+            );
+        }
+        assert_eq!(state.next_delay(), RetryDecision::GiveUp);
+    }
+
+    #[test]
+    fn attempts_used_tracks_correctly() {
+        let policy = ExponentialRetryPolicy::new(3, 100, 2.0, 10_000, false);
+        let mut state = policy.start();
+        assert_eq!(state.attempts_used(), 0);
+        state.next_delay();
+        assert_eq!(state.attempts_used(), 1);
+        state.next_delay();
+        assert_eq!(state.attempts_used(), 2);
+    }
+
+    #[test]
+    fn default_policy_has_sane_values() {
+        let p = ExponentialRetryPolicy::default_policy();
+        assert_eq!(p.max_attempts, 3);
+        assert_eq!(p.initial_delay_ms, 100);
+        assert!((p.multiplier - 2.0).abs() < f64::EPSILON);
+        assert_eq!(p.max_delay_ms, 30_000);
+        assert!(p.jitter);
+    }
+
+    #[test]
+    fn zero_initial_delay_no_jitter() {
+        let policy = ExponentialRetryPolicy::new(2, 0, 2.0, 0, true);
+        let mut state = policy.start();
+        assert_eq!(
+            state.next_delay(),
+            RetryDecision::Retry(Duration::from_millis(0))
+        );
+    }
+
+    #[test]
+    fn give_up_after_all_attempts_exhausted() {
+        let policy = ExponentialRetryPolicy::new(1, 50, 1.0, 1000, false);
+        let mut state = policy.start();
+        assert!(matches!(state.next_delay(), RetryDecision::Retry(_)));
+        assert_eq!(state.next_delay(), RetryDecision::GiveUp);
+        // Additional calls still return GiveUp.
+        assert_eq!(state.next_delay(), RetryDecision::GiveUp);
+    }
+
+    #[test]
+    fn splitmix64_produces_different_values() {
+        let mut seed = 12345u64;
+        let a = splitmix64(&mut seed);
+        let b = splitmix64(&mut seed);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn splitmix64_f64_in_unit_range() {
+        let mut seed = 0xabcd_ef01_2345_6789u64;
+        for _ in 0..1000 {
+            let v = splitmix64_f64(&mut seed);
+            assert!(v >= 0.0 && v < 1.0, "out of range: {v}");
+        }
     }
 }

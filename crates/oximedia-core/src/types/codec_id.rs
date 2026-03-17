@@ -105,6 +105,16 @@ pub enum CodecId {
     Dng,
     /// FFV1 lossless video codec (RFC 9043 / ISO/IEC 24114).
     Ffv1,
+    /// WebP image format (Google, royalty-free).
+    WebP,
+    /// GIF image format (patents expired, royalty-free since 2004).
+    Gif,
+    /// PNG lossless image format (W3C royalty-free).
+    Png,
+    /// TIFF image format (Adobe, royalty-free for core spec).
+    Tiff,
+    /// OpenEXR HDR image format (Academy Software Foundation, BSD-3).
+    OpenExr,
 
     // Audio codecs (Green List)
     /// Opus audio codec (IETF/Xiph.org).
@@ -152,7 +162,12 @@ impl CodecId {
             | Self::RawVideo
             | Self::JpegXl
             | Self::Dng
-            | Self::Ffv1 => MediaType::Video,
+            | Self::Ffv1
+            | Self::WebP
+            | Self::Gif
+            | Self::Png
+            | Self::Tiff
+            | Self::OpenExr => MediaType::Video,
             Self::Opus | Self::Vorbis | Self::Flac | Self::Mp3 | Self::Pcm => MediaType::Audio,
             Self::WebVtt | Self::Ass | Self::Ssa | Self::Srt => MediaType::Subtitle,
         }
@@ -225,6 +240,11 @@ impl CodecId {
             Self::JpegXl => "jpegxl",
             Self::Dng => "dng",
             Self::Ffv1 => "ffv1",
+            Self::WebP => "webp",
+            Self::Gif => "gif",
+            Self::Png => "png",
+            Self::Tiff => "tiff",
+            Self::OpenExr => "openexr",
             Self::Opus => "opus",
             Self::Vorbis => "vorbis",
             Self::Flac => "flac",
@@ -252,7 +272,15 @@ impl CodecId {
     pub const fn is_lossless(&self) -> bool {
         matches!(
             self,
-            Self::Flac | Self::Pcm | Self::RawVideo | Self::JpegXl | Self::Dng | Self::Ffv1
+            Self::Flac
+                | Self::Pcm
+                | Self::RawVideo
+                | Self::JpegXl
+                | Self::Dng
+                | Self::Ffv1
+                | Self::Png
+                | Self::Tiff
+                | Self::OpenExr
         )
     }
 }
@@ -321,6 +349,11 @@ mod tests {
     fn test_is_lossless() {
         assert!(CodecId::Flac.is_lossless());
         assert!(CodecId::Pcm.is_lossless());
+        assert!(CodecId::Png.is_lossless());
+        assert!(CodecId::Tiff.is_lossless());
+        assert!(CodecId::OpenExr.is_lossless());
+        assert!(!CodecId::WebP.is_lossless());
+        assert!(!CodecId::Gif.is_lossless());
         assert!(!CodecId::Opus.is_lossless());
         assert!(!CodecId::Av1.is_lossless());
     }
@@ -329,5 +362,28 @@ mod tests {
     fn test_display() {
         assert_eq!(format!("{}", CodecId::Av1), "av1");
         assert_eq!(format!("{}", MediaType::Video), "video");
+    }
+
+    #[test]
+    fn test_new_image_codecs_are_video() {
+        assert_eq!(CodecId::WebP.media_type(), MediaType::Video);
+        assert_eq!(CodecId::Gif.media_type(), MediaType::Video);
+        assert_eq!(CodecId::Png.media_type(), MediaType::Video);
+        assert_eq!(CodecId::Tiff.media_type(), MediaType::Video);
+        assert_eq!(CodecId::OpenExr.media_type(), MediaType::Video);
+        assert!(CodecId::WebP.is_video());
+        assert!(CodecId::Gif.is_video());
+        assert!(CodecId::Png.is_video());
+        assert!(!CodecId::WebP.is_audio());
+        assert!(!CodecId::Png.is_subtitle());
+    }
+
+    #[test]
+    fn test_new_codec_names() {
+        assert_eq!(CodecId::WebP.name(), "webp");
+        assert_eq!(CodecId::Gif.name(), "gif");
+        assert_eq!(CodecId::Png.name(), "png");
+        assert_eq!(CodecId::Tiff.name(), "tiff");
+        assert_eq!(CodecId::OpenExr.name(), "openexr");
     }
 }

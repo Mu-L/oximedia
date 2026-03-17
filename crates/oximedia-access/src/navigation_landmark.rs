@@ -121,7 +121,8 @@ impl Landmark {
     /// Get the duration in milliseconds (0 for point landmarks).
     #[must_use]
     pub fn duration_ms(&self) -> u64 {
-        self.end_ms.map_or(0, |end| end.saturating_sub(self.start_ms))
+        self.end_ms
+            .map_or(0, |end| end.saturating_sub(self.start_ms))
     }
 
     /// Check if a timestamp falls within this landmark.
@@ -313,12 +314,11 @@ mod tests {
 
     #[test]
     fn test_landmark_with_importance() {
-        let lm = Landmark::point(1, LandmarkKind::VisualEvent, 1000, "Explosion")
-            .with_importance(9);
+        let lm =
+            Landmark::point(1, LandmarkKind::VisualEvent, 1000, "Explosion").with_importance(9);
         assert_eq!(lm.importance, 9);
         // Clamped
-        let lm2 = Landmark::point(2, LandmarkKind::MusicCue, 2000, "Cue")
-            .with_importance(15);
+        let lm2 = Landmark::point(2, LandmarkKind::MusicCue, 2000, "Cue").with_importance(15);
         assert_eq!(lm2.importance, 10);
     }
 

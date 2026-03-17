@@ -204,14 +204,19 @@ pub fn wasm_timecode_to_frames(tc_str: &str, fps: f64, drop_frame: bool) -> Resu
 pub fn wasm_list_frame_rates() -> Result<String, JsValue> {
     let rates = [
         FrameRate::Fps23976,
+        FrameRate::Fps23976DF,
         FrameRate::Fps24,
         FrameRate::Fps25,
         FrameRate::Fps2997DF,
         FrameRate::Fps2997NDF,
         FrameRate::Fps30,
+        FrameRate::Fps47952,
+        FrameRate::Fps47952DF,
         FrameRate::Fps50,
         FrameRate::Fps5994,
+        FrameRate::Fps5994DF,
         FrameRate::Fps60,
+        FrameRate::Fps120,
     ];
 
     let entries: Vec<String> = rates
@@ -220,14 +225,19 @@ pub fn wasm_list_frame_rates() -> Result<String, JsValue> {
             let (num, den) = fr.as_rational();
             let name = match fr {
                 FrameRate::Fps23976 => "23.976 fps",
+                FrameRate::Fps23976DF => "23.976 fps DF",
                 FrameRate::Fps24 => "24 fps",
                 FrameRate::Fps25 => "25 fps (PAL)",
                 FrameRate::Fps2997DF => "29.97 fps DF (NTSC)",
                 FrameRate::Fps2997NDF => "29.97 fps NDF (NTSC)",
                 FrameRate::Fps30 => "30 fps",
+                FrameRate::Fps47952 => "47.952 fps",
+                FrameRate::Fps47952DF => "47.952 fps DF",
                 FrameRate::Fps50 => "50 fps",
                 FrameRate::Fps5994 => "59.94 fps",
+                FrameRate::Fps5994DF => "59.94 fps DF",
                 FrameRate::Fps60 => "60 fps",
+                FrameRate::Fps120 => "120 fps",
             };
             format!(
                 r#"{{"fps":{},"is_drop_frame":{},"name":"{}","rational":[{},{}]}}"#,

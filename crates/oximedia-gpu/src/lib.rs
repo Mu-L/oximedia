@@ -99,6 +99,19 @@ pub mod buffer_copy;
 pub mod occupancy;
 pub mod workgroup;
 
+// Wave-15 new modules
+pub mod buffer_pool;
+pub mod compute_kernels;
+pub mod pipeline_stages;
+
+// Wave-16 new modules (0.1.2 enhancements)
+pub mod motion_estimation;
+pub mod multi_gpu;
+
+// Wave-17 new modules
+pub mod compute_shader;
+pub mod histogram_equalization;
+
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -108,7 +121,13 @@ pub use accelerator::{AcceleratorBuilder, CpuAccelerator, GpuAccelerator, WgpuAc
 // Core exports
 pub use buffer::{BufferType, GpuBuffer};
 pub use device::{GpuDevice, GpuDeviceInfo};
-pub use ops::{ColorSpaceConversion, FilterOperation, ScaleOperation, TransformOperation};
+pub use ops::quality_metrics::{
+    compute_ms_ssim, compute_psnr, compute_ssim, MsSsimResult, PsnrResult, SsimResult,
+};
+pub use ops::{
+    ChromaOps, ChromaSubsampling, ColorSpaceConversion, FilterOperation, ScaleOperation,
+    TransformOperation, YcbcrCoefficients,
+};
 
 // Backend exports
 pub use backend::{Backend, BackendCapabilities, BackendType, CpuBackend, VulkanBackend};
@@ -144,12 +163,22 @@ pub use queue::{
 // Sync exports
 pub use sync::{Barrier, Event, Fence, Semaphore};
 
+// Workgroup auto-tuner exports
+pub use workgroup::{DeviceLimits, WorkgroupAutoTuner};
+
+// Memory pool defragmentation exports
+pub use memory_pool::{CompactionPlan, DefragResult, MigrationEntry};
+
 // Video processing exports
 pub use histogram::{ChannelHistogram, ImageHistogram};
 pub use motion_detect::{MotionAnalysis, MotionDetector, MotionRegion, Sensitivity};
 pub use pipeline::{GpuPipeline, PipelineMetrics, PipelineNode, PipelineStage};
 pub use texture::{TextureDescriptor, TextureFormat, TexturePool};
 pub use video_process::{FrameProcessConfig, FrameProcessResult, VideoFrameProcessor};
+
+// Wave-17 exports
+pub use compute_shader::{ComputeShaderSimulator, ShaderKernel, ThreadGroupContext};
+pub use histogram_equalization::{ClaheConfig, EqualizationStats, HistogramEqualizer};
 
 /// Error types for GPU operations
 #[derive(Debug, Error)]
@@ -406,6 +435,41 @@ impl GpuContext {
         )
     }
 
+    /// Scale an image using Lanczos-3 interpolation (highest quality)
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - Input image buffer (packed RGBA format)
+    /// * `src_width` - Source image width
+    /// * `src_height` - Source image height
+    /// * `output` - Output image buffer (packed RGBA format)
+    /// * `dst_width` - Destination image width
+    /// * `dst_height` - Destination image height
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if buffer sizes are invalid or if the GPU operation fails.
+    pub fn scale_lanczos(
+        &self,
+        input: &[u8],
+        src_width: u32,
+        src_height: u32,
+        output: &mut [u8],
+        dst_width: u32,
+        dst_height: u32,
+    ) -> Result<()> {
+        ops::ScaleOperation::scale(
+            &self.device,
+            input,
+            src_width,
+            src_height,
+            output,
+            dst_width,
+            dst_height,
+            ops::ScaleFilter::Lanczos3,
+        )
+    }
+
     /// Apply Gaussian blur
     ///
     /// # Arguments
@@ -524,8 +588,12 @@ impl GpuContext {
     }
 }
 
-impl Default for GpuContext {
-    fn default() -> Self {
-        Self::new().expect("Failed to create GPU context")
-    }
-}
+// GpuContext intentionally does not implement Default.
+//
+// GPU context creation is inherently fallible (no adapter, driver error, etc.).
+// Callers must use GpuContext::new() or GpuContext::with_device() and handle
+// the returned Result explicitly.  A silent Default impl that can either panic
+// or silently return a non-functional context would be misleading.
+//
+// If a best-effort fallback context is needed, use:
+//   GpuContext::new().or_else(|_| GpuContext::with_device(0))

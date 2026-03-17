@@ -5,8 +5,9 @@
 use oximedia_audio::{AudioFrame, ChannelLayout};
 use oximedia_codec::VideoFrame;
 use oximedia_core::{PixelFormat, Rational, SampleFormat, Timestamp};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
 
 use crate::clip::Clip;
@@ -350,6 +351,7 @@ impl FrameCache {
 }
 
 /// Background renderer for non-blocking rendering.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct BackgroundRenderer {
     /// Timeline to render.
     timeline: Arc<Timeline>,
@@ -359,6 +361,7 @@ pub struct BackgroundRenderer {
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl BackgroundRenderer {
     /// Create a new background renderer.
     #[must_use]
@@ -631,6 +634,282 @@ impl TimelineRenderer {
             config: self.config.clone(),
             cache: FrameCache::new(self.config.cache_size),
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RawFrameCache — byte-buffer frame cache with LRU eviction
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Maximum number of raw frames kept in [`RawFrameCache`] before LRU eviction.
+pub const RAW_FRAME_CACHE_CAPACITY: usize = 32;
+
+/// A cache that stores raw pixel byte buffers (e.g. decoded video frames) keyed
+/// by frame number.
+///
+/// When the cache reaches [`RAW_FRAME_CACHE_CAPACITY`] entries the least-recently
+/// used frame is evicted before inserting the new one.
+///
+/// # Example
+///
+/// ```
+/// use oximedia_edit::render::RawFrameCache;
+///
+/// let mut cache = RawFrameCache::new(4);
+/// let data = cache.get_or_render(0, || vec![0u8; 1024]);
+/// assert_eq!(data.len(), 1024);
+/// ```
+pub struct RawFrameCache {
+    /// Frame data keyed by frame number.
+    store: HashMap<u64, Vec<u8>>,
+    /// Insertion-order tracking for LRU eviction (front = oldest).
+    order: VecDeque<u64>,
+    /// Maximum number of frames to retain.
+    capacity: usize,
+}
+
+impl RawFrameCache {
+    /// Create a new cache with the given capacity (clamped to at least 1).
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        Self {
+            store: HashMap::with_capacity(capacity),
+            order: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Return a reference to the cached bytes for `frame_num`, rendering and
+    /// inserting them via `render_fn` if not already present.
+    ///
+    /// The rendered bytes are stored in the cache; on subsequent calls the same
+    /// reference is returned without invoking `render_fn`.
+    ///
+    /// When the cache is full the **oldest** frame is evicted first (LRU by
+    /// insertion order).
+    pub fn get_or_render(&mut self, frame_num: u64, render_fn: impl FnOnce() -> Vec<u8>) -> &[u8] {
+        if !self.store.contains_key(&frame_num) {
+            // Evict oldest entry if at capacity.
+            if self.store.len() >= self.capacity {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.store.remove(&oldest);
+                }
+            }
+
+            let data = render_fn();
+            self.store.insert(frame_num, data);
+            self.order.push_back(frame_num);
+        }
+
+        // Safety: key is guaranteed to be present after the block above.
+        self.store.get(&frame_num).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Return a reference to the cached bytes for `frame_num` without rendering.
+    ///
+    /// Returns `None` if the frame is not in the cache.
+    #[must_use]
+    pub fn get(&self, frame_num: u64) -> Option<&[u8]> {
+        self.store.get(&frame_num).map(Vec::as_slice)
+    }
+
+    /// Explicitly insert pre-rendered bytes for `frame_num`.
+    ///
+    /// If the frame already exists it is replaced.  If the cache is full the
+    /// oldest frame is evicted.
+    pub fn insert(&mut self, frame_num: u64, data: Vec<u8>) {
+        if let std::collections::hash_map::Entry::Occupied(mut e) = self.store.entry(frame_num) {
+            e.insert(data);
+            return;
+        }
+        if self.store.len() >= self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.store.remove(&oldest);
+            }
+        }
+        self.store.insert(frame_num, data);
+        self.order.push_back(frame_num);
+    }
+
+    /// Invalidate (remove) the cache entry for `frame_num`, if present.
+    pub fn invalidate(&mut self, frame_num: u64) {
+        if self.store.remove(&frame_num).is_some() {
+            self.order.retain(|&f| f != frame_num);
+        }
+    }
+
+    /// Clear all cached frames.
+    pub fn clear(&mut self) {
+        self.store.clear();
+        self.order.clear();
+    }
+
+    /// Return the number of frames currently in the cache.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.store.len()
+    }
+
+    /// Return `true` if the cache contains no frames.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.store.is_empty()
+    }
+
+    /// Return the maximum number of frames this cache holds.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Return `true` if a frame for `frame_num` is present in the cache.
+    #[must_use]
+    pub fn contains(&self, frame_num: u64) -> bool {
+        self.store.contains_key(&frame_num)
+    }
+}
+
+impl std::fmt::Debug for RawFrameCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawFrameCache")
+            .field("len", &self.store.len())
+            .field("capacity", &self.capacity)
+            .finish()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests for RawFrameCache
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod raw_cache_tests {
+    use super::{RawFrameCache, RAW_FRAME_CACHE_CAPACITY};
+
+    #[test]
+    fn test_raw_frame_cache_basic_get_or_render() {
+        let mut cache = RawFrameCache::new(4);
+        let mut render_count = 0usize;
+
+        // First call: renders.
+        let data = cache.get_or_render(0, || {
+            render_count += 1;
+            vec![1u8, 2, 3]
+        });
+        assert_eq!(data, &[1u8, 2, 3]);
+        assert_eq!(render_count, 1);
+
+        // Second call: cached — render_fn must not be invoked.
+        let data2 = cache.get_or_render(0, || {
+            render_count += 1;
+            vec![99u8]
+        });
+        assert_eq!(data2, &[1u8, 2, 3]);
+        assert_eq!(render_count, 1, "render_fn should not be called twice");
+    }
+
+    #[test]
+    fn test_raw_frame_cache_lru_eviction() {
+        let mut cache = RawFrameCache::new(4);
+
+        // Fill cache to capacity.
+        for i in 0u64..4 {
+            cache.get_or_render(i, || vec![i as u8]);
+        }
+        assert_eq!(cache.len(), 4);
+
+        // Insert one more frame — oldest (frame 0) should be evicted.
+        cache.get_or_render(4, || vec![4u8]);
+        assert_eq!(cache.len(), 4, "cache must not exceed capacity");
+        assert!(
+            !cache.contains(0),
+            "oldest frame (0) should have been evicted"
+        );
+        assert!(
+            cache.contains(4),
+            "newly inserted frame (4) should be present"
+        );
+    }
+
+    #[test]
+    fn test_raw_frame_cache_capacity_32() {
+        let cache = RawFrameCache::new(RAW_FRAME_CACHE_CAPACITY);
+        assert_eq!(cache.capacity(), 32);
+    }
+
+    #[test]
+    fn test_raw_frame_cache_get_missing() {
+        let cache = RawFrameCache::new(4);
+        assert!(cache.get(99).is_none());
+    }
+
+    #[test]
+    fn test_raw_frame_cache_insert_and_get() {
+        let mut cache = RawFrameCache::new(4);
+        cache.insert(7, vec![10, 20, 30]);
+        assert_eq!(cache.get(7), Some(&[10u8, 20, 30][..]));
+    }
+
+    #[test]
+    fn test_raw_frame_cache_invalidate() {
+        let mut cache = RawFrameCache::new(4);
+        cache.insert(1, vec![1, 2]);
+        cache.invalidate(1);
+        assert!(!cache.contains(1));
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_raw_frame_cache_clear() {
+        let mut cache = RawFrameCache::new(4);
+        for i in 0u64..4 {
+            cache.insert(i, vec![i as u8]);
+        }
+        cache.clear();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn test_raw_frame_cache_eviction_order() {
+        let mut cache = RawFrameCache::new(3);
+        cache.insert(10, vec![10]);
+        cache.insert(20, vec![20]);
+        cache.insert(30, vec![30]);
+
+        // Frame 40 → evicts frame 10 (oldest).
+        cache.insert(40, vec![40]);
+        assert!(!cache.contains(10));
+        assert!(cache.contains(20));
+        assert!(cache.contains(30));
+        assert!(cache.contains(40));
+
+        // Frame 50 → evicts frame 20.
+        cache.insert(50, vec![50]);
+        assert!(!cache.contains(20));
+        assert!(cache.contains(30));
+        assert!(cache.contains(40));
+        assert!(cache.contains(50));
+    }
+
+    #[test]
+    fn test_raw_frame_cache_capacity_clamped_to_one() {
+        let cache = RawFrameCache::new(0);
+        assert_eq!(cache.capacity(), 1);
+    }
+
+    #[test]
+    fn test_raw_frame_cache_is_empty_initially() {
+        let cache = RawFrameCache::new(8);
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn test_raw_frame_cache_debug_format() {
+        let cache = RawFrameCache::new(4);
+        let debug = format!("{cache:?}");
+        assert!(debug.contains("RawFrameCache"), "debug output: {debug}");
     }
 }
 

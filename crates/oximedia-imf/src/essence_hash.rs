@@ -14,8 +14,10 @@ use std::time::SystemTime;
 pub enum HashAlgo {
     /// SHA-1 (legacy, SMPTE ST 429-8).
     Sha1,
-    /// SHA-256 (recommended).
+    /// SHA-256 (recommended, SMPTE ST 429-8:2014).
     Sha256,
+    /// SHA-512 (high-security archival use).
+    Sha512,
     /// MD5 (legacy, not recommended for new packages).
     Md5,
 }
@@ -25,6 +27,7 @@ impl fmt::Display for HashAlgo {
         match self {
             Self::Sha1 => write!(f, "SHA-1"),
             Self::Sha256 => write!(f, "SHA-256"),
+            Self::Sha512 => write!(f, "SHA-512"),
             Self::Md5 => write!(f, "MD5"),
         }
     }
@@ -36,6 +39,7 @@ impl HashAlgo {
         match self {
             Self::Sha1 => 20,
             Self::Sha256 => 32,
+            Self::Sha512 => 64,
             Self::Md5 => 16,
         }
     }
@@ -43,6 +47,137 @@ impl HashAlgo {
     /// Returns the hash digest length in hex characters.
     pub fn hex_length(&self) -> usize {
         self.digest_length() * 2
+    }
+}
+
+// ── Cryptographic computation ─────────────────────────────────────────────────
+
+/// Compute a hash over the given byte slice using the specified algorithm.
+///
+/// Returns the raw digest bytes.
+///
+/// # Example
+/// ```
+/// use oximedia_imf::essence_hash::{compute_hash, HashAlgo};
+/// let digest = compute_hash(b"hello world", HashAlgo::Sha256);
+/// assert_eq!(digest.len(), 32);
+/// ```
+pub fn compute_hash(data: &[u8], algorithm: HashAlgo) -> Vec<u8> {
+    match algorithm {
+        HashAlgo::Sha1 => {
+            use sha1::Digest;
+            sha1::Sha1::digest(data).to_vec()
+        }
+        HashAlgo::Sha256 => {
+            use sha2::Digest;
+            sha2::Sha256::digest(data).to_vec()
+        }
+        HashAlgo::Sha512 => {
+            use sha2::Digest;
+            sha2::Sha512::digest(data).to_vec()
+        }
+        HashAlgo::Md5 => {
+            use md5::Digest;
+            md5::Md5::digest(data).to_vec()
+        }
+    }
+}
+
+/// Compute a hex-encoded hash over the given byte slice.
+pub fn compute_hash_hex(data: &[u8], algorithm: HashAlgo) -> String {
+    let raw = compute_hash(data, algorithm);
+    hex::encode(raw)
+}
+
+// ── Streaming / incremental hash context ─────────────────────────────────────
+
+/// Internal state for an incremental (streaming) hash computation.
+///
+/// Unlike [`IncrementalHasher`] (which buffers all chunks), `HashContext`
+/// uses real cryptographic streaming APIs so that arbitrarily large data can
+/// be hashed without accumulating everything in memory.
+pub struct HashContext {
+    inner: HashContextInner,
+}
+
+enum HashContextInner {
+    Sha1(sha1::Sha1),
+    Sha256(sha2::Sha256),
+    Sha512(sha2::Sha512),
+    Md5(md5::Md5),
+}
+
+impl HashContext {
+    /// Create a new [`HashContext`] for the given algorithm.
+    pub fn new(algorithm: HashAlgo) -> Self {
+        let inner = match algorithm {
+            HashAlgo::Sha1 => {
+                use sha1::Digest;
+                HashContextInner::Sha1(sha1::Sha1::new())
+            }
+            HashAlgo::Sha256 => {
+                use sha2::Digest;
+                HashContextInner::Sha256(sha2::Sha256::new())
+            }
+            HashAlgo::Sha512 => {
+                use sha2::Digest;
+                HashContextInner::Sha512(sha2::Sha512::new())
+            }
+            HashAlgo::Md5 => {
+                use md5::Digest;
+                HashContextInner::Md5(md5::Md5::new())
+            }
+        };
+        Self { inner }
+    }
+
+    /// Feed a chunk of data into the hasher.
+    pub fn update(&mut self, chunk: &[u8]) {
+        match &mut self.inner {
+            HashContextInner::Sha1(h) => {
+                use sha1::Digest;
+                h.update(chunk);
+            }
+            HashContextInner::Sha256(h) => {
+                use sha2::Digest;
+                h.update(chunk);
+            }
+            HashContextInner::Sha512(h) => {
+                use sha2::Digest;
+                h.update(chunk);
+            }
+            HashContextInner::Md5(h) => {
+                use md5::Digest;
+                h.update(chunk);
+            }
+        }
+    }
+
+    /// Finalize and return the raw digest bytes, consuming `self`.
+    pub fn finalize(self) -> Vec<u8> {
+        match self.inner {
+            HashContextInner::Sha1(h) => {
+                use sha1::Digest;
+                h.finalize().to_vec()
+            }
+            HashContextInner::Sha256(h) => {
+                use sha2::Digest;
+                h.finalize().to_vec()
+            }
+            HashContextInner::Sha512(h) => {
+                use sha2::Digest;
+                h.finalize().to_vec()
+            }
+            HashContextInner::Md5(h) => {
+                use md5::Digest;
+                h.finalize().to_vec()
+            }
+        }
+    }
+
+    /// Finalize and return the hex-encoded digest, consuming `self`.
+    pub fn finalize_hex(self) -> String {
+        hex::encode(self.finalize())
     }
 }
 
@@ -303,19 +438,16 @@ impl IncrementalHasher {
         self.bytes_processed
     }
 
-    /// Finalizes and returns a simple checksum (XOR-based placeholder).
+    /// Finalizes and returns the cryptographic hash using the real algorithm.
     ///
-    /// In production, this would delegate to SHA-1/SHA-256/MD5.
-    /// Here we produce a deterministic hex string for testing.
+    /// All buffered chunks are concatenated and hashed via the algorithm
+    /// specified at construction time (SHA-1, SHA-256, SHA-512, or MD5).
     pub fn finalize(&self) -> EssenceHash {
-        let digest_len = self.algorithm.digest_length();
-        let mut result = vec![0u8; digest_len];
+        let mut ctx = HashContext::new(self.algorithm);
         for chunk in &self.chunks {
-            for (i, &byte) in chunk.iter().enumerate() {
-                result[i % digest_len] ^= byte;
-            }
+            ctx.update(chunk);
         }
-        let hex: String = result.iter().map(|b| format!("{b:02x}")).collect();
+        let hex = ctx.finalize_hex();
         EssenceHash::new(self.algorithm, &hex)
     }
 }
@@ -328,6 +460,7 @@ mod tests {
     fn test_hash_algo_display() {
         assert_eq!(format!("{}", HashAlgo::Sha1), "SHA-1");
         assert_eq!(format!("{}", HashAlgo::Sha256), "SHA-256");
+        assert_eq!(format!("{}", HashAlgo::Sha512), "SHA-512");
         assert_eq!(format!("{}", HashAlgo::Md5), "MD5");
     }
 
@@ -335,6 +468,7 @@ mod tests {
     fn test_hash_algo_digest_length() {
         assert_eq!(HashAlgo::Sha1.digest_length(), 20);
         assert_eq!(HashAlgo::Sha256.digest_length(), 32);
+        assert_eq!(HashAlgo::Sha512.digest_length(), 64);
         assert_eq!(HashAlgo::Md5.digest_length(), 16);
     }
 
@@ -342,7 +476,134 @@ mod tests {
     fn test_hash_algo_hex_length() {
         assert_eq!(HashAlgo::Sha1.hex_length(), 40);
         assert_eq!(HashAlgo::Sha256.hex_length(), 64);
+        assert_eq!(HashAlgo::Sha512.hex_length(), 128);
         assert_eq!(HashAlgo::Md5.hex_length(), 32);
+    }
+
+    #[test]
+    fn test_compute_hash_sha256_length() {
+        let digest = compute_hash(b"hello world", HashAlgo::Sha256);
+        assert_eq!(digest.len(), 32);
+    }
+
+    #[test]
+    fn test_compute_hash_sha512_length() {
+        let digest = compute_hash(b"hello world", HashAlgo::Sha512);
+        assert_eq!(digest.len(), 64);
+    }
+
+    #[test]
+    fn test_compute_hash_sha1_length() {
+        let digest = compute_hash(b"hello", HashAlgo::Sha1);
+        assert_eq!(digest.len(), 20);
+    }
+
+    #[test]
+    fn test_compute_hash_md5_length() {
+        let digest = compute_hash(b"hello", HashAlgo::Md5);
+        assert_eq!(digest.len(), 16);
+    }
+
+    #[test]
+    fn test_compute_hash_sha256_known_value() {
+        // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        let digest = compute_hash_hex(b"", HashAlgo::Sha256);
+        assert_eq!(
+            digest,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_compute_hash_sha512_known_value() {
+        // SHA-512("") = cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e
+        let digest = compute_hash_hex(b"", HashAlgo::Sha512);
+        assert!(digest.starts_with("cf83e135"));
+        assert_eq!(digest.len(), 128);
+    }
+
+    #[test]
+    fn test_compute_hash_deterministic() {
+        let d1 = compute_hash(b"oximedia", HashAlgo::Sha256);
+        let d2 = compute_hash(b"oximedia", HashAlgo::Sha256);
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn test_hash_context_sha256_matches_one_shot() {
+        let data = b"streaming hash test";
+        let one_shot = compute_hash(data, HashAlgo::Sha256);
+
+        let mut ctx = HashContext::new(HashAlgo::Sha256);
+        ctx.update(&data[..8]);
+        ctx.update(&data[8..]);
+        let incremental = ctx.finalize();
+
+        assert_eq!(one_shot, incremental);
+    }
+
+    #[test]
+    fn test_hash_context_sha512_matches_one_shot() {
+        let data = b"large file chunk";
+        let one_shot = compute_hash(data, HashAlgo::Sha512);
+
+        let mut ctx = HashContext::new(HashAlgo::Sha512);
+        ctx.update(data);
+        let incremental = ctx.finalize();
+
+        assert_eq!(one_shot, incremental);
+    }
+
+    #[test]
+    fn test_hash_context_sha1_matches_one_shot() {
+        let data = b"sha1 streaming";
+        let one_shot = compute_hash(data, HashAlgo::Sha1);
+
+        let mut ctx = HashContext::new(HashAlgo::Sha1);
+        ctx.update(data);
+        let incremental = ctx.finalize();
+
+        assert_eq!(one_shot, incremental);
+    }
+
+    #[test]
+    fn test_hash_context_md5_matches_one_shot() {
+        let data = b"md5 streaming";
+        let one_shot = compute_hash(data, HashAlgo::Md5);
+
+        let mut ctx = HashContext::new(HashAlgo::Md5);
+        ctx.update(data);
+        let incremental = ctx.finalize();
+
+        assert_eq!(one_shot, incremental);
+    }
+
+    #[test]
+    fn test_hash_context_finalize_hex_length_sha256() {
+        let mut ctx = HashContext::new(HashAlgo::Sha256);
+        ctx.update(b"test");
+        let hex = ctx.finalize_hex();
+        assert_eq!(hex.len(), 64);
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_hash_context_finalize_hex_length_sha512() {
+        let mut ctx = HashContext::new(HashAlgo::Sha512);
+        ctx.update(b"test");
+        let hex = ctx.finalize_hex();
+        assert_eq!(hex.len(), 128);
+    }
+
+    #[test]
+    fn test_hash_context_empty_input() {
+        // Empty SHA-256 must match known value
+        let ctx = HashContext::new(HashAlgo::Sha256);
+        let hex = ctx.finalize_hex();
+        assert_eq!(
+            hex,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]

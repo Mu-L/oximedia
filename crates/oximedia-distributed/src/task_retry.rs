@@ -361,12 +361,12 @@ mod tests {
     #[test]
     fn test_exponential_backoff_cap() {
         let policy = RetryPolicy::new(10).with_backoff(BackoffStrategy::Exponential {
-            base: Duration::from_millis(1000),
+            base: Duration::from_secs(1),
             multiplier: 3.0,
             max_delay: Duration::from_secs(5),
         });
         // 1000 * 3^5 = 243000 ms, but capped at 5000ms
-        assert_eq!(policy.compute_delay(5), Duration::from_millis(5000));
+        assert_eq!(policy.compute_delay(5), Duration::from_secs(5));
     }
 
     #[test]

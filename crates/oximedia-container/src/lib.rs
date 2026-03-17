@@ -99,6 +99,7 @@ pub mod box_header;
 pub mod chapters;
 pub mod chunk_map;
 pub mod container_probe;
+pub(crate) mod container_probe_parsers;
 pub mod cue;
 pub mod data;
 pub mod demux;
@@ -124,10 +125,15 @@ pub mod track_info;
 pub mod tracks;
 
 // Re-export main types at crate root
+pub use container_probe::{DetailedContainerInfo, DetailedStreamInfo, MultiFormatProber};
 pub use demux::Demuxer;
 pub use format::ContainerFormat;
 pub use mux::{Muxer, MuxerConfig};
 pub use packet::{Packet, PacketFlags};
 pub use probe::{probe_format, ProbeResult};
-pub use seek::{SeekFlags, SeekTarget};
+pub use seek::{
+    MultiTrackSeeker, MultiTrackSeekerError, PtsSeekResult, SampleAccurateSeeker, SampleIndexEntry,
+    SeekAccuracy, SeekFlags, SeekIndex, SeekIndexEntry, SeekPlan, SeekResult, SeekTarget,
+    TrackIndex,
+};
 pub use stream::{CodecParams, Metadata, StreamInfo};

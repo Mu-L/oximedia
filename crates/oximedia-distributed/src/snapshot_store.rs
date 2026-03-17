@@ -3,9 +3,114 @@
 //!
 //! Provides a lightweight in-memory snapshot store that can save, load, prune,
 //! and validate distributed-state snapshots (e.g. Raft snapshots).
+//!
+//! All mutations are captured in an append-only `AuditLog` so that every
+//! coordinator state change can be reviewed for debugging and compliance.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
+
+// ---------------------------------------------------------------------------
+// AuditLog
+// ---------------------------------------------------------------------------
+
+/// Categories of auditable coordinator events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuditEventKind {
+    /// A snapshot was saved (new or replacing an existing one).
+    SnapshotSaved,
+    /// A snapshot was loaded / accessed.
+    SnapshotLoaded,
+    /// One or more snapshots were pruned due to age.
+    SnapshotsPruned,
+    /// Snapshots were trimmed to retain only the N most recent.
+    SnapshotsRetained,
+    /// A custom coordinator state change event.
+    Custom(String),
+}
+
+impl std::fmt::Display for AuditEventKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SnapshotSaved => write!(f, "SNAPSHOT_SAVED"),
+            Self::SnapshotLoaded => write!(f, "SNAPSHOT_LOADED"),
+            Self::SnapshotsPruned => write!(f, "SNAPSHOTS_PRUNED"),
+            Self::SnapshotsRetained => write!(f, "SNAPSHOTS_RETAINED"),
+            Self::Custom(s) => write!(f, "CUSTOM:{s}"),
+        }
+    }
+}
+
+/// A single auditable event.
+#[derive(Debug, Clone)]
+pub struct AuditEntry {
+    /// Wall-clock timestamp when the event was recorded.
+    pub recorded_at: Instant,
+    /// Kind of event.
+    pub kind: AuditEventKind,
+    /// Human-readable description with relevant context (IDs, counts, …).
+    pub message: String,
+    /// Optional snapshot ID involved in the event.
+    pub snapshot_id: Option<SnapshotId>,
+}
+
+impl AuditEntry {
+    fn new(
+        kind: AuditEventKind,
+        message: impl Into<String>,
+        snapshot_id: Option<SnapshotId>,
+    ) -> Self {
+        Self {
+            recorded_at: Instant::now(),
+            kind,
+            message: message.into(),
+            snapshot_id,
+        }
+    }
+}
+
+/// Append-only audit log for coordinator state changes.
+#[derive(Debug, Default)]
+pub struct AuditLog {
+    entries: Vec<AuditEntry>,
+}
+
+impl AuditLog {
+    /// Create an empty audit log.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append an entry to the log.
+    pub fn append(&mut self, entry: AuditEntry) {
+        self.entries.push(entry);
+    }
+
+    /// Number of entries in the log.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns `true` if no entries have been recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Iterate over all entries in insertion order.
+    #[must_use]
+    pub fn entries(&self) -> &[AuditEntry] {
+        &self.entries
+    }
+
+    /// Return all entries of a particular kind.
+    #[must_use]
+    pub fn entries_of_kind(&self, kind: &AuditEventKind) -> Vec<&AuditEntry> {
+        self.entries.iter().filter(|e| &e.kind == kind).collect()
+    }
+}
 
 /// Identifies a snapshot by term + index (Raft-style).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -94,13 +199,19 @@ impl Snapshot {
     }
 }
 
-/// In-memory snapshot store with optional retention policy.
+/// In-memory snapshot store with optional retention policy and audit logging.
+///
+/// Every mutating operation (save, prune, retain) is recorded in the
+/// embedded `AuditLog` so that all coordinator state changes can be
+/// reviewed after the fact.
 #[derive(Debug, Default)]
 pub struct SnapshotStore {
     /// Snapshots keyed by their id.
     snapshots: BTreeMap<SnapshotId, Snapshot>,
     /// Total bytes stored.
     total_bytes: usize,
+    /// Append-only audit log for all state changes.
+    audit_log: AuditLog,
 }
 
 impl SnapshotStore {
@@ -113,18 +224,52 @@ impl SnapshotStore {
     /// Persist a snapshot.
     ///
     /// If a snapshot with the same id already exists it is replaced.
+    /// Both cases are recorded in the audit log.
     pub fn save(&mut self, snapshot: Snapshot) {
+        let id = snapshot.id;
+        let is_replace = self.snapshots.contains_key(&id);
+
         // If replacing, subtract old size.
-        if let Some(old) = self.snapshots.get(&snapshot.id) {
+        if let Some(old) = self.snapshots.get(&id) {
             self.total_bytes -= old.size_bytes();
         }
-        self.total_bytes += snapshot.size_bytes();
-        self.snapshots.insert(snapshot.id, snapshot);
+        let size = snapshot.size_bytes();
+        self.total_bytes += size;
+        self.snapshots.insert(id, snapshot);
+
+        let msg = if is_replace {
+            format!("Replaced snapshot {id} ({size} bytes)")
+        } else {
+            format!("Saved snapshot {id} ({size} bytes)")
+        };
+        self.audit_log.append(AuditEntry::new(
+            AuditEventKind::SnapshotSaved,
+            msg,
+            Some(id),
+        ));
     }
 
     /// Retrieve a snapshot by id.
+    ///
+    /// Access is recorded in the audit log.
     #[must_use]
-    pub fn load(&self, id: &SnapshotId) -> Option<&Snapshot> {
+    pub fn load(&mut self, id: &SnapshotId) -> Option<&Snapshot> {
+        if self.snapshots.contains_key(id) {
+            let msg = format!("Loaded snapshot {id}");
+            self.audit_log.append(AuditEntry::new(
+                AuditEventKind::SnapshotLoaded,
+                msg,
+                Some(*id),
+            ));
+        }
+        self.snapshots.get(id)
+    }
+
+    /// Retrieve a snapshot by id (immutable, not audit-logged).
+    ///
+    /// Use `load` to perform an audited access.
+    #[must_use]
+    pub fn get(&self, id: &SnapshotId) -> Option<&Snapshot> {
         self.snapshots.get(id)
     }
 
@@ -148,7 +293,7 @@ impl SnapshotStore {
 
     /// Remove snapshots that are older than `max_age` relative to `now`.
     ///
-    /// Returns the number of snapshots removed.
+    /// Returns the number of snapshots removed. The operation is audit-logged.
     pub fn prune_old(&mut self, now: Instant, max_age: Duration) -> usize {
         let stale_ids: Vec<SnapshotId> = self
             .snapshots
@@ -158,17 +303,24 @@ impl SnapshotStore {
             .collect();
 
         let removed = stale_ids.len();
-        for id in stale_ids {
-            if let Some(s) = self.snapshots.remove(&id) {
+        for id in &stale_ids {
+            if let Some(s) = self.snapshots.remove(id) {
                 self.total_bytes -= s.size_bytes();
             }
         }
+
+        if removed > 0 {
+            let msg = format!("Pruned {removed} stale snapshot(s)");
+            self.audit_log
+                .append(AuditEntry::new(AuditEventKind::SnapshotsPruned, msg, None));
+        }
+
         removed
     }
 
     /// Keep only the `keep_count` most recent snapshots, removing the rest.
     ///
-    /// Returns the number of snapshots removed.
+    /// Returns the number of snapshots removed. The operation is audit-logged.
     pub fn retain_latest(&mut self, keep_count: usize) -> usize {
         if self.snapshots.len() <= keep_count {
             return 0;
@@ -180,13 +332,37 @@ impl SnapshotStore {
                 self.total_bytes -= s.size_bytes();
             }
         }
-        old_ids.len()
+        let removed = old_ids.len();
+        if removed > 0 {
+            let msg = format!("Retained latest {keep_count} snapshot(s), removed {removed}");
+            self.audit_log.append(AuditEntry::new(
+                AuditEventKind::SnapshotsRetained,
+                msg,
+                None,
+            ));
+        }
+        removed
     }
 
     /// Return all snapshot ids in ascending order.
     #[must_use]
     pub fn all_ids(&self) -> Vec<SnapshotId> {
         self.snapshots.keys().copied().collect()
+    }
+
+    /// Immutable reference to the embedded audit log.
+    #[must_use]
+    pub fn audit_log(&self) -> &AuditLog {
+        &self.audit_log
+    }
+
+    /// Record a custom coordinator state change event in the audit log.
+    pub fn audit_custom(&mut self, event: impl Into<String>, message: impl Into<String>) {
+        self.audit_log.append(AuditEntry::new(
+            AuditEventKind::Custom(event.into()),
+            message,
+            None,
+        ));
     }
 }
 

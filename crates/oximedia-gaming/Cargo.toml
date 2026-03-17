@@ -1,8 +1,9 @@
 [package]
 name = "oximedia-gaming"
 version.workspace = true
-edition = "2021"
-license = "Apache-2.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Game streaming and screen capture optimization for OxiMedia"
 homepage.workspace = true
 repository.workspace = true
@@ -18,6 +19,8 @@ oximedia-codec = { workspace = true, default-features = true }
 oximedia-audio = { workspace = true }
 oximedia-graph = { workspace = true }
 thiserror = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
 
 [dev-dependencies]

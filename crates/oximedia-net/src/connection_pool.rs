@@ -548,3 +548,344 @@ mod tests {
         assert!(conn.age() < Duration::from_secs(1));
     }
 }
+
+// =============================================================================
+// Generic ConnectionPool<T>
+// =============================================================================
+
+/// Configuration for the generic pool.
+#[derive(Debug, Clone)]
+pub struct GenericPoolConfig {
+    /// Maximum total items (idle + active) in the pool.
+    pub max_size: usize,
+    /// Minimum idle items to retain (not currently enforced on eviction, used
+    /// as a hint for pre-population).
+    pub min_idle: usize,
+    /// Maximum age of an idle item in milliseconds before it is evicted.
+    /// `0` means evict immediately (useful in tests).
+    pub max_lifetime_ms: u64,
+}
+
+impl Default for GenericPoolConfig {
+    fn default() -> Self {
+        Self {
+            max_size: 16,
+            min_idle: 1,
+            max_lifetime_ms: 300_000,
+        }
+    }
+}
+
+impl GenericPoolConfig {
+    /// Create a new config.
+    #[must_use]
+    pub const fn new(max_size: usize, min_idle: usize, max_lifetime_ms: u64) -> Self {
+        Self {
+            max_size,
+            min_idle,
+            max_lifetime_ms,
+        }
+    }
+}
+
+/// A slot held in the generic pool, pairing the value with its creation timestamp.
+struct GenericPoolSlot<T> {
+    value: T,
+    /// Milliseconds since UNIX_EPOCH at creation.
+    created_ms: u64,
+}
+
+/// Return the current time as milliseconds since UNIX_EPOCH, or 0 on error.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A generic pool that manages reusable values of type `T`.
+///
+/// Items are obtained via [`GenericPool::try_acquire`] and returned via
+/// [`GenericPool::release`]. Idle items older than `max_lifetime_ms` are
+/// evicted lazily on the next [`try_acquire`][GenericPool::try_acquire] call.
+///
+/// # Example
+///
+/// ```rust
+/// use oximedia_net::connection_pool::{GenericPool, GenericPoolConfig};
+///
+/// let mut pool: GenericPool<String> = GenericPool::new(GenericPoolConfig::default());
+/// pool.add("conn-1".to_owned()).ok();
+/// let item = pool.try_acquire();
+/// assert!(item.is_some());
+/// ```
+pub struct GenericPool<T> {
+    config: GenericPoolConfig,
+    idle: VecDeque<GenericPoolSlot<T>>,
+    active_count: usize,
+}
+
+impl<T> GenericPool<T> {
+    /// Create a new pool with the given configuration.
+    #[must_use]
+    pub fn new(config: GenericPoolConfig) -> Self {
+        Self {
+            config,
+            idle: VecDeque::new(),
+            active_count: 0,
+        }
+    }
+
+    /// Create a pool with default configuration.
+    #[must_use]
+    pub fn with_defaults() -> Self {
+        Self::new(GenericPoolConfig::default())
+    }
+
+    /// Return the pool configuration.
+    #[must_use]
+    pub fn config(&self) -> &GenericPoolConfig {
+        &self.config
+    }
+
+    /// Total items in the pool (idle + active).
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.idle.len() + self.active_count
+    }
+
+    /// Number of idle items available for acquisition.
+    #[must_use]
+    pub fn idle_count(&self) -> usize {
+        self.idle.len()
+    }
+
+    /// Number of items currently checked out (active).
+    #[must_use]
+    pub fn active_count(&self) -> usize {
+        self.active_count
+    }
+
+    /// Add a pre-created value to the idle pool.
+    ///
+    /// Returns `Err(value)` if the pool is at capacity.
+    pub fn add(&mut self, value: T) -> Result<(), T> {
+        if self.total() >= self.config.max_size {
+            return Err(value);
+        }
+        self.idle.push_back(GenericPoolSlot {
+            value,
+            created_ms: now_ms(),
+        });
+        Ok(())
+    }
+
+    /// Try to acquire an idle item from the pool.
+    ///
+    /// Evicts expired items first, then pops the oldest idle item.
+    /// Returns `None` if no idle items are available.
+    ///
+    /// The caller **must** return the item via [`release`][GenericPool::release]
+    /// when done.
+    pub fn try_acquire(&mut self) -> Option<T> {
+        self.evict_expired();
+        if let Some(slot) = self.idle.pop_front() {
+            self.active_count += 1;
+            Some(slot.value)
+        } else {
+            None
+        }
+    }
+
+    /// Return a previously acquired item back to the idle pool.
+    ///
+    /// If the pool is full, the item is silently dropped.
+    pub fn release(&mut self, value: T) {
+        self.active_count = self.active_count.saturating_sub(1);
+        if self.idle.len() + self.active_count < self.config.max_size {
+            self.idle.push_back(GenericPoolSlot {
+                value,
+                created_ms: now_ms(),
+            });
+        }
+    }
+
+    /// Remove all idle items that have exceeded `max_lifetime_ms`.
+    ///
+    /// If `max_lifetime_ms` is `0`, all idle items are evicted.
+    pub fn evict_expired(&mut self) {
+        let max_ms = self.config.max_lifetime_ms;
+        let now = now_ms();
+        self.idle
+            .retain(|slot| max_ms > 0 && now.saturating_sub(slot.created_ms) < max_ms);
+    }
+
+    /// Drain all idle items, returning them as a `Vec`.
+    ///
+    /// Active items are NOT affected.
+    pub fn drain(&mut self) -> Vec<T> {
+        self.idle.drain(..).map(|s| s.value).collect()
+    }
+
+    /// Returns `true` when there are no idle or active items.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.idle.is_empty() && self.active_count == 0
+    }
+}
+
+// =============================================================================
+// GenericPool tests
+// =============================================================================
+
+#[cfg(test)]
+mod generic_pool_tests {
+    use super::*;
+
+    fn make_pool(max_size: usize) -> GenericPool<i32> {
+        GenericPool::new(GenericPoolConfig::new(max_size, 1, 300_000))
+    }
+
+    #[test]
+    fn test_generic_pool_add_and_acquire() {
+        let mut pool = make_pool(4);
+        pool.add(42).expect("should add");
+        let item = pool.try_acquire();
+        assert_eq!(item, Some(42));
+    }
+
+    #[test]
+    fn test_generic_pool_release_returns_to_idle() {
+        let mut pool = make_pool(4);
+        pool.add(10).expect("add");
+        let item = pool.try_acquire().expect("acquire");
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.active_count(), 1);
+
+        pool.release(item);
+        assert_eq!(pool.idle_count(), 1);
+        assert_eq!(pool.active_count(), 0);
+    }
+
+    #[test]
+    fn test_generic_pool_max_size_respected() {
+        let mut pool = make_pool(2);
+        pool.add(1).expect("add 1");
+        pool.add(2).expect("add 2");
+        let result = pool.add(3);
+        assert!(result.is_err(), "should reject when at capacity");
+        assert_eq!(result.err(), Some(3));
+    }
+
+    #[test]
+    fn test_generic_pool_drain() {
+        let mut pool = make_pool(4);
+        pool.add(1).expect("add 1");
+        pool.add(2).expect("add 2");
+        pool.add(3).expect("add 3");
+
+        let drained = pool.drain();
+        assert_eq!(drained.len(), 3);
+        assert_eq!(pool.idle_count(), 0);
+    }
+
+    #[test]
+    fn test_generic_pool_idle_count() {
+        let mut pool = make_pool(4);
+        assert_eq!(pool.idle_count(), 0);
+        pool.add(1).expect("add");
+        pool.add(2).expect("add");
+        assert_eq!(pool.idle_count(), 2);
+    }
+
+    #[test]
+    fn test_generic_pool_active_count_tracking() {
+        let mut pool = make_pool(4);
+        pool.add(7).expect("add");
+        pool.add(8).expect("add");
+
+        let _a = pool.try_acquire();
+        assert_eq!(pool.active_count(), 1);
+        let _b = pool.try_acquire();
+        assert_eq!(pool.active_count(), 2);
+        assert_eq!(pool.idle_count(), 0);
+    }
+
+    #[test]
+    fn test_generic_pool_defaults() {
+        let pool: GenericPool<String> = GenericPool::with_defaults();
+        assert_eq!(pool.config().max_size, 16);
+        assert_eq!(pool.config().min_idle, 1);
+        assert_eq!(pool.config().max_lifetime_ms, 300_000);
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn test_generic_pool_add_overflow_returns_err() {
+        let mut pool = make_pool(1);
+        pool.add(100).expect("first add");
+        let err = pool.add(200);
+        assert!(err.is_err());
+        assert_eq!(err.err(), Some(200));
+    }
+
+    #[test]
+    fn test_generic_pool_config_fields() {
+        let cfg = GenericPoolConfig::new(8, 2, 60_000);
+        assert_eq!(cfg.max_size, 8);
+        assert_eq!(cfg.min_idle, 2);
+        assert_eq!(cfg.max_lifetime_ms, 60_000);
+    }
+
+    #[test]
+    fn test_generic_pool_total() {
+        let mut pool = make_pool(4);
+        pool.add(1).expect("add");
+        pool.add(2).expect("add");
+        let _item = pool.try_acquire();
+        // 1 idle + 1 active = 2
+        assert_eq!(pool.total(), 2);
+    }
+
+    #[test]
+    fn test_generic_pool_evict_expired_zero_lifetime() {
+        // max_lifetime_ms = 0 → all idle items should be evicted immediately
+        let mut pool: GenericPool<i32> = GenericPool::new(GenericPoolConfig::new(8, 1, 0));
+        pool.add(1).expect("add");
+        pool.add(2).expect("add");
+        assert_eq!(pool.idle_count(), 2);
+
+        pool.evict_expired();
+        assert_eq!(pool.idle_count(), 0);
+    }
+
+    #[test]
+    fn test_generic_pool_release_increments_idle() {
+        let mut pool = make_pool(4);
+        // Start with nothing
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.active_count(), 0);
+
+        // Manually increment active by acquiring from a pool seeded via release
+        pool.release(99); // release without prior acquire still adds to idle
+        assert_eq!(pool.idle_count(), 1);
+        assert_eq!(pool.active_count(), 0); // saturating_sub(0) = 0
+
+        let item = pool.try_acquire().expect("acquire");
+        assert_eq!(item, 99);
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.active_count(), 1);
+    }
+
+    #[test]
+    fn test_generic_pool_is_empty() {
+        let pool: GenericPool<u8> = GenericPool::with_defaults();
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn test_generic_pool_acquire_empty_returns_none() {
+        let mut pool: GenericPool<u32> = GenericPool::with_defaults();
+        assert!(pool.try_acquire().is_none());
+    }
+}

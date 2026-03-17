@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use crate::{FrameRate, FrameRateInfo, Timecode};
+use crate::{FrameRate, Timecode};
 
 // -- SmpteBoundary -----------------------------------------------------------
 
@@ -196,17 +196,7 @@ impl Default for BoundaryChecker {
 
 /// Build a `Timecode` from raw fields (bypasses constructor checks).
 fn raw_tc(hours: u8, minutes: u8, seconds: u8, frames: u8, fps: u8) -> Timecode {
-    Timecode {
-        hours,
-        minutes,
-        seconds,
-        frames,
-        frame_rate: FrameRateInfo {
-            fps,
-            drop_frame: false,
-        },
-        user_bits: 0,
-    }
+    Timecode::from_raw_fields(hours, minutes, seconds, frames, fps, false, 0)
 }
 
 // -- Tests -------------------------------------------------------------------

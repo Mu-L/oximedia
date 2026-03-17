@@ -11,7 +11,7 @@ pub mod shifter;
 pub mod stretch;
 
 // Re-exports
-pub use autotune::{AutoTune, AutoTuneConfig, Scale};
+pub use autotune::{AutoTune, AutoTuneConfig, Key, Scale};
 pub use shifter::{
     AdvancedPitchShifter, FormantPreserver, PitchAlgorithm, PitchShifter, PitchShifterConfig,
 };

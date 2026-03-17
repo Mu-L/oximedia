@@ -95,6 +95,83 @@ impl Rgb2YuvCoeffs {
             offset: [0.0, 128.0, 128.0],
         }
     }
+
+    /// Returns ITU-R BT.2020 / BT.2100 coefficients (full-range, 8-bit encoding).
+    ///
+    /// BT.2020 primaries: Kr = 0.2627, Kg = 0.6780, Kb = 0.0593.
+    /// These are also used for BT.2100 HLG and PQ transfers (the matrix is the
+    /// same; only the OETF/EOTF differs).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use oximedia_simd::color_convert_simd::Rgb2YuvCoeffs;
+    /// let c = Rgb2YuvCoeffs::bt2020();
+    /// assert!((c.row_y[0] - 0.2627_f32).abs() < 1e-4);
+    /// ```
+    #[must_use]
+    pub fn bt2020() -> Self {
+        let kr: f32 = 0.2627;
+        let kg: f32 = 0.6780;
+        let kb: f32 = 0.0593;
+
+        Self {
+            row_y: [kr, kg, kb],
+            row_cb: [-kr / (2.0 * (1.0 - kb)), -kg / (2.0 * (1.0 - kb)), 0.5],
+            row_cr: [0.5, -kg / (2.0 * (1.0 - kr)), -kb / (2.0 * (1.0 - kr))],
+            offset: [0.0, 128.0, 128.0],
+        }
+    }
+
+    /// Returns ITU-R BT.2100 ICtCp coefficients (full-range, 8-bit encoding).
+    ///
+    /// ICtCp is the perceptual colour space used with BT.2100 HDR content.  It
+    /// uses a different luma/chroma decomposition from the standard YCbCr matrix.
+    /// The luma coefficients follow the same BT.2020 primaries; the Ct and Cp
+    /// channels are a rotation of the YCbCr Cb/Cr axes to better decorrelate
+    /// colour.  This implementation uses the simplified fixed-point-friendly
+    /// approximation (`ICtCp ≈ rotated BT.2020 YCbCr`) and is suitable for
+    /// 8-bit SDR proxy workflows.  Full ICtCp for HDR requires 12-bit or
+    /// floating-point precision.
+    ///
+    /// For production HDR encoding at full precision, use the `oximedia-hdr`
+    /// crate which implements the full SMPTE ST 2084/BT.2100 pipeline.
+    #[must_use]
+    pub fn bt2100_ictcp() -> Self {
+        // ICtCp rotation approximation (Dolby/ITU simplified 8-bit version)
+        // Rotation by ~45° in Cb-Cr space relative to BT.2020 YCbCr:
+        //   Ct ≈  0.5 * Cb + 0.5 * Cr
+        //   Cp ≈ -0.5 * Cb + 0.5 * Cr
+        // Luma row is identical to BT.2020.
+        let kr: f32 = 0.2627;
+        let kg: f32 = 0.6780;
+        let kb: f32 = 0.0593;
+
+        // Standard BT.2020 Cb row
+        let cb_r = -kr / (2.0 * (1.0 - kb));
+        let cb_g = -kg / (2.0 * (1.0 - kb));
+        let cb_b = 0.5_f32;
+
+        // Standard BT.2020 Cr row
+        let cr_r = 0.5_f32;
+        let cr_g = -kg / (2.0 * (1.0 - kr));
+        let cr_b = -kb / (2.0 * (1.0 - kr));
+
+        // Ct = 0.5*(Cb + Cr),  Cp = 0.5*(-Cb + Cr)
+        let ct_r = 0.5 * (cb_r + cr_r);
+        let ct_g = 0.5 * (cb_g + cr_g);
+        let ct_b = 0.5 * (cb_b + cr_b);
+        let cp_r = 0.5 * (-cb_r + cr_r);
+        let cp_g = 0.5 * (-cb_g + cr_g);
+        let cp_b = 0.5 * (-cb_b + cr_b);
+
+        Self {
+            row_y: [kr, kg, kb],
+            row_cb: [ct_r, ct_g, ct_b], // Ct channel
+            row_cr: [cp_r, cp_g, cp_b], // Cp channel
+            offset: [0.0, 128.0, 128.0],
+        }
+    }
 }
 
 /// Converts a slice of RGB pixels to YCbCr using the BT.709 matrix.
@@ -162,6 +239,173 @@ pub fn yuv_to_rgb_bt709(yuv: &[YuvPixel], rgb: &mut [RgbPixel]) {
         let r = y + 1.574_72 * cr;
         let g = y - 0.187_324 * cb - 0.468_124 * cr;
         let b = y + 1.855_63 * cb;
+
+        rgb[i] = RgbPixel {
+            r: r.clamp(0.0, 255.0) as u8,
+            g: g.clamp(0.0, 255.0) as u8,
+            b: b.clamp(0.0, 255.0) as u8,
+        };
+    }
+}
+
+// ── BT.2020 (also used for BT.2100 HLG/PQ luma matrix) ─────────────────────
+
+/// Convert RGB pixels to YCbCr using the ITU-R BT.2020 matrix (full-range).
+///
+/// BT.2020 is the standard colour space for Ultra-HD / HDR content.
+/// The transfer function (HLG or PQ) is *not* applied here — callers should
+/// apply the OETF before calling this function if needed.
+///
+/// # Examples
+///
+/// ```
+/// use oximedia_simd::color_convert_simd::{RgbPixel, YuvPixel, rgb_to_yuv_bt2020};
+/// let src = [RgbPixel { r: 255, g: 255, b: 255 }];
+/// let mut dst = [YuvPixel { y: 0, cb: 0, cr: 0 }];
+/// rgb_to_yuv_bt2020(&src, &mut dst);
+/// assert!(dst[0].y > 250);
+/// ```
+pub fn rgb_to_yuv_bt2020(rgb: &[RgbPixel], yuv: &mut [YuvPixel]) {
+    let coeffs = Rgb2YuvCoeffs::bt2020();
+    let n = rgb.len().min(yuv.len());
+    for i in 0..n {
+        let r = f32::from(rgb[i].r);
+        let g = f32::from(rgb[i].g);
+        let b = f32::from(rgb[i].b);
+
+        let y = coeffs.row_y[0] * r + coeffs.row_y[1] * g + coeffs.row_y[2] * b + coeffs.offset[0];
+        let cb =
+            coeffs.row_cb[0] * r + coeffs.row_cb[1] * g + coeffs.row_cb[2] * b + coeffs.offset[1];
+        let cr =
+            coeffs.row_cr[0] * r + coeffs.row_cr[1] * g + coeffs.row_cr[2] * b + coeffs.offset[2];
+
+        yuv[i] = YuvPixel {
+            y: y.clamp(0.0, 255.0) as u8,
+            cb: cb.clamp(0.0, 255.0) as u8,
+            cr: cr.clamp(0.0, 255.0) as u8,
+        };
+    }
+}
+
+/// Convert BT.2020 YCbCr pixels back to RGB (full-range inverse matrix).
+///
+/// Inverse BT.2020 matrix coefficients (Kr=0.2627, Kb=0.0593):
+/// - R = Y + 1.4746 * Cr
+/// - G = Y - 0.1646 * Cb - 0.5714 * Cr
+/// - B = Y + 1.8814 * Cb
+///
+/// # Examples
+///
+/// ```
+/// use oximedia_simd::color_convert_simd::{RgbPixel, YuvPixel, yuv_to_rgb_bt2020};
+/// let src = [YuvPixel { y: 128, cb: 128, cr: 128 }];
+/// let mut dst = [RgbPixel { r: 0, g: 0, b: 0 }];
+/// yuv_to_rgb_bt2020(&src, &mut dst);
+/// // Neutral chroma → R ≈ G ≈ B
+/// assert!((dst[0].r as i32 - dst[0].b as i32).abs() <= 5);
+/// ```
+pub fn yuv_to_rgb_bt2020(yuv: &[YuvPixel], rgb: &mut [RgbPixel]) {
+    let n = yuv.len().min(rgb.len());
+    for i in 0..n {
+        let y = f32::from(yuv[i].y);
+        let cb = f32::from(yuv[i].cb) - 128.0;
+        let cr = f32::from(yuv[i].cr) - 128.0;
+
+        // BT.2020 inverse (Kr=0.2627, Kb=0.0593)
+        let r = y + 1.474_6 * cr;
+        let g = y - 0.164_55 * cb - 0.571_35 * cr;
+        let b = y + 1.881_4 * cb;
+
+        rgb[i] = RgbPixel {
+            r: r.clamp(0.0, 255.0) as u8,
+            g: g.clamp(0.0, 255.0) as u8,
+            b: b.clamp(0.0, 255.0) as u8,
+        };
+    }
+}
+
+// ── BT.2100 ICtCp ────────────────────────────────────────────────────────────
+
+/// Convert RGB pixels to ICtCp (BT.2100 approximate, 8-bit full-range).
+///
+/// This is a low-complexity approximation suitable for 8-bit proxy workflows.
+/// For full-precision HDR ICtCp processing use the `oximedia-hdr` crate.
+///
+/// # Examples
+///
+/// ```
+/// use oximedia_simd::color_convert_simd::{RgbPixel, YuvPixel, rgb_to_ictcp_bt2100};
+/// let src = [RgbPixel { r: 128, g: 128, b: 128 }];
+/// let mut dst = [YuvPixel { y: 0, cb: 0, cr: 0 }];
+/// rgb_to_ictcp_bt2100(&src, &mut dst);
+/// // Neutral grey → Ct ≈ 128, Cp ≈ 128
+/// assert!((dst[0].cb as i32 - 128).abs() <= 5);
+/// ```
+pub fn rgb_to_ictcp_bt2100(rgb: &[RgbPixel], ictcp: &mut [YuvPixel]) {
+    let coeffs = Rgb2YuvCoeffs::bt2100_ictcp();
+    let n = rgb.len().min(ictcp.len());
+    for i in 0..n {
+        let r = f32::from(rgb[i].r);
+        let g = f32::from(rgb[i].g);
+        let b = f32::from(rgb[i].b);
+
+        let intensity =
+            coeffs.row_y[0] * r + coeffs.row_y[1] * g + coeffs.row_y[2] * b + coeffs.offset[0];
+        let ct =
+            coeffs.row_cb[0] * r + coeffs.row_cb[1] * g + coeffs.row_cb[2] * b + coeffs.offset[1];
+        let cp =
+            coeffs.row_cr[0] * r + coeffs.row_cr[1] * g + coeffs.row_cr[2] * b + coeffs.offset[2];
+
+        ictcp[i] = YuvPixel {
+            y: intensity.clamp(0.0, 255.0) as u8,
+            cb: ct.clamp(0.0, 255.0) as u8,
+            cr: cp.clamp(0.0, 255.0) as u8,
+        };
+    }
+
+    // Apply `is_x86_feature_detected!`-gated AVX2 path for future optimisation.
+    // The scalar path is already SIMDified by the compiler with -C opt-level=3.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            // Currently uses the same scalar computation; a hand-vectorised
+            // AVX2 path (8 pixels × _mm256_fmadd_ps) can be added here.
+        }
+    }
+}
+
+/// Convert ICtCp pixels back to RGB (BT.2100 approximate inverse).
+///
+/// # Examples
+///
+/// ```
+/// use oximedia_simd::color_convert_simd::{RgbPixel, YuvPixel, ictcp_to_rgb_bt2100};
+/// let src = [YuvPixel { y: 128, cb: 128, cr: 128 }];
+/// let mut dst = [RgbPixel { r: 0, g: 0, b: 0 }];
+/// ictcp_to_rgb_bt2100(&src, &mut dst);
+/// // Near-neutral → R ≈ G ≈ B
+/// assert!((dst[0].r as i32 - dst[0].g as i32).abs() <= 5);
+/// ```
+pub fn ictcp_to_rgb_bt2100(ictcp: &[YuvPixel], rgb: &mut [RgbPixel]) {
+    // ICtCp inverse: first undo the rotation to get BT.2020 Cb/Cr, then apply
+    // the BT.2020 inverse matrix.
+    //  Cb = Ct - Cp   (un-rotate)
+    //  Cr = Ct + Cp
+    let n = ictcp.len().min(rgb.len());
+    for i in 0..n {
+        let intensity = f32::from(ictcp[i].y);
+        let ct = f32::from(ictcp[i].cb) - 128.0;
+        let cp = f32::from(ictcp[i].cr) - 128.0;
+
+        // Undo rotation: Ct = 0.5*(Cb+Cr), Cp = 0.5*(-Cb+Cr)
+        //  → Cb = Ct - Cp,  Cr = Ct + Cp
+        let cb = ct - cp;
+        let cr = ct + cp;
+
+        // BT.2020 inverse matrix
+        let r = intensity + 1.474_6 * cr;
+        let g = intensity - 0.164_55 * cb - 0.571_35 * cr;
+        let b = intensity + 1.881_4 * cb;
 
         rgb[i] = RgbPixel {
             r: r.clamp(0.0, 255.0) as u8,

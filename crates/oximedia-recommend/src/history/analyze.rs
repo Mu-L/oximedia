@@ -116,9 +116,12 @@ impl HistoryAnalyzer {
         }
 
         let total_watch_time: i64 = events.iter().map(|e| e.watch_time_ms).sum();
-        let avg_watch_time = total_watch_time / events.len() as i64;
+        let avg_watch_time = total_watch_time
+            .checked_div(events.len() as i64)
+            .unwrap_or(0);
 
         let completed_count = events.iter().filter(|e| e.completed).count();
+        #[allow(clippy::manual_checked_ops)]
         let completion_rate = completed_count as f32 / events.len() as f32;
 
         // Calculate session consistency
@@ -131,11 +134,11 @@ impl HistoryAnalyzer {
             session_gaps.push(gap);
         }
 
-        let avg_session_gap = if session_gaps.is_empty() {
-            0
-        } else {
-            session_gaps.iter().sum::<i64>() / session_gaps.len() as i64
-        };
+        let avg_session_gap = session_gaps
+            .iter()
+            .sum::<i64>()
+            .checked_div(session_gaps.len() as i64)
+            .unwrap_or(0);
 
         EngagementPatterns {
             avg_watch_time_ms: avg_watch_time,
@@ -172,6 +175,7 @@ impl HistoryAnalyzer {
             }
         }
 
+        #[allow(clippy::manual_checked_ops)]
         let binge_tendency = if events.is_empty() {
             0.0
         } else {
@@ -181,11 +185,7 @@ impl HistoryAnalyzer {
         BingeWatchingMetrics {
             binge_sessions,
             binge_tendency,
-            avg_consecutive_views: if binge_sessions > 0 {
-                events.len() / binge_sessions
-            } else {
-                0
-            },
+            avg_consecutive_views: events.len().checked_div(binge_sessions).unwrap_or(0),
         }
     }
 
@@ -196,10 +196,13 @@ impl HistoryAnalyzer {
             return 0.0;
         }
 
-        let unique_content: std::collections::HashSet<Uuid> =
-            events.iter().map(|e| e.content_id).collect();
+        #[allow(clippy::manual_checked_ops)]
+        {
+            let unique_content: std::collections::HashSet<Uuid> =
+                events.iter().map(|e| e.content_id).collect();
 
-        unique_content.len() as f32 / events.len() as f32
+            unique_content.len() as f32 / events.len() as f32
+        }
     }
 }
 

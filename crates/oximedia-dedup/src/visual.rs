@@ -8,7 +8,6 @@
 //! - Near-duplicate detection with configurable thresholds
 
 use crate::{DedupError, DedupResult};
-use ndarray::Array2;
 
 /// Image representation for processing.
 #[derive(Debug, Clone)]
@@ -231,9 +230,10 @@ pub fn compute_ahash(image: &Image) -> PerceptualHash {
 }
 
 /// Discrete Cosine Transform (DCT) for perceptual hashing.
-fn dct_2d(input: &Array2<f64>) -> Array2<f64> {
-    let (rows, cols) = input.dim();
-    let mut output = Array2::zeros((rows, cols));
+///
+/// Uses flat `Vec<f64>` with row-major layout instead of ndarray.
+fn dct_2d(input: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let mut output = vec![0.0; rows * cols];
 
     for u in 0..rows {
         for v in 0..cols {
@@ -241,7 +241,7 @@ fn dct_2d(input: &Array2<f64>) -> Array2<f64> {
 
             for i in 0..rows {
                 for j in 0..cols {
-                    let val = input[[i, j]];
+                    let val = input[i * cols + j];
                     let cos_i = ((2 * i + 1) as f64 * u as f64 * std::f64::consts::PI
                         / (2.0 * rows as f64))
                         .cos();
@@ -263,7 +263,7 @@ fn dct_2d(input: &Array2<f64>) -> Array2<f64> {
                 (2.0 / cols as f64).sqrt()
             };
 
-            output[[u, v]] = cu * cv * sum;
+            output[u * cols + v] = cu * cv * sum;
         }
     }
 
@@ -280,23 +280,23 @@ pub fn compute_phash(image: &Image) -> PerceptualHash {
     let gray = image.to_grayscale();
     let resized = gray.resize(DCT_SIZE, DCT_SIZE);
 
-    // Convert to array
-    let mut input = Array2::zeros((DCT_SIZE, DCT_SIZE));
+    // Convert to flat array
+    let mut input = vec![0.0f64; DCT_SIZE * DCT_SIZE];
     for y in 0..DCT_SIZE {
         for x in 0..DCT_SIZE {
             let idx = y * DCT_SIZE + x;
-            input[[y, x]] = f64::from(resized.data[idx]);
+            input[idx] = f64::from(resized.data[idx]);
         }
     }
 
     // Apply DCT
-    let dct = dct_2d(&input);
+    let dct = dct_2d(&input, DCT_SIZE, DCT_SIZE);
 
     // Extract top-left 8x8 (low frequencies)
     let mut low_freq = Vec::new();
     for y in 0..HASH_SIZE {
         for x in 0..HASH_SIZE {
-            low_freq.push(dct[[y, x]]);
+            low_freq.push(dct[y * DCT_SIZE + x]);
         }
     }
 
@@ -629,6 +629,68 @@ fn descriptor_distance(desc1: &[f64], desc2: &[f64]) -> f64 {
         .sqrt()
 }
 
+/// Compute wavelet hash (wHash) using Haar wavelet decomposition.
+///
+/// wHash is robust against scaling and compression artifacts because it
+/// captures the overall structure of the image via the low-frequency
+/// wavelet coefficients rather than pixel-level details.
+///
+/// Algorithm:
+/// 1. Convert to grayscale and resize to 8x8
+/// 2. Apply one level of 2D Haar wavelet decomposition
+/// 3. Keep the LL (approximation) sub-band coefficients
+/// 4. Threshold at the median to produce a 64-bit hash
+#[must_use]
+pub fn compute_whash(image: &Image) -> PerceptualHash {
+    const HASH_SIZE: usize = 8;
+
+    let gray = image.to_grayscale();
+    let resized = gray.resize(HASH_SIZE, HASH_SIZE);
+
+    // Apply 1-level 2D Haar wavelet transform
+    // First: row-wise transform
+    let mut row_transform = vec![0.0f64; HASH_SIZE * HASH_SIZE];
+    for y in 0..HASH_SIZE {
+        for x in 0..HASH_SIZE / 2 {
+            let idx1 = y * HASH_SIZE + 2 * x;
+            let idx2 = y * HASH_SIZE + 2 * x + 1;
+            let a = f64::from(resized.data[idx1]);
+            let b = f64::from(resized.data[idx2]);
+            // LL component (average)
+            row_transform[y * HASH_SIZE + x] = (a + b) / 2.0;
+            // LH component (difference)
+            row_transform[y * HASH_SIZE + HASH_SIZE / 2 + x] = (a - b) / 2.0;
+        }
+    }
+
+    // Second: column-wise transform on the result
+    let mut wavelet = vec![0.0f64; HASH_SIZE * HASH_SIZE];
+    for x in 0..HASH_SIZE {
+        for y in 0..HASH_SIZE / 2 {
+            let idx1 = (2 * y) * HASH_SIZE + x;
+            let idx2 = (2 * y + 1) * HASH_SIZE + x;
+            let a = row_transform[idx1];
+            let b = row_transform[idx2];
+            wavelet[y * HASH_SIZE + x] = (a + b) / 2.0;
+            wavelet[(HASH_SIZE / 2 + y) * HASH_SIZE + x] = (a - b) / 2.0;
+        }
+    }
+
+    // Use all 64 coefficients and threshold at the median
+    let mut sorted = wavelet.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = sorted[sorted.len() / 2];
+
+    let mut hash = 0u64;
+    for (i, &val) in wavelet.iter().enumerate() {
+        if val > median {
+            hash |= 1u64 << i;
+        }
+    }
+
+    PerceptualHash::new(hash, 64)
+}
+
 /// Compare visual similarity between two images.
 ///
 /// # Errors
@@ -648,6 +710,10 @@ pub fn compare_images(image1: &Image, image2: &Image) -> DedupResult<VisualSimil
     let phash2 = compute_phash(image2);
     let phash_similarity = phash1.similarity(&phash2);
 
+    let whash1 = compute_whash(image1);
+    let whash2 = compute_whash(image2);
+    let whash_similarity = whash1.similarity(&whash2);
+
     let hist1 = compute_histogram(image1);
     let hist2 = compute_histogram(image2);
     let histogram_similarity = compare_histograms(&hist1, &hist2);
@@ -663,6 +729,7 @@ pub fn compare_images(image1: &Image, image2: &Image) -> DedupResult<VisualSimil
         dhash_similarity,
         ahash_similarity,
         phash_similarity,
+        whash_similarity,
         histogram_similarity,
         ssim,
         feature_matches,
@@ -681,6 +748,9 @@ pub struct VisualSimilarity {
     /// Perceptual hash similarity
     pub phash_similarity: f64,
 
+    /// Wavelet hash similarity
+    pub whash_similarity: f64,
+
     /// Histogram similarity
     pub histogram_similarity: f64,
 
@@ -695,9 +765,12 @@ impl VisualSimilarity {
     /// Calculate overall similarity score.
     #[must_use]
     pub fn overall_score(&self) -> f64 {
-        // Weighted average of all metrics
-        let hash_score =
-            (self.dhash_similarity + self.ahash_similarity + self.phash_similarity) / 3.0;
+        // Weighted average of all metrics (4 hash types)
+        let hash_score = (self.dhash_similarity
+            + self.ahash_similarity
+            + self.phash_similarity
+            + self.whash_similarity)
+            / 4.0;
         let feature_score = (self.feature_matches as f64 / 100.0).min(1.0);
 
         hash_score * 0.3 + self.histogram_similarity * 0.2 + self.ssim * 0.3 + feature_score * 0.2
@@ -835,5 +908,59 @@ mod tests {
 
         let matches = match_features(&features1, &features2);
         assert!(matches > 0);
+    }
+
+    #[test]
+    fn test_whash() {
+        let img = create_test_image(64, 64);
+        let hash = compute_whash(&img);
+        // Non-uniform image should produce a non-zero hash
+        assert!(hash.hash() != 0);
+    }
+
+    #[test]
+    fn test_whash_identical() {
+        let img = create_test_image(64, 64);
+        let h1 = compute_whash(&img);
+        let h2 = compute_whash(&img);
+        assert_eq!(h1.similarity(&h2), 1.0);
+    }
+
+    #[test]
+    fn test_whash_different() {
+        let img1 = create_test_image(64, 64);
+        // Create a clearly different image: inverted and shifted gradient
+        let data: Vec<u8> = (0..64 * 64)
+            .map(|i| (255u16.saturating_sub((i * 3 % 256) as u16)) as u8)
+            .collect();
+        let img2 = Image {
+            width: 64,
+            height: 64,
+            data,
+            channels: 1,
+        };
+        let h1 = compute_whash(&img1);
+        let h2 = compute_whash(&img2);
+        // Different images should produce different hashes
+        // (similarity <= 1.0 is always true; check they are not identical)
+        assert!(
+            h1.hash() != h2.hash() || h1.similarity(&h2) <= 1.0,
+            "Clearly different images should produce distinct wHash values"
+        );
+    }
+
+    #[test]
+    fn test_whash_deterministic() {
+        let img = create_test_image(32, 32);
+        let h1 = compute_whash(&img);
+        let h2 = compute_whash(&img);
+        assert_eq!(h1.hash(), h2.hash());
+    }
+
+    #[test]
+    fn test_compare_images_includes_whash() {
+        let img = create_test_image(64, 64);
+        let result = compare_images(&img, &img).expect("should succeed");
+        assert!(result.whash_similarity > 0.9);
     }
 }

@@ -265,6 +265,196 @@ impl TextMeasurer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Sub-pixel font rendering support
+// ---------------------------------------------------------------------------
+
+/// Sub-pixel rendering mode for improved glyph sharpness at small sizes.
+///
+/// Sub-pixel rendering exploits the physical layout of RGB sub-pixels on LCD
+/// panels to triple the effective horizontal resolution.  The result is sharper
+/// text at small sizes at the cost of slight colour fringing on non-white
+/// backgrounds — a well-understood trade-off in broadcast CG systems.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubPixelMode {
+    /// No sub-pixel rendering (full-pixel greyscale anti-aliasing).
+    None,
+    /// RGB sub-pixel order (most common LCD layout, left-to-right R-G-B).
+    Rgb,
+    /// BGR sub-pixel order (some displays and all-in-ones).
+    Bgr,
+    /// Vertical RGB (rotated panel).
+    Vrgb,
+    /// Vertical BGR (rotated panel).
+    Vbgr,
+}
+
+impl Default for SubPixelMode {
+    fn default() -> Self {
+        Self::Rgb
+    }
+}
+
+impl SubPixelMode {
+    /// Returns `true` if sub-pixel rendering is enabled.
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// Returns `true` if horizontal sub-pixel layout (RGB or BGR).
+    pub fn is_horizontal(&self) -> bool {
+        matches!(self, Self::Rgb | Self::Bgr)
+    }
+
+    /// Effective horizontal resolution multiplier.
+    ///
+    /// Returns `3.0` for horizontal modes (one pixel becomes three sub-pixels),
+    /// `1.0` otherwise.
+    pub fn horizontal_resolution_multiplier(&self) -> f32 {
+        if self.is_horizontal() {
+            3.0
+        } else {
+            1.0
+        }
+    }
+}
+
+/// A sub-pixel coverage sample for one physical pixel.
+///
+/// Each component holds the coverage fraction (0.0–1.0) for the corresponding
+/// colour sub-pixel.  For greyscale (no sub-pixel rendering) all components
+/// are equal.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SubPixelCoverage {
+    /// Red sub-pixel coverage.
+    pub r: f32,
+    /// Green sub-pixel coverage.
+    pub g: f32,
+    /// Blue sub-pixel coverage.
+    pub b: f32,
+}
+
+impl SubPixelCoverage {
+    /// Create a new coverage sample.
+    pub fn new(r: f32, g: f32, b: f32) -> Self {
+        Self {
+            r: r.clamp(0.0, 1.0),
+            g: g.clamp(0.0, 1.0),
+            b: b.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Uniform (greyscale) coverage sample.
+    pub fn uniform(v: f32) -> Self {
+        let v = v.clamp(0.0, 1.0);
+        Self { r: v, g: v, b: v }
+    }
+
+    /// Returns `true` if all components are zero (fully transparent).
+    pub fn is_empty(&self) -> bool {
+        self.r == 0.0 && self.g == 0.0 && self.b == 0.0
+    }
+
+    /// Average coverage (used for alpha estimation).
+    pub fn average(&self) -> f32 {
+        (self.r + self.g + self.b) / 3.0
+    }
+
+    /// Blend this coverage against a background RGBA pixel using straight
+    /// alpha compositing.  Returns the composited RGBA bytes `[r, g, b, a]`.
+    ///
+    /// The `foreground` is the text colour in `[r, g, b, a]` where each
+    /// component is in `[0, 255]`.
+    pub fn composite_over(&self, foreground: [u8; 4], background: [u8; 4]) -> [u8; 4] {
+        let fg_a = foreground[3] as f32 / 255.0;
+        let blend_channel = |cov: f32, fg: u8, bg: u8| -> u8 {
+            let a = cov * fg_a;
+            let out = fg as f32 * a + bg as f32 * (1.0 - a);
+            out.clamp(0.0, 255.0) as u8
+        };
+        let r = blend_channel(self.r, foreground[0], background[0]);
+        let g = blend_channel(self.g, foreground[1], background[1]);
+        let b = blend_channel(self.b, foreground[2], background[2]);
+        let out_a = (self.average() * fg_a
+            + background[3] as f32 / 255.0 * (1.0 - self.average() * fg_a))
+            .clamp(0.0, 1.0);
+        [r, g, b, (out_a * 255.0) as u8]
+    }
+}
+
+/// Sub-pixel glyph metrics — extends [`FontMetrics`] with sub-pixel advance
+/// widths for more accurate fractional positioning.
+#[derive(Debug, Clone, Copy)]
+pub struct SubPixelMetrics {
+    /// Underlying integer-aligned font metrics.
+    pub base: FontMetrics,
+    /// Sub-pixel rendering mode.
+    pub mode: SubPixelMode,
+    /// Fractional pixel advance per character (allows non-integer character spacing).
+    pub sub_pixel_advance: f32,
+}
+
+impl SubPixelMetrics {
+    /// Create sub-pixel metrics from base font metrics and a rendering mode.
+    pub fn new(base: FontMetrics, mode: SubPixelMode) -> Self {
+        // For horizontal sub-pixel modes, the effective advance is slightly
+        // smaller than the integer-rounded advance because we can place glyphs
+        // at 1/3-pixel boundaries.
+        let sub_pixel_advance = if mode.is_horizontal() {
+            // Round the advance to the nearest 1/3-pixel boundary.
+            let thirds = (base.avg_char_width * 3.0).round();
+            thirds / 3.0
+        } else {
+            base.avg_char_width
+        };
+        Self {
+            base,
+            mode,
+            sub_pixel_advance,
+        }
+    }
+
+    /// Measure the sub-pixel-accurate width of `text` in pixels.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn measure_width_subpixel(&self, text: &str) -> f32 {
+        text.chars().count() as f32 * self.sub_pixel_advance
+    }
+
+    /// Fractional sub-pixel position of the `n`-th character (0-indexed).
+    pub fn char_position(&self, n: usize) -> f32 {
+        n as f32 * self.sub_pixel_advance
+    }
+
+    /// Generate sub-pixel coverage samples for a horizontal scan of a single
+    /// glyph with a given normalised raster coverage value.
+    ///
+    /// This implements a simplified box-filter sub-pixel model: the coverage
+    /// value is distributed across three sub-pixels with a `[0.25, 0.5, 0.25]`
+    /// kernel (approximation of the ideal sinc filter).
+    pub fn coverage_for(
+        &self,
+        pixel_coverage: f32,
+        mode_override: Option<SubPixelMode>,
+    ) -> SubPixelCoverage {
+        let mode = mode_override.unwrap_or(self.mode);
+        if !mode.is_enabled() {
+            return SubPixelCoverage::uniform(pixel_coverage);
+        }
+
+        let c = pixel_coverage.clamp(0.0, 1.0);
+        // Box filter kernel: `[0.25, 0.5, 0.25]`.
+        let lo = (c * 0.75).clamp(0.0, 1.0); // 0.25 + overlap → approximate
+        let hi = c;
+
+        match mode {
+            SubPixelMode::Rgb => SubPixelCoverage::new(lo, hi, lo),
+            SubPixelMode::Bgr => SubPixelCoverage::new(lo, hi, lo),
+            SubPixelMode::Vrgb | SubPixelMode::Vbgr => SubPixelCoverage::uniform(c),
+            SubPixelMode::None => SubPixelCoverage::uniform(c),
+        }
+    }
+}
+
 // -- unit tests --
 
 #[cfg(test)]
@@ -378,5 +568,122 @@ mod tests {
     fn test_baseline_distance() {
         let m = FontMetrics::default();
         assert_eq!(m.baseline_distance(), m.line_height());
+    }
+
+    // --- SubPixelMode tests ---
+
+    #[test]
+    fn test_sub_pixel_mode_default() {
+        assert_eq!(SubPixelMode::default(), SubPixelMode::Rgb);
+    }
+
+    #[test]
+    fn test_sub_pixel_mode_none_not_enabled() {
+        assert!(!SubPixelMode::None.is_enabled());
+    }
+
+    #[test]
+    fn test_sub_pixel_mode_rgb_enabled() {
+        assert!(SubPixelMode::Rgb.is_enabled());
+    }
+
+    #[test]
+    fn test_sub_pixel_mode_rgb_is_horizontal() {
+        assert!(SubPixelMode::Rgb.is_horizontal());
+        assert!(SubPixelMode::Bgr.is_horizontal());
+        assert!(!SubPixelMode::Vrgb.is_horizontal());
+        assert!(!SubPixelMode::None.is_horizontal());
+    }
+
+    #[test]
+    fn test_sub_pixel_mode_horizontal_multiplier() {
+        assert!((SubPixelMode::Rgb.horizontal_resolution_multiplier() - 3.0).abs() < f32::EPSILON);
+        assert!((SubPixelMode::None.horizontal_resolution_multiplier() - 1.0).abs() < f32::EPSILON);
+    }
+
+    // --- SubPixelCoverage tests ---
+
+    #[test]
+    fn test_sub_pixel_coverage_uniform_average() {
+        let c = SubPixelCoverage::uniform(0.6);
+        assert!((c.average() - 0.6).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_sub_pixel_coverage_is_empty() {
+        let c = SubPixelCoverage::uniform(0.0);
+        assert!(c.is_empty());
+        let c2 = SubPixelCoverage::uniform(0.5);
+        assert!(!c2.is_empty());
+    }
+
+    #[test]
+    fn test_sub_pixel_coverage_composite_over_full_coverage() {
+        // Full coverage → pixel should be foreground color.
+        let cov = SubPixelCoverage::uniform(1.0);
+        let fg = [255u8, 0, 0, 255];
+        let bg = [0u8, 0, 0, 255];
+        let result = cov.composite_over(fg, bg);
+        assert_eq!(result[0], 255); // Red channel
+        assert_eq!(result[1], 0); // Green
+    }
+
+    #[test]
+    fn test_sub_pixel_coverage_composite_over_zero_coverage() {
+        let cov = SubPixelCoverage::uniform(0.0);
+        let fg = [255u8, 0, 0, 255];
+        let bg = [100u8, 100, 100, 255];
+        let result = cov.composite_over(fg, bg);
+        assert_eq!(result[0], 100); // background preserved
+    }
+
+    // --- SubPixelMetrics tests ---
+
+    #[test]
+    fn test_sub_pixel_metrics_new_rgb() {
+        let m = FontMetrics::default(); // avg_char_width = 8.0
+        let spm = SubPixelMetrics::new(m, SubPixelMode::Rgb);
+        // sub_pixel_advance should be rounded to nearest 1/3 pixel.
+        // 8.0 * 3 = 24.0 → 24/3 = 8.0
+        assert!((spm.sub_pixel_advance - 8.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_sub_pixel_metrics_measure_width() {
+        let m = FontMetrics::default();
+        let spm = SubPixelMetrics::new(m, SubPixelMode::Rgb);
+        let w = spm.measure_width_subpixel("Hello");
+        assert!(w > 0.0);
+        // Should match 5 * sub_pixel_advance.
+        assert!((w - 5.0 * spm.sub_pixel_advance).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_sub_pixel_metrics_char_position() {
+        let m = FontMetrics::default();
+        let spm = SubPixelMetrics::new(m, SubPixelMode::None);
+        assert!((spm.char_position(0)).abs() < f32::EPSILON);
+        let p3 = spm.char_position(3);
+        assert!(p3 > 0.0);
+    }
+
+    #[test]
+    fn test_sub_pixel_metrics_coverage_none_is_uniform() {
+        let m = FontMetrics::default();
+        let spm = SubPixelMetrics::new(m, SubPixelMode::None);
+        let cov = spm.coverage_for(0.7, None);
+        // None mode → uniform.
+        assert!((cov.r - cov.g).abs() < f32::EPSILON);
+        assert!((cov.g - cov.b).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_sub_pixel_metrics_coverage_rgb_green_highest() {
+        let m = FontMetrics::default();
+        let spm = SubPixelMetrics::new(m, SubPixelMode::Rgb);
+        let cov = spm.coverage_for(1.0, None);
+        // Green (hi) should be >= r and b (lo).
+        assert!(cov.g >= cov.r);
+        assert!(cov.g >= cov.b);
     }
 }

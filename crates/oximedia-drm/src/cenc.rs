@@ -3,10 +3,15 @@
 //! Implements ISO/IEC 23001-7 (Common Encryption in ISO Base Media File Format)
 //! Supporting encryption schemes: cenc, cbc1, cens, cbcs
 
+use crate::aes_ctr::AesCtr;
 use crate::{DrmError, DrmSystem, Result};
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes128Gcm, Nonce as GcmNonce,
+};
 use bytes::{BufMut, BytesMut};
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM};
-use ring::rand::{SecureRandom, SystemRandom};
+use rand::Rng;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use uuid::Uuid;
@@ -311,7 +316,6 @@ impl SampleEncryptionInfo {
 pub struct CencEncryptor {
     scheme: EncryptionScheme,
     key: Vec<u8>,
-    rng: SystemRandom,
     pattern: Option<EncryptionPattern>,
 }
 
@@ -328,7 +332,6 @@ impl CencEncryptor {
         Ok(Self {
             scheme,
             key,
-            rng: SystemRandom::new(),
             pattern: None,
         })
     }
@@ -347,9 +350,7 @@ impl CencEncryptor {
         };
 
         let mut iv = vec![0u8; iv_size];
-        self.rng
-            .fill(&mut iv)
-            .map_err(|e| DrmError::EncryptionError(format!("Failed to generate IV: {:?}", e)))?;
+        rand::rng().fill_bytes(&mut iv);
 
         Ok(iv)
     }
@@ -504,26 +505,14 @@ impl CencEncryptor {
             )));
         }
 
-        // Using AES-128-GCM from ring for encryption
-        // Note: For production, you'd want proper AES-CTR/CBC implementation
-        // This is a simplified version using available ring APIs
-        let unbound_key = UnboundKey::new(&AES_128_GCM, &self.key)
-            .map_err(|e| DrmError::EncryptionError(format!("Failed to create key: {:?}", e)))?;
-        let key = LessSafeKey::new(unbound_key);
-
-        let nonce_bytes = [0u8; 12]; // GCM nonce
-        let nonce = Nonce::assume_unique_for_key(nonce_bytes);
-
-        let mut in_out = block.to_vec();
-        // Pad to include auth tag space
-        in_out.resize(block.len() + 16, 0);
-
-        let _tag = key
-            .seal_in_place_separate_tag(nonce, Aad::empty(), &mut in_out[..block.len()])
-            .map_err(|e| DrmError::EncryptionError(format!("Encryption failed: {:?}", e)))?;
-
-        // Return only the first 16 bytes (encrypted block, without auth tag)
-        Ok(in_out[..16].to_vec())
+        let cipher = Aes128Gcm::new_from_slice(&self.key)
+            .map_err(|e| DrmError::EncryptionError(format!("Failed to create cipher: {e}")))?;
+        let nonce = GcmNonce::from([0u8; 12]);
+        let in_out = block.to_vec();
+        let ciphertext = cipher
+            .encrypt(&nonce, in_out.as_ref())
+            .map_err(|e| DrmError::EncryptionError(format!("Encryption failed: {e}")))?;
+        Ok(ciphertext[..16].to_vec())
     }
 }
 
@@ -609,7 +598,6 @@ impl CencDecryptor {
         let encryptor = CencEncryptor {
             scheme: self.scheme,
             key: self.key.clone(),
-            rng: SystemRandom::new(),
             pattern: self.pattern,
         };
         encryptor.encrypt_ctr(data, iv)
@@ -625,7 +613,7 @@ impl CencDecryptor {
         }
 
         let block_size = 16;
-        if !data.len().is_multiple_of(block_size) {
+        if data.len() % block_size != 0 {
             return Err(DrmError::DecryptionError(
                 "Data length must be multiple of block size".to_string(),
             ));
@@ -683,6 +671,56 @@ impl CencDecryptor {
             "Block decryption not fully implemented".to_string(),
         ))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Parallel subsample encryption
+// ---------------------------------------------------------------------------
+
+/// Encrypt a slice of independent subsample byte buffers in parallel using rayon.
+///
+/// Each subsample in `subsamples` is encrypted with AES-128-CTR independently.
+/// Because AES-CTR allows random access (the counter for subsample `i` starts at
+/// block offset `i * max_blocks_per_subsample`), the samples can be processed
+/// without ordering dependencies.
+///
+/// For simplicity this implementation assigns each subsample its own counter
+/// starting at 0 with the same nonce, which is the correct model when every
+/// subsample is logically independent (e.g. individual NAL units of a NAL-unit
+/// aligned encryption scheme where each sample resets the IV counter).
+///
+/// # Parameters
+/// - `subsamples`: mutable slice of byte vectors; each is encrypted in place.
+/// - `key`:        16-byte AES-128 content encryption key.
+/// - `iv`:         16-byte initialization vector — the first 8 bytes are used as
+///                 the CTR nonce, the remaining 8 bytes are treated as the initial
+///                 big-endian counter value (per ISO 23001-7 `cenc` scheme).
+///
+/// # Errors
+/// Returns `DrmError::InvalidKey` if `key.len() != 16` or
+/// `DrmError::InvalidIv` if `iv.len() != 16`.
+pub fn encrypt_subsamples_parallel(
+    subsamples: &mut [Vec<u8>],
+    key: &[u8; 16],
+    iv: &[u8; 16],
+) -> Result<()> {
+    // Derive nonce (bytes 0..8) and initial counter (bytes 8..16) from the IV.
+    let nonce: [u8; 8] = iv[0..8]
+        .try_into()
+        .map_err(|_| DrmError::InvalidIv("Failed to extract 8-byte nonce from IV".to_string()))?;
+    let counter_start = u64::from_be_bytes(iv[8..16].try_into().map_err(|_| {
+        DrmError::InvalidIv("Failed to extract 8-byte counter from IV".to_string())
+    })?);
+
+    let cipher = AesCtr::new_128(key);
+
+    // Parallel in-place encryption: each subsample encrypts independently.
+    subsamples.par_iter_mut().for_each(|sample| {
+        let encrypted = cipher.encrypt(sample, &nonce, counter_start);
+        *sample = encrypted;
+    });
+
+    Ok(())
 }
 
 /// Increment a counter for CTR mode
@@ -813,5 +851,110 @@ mod tests {
         increment_counter(&mut counter);
         assert_eq!(counter[15], 0);
         assert_eq!(counter[14], 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // CENC AES-CTR encrypt/decrypt round-trip test (Task 4)
+    // Uses the pure-Rust AesCtr from aes_ctr.rs for a full verified round-trip.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cenc_encrypt_decrypt_roundtrip() {
+        use crate::aes_ctr::AesCtr;
+
+        // Known key and IV (AES-128 — 16 bytes each)
+        let key: [u8; 16] = [
+            0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
+            0x4f, 0x3c,
+        ];
+        // IV: 8-byte nonce || 8-byte counter (all zeros → counter starts at 0)
+        let nonce: [u8; 8] = [0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7];
+        let counter_start: u64 = 0;
+
+        // 128 bytes of known plaintext (incrementing pattern)
+        let plaintext: Vec<u8> = (0u8..128).collect();
+        assert_eq!(plaintext.len(), 128);
+
+        let cipher = AesCtr::new_128(&key);
+
+        // Encrypt
+        let ciphertext = cipher.encrypt(&plaintext, &nonce, counter_start);
+        assert_eq!(
+            ciphertext.len(),
+            plaintext.len(),
+            "ciphertext length must match plaintext"
+        );
+        // Ciphertext must differ from plaintext (with overwhelming probability)
+        assert_ne!(
+            ciphertext, plaintext,
+            "ciphertext must differ from plaintext"
+        );
+
+        // Decrypt (CTR is symmetric — same operation)
+        let decrypted = cipher.decrypt(&ciphertext, &nonce, counter_start);
+        assert_eq!(
+            decrypted, plaintext,
+            "decrypted output must match original plaintext"
+        );
+
+        // Extra: verify wrong nonce produces wrong output
+        let wrong_nonce: [u8; 8] = [0xFF; 8];
+        let wrong_dec = cipher.decrypt(&ciphertext, &wrong_nonce, counter_start);
+        assert_ne!(
+            wrong_dec, plaintext,
+            "wrong nonce must not recover plaintext"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Parallel subsample encryption test (Task 5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encrypt_subsamples_parallel_roundtrip() {
+        let key: [u8; 16] = [0x42u8; 16];
+        // IV: nonce (bytes 0..8) = 0x01..0x08, counter (bytes 8..16) = 0
+        let iv: [u8; 16] = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00,
+        ];
+
+        // Create 4 subsamples with known content
+        let original_subsamples: Vec<Vec<u8>> = vec![
+            (0u8..64).collect(),
+            (64u8..128).collect(),
+            vec![0xABu8; 48],
+            vec![0x00u8; 32],
+        ];
+
+        // Encrypt
+        let mut encrypted = original_subsamples.clone();
+        encrypt_subsamples_parallel(&mut encrypted, &key, &iv)
+            .expect("parallel encryption should succeed");
+
+        // Each encrypted subsample must differ from the original
+        for (i, (orig, enc)) in original_subsamples.iter().zip(encrypted.iter()).enumerate() {
+            assert_ne!(enc, orig, "subsample {} should be encrypted", i);
+        }
+
+        // Decrypt (AES-CTR is symmetric)
+        let mut decrypted = encrypted;
+        encrypt_subsamples_parallel(&mut decrypted, &key, &iv)
+            .expect("parallel decryption should succeed");
+
+        // Decrypted must match original
+        assert_eq!(
+            decrypted, original_subsamples,
+            "decrypted subsamples must match originals"
+        );
+    }
+
+    #[test]
+    fn test_encrypt_subsamples_parallel_empty_slice() {
+        let key: [u8; 16] = [0x00u8; 16];
+        let iv: [u8; 16] = [0x00u8; 16];
+        let mut subsamples: Vec<Vec<u8>> = vec![];
+        let result = encrypt_subsamples_parallel(&mut subsamples, &key, &iv);
+        assert!(result.is_ok(), "empty subsample slice should succeed");
     }
 }

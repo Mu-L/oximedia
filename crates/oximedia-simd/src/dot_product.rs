@@ -16,7 +16,11 @@ pub fn dot_u8(a: &[u8], b: &[u8]) -> Option<u64> {
     if a.len() != b.len() {
         return None;
     }
-    let sum: u64 = a.iter().zip(b.iter()).map(|(&x, &y)| u64::from(x) * u64::from(y)).sum();
+    let sum: u64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| u64::from(x) * u64::from(y))
+        .sum();
     Some(sum)
 }
 
@@ -27,7 +31,11 @@ pub fn dot_i16(a: &[i16], b: &[i16]) -> Option<i64> {
     if a.len() != b.len() {
         return None;
     }
-    let sum: i64 = a.iter().zip(b.iter()).map(|(&x, &y)| i64::from(x) * i64::from(y)).sum();
+    let sum: i64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| i64::from(x) * i64::from(y))
+        .sum();
     Some(sum)
 }
 
@@ -38,7 +46,11 @@ pub fn dot_i32(a: &[i32], b: &[i32]) -> Option<i64> {
     if a.len() != b.len() {
         return None;
     }
-    let sum: i64 = a.iter().zip(b.iter()).map(|(&x, &y)| i64::from(x) * i64::from(y)).sum();
+    let sum: i64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| i64::from(x) * i64::from(y))
+        .sum();
     Some(sum)
 }
 

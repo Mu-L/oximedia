@@ -30,6 +30,7 @@ pub fn low_240p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
     Preset::new(metadata, config)
 }
@@ -55,6 +56,7 @@ pub fn low_360p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
     Preset::new(metadata, config)
 }
@@ -80,6 +82,7 @@ pub fn low_480p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
     Preset::new(metadata, config)
 }

@@ -1,10 +1,10 @@
 [package]
 name = "oximedia-collab"
 version.workspace = true
-edition = "2021"
-authors = ["OxiMedia Contributors"]
+edition.workspace = true
+authors.workspace = true
 description = "Real-time collaboration system for multi-user video editing"
-license = "Apache-2.0"
+license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
@@ -16,7 +16,7 @@ tokio = { workspace = true }
 yrs = "0.25"
 serde = { workspace = true }
 serde_json = { workspace = true }
-oxicode = { version = "0.1", features = ["serde"] }
+oxicode = { version = "0.2", features = ["serde"] }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 async-trait = { workspace = true }

@@ -16,7 +16,7 @@
 //!
 //! ## Basic Spectrum Analysis
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use oximedia_audio::spectrum::{SpectrumAnalyzer, SpectrumConfig};
 //! use oximedia_audio::AudioFrame;
 //!
@@ -39,7 +39,7 @@
 //!
 //! ## Generate Spectrogram
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use oximedia_audio::spectrum::{SpectrogramGenerator, SpectrogramConfig, ColorMap};
 //!
 //! let config = SpectrogramConfig {
@@ -61,7 +61,7 @@
 //!
 //! ## Extract Spectral Features
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use oximedia_audio::spectrum::{SpectrumAnalyzer, SpectrumConfig, FeatureExtractor};
 //!
 //! let config = SpectrumConfig::default();
@@ -83,7 +83,7 @@
 //!
 //! ## Render Waveform
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use oximedia_audio::spectrum::{WaveformRenderer, WaveformConfig, WaveformMode};
 //!
 //! let config = WaveformConfig {

@@ -2,9 +2,23 @@
 //!
 //! Models the radial colour fringing produced by imperfect lens optics where
 //! different wavelengths focus at slightly different points.
+//!
+//! # Overview
+//!
+//! Two complementary models are provided:
+//!
+//! 1. **[`AberrationSimulator`]** — simple lateral chromatic aberration via
+//!    per-channel normalised coordinate offsets (fast, good for stylised looks).
+//!
+//! 2. **[`ChromaticAberrationEffect`]** — physically-based model combining
+//!    Brown-Conrady radial lens distortion with per-channel dispersion.  Each
+//!    colour channel is individually warped using slightly different distortion
+//!    coefficients, reproducing the rainbow fringing seen in real glass optics.
+//!    This implements the [`crate::VideoEffect`] trait for use in effect chains.
 
 #![allow(dead_code)]
 
+use crate::{EffectParams, Frame, VfxError, VfxResult, VideoEffect};
 use serde::{Deserialize, Serialize};
 
 /// Axis along which lateral chromatic aberration is expressed.
@@ -216,6 +230,324 @@ impl AberrationSimulator {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Brown-Conrady Lens Distortion Model
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Brown-Conrady lens distortion coefficients.
+///
+/// Models both radial (`k1`, `k2`, `k3`) and tangential (`p1`, `p2`) distortion
+/// as used in OpenCV camera calibration.  Chromatic aberration is achieved by
+/// assigning slightly different coefficients to each colour channel.
+///
+/// Reference: D.C. Brown, "Decentering Distortion of Lenses", 1966.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct LensDistortionCoeffs {
+    /// Radial distortion coefficient k1 (2nd-order).
+    pub k1: f32,
+    /// Radial distortion coefficient k2 (4th-order).
+    pub k2: f32,
+    /// Radial distortion coefficient k3 (6th-order).
+    pub k3: f32,
+    /// Tangential distortion coefficient p1.
+    pub p1: f32,
+    /// Tangential distortion coefficient p2.
+    pub p2: f32,
+}
+
+impl LensDistortionCoeffs {
+    /// Identity (no distortion).
+    #[must_use]
+    pub const fn identity() -> Self {
+        Self {
+            k1: 0.0,
+            k2: 0.0,
+            k3: 0.0,
+            p1: 0.0,
+            p2: 0.0,
+        }
+    }
+
+    /// Typical moderate barrel distortion (consumer zoom lens).
+    #[must_use]
+    pub const fn barrel() -> Self {
+        Self {
+            k1: -0.25,
+            k2: 0.05,
+            k3: 0.0,
+            p1: 0.0,
+            p2: 0.0,
+        }
+    }
+
+    /// Apply distortion to a normalised image coordinate `(x, y)` where
+    /// `(0, 0)` is the principal point and `(1, 1)` is the corner.
+    ///
+    /// Returns the distorted coordinate.
+    #[must_use]
+    pub fn apply(&self, x: f32, y: f32) -> (f32, f32) {
+        let r2 = x * x + y * y;
+        let r4 = r2 * r2;
+        let r6 = r4 * r2;
+
+        let radial = 1.0 + self.k1 * r2 + self.k2 * r4 + self.k3 * r6;
+
+        let xd = x * radial + 2.0 * self.p1 * x * y + self.p2 * (r2 + 2.0 * x * x);
+        let yd = y * radial + self.p1 * (r2 + 2.0 * y * y) + 2.0 * self.p2 * x * y;
+
+        (xd, yd)
+    }
+}
+
+impl Default for LensDistortionCoeffs {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
+/// Per-channel lens distortion coefficients for chromatic aberration.
+///
+/// Chromatic aberration arises because different wavelengths of light are
+/// refracted differently by glass.  By assigning slightly different distortion
+/// coefficients to the R, G, and B channels we reproduce this effect.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerChannelDistortion {
+    /// Coefficients for the red channel (longest visible wavelength → least refracted).
+    pub red: LensDistortionCoeffs,
+    /// Coefficients for the green channel (reference / least aberrated).
+    pub green: LensDistortionCoeffs,
+    /// Coefficients for the blue channel (shortest visible wavelength → most refracted).
+    pub blue: LensDistortionCoeffs,
+}
+
+impl PerChannelDistortion {
+    /// Identity — no distortion on any channel.
+    #[must_use]
+    pub fn identity() -> Self {
+        Self {
+            red: LensDistortionCoeffs::identity(),
+            green: LensDistortionCoeffs::identity(),
+            blue: LensDistortionCoeffs::identity(),
+        }
+    }
+
+    /// A typical lens chromatic aberration pattern:
+    /// - Red channel: slightly less distorted (magnified).
+    /// - Green channel: reference (nominal distortion).
+    /// - Blue channel: slightly more distorted (de-magnified).
+    ///
+    /// `strength` scales the inter-channel difference (0.0 = identity, 1.0 = default).
+    #[must_use]
+    pub fn typical(strength: f32) -> Self {
+        let s = strength.clamp(0.0, 4.0);
+        Self {
+            red: LensDistortionCoeffs {
+                k1: -0.2 + 0.02 * s,
+                k2: 0.04,
+                k3: 0.0,
+                p1: 0.0,
+                p2: 0.0,
+            },
+            green: LensDistortionCoeffs {
+                k1: -0.22,
+                k2: 0.04,
+                k3: 0.0,
+                p1: 0.0,
+                p2: 0.0,
+            },
+            blue: LensDistortionCoeffs {
+                k1: -0.24 - 0.02 * s,
+                k2: 0.04,
+                k3: 0.0,
+                p1: 0.0,
+                p2: 0.0,
+            },
+        }
+    }
+}
+
+impl Default for PerChannelDistortion {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ChromaticAberrationEffect  (VideoEffect)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Physically-based chromatic aberration effect implementing [`VideoEffect`].
+///
+/// Each colour channel (R, G, B) is independently sampled at a position warped
+/// by its own Brown-Conrady lens distortion coefficients.  The alpha channel is
+/// taken from the green (reference) channel position.
+///
+/// This produces the rainbow fringing typical of real optical systems rather
+/// than the uniform lateral shift of [`AberrationSimulator`].
+pub struct ChromaticAberrationEffect {
+    /// Per-channel distortion parameters.
+    pub distortion: PerChannelDistortion,
+    /// Global strength blend: 0.0 = original image, 1.0 = full effect.
+    pub strength: f32,
+}
+
+impl ChromaticAberrationEffect {
+    /// Create an identity effect (no aberration).
+    #[must_use]
+    pub fn identity() -> Self {
+        Self {
+            distortion: PerChannelDistortion::identity(),
+            strength: 1.0,
+        }
+    }
+
+    /// Create with typical lens chromatic aberration at the given strength.
+    #[must_use]
+    pub fn typical(strength: f32) -> Self {
+        Self {
+            distortion: PerChannelDistortion::typical(strength),
+            strength: strength.clamp(0.0, 4.0),
+        }
+    }
+
+    /// Bilinearly sample `channel` (0=R, 1=G, 2=B) from an RGBA pixel buffer
+    /// at normalised floating-point coordinates `(nx, ny)` ∈ [0, 1].
+    fn sample_channel(
+        pixels: &[u8],
+        width: usize,
+        height: usize,
+        nx: f32,
+        ny: f32,
+        channel: usize,
+    ) -> u8 {
+        let fx = nx * (width as f32 - 1.0);
+        let fy = ny * (height as f32 - 1.0);
+
+        let x0 = (fx.floor() as i32).clamp(0, width as i32 - 1) as usize;
+        let y0 = (fy.floor() as i32).clamp(0, height as i32 - 1) as usize;
+        let x1 = (x0 + 1).min(width - 1);
+        let y1 = (y0 + 1).min(height - 1);
+
+        let tx = fx - fx.floor();
+        let ty = fy - fy.floor();
+
+        let p00 = pixels[(y0 * width + x0) * 4 + channel] as f32;
+        let p10 = pixels[(y0 * width + x1) * 4 + channel] as f32;
+        let p01 = pixels[(y1 * width + x0) * 4 + channel] as f32;
+        let p11 = pixels[(y1 * width + x1) * 4 + channel] as f32;
+
+        let top = p00 * (1.0 - tx) + p10 * tx;
+        let bot = p01 * (1.0 - tx) + p11 * tx;
+        (top * (1.0 - ty) + bot * ty).clamp(0.0, 255.0) as u8
+    }
+
+    /// Map a distorted normalised coordinate back to [0, 1] image space.
+    ///
+    /// The principal point is at (0.5, 0.5).  The normalised coordinate system
+    /// centred on the principal point uses the half-diagonal as the unit length.
+    fn to_image_coord(coeffs: &LensDistortionCoeffs, nx: f32, ny: f32) -> (f32, f32) {
+        // Convert image [0,1] coords to normalised coords centred at (0,0)
+        let cx = nx * 2.0 - 1.0; // [-1, 1]
+        let cy = ny * 2.0 - 1.0;
+
+        let (dx, dy) = coeffs.apply(cx, cy);
+
+        // Back to [0, 1]
+        let out_x = (dx + 1.0) / 2.0;
+        let out_y = (dy + 1.0) / 2.0;
+        (out_x, out_y)
+    }
+}
+
+impl Default for ChromaticAberrationEffect {
+    fn default() -> Self {
+        Self::typical(1.0)
+    }
+}
+
+impl VideoEffect for ChromaticAberrationEffect {
+    fn name(&self) -> &str {
+        "ChromaticAberration"
+    }
+
+    fn description(&self) -> &'static str {
+        "Physically-based per-channel lens distortion producing chromatic aberration"
+    }
+
+    fn apply(
+        &mut self,
+        input: &Frame,
+        output: &mut Frame,
+        _params: &EffectParams,
+    ) -> VfxResult<()> {
+        if input.width != output.width || input.height != output.height {
+            return Err(VfxError::InvalidDimensions {
+                width: output.width,
+                height: output.height,
+            });
+        }
+
+        let w = input.width as usize;
+        let h = input.height as usize;
+
+        if w == 0 || h == 0 {
+            return Ok(());
+        }
+
+        let pixels = &input.data;
+        let strength = self.strength.clamp(0.0, 4.0);
+        let inv_strength = 1.0 - strength.min(1.0);
+
+        for py in 0..h {
+            for px in 0..w {
+                let nx = px as f32 / (w as f32 - 1.0).max(1.0);
+                let ny = py as f32 / (h as f32 - 1.0).max(1.0);
+
+                // Compute distorted coords per channel
+                let (rx, ry) = Self::to_image_coord(&self.distortion.red, nx, ny);
+                let (gx, gy) = Self::to_image_coord(&self.distortion.green, nx, ny);
+                let (bx, by) = Self::to_image_coord(&self.distortion.blue, nx, ny);
+
+                let r = Self::sample_channel(pixels, w, h, rx, ry, 0);
+                let g = Self::sample_channel(pixels, w, h, gx, gy, 1);
+                let b = Self::sample_channel(pixels, w, h, bx, by, 2);
+                // Alpha from green (reference) channel
+                let a = Self::sample_channel(pixels, w, h, gx, gy, 3);
+
+                let base_idx = (py * w + px) * 4;
+                let orig = [
+                    pixels[base_idx],
+                    pixels[base_idx + 1],
+                    pixels[base_idx + 2],
+                    pixels[base_idx + 3],
+                ];
+
+                let out_pixel = if inv_strength > 0.0 {
+                    [
+                        (orig[0] as f32 * inv_strength + r as f32 * strength).clamp(0.0, 255.0)
+                            as u8,
+                        (orig[1] as f32 * inv_strength + g as f32 * strength).clamp(0.0, 255.0)
+                            as u8,
+                        (orig[2] as f32 * inv_strength + b as f32 * strength).clamp(0.0, 255.0)
+                            as u8,
+                        a,
+                    ]
+                } else {
+                    [r, g, b, a]
+                };
+
+                output.set_pixel(px as u32, py as u32, out_pixel);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn supports_gpu(&self) -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +671,115 @@ mod tests {
         let bad_pixels = vec![0u8; 10]; // wrong size
         let result = sim.apply(&bad_pixels);
         assert_eq!(result, bad_pixels);
+    }
+
+    // ── LensDistortionCoeffs ───────────────────────────────────────────────
+
+    #[test]
+    fn test_lens_distortion_identity_no_change() {
+        let coeff = LensDistortionCoeffs::identity();
+        let (xd, yd) = coeff.apply(0.5, 0.3);
+        assert!((xd - 0.5).abs() < 1e-5, "x unchanged by identity");
+        assert!((yd - 0.3).abs() < 1e-5, "y unchanged by identity");
+    }
+
+    #[test]
+    fn test_lens_distortion_centre_unchanged() {
+        // At (0,0) all radial terms vanish
+        let coeff = LensDistortionCoeffs::barrel();
+        let (xd, yd) = coeff.apply(0.0, 0.0);
+        assert!(xd.abs() < 1e-6);
+        assert!(yd.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_lens_distortion_barrel_moves_corner_inward() {
+        // Barrel distortion (k1 < 0) should move the corner closer to centre
+        let coeff = LensDistortionCoeffs::barrel();
+        let (xd, _) = coeff.apply(0.7, 0.0);
+        // |xd| < |x| for barrel distortion
+        assert!(xd.abs() < 0.7, "barrel should reduce magnitude, got {xd}");
+    }
+
+    // ── PerChannelDistortion ───────────────────────────────────────────────
+
+    #[test]
+    fn test_per_channel_identity_all_same() {
+        let pcd = PerChannelDistortion::identity();
+        let (rx, _) = pcd.red.apply(0.5, 0.5);
+        let (gx, _) = pcd.green.apply(0.5, 0.5);
+        let (bx, _) = pcd.blue.apply(0.5, 0.5);
+        assert!((rx - gx).abs() < 1e-5);
+        assert!((bx - gx).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_per_channel_typical_channels_differ() {
+        let pcd = PerChannelDistortion::typical(1.0);
+        let (rx, _) = pcd.red.apply(0.8, 0.0);
+        let (bx, _) = pcd.blue.apply(0.8, 0.0);
+        // Red and blue channels should produce different displacements
+        assert!((rx - bx).abs() > 1e-4, "R and B channels should differ");
+    }
+
+    // ── ChromaticAberrationEffect ──────────────────────────────────────────
+
+    #[test]
+    fn test_ca_effect_name() {
+        let e = ChromaticAberrationEffect::identity();
+        assert_eq!(e.name(), "ChromaticAberration");
+        assert!(!e.description().is_empty());
+    }
+
+    #[test]
+    fn test_ca_effect_identity_preserves_uniform_image() {
+        let mut effect = ChromaticAberrationEffect::identity();
+        let mut input = Frame::new(16, 16).expect("frame");
+        input.clear([200, 100, 50, 255]);
+        let mut output = Frame::new(16, 16).expect("frame");
+        let params = EffectParams::new();
+        effect.apply(&input, &mut output, &params).expect("apply");
+        // On a uniform source image the identity effect should produce identical pixels
+        let p = output.get_pixel(8, 8).expect("center");
+        assert_eq!(p[0], 200, "R channel");
+        assert_eq!(p[1], 100, "G channel");
+    }
+
+    #[test]
+    fn test_ca_effect_dimension_mismatch() {
+        let mut effect = ChromaticAberrationEffect::typical(1.0);
+        let input = Frame::new(16, 16).expect("frame");
+        let mut output = Frame::new(8, 8).expect("frame");
+        assert!(effect
+            .apply(&input, &mut output, &EffectParams::new())
+            .is_err());
+    }
+
+    #[test]
+    fn test_ca_effect_output_same_size() {
+        let mut effect = ChromaticAberrationEffect::typical(0.5);
+        let mut input = Frame::new(32, 32).expect("frame");
+        input.clear([100, 150, 200, 255]);
+        let mut output = Frame::new(32, 32).expect("frame");
+        effect
+            .apply(&input, &mut output, &EffectParams::new())
+            .expect("apply");
+        assert_eq!(output.width, 32);
+        assert_eq!(output.height, 32);
+    }
+
+    #[test]
+    fn test_ca_effect_uniform_source_unchanged() {
+        // On a solid colour image any warp should produce the same colour
+        let mut effect = ChromaticAberrationEffect::typical(2.0);
+        let mut input = Frame::new(32, 32).expect("frame");
+        input.clear([180, 90, 45, 255]);
+        let mut output = Frame::new(32, 32).expect("frame");
+        effect
+            .apply(&input, &mut output, &EffectParams::new())
+            .expect("apply");
+        let p = output.get_pixel(16, 16).expect("center");
+        assert!((p[0] as i32 - 180).abs() <= 2, "R: {}", p[0]);
+        assert!((p[1] as i32 - 90).abs() <= 2, "G: {}", p[1]);
     }
 }

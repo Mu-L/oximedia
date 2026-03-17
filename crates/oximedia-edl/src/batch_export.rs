@@ -2,9 +2,17 @@
 //!
 //! Provides types and operations for exporting multiple EDL sequences
 //! in various formats as a batch operation.
+//!
+//! The [`BatchEdlExporter`] type offers a [`BatchEdlExporter::export_parallel`]
+//! method that processes multiple [`crate::Edl`] structs concurrently via rayon.
 
 #![allow(dead_code)]
 #![allow(clippy::cast_precision_loss)]
+
+use crate::error::{EdlError, EdlResult};
+use crate::{Edl, EdlGenerator};
+use rayon::prelude::*;
+use std::path::{Path, PathBuf};
 
 /// Supported export formats for EDL batch export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +265,99 @@ impl BatchExportSummary {
     }
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// BatchEdlExporter — parallel multi-EDL export
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Exports multiple [`Edl`] documents to individual files in an output
+/// directory, optionally in parallel via rayon.
+///
+/// Each EDL is written to `<output_dir>/<title_or_index>.edl`.  When the EDL
+/// has no title, the file is named `edl_<index>.edl`.
+#[derive(Debug, Default)]
+pub struct BatchEdlExporter {
+    /// EDL generator used for serialisation.
+    generator: EdlGenerator,
+}
+
+impl BatchEdlExporter {
+    /// Create a new exporter with default generator settings.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            generator: EdlGenerator::new(),
+        }
+    }
+
+    /// Create a new exporter with a custom generator.
+    #[must_use]
+    pub fn with_generator(generator: EdlGenerator) -> Self {
+        Self { generator }
+    }
+
+    /// Export a collection of EDLs to `output_dir` using rayon parallel iteration.
+    ///
+    /// Each element of the returned `Vec` corresponds positionally to an EDL in
+    /// `edls`.  A successful export contains the [`PathBuf`] of the written
+    /// file; a failed export contains the [`EdlError`] that caused the failure.
+    ///
+    /// The method creates `output_dir` and any necessary parent directories
+    /// before writing.  Individual file errors do **not** abort the batch —
+    /// every EDL is attempted regardless of other failures.
+    pub fn export_parallel(&self, edls: Vec<Edl>, output_dir: &Path) -> Vec<EdlResult<PathBuf>> {
+        // Create output directory upfront; propagate as errors for every item if
+        // this fails (we cannot write any file without the directory).
+        if let Err(io_err) = std::fs::create_dir_all(output_dir) {
+            let wrapped = EdlError::Io(io_err);
+            return edls
+                .into_iter()
+                .map(|_| Err(EdlError::Io(std::io::Error::other(wrapped.to_string()))))
+                .collect();
+        }
+
+        let generator = &self.generator;
+        let output_dir_ref = output_dir;
+
+        // Enumerate before par_iter so each item can derive its own filename.
+        let indexed: Vec<(usize, Edl)> = edls.into_iter().enumerate().collect();
+
+        indexed
+            .into_par_iter()
+            .map(|(idx, edl)| {
+                let stem = edl
+                    .title
+                    .as_deref()
+                    .map(sanitize_filename)
+                    .unwrap_or_else(|| format!("edl_{idx:04}"));
+
+                let file_path = output_dir_ref.join(format!("{stem}.edl"));
+
+                let content = generator.generate(&edl)?;
+                std::fs::write(&file_path, &content).map_err(EdlError::Io)?;
+                Ok(file_path)
+            })
+            .collect()
+    }
+}
+
+/// Replace characters that are invalid in file names with underscores.
+fn sanitize_filename(title: &str) -> String {
+    title
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Tests
+// ────────────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,5 +537,92 @@ mod tests {
     fn test_export_format_equality() {
         assert_eq!(ExportFormat::Cmx3600, ExportFormat::Cmx3600);
         assert_ne!(ExportFormat::Cmx3600, ExportFormat::FcpXml);
+    }
+
+    // ── BatchEdlExporter tests ───────────────────────────────────────────────
+
+    use crate::event::{EditType, EdlEvent, TrackType};
+    use crate::timecode::{EdlFrameRate, EdlTimecode};
+    use crate::EdlFormat;
+
+    fn make_test_edl(title: &str, reel: &str) -> Edl {
+        let mut edl = Edl::new(EdlFormat::Cmx3600);
+        edl.set_title(title.to_string());
+        edl.set_frame_rate(EdlFrameRate::Fps25);
+        let tc1 = EdlTimecode::new(1, 0, 0, 0, EdlFrameRate::Fps25).expect("valid tc");
+        let tc2 = EdlTimecode::new(1, 0, 5, 0, EdlFrameRate::Fps25).expect("valid tc");
+        let event = EdlEvent::new(
+            1,
+            reel.to_string(),
+            TrackType::Video,
+            EditType::Cut,
+            tc1,
+            tc2,
+            tc1,
+            tc2,
+        );
+        edl.add_event(event).expect("add event");
+        edl
+    }
+
+    #[test]
+    fn test_batch_edl_exporter_export_parallel() {
+        let output_dir = std::env::temp_dir().join("oximedia_edl_batch_test");
+
+        let edls = vec![
+            make_test_edl("Alpha Sequence", "A001"),
+            make_test_edl("Beta Sequence", "B001"),
+            make_test_edl("Gamma Sequence", "C001"),
+        ];
+
+        let exporter = BatchEdlExporter::new();
+        let results = exporter.export_parallel(edls, &output_dir);
+
+        assert_eq!(results.len(), 3, "should have one result per EDL");
+
+        for result in &results {
+            assert!(result.is_ok(), "export should succeed: {result:?}");
+        }
+
+        let paths: Vec<PathBuf> = results.into_iter().map(|r| r.expect("ok")).collect();
+
+        // All files should exist and be non-empty.
+        for path in &paths {
+            assert!(path.exists(), "output file should exist: {path:?}");
+            let content = std::fs::read_to_string(path).expect("read file");
+            assert!(!content.is_empty(), "exported EDL should not be empty");
+        }
+
+        // Clean up.
+        for path in &paths {
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir(&output_dir);
+    }
+
+    #[test]
+    fn test_batch_edl_exporter_unnamed_edls() {
+        let output_dir = std::env::temp_dir().join("oximedia_edl_batch_unnamed_test");
+
+        // EDLs without titles should receive auto-generated filenames.
+        let edls = vec![Edl::new(EdlFormat::Cmx3600), Edl::new(EdlFormat::Cmx3600)];
+
+        let exporter = BatchEdlExporter::new();
+        let results = exporter.export_parallel(edls, &output_dir);
+
+        assert_eq!(results.len(), 2);
+        for result in &results {
+            assert!(
+                result.is_ok(),
+                "export of untitled EDL should succeed: {result:?}"
+            );
+        }
+
+        let paths: Vec<PathBuf> = results.into_iter().map(|r| r.expect("ok")).collect();
+        for path in &paths {
+            assert!(path.exists());
+            let _ = std::fs::remove_file(path);
+        }
+        let _ = std::fs::remove_dir(&output_dir);
     }
 }

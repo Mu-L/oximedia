@@ -203,8 +203,7 @@ pub use colormgmt_wasm::{
     wasm_gamut_check, wasm_list_colorspaces, wasm_list_tone_map_operators, WasmColorPipeline,
 };
 pub use conform_wasm::{
-    wasm_check_conform, wasm_get_delivery_spec, wasm_list_delivery_specs,
-    wasm_validate_against_spec,
+    wasm_check_conform, wasm_get_delivery_spec, wasm_list_conform_specs, wasm_validate_against_spec,
 };
 pub use convert::{wasm_convert_sample_format, wasm_resample};
 pub use convert_wasm::{
@@ -267,8 +266,8 @@ pub use proxy_wasm::{
 pub use qc_wasm::{wasm_list_qc_rules, wasm_qc_check, wasm_qc_validate_frame};
 pub use quality_wasm::{wasm_compute_psnr, wasm_compute_ssim, wasm_frame_quality};
 pub use recommend_wasm::{
-    wasm_analyze_content, wasm_recommend_codec as wasm_recommend_codec_for_usecase,
-    wasm_recommend_settings as wasm_recommend_encoding_settings, wasm_recommendation_strategies,
+    wasm_analyze_content, wasm_recommend_codec_for_use_case, wasm_recommend_encoding_settings,
+    wasm_recommendation_strategies,
 };
 pub use renderfarm_wasm::{wasm_estimate_render_time, wasm_farm_node_types, wasm_farm_status};
 pub use restore_wasm::{wasm_analyze_degradation, wasm_declip_audio, wasm_restore_audio_samples};

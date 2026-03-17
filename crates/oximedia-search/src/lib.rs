@@ -35,13 +35,19 @@
 //! # Example
 //!
 //! ```
-//! use oximedia_search::{SearchEngine, SearchQuery};
+//! use oximedia_search::SearchQuery;
 //!
-//! // Create a search engine
-//! // let engine = SearchEngine::new("/path/to/index")?;
-//!
-//! // Execute a search
-//! // let results = engine.search(&query)?;
+//! // Build a query
+//! let query = SearchQuery {
+//!     text: Some("rainforest documentary".to_string()),
+//!     visual: None,
+//!     audio: None,
+//!     filters: Default::default(),
+//!     limit: 20,
+//!     offset: 0,
+//!     sort: Default::default(),
+//! };
+//! assert!(query.text.is_some());
 //! ```
 
 #![forbid(unsafe_code)]
@@ -60,10 +66,14 @@ pub mod audio;
 pub mod bool_query;
 pub mod cache;
 pub mod color;
+pub mod duplicate_detection;
+pub mod embedding_search;
 pub mod error;
 pub mod face;
 pub mod facet;
 pub mod facets;
+pub mod geo_search;
+pub mod hierarchical_facets;
 pub mod index;
 pub mod index_builder;
 pub mod index_stats;
@@ -75,10 +85,15 @@ pub mod query_parser;
 pub mod range;
 pub mod rank;
 pub mod ranking;
+pub mod related_content;
 pub mod relevance_score;
+pub mod result_cache;
 pub mod reverse;
+pub mod saved_search;
+pub mod search_ab_test;
 pub mod search_analytics;
 pub mod search_cluster;
+pub mod search_export;
 pub mod search_federation;
 pub mod search_filter;
 pub mod search_pipeline;
@@ -91,15 +106,18 @@ pub mod spell_suggest;
 pub mod temporal;
 pub mod text;
 pub mod visual;
+pub mod vp_tree;
 
 // Re-export commonly used items
 pub use error::{SearchError, SearchResult};
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "search-engine")]
 use std::path::Path;
 use uuid::Uuid;
 
 /// Main search engine coordinating all search capabilities
+#[cfg(feature = "search-engine")]
 pub struct SearchEngine {
     /// Text search index
     text_index: text::search::TextSearchIndex,
@@ -163,6 +181,41 @@ pub struct SearchFilters {
     pub has_ocr: Option<bool>,
     /// Specific face IDs to match
     pub face_ids: Vec<Uuid>,
+    /// Codec-specific filters for detailed media property filtering
+    pub codec_filters: Option<CodecFilters>,
+}
+
+/// Codec-specific filters for detailed media property filtering.
+///
+/// Allows narrowing search results by technical media attributes such as
+/// bit depth, sample rate, frame rate, color space, and channel layout.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CodecFilters {
+    /// Audio/video bit depth range (e.g., 8, 10, 16, 24)
+    pub bit_depth_range: Option<(u32, u32)>,
+    /// Audio sample rate range in Hz (e.g., 44100..96000)
+    pub sample_rate_range: Option<(u32, u32)>,
+    /// Video frame rate range (e.g., 23.976..60.0)
+    pub frame_rate_range: Option<(f64, f64)>,
+    /// Color space filter (e.g., "bt709", "bt2020", "srgb", "p3")
+    pub color_spaces: Vec<String>,
+    /// Audio channel count range (e.g., 1..8)
+    pub channel_count_range: Option<(u32, u32)>,
+    /// Video scan type filter
+    pub scan_type: Option<ScanType>,
+    /// Chroma subsampling filter (e.g., "4:2:0", "4:2:2", "4:4:4")
+    pub chroma_subsampling: Vec<String>,
+    /// Bitrate range in bits per second
+    pub bitrate_range: Option<(u64, u64)>,
+}
+
+/// Video scan type for filtering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScanType {
+    /// Progressive scan
+    Progressive,
+    /// Interlaced scan
+    Interlaced,
 }
 
 /// Sort options for search results
@@ -219,6 +272,10 @@ pub struct SearchResultItem {
     pub duration_ms: Option<i64>,
     /// Created timestamp
     pub created_at: i64,
+    /// Modified timestamp (unix seconds)
+    pub modified_at: Option<i64>,
+    /// File size in bytes
+    pub file_size: Option<u64>,
     /// Matched fields (for highlighting)
     pub matched_fields: Vec<String>,
     /// Thumbnail URL
@@ -242,6 +299,7 @@ pub struct SearchResults {
     pub query_time_ms: u64,
 }
 
+#[cfg(feature = "search-engine")]
 impl SearchEngine {
     /// Create a new search engine
     ///
@@ -302,6 +360,15 @@ impl SearchEngine {
         // Sort results
         let sorted_results = self.sort_results(filtered_results, &query.sort);
 
+        // Collect facets — aggregate over the full (pre-pagination) result set
+        // so that every facet bucket reflects all matching documents, not just
+        // the current page.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let facets = facet::aggregation::aggregate_facets(&sorted_results, now_secs);
+
         // Paginate
         let total = sorted_results.len();
         let paginated: Vec<_> = sorted_results
@@ -309,9 +376,6 @@ impl SearchEngine {
             .skip(query.offset)
             .take(query.limit)
             .collect();
-
-        // Collect facets
-        let facets = facet::aggregation::Facets::default();
 
         let query_time_ms = start.elapsed().as_millis() as u64;
 
@@ -363,6 +427,18 @@ impl SearchEngine {
                     }
                 }
 
+                // File size range filter
+                if let Some((min, max)) = filters.file_size_range {
+                    if let Some(size) = item.file_size {
+                        let size_i64 = size as i64;
+                        if size_i64 < min || size_i64 > max {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+
                 true
             })
             .collect()
@@ -376,19 +452,28 @@ impl SearchEngine {
     ) -> Vec<SearchResultItem> {
         results.sort_by(|a, b| {
             let cmp = match sort.field {
-                SortField::Relevance => b
-                    .score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal),
+                SortField::Relevance => b.score.total_cmp(&a.score),
                 SortField::CreatedAt => b.created_at.cmp(&a.created_at),
-                SortField::ModifiedAt => b.created_at.cmp(&a.created_at), // Using created_at as proxy
-                SortField::Duration => b.duration_ms.unwrap_or(0).cmp(&a.duration_ms.unwrap_or(0)),
-                SortField::FileSize => std::cmp::Ordering::Equal, // Not available in result
-                SortField::Title => a
-                    .title
-                    .as_ref()
-                    .unwrap_or(&String::new())
-                    .cmp(b.title.as_ref().unwrap_or(&String::new())),
+                SortField::ModifiedAt => {
+                    let a_mod = a.modified_at.unwrap_or(a.created_at);
+                    let b_mod = b.modified_at.unwrap_or(b.created_at);
+                    b_mod.cmp(&a_mod)
+                }
+                SortField::Duration => {
+                    let a_dur = a.duration_ms.unwrap_or(i64::MIN);
+                    let b_dur = b.duration_ms.unwrap_or(i64::MIN);
+                    b_dur.cmp(&a_dur)
+                }
+                SortField::FileSize => {
+                    let a_size = a.file_size.unwrap_or(0);
+                    let b_size = b.file_size.unwrap_or(0);
+                    b_size.cmp(&a_size)
+                }
+                SortField::Title => {
+                    let a_title = a.title.as_deref().unwrap_or("");
+                    let b_title = b.title.as_deref().unwrap_or("");
+                    a_title.cmp(b_title)
+                }
             };
 
             match sort.order {
@@ -483,11 +568,37 @@ impl Default for SortOptions {
 mod tests {
     use super::*;
 
+    fn make_test_item(
+        title: Option<&str>,
+        score: f32,
+        created_at: i64,
+        modified_at: Option<i64>,
+        file_size: Option<u64>,
+        duration_ms: Option<i64>,
+        mime_type: Option<&str>,
+    ) -> SearchResultItem {
+        SearchResultItem {
+            asset_id: Uuid::new_v4(),
+            score,
+            title: title.map(str::to_string),
+            description: None,
+            file_path: "/test/file.mp4".to_string(),
+            mime_type: mime_type.map(str::to_string),
+            duration_ms,
+            created_at,
+            modified_at,
+            file_size,
+            matched_fields: Vec::new(),
+            thumbnail_url: None,
+        }
+    }
+
     #[test]
     fn test_search_query_default() {
         let filters = SearchFilters::default();
         assert!(filters.mime_types.is_empty());
         assert!(filters.duration_range.is_none());
+        assert!(filters.codec_filters.is_none());
     }
 
     #[test]
@@ -495,5 +606,101 @@ mod tests {
         let sort = SortOptions::default();
         assert!(matches!(sort.field, SortField::Relevance));
         assert!(matches!(sort.order, SortOrder::Descending));
+    }
+
+    #[test]
+    fn test_search_result_item_has_modified_at() {
+        let item = make_test_item(Some("Test"), 1.0, 1000, Some(2000), None, None, None);
+        assert_eq!(item.modified_at, Some(2000));
+    }
+
+    #[test]
+    fn test_search_result_item_has_file_size() {
+        let item = make_test_item(Some("Test"), 1.0, 1000, None, Some(1_048_576), None, None);
+        assert_eq!(item.file_size, Some(1_048_576));
+    }
+
+    #[test]
+    fn test_codec_filters_default() {
+        let cf = CodecFilters::default();
+        assert!(cf.bit_depth_range.is_none());
+        assert!(cf.sample_rate_range.is_none());
+        assert!(cf.frame_rate_range.is_none());
+        assert!(cf.color_spaces.is_empty());
+        assert!(cf.channel_count_range.is_none());
+        assert!(cf.scan_type.is_none());
+        assert!(cf.chroma_subsampling.is_empty());
+        assert!(cf.bitrate_range.is_none());
+    }
+
+    #[test]
+    fn test_codec_filters_with_values() {
+        let cf = CodecFilters {
+            bit_depth_range: Some((8, 16)),
+            sample_rate_range: Some((44100, 96000)),
+            frame_rate_range: Some((23.976, 60.0)),
+            color_spaces: vec!["bt709".to_string(), "bt2020".to_string()],
+            channel_count_range: Some((2, 8)),
+            scan_type: Some(ScanType::Progressive),
+            chroma_subsampling: vec!["4:2:0".to_string()],
+            bitrate_range: Some((1_000_000, 50_000_000)),
+        };
+        assert_eq!(cf.bit_depth_range, Some((8, 16)));
+        assert_eq!(cf.sample_rate_range, Some((44100, 96000)));
+        assert!(cf.frame_rate_range.is_some());
+        assert_eq!(cf.color_spaces.len(), 2);
+        assert_eq!(cf.scan_type, Some(ScanType::Progressive));
+        assert_eq!(cf.chroma_subsampling.len(), 1);
+    }
+
+    #[test]
+    fn test_scan_type_equality() {
+        assert_eq!(ScanType::Progressive, ScanType::Progressive);
+        assert_ne!(ScanType::Progressive, ScanType::Interlaced);
+    }
+
+    #[test]
+    fn test_search_filters_with_codec_filters() {
+        let filters = SearchFilters {
+            codec_filters: Some(CodecFilters {
+                bit_depth_range: Some((10, 12)),
+                frame_rate_range: Some((24.0, 30.0)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(filters.codec_filters.is_some());
+        let cf = filters.codec_filters.as_ref().expect("should exist");
+        assert_eq!(cf.bit_depth_range, Some((10, 12)));
+    }
+
+    #[test]
+    fn test_codec_filters_serialization() {
+        let cf = CodecFilters {
+            bit_depth_range: Some((8, 16)),
+            scan_type: Some(ScanType::Interlaced),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cf).expect("should serialize");
+        assert!(json.contains("bit_depth_range"));
+        assert!(json.contains("Interlaced"));
+    }
+
+    #[test]
+    fn test_search_result_item_serialization_with_new_fields() {
+        let item = make_test_item(
+            Some("Test Video"),
+            0.95,
+            1000,
+            Some(2000),
+            Some(5_000_000),
+            Some(60_000),
+            Some("video/mp4"),
+        );
+        let json = serde_json::to_string(&item).expect("should serialize");
+        assert!(json.contains("modified_at"));
+        assert!(json.contains("file_size"));
+        assert!(json.contains("2000"));
+        assert!(json.contains("5000000"));
     }
 }

@@ -1,5 +1,6 @@
 //! Core clip data structures.
 
+use crate::camera_metadata::CameraMetadata;
 use crate::logging::Rating;
 use crate::marker::Marker;
 use chrono::{DateTime, Utc};
@@ -103,6 +104,9 @@ pub struct Clip {
 
     /// Custom metadata as JSON.
     pub custom_metadata: Option<String>,
+
+    /// Optional camera-specific technical metadata (lens, ISO, aperture, etc.).
+    pub camera: Option<CameraMetadata>,
 }
 
 impl Clip {
@@ -133,6 +137,7 @@ impl Clip {
             created_at: now,
             modified_at: now,
             custom_metadata: None,
+            camera: None,
         }
     }
 
@@ -252,6 +257,18 @@ impl Clip {
     #[must_use]
     pub fn file_exists(&self) -> bool {
         self.file_path.exists()
+    }
+
+    /// Sets the camera metadata for this clip.
+    pub fn set_camera_metadata(&mut self, camera: CameraMetadata) {
+        self.camera = Some(camera);
+        self.modified_at = Utc::now();
+    }
+
+    /// Clears the camera metadata.
+    pub fn clear_camera_metadata(&mut self) {
+        self.camera = None;
+        self.modified_at = Utc::now();
     }
 }
 

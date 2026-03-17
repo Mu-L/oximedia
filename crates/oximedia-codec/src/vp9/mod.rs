@@ -27,6 +27,7 @@ mod bitstream;
 mod coeff_decode;
 mod compressed;
 mod decoder;
+mod encoder;
 mod frame;
 mod inter;
 mod intra;
@@ -40,11 +41,15 @@ mod reference;
 mod segmentation;
 mod superframe;
 mod symbols;
+mod tile_encoder;
 mod transform;
 mod uncompressed;
 
 // Primary exports
 pub use decoder::Vp9Decoder;
+pub use encoder::{
+    SimpleVp9Encoder, Vp9EncConfig, Vp9Encoder, Vp9EncoderConfig, Vp9Packet, Vp9Profile,
+};
 pub use frame::{FrameType as Vp9FrameType, Vp9Frame};
 pub use superframe::{Superframe, SuperframeIndex};
 pub use uncompressed::{ColorSpace, UncompressedHeader, Vp9FrameType as HeaderFrameType};

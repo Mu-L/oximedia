@@ -9,8 +9,14 @@
 //! - **Quantization**: Compact binary fingerprints
 
 use crate::error::{CvError, CvResult};
+use oxifft::api::{Direction, Flags, Plan};
+use oxifft::Complex;
 use rayon::prelude::*;
-use rustfft::{num_complex::Complex, FftPlanner};
+
+/// Zero value for a Complex<f32>.
+fn complex_zero() -> Complex<f32> {
+    Complex::new(0.0_f32, 0.0_f32)
+}
 
 /// Audio fingerprint configuration.
 #[derive(Debug, Clone)]
@@ -139,14 +145,17 @@ fn compute_spectrogram(
     samples: &[f32],
     config: &AudioFingerprintConfig,
 ) -> CvResult<Vec<Vec<f32>>> {
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(config.frame_size);
+    // Build oxifft plan once — `Plan::dft_1d` returns Option<Plan>
+    let plan = Plan::dft_1d(config.frame_size, Direction::Forward, Flags::ESTIMATE)
+        .ok_or_else(|| CvError::detection_failed("FFT plan creation failed"))?;
 
-    let num_frames = (samples.len() - config.frame_size) / config.hop_size + 1;
+    let num_frames = (samples.len().saturating_sub(config.frame_size)) / config.hop_size + 1;
     let mut spectrogram = Vec::with_capacity(num_frames);
 
-    // Hanning window
+    // Hanning window (f32 for low-overhead)
     let window = create_hanning_window(config.frame_size);
+
+    let mut output = vec![complex_zero(); config.frame_size];
 
     for frame_idx in 0..num_frames {
         let start = frame_idx * config.hop_size;
@@ -156,20 +165,20 @@ fn compute_spectrogram(
             break;
         }
 
-        // Apply window and create complex buffer
-        let mut buffer: Vec<Complex<f32>> = samples[start..end]
+        // Apply Hanning window; create Complex<f32> input
+        let input: Vec<Complex<f32>> = samples[start..end]
             .iter()
             .zip(window.iter())
-            .map(|(&s, &w)| Complex::new(s * w, 0.0))
+            .map(|(&s, &w)| Complex::new(s * w, 0.0_f32))
             .collect();
 
-        // Perform FFT
-        fft.process(&mut buffer);
+        // Execute FFT: plan.execute(&input, &mut output)
+        plan.execute(&input, &mut output);
 
-        // Compute magnitude spectrum
-        let magnitudes: Vec<f32> = buffer[..config.frame_size / 2]
+        // Magnitude spectrum — take positive-frequency half
+        let magnitudes: Vec<f32> = output[..config.frame_size / 2]
             .iter()
-            .map(|c| c.norm())
+            .map(|c| (c.re * c.re + c.im * c.im).sqrt())
             .collect();
 
         spectrogram.push(magnitudes);

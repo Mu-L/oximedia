@@ -190,6 +190,10 @@ pub struct ValidationConfig {
     pub max_drift_ms: u64,
     /// Whether keyframe-at-start is required.
     pub require_keyframe_start: bool,
+    /// Minimum duration multiplier relative to target (e.g. 0.5 = 50% of target).
+    pub min_duration_factor: f64,
+    /// Maximum duration multiplier relative to target (e.g. 2.0 = 200% of target).
+    pub max_duration_factor: f64,
 }
 
 impl ValidationConfig {
@@ -203,6 +207,8 @@ impl ValidationConfig {
             min_segment_size: 100,
             max_drift_ms: 500,
             require_keyframe_start: true,
+            min_duration_factor: 0.5,
+            max_duration_factor: 2.0,
         }
     }
 
@@ -217,6 +223,20 @@ impl ValidationConfig {
     #[must_use]
     pub fn with_keyframe_required(mut self, required: bool) -> Self {
         self.require_keyframe_start = required;
+        self
+    }
+
+    /// Set the minimum duration factor (e.g. 0.5 means segment must be >= 50% of target).
+    #[must_use]
+    pub fn with_min_duration_factor(mut self, factor: f64) -> Self {
+        self.min_duration_factor = factor.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Set the maximum duration factor (e.g. 2.0 means segment must be <= 200% of target).
+    #[must_use]
+    pub fn with_max_duration_factor(mut self, factor: f64) -> Self {
+        self.max_duration_factor = factor.max(1.0);
         self
     }
 }
@@ -288,13 +308,14 @@ impl SegmentValidator {
         SegmentValidationResult::with_issues(metadata.index, issues)
     }
 
-    /// Check duration is within tolerance.
+    /// Check duration is within tolerance and hard bounds.
     #[allow(clippy::cast_precision_loss)]
     fn check_duration(&self, metadata: &SegmentMetadata, issues: &mut Vec<ValidationIssue>) {
         let target_ms = self.config.target_duration.as_millis() as f64;
         let actual_ms = metadata.duration.as_millis() as f64;
 
         if target_ms > 0.0 {
+            // Soft tolerance check (warning)
             let deviation = (actual_ms - target_ms).abs() / target_ms;
             if deviation > self.config.duration_tolerance {
                 issues.push(ValidationIssue::warning(
@@ -305,6 +326,28 @@ impl SegmentValidator {
                         actual_ms,
                         deviation * 100.0,
                         target_ms
+                    ),
+                ));
+            }
+
+            // Hard bounds check (error): segment must be within [min_factor, max_factor] of target
+            let min_ms = target_ms * self.config.min_duration_factor;
+            let max_ms = target_ms * self.config.max_duration_factor;
+
+            if actual_ms < min_ms {
+                issues.push(ValidationIssue::error(
+                    ValidationCode::DurationOutOfRange,
+                    format!(
+                        "Segment {} duration {:.0}ms is below hard minimum {:.0}ms ({:.0}x target)",
+                        metadata.index, actual_ms, min_ms, self.config.min_duration_factor,
+                    ),
+                ));
+            } else if actual_ms > max_ms {
+                issues.push(ValidationIssue::error(
+                    ValidationCode::DurationOutOfRange,
+                    format!(
+                        "Segment {} duration {:.0}ms exceeds hard maximum {:.0}ms ({:.0}x target)",
+                        metadata.index, actual_ms, max_ms, self.config.max_duration_factor,
                     ),
                 ));
             }
@@ -352,6 +395,50 @@ impl SegmentValidator {
                 ));
             }
         }
+    }
+
+    /// Validate that a segment duration is within the hard bounds
+    /// `[min_factor * target, max_factor * target]`.
+    ///
+    /// Returns `Ok(())` if within bounds, or an `Err` describing the violation.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn validate_duration_bounds(&self, segment: &SegmentMetadata) -> Result<(), String> {
+        let target_ms = self.config.target_duration.as_millis() as f64;
+        let actual_ms = segment.duration.as_millis() as f64;
+
+        if target_ms <= 0.0 {
+            return Ok(());
+        }
+
+        let min_ms = target_ms * self.config.min_duration_factor;
+        let max_ms = target_ms * self.config.max_duration_factor;
+
+        if actual_ms < min_ms {
+            return Err(format!(
+                "Segment {} duration {:.0}ms below minimum {:.0}ms",
+                segment.index, actual_ms, min_ms,
+            ));
+        }
+        if actual_ms > max_ms {
+            return Err(format!(
+                "Segment {} duration {:.0}ms exceeds maximum {:.0}ms",
+                segment.index, actual_ms, max_ms,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate duration bounds for an entire sequence.
+    /// Returns a list of (segment_index, error_message) for any violations.
+    #[must_use]
+    pub fn validate_sequence_bounds(&self, segments: &[SegmentMetadata]) -> Vec<(u64, String)> {
+        let mut violations = Vec::new();
+        for seg in segments {
+            if let Err(msg) = self.validate_duration_bounds(seg) {
+                violations.push((seg.index, msg));
+            }
+        }
+        violations
     }
 
     /// Compute total validated duration.
@@ -505,5 +592,133 @@ mod tests {
         assert_eq!(config.target_duration, Duration::from_secs(6));
         assert!((config.duration_tolerance - 0.1).abs() < f64::EPSILON);
         assert!(config.require_keyframe_start);
+        assert!((config.min_duration_factor - 0.5).abs() < f64::EPSILON);
+        assert!((config.max_duration_factor - 2.0).abs() < f64::EPSILON);
+    }
+
+    // --- Duration bounds tests (0.5x - 2x target) ---
+
+    #[test]
+    fn test_duration_within_bounds() {
+        // 6s target, segment at 6s => within [3s, 12s]
+        let validator = SegmentValidator::new(ValidationConfig::new(Duration::from_secs(6)));
+        let result = validator.validate_duration_bounds(&seg(0, 6000, 500_000));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_duration_at_lower_bound() {
+        // 6s target, segment at 3s (0.5x) => just within bounds
+        let validator = SegmentValidator::new(ValidationConfig::new(Duration::from_secs(6)));
+        let result = validator.validate_duration_bounds(&seg(0, 3000, 500_000));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_duration_at_upper_bound() {
+        // 6s target, segment at 12s (2.0x) => just within bounds
+        let validator = SegmentValidator::new(ValidationConfig::new(Duration::from_secs(6)));
+        let result = validator.validate_duration_bounds(&seg(0, 12000, 500_000));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_duration_below_lower_bound() {
+        // 6s target, segment at 2s => below 3s (0.5x)
+        let validator = SegmentValidator::new(ValidationConfig::new(Duration::from_secs(6)));
+        let result = validator.validate_duration_bounds(&seg(0, 2000, 500_000));
+        assert!(result.is_err());
+        let msg = result.expect_err("should be err");
+        assert!(msg.contains("below minimum"));
+    }
+
+    #[test]
+    fn test_duration_above_upper_bound() {
+        // 6s target, segment at 13s => above 12s (2.0x)
+        let validator = SegmentValidator::new(ValidationConfig::new(Duration::from_secs(6)));
+        let result = validator.validate_duration_bounds(&seg(0, 13000, 500_000));
+        assert!(result.is_err());
+        let msg = result.expect_err("should be err");
+        assert!(msg.contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn test_duration_bounds_custom_factors() {
+        let config = ValidationConfig::new(Duration::from_secs(6))
+            .with_min_duration_factor(0.8)
+            .with_max_duration_factor(1.2);
+        let validator = SegmentValidator::new(config);
+
+        // 6s * 0.8 = 4.8s min, 6s * 1.2 = 7.2s max
+        assert!(validator
+            .validate_duration_bounds(&seg(0, 5000, 1000))
+            .is_ok());
+        assert!(validator
+            .validate_duration_bounds(&seg(0, 7000, 1000))
+            .is_ok());
+        assert!(validator
+            .validate_duration_bounds(&seg(0, 4000, 1000))
+            .is_err());
+        assert!(validator
+            .validate_duration_bounds(&seg(0, 8000, 1000))
+            .is_err());
+    }
+
+    #[test]
+    fn test_validate_segment_hard_bounds_error() {
+        // Duration bounds violations produce errors, not just warnings
+        let validator = SegmentValidator::new(ValidationConfig::new(Duration::from_secs(6)));
+        // 1s segment => well below 0.5x (3s)
+        let result = validator.validate_segment(&seg(0, 1000, 500_000));
+        assert!(!result.is_valid);
+        assert!(result.has_errors());
+    }
+
+    #[test]
+    fn test_validate_segment_over_2x_error() {
+        let validator = SegmentValidator::new(ValidationConfig::new(Duration::from_secs(6)));
+        // 15s segment => above 2.0x (12s)
+        let result = validator.validate_segment(&seg(0, 15000, 500_000));
+        assert!(!result.is_valid);
+        assert!(result.has_errors());
+    }
+
+    #[test]
+    fn test_validate_sequence_bounds() {
+        let validator = SegmentValidator::new(ValidationConfig::new(Duration::from_secs(6)));
+        let segments = vec![
+            seg(0, 6000, 500_000),
+            seg(1, 2000, 500_000), // too short
+            seg(2, 6000, 500_000),
+            seg(3, 15000, 500_000), // too long
+        ];
+        let violations = validator.validate_sequence_bounds(&segments);
+        assert_eq!(violations.len(), 2);
+        assert_eq!(violations[0].0, 1);
+        assert_eq!(violations[1].0, 3);
+    }
+
+    #[test]
+    fn test_validate_sequence_bounds_all_valid() {
+        let validator = SegmentValidator::new(ValidationConfig::new(Duration::from_secs(6)));
+        let segments = vec![
+            seg(0, 5000, 500_000),
+            seg(1, 7000, 500_000),
+            seg(2, 6000, 500_000),
+        ];
+        let violations = validator.validate_sequence_bounds(&segments);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn test_min_duration_factor_clamped() {
+        let config = ValidationConfig::new(Duration::from_secs(6)).with_min_duration_factor(5.0); // should clamp to 1.0
+        assert!((config.min_duration_factor - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_max_duration_factor_min_bound() {
+        let config = ValidationConfig::new(Duration::from_secs(6)).with_max_duration_factor(0.5); // should clamp to 1.0
+        assert!((config.max_duration_factor - 1.0).abs() < f64::EPSILON);
     }
 }

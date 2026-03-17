@@ -23,7 +23,7 @@
 //!     .title("Final Cut Review")
 //!     .content_id("video-123")
 //!     .workflow_type(oximedia_review::WorkflowType::MultiStage)
-//!     .build();
+//!     .build()?;
 //!
 //! let session = ReviewSession::create(config).await?;
 //!
@@ -66,6 +66,7 @@ pub mod change;
 pub mod comment;
 pub mod comment_thread;
 pub mod compare;
+pub mod comparison_mode;
 pub mod delivery;
 pub mod drawing;
 pub mod export;
@@ -389,17 +390,24 @@ impl SessionConfigBuilder {
     ///
     /// # Errors
     ///
-    /// Returns error if required fields are missing.
-    #[must_use]
-    pub fn build(self) -> SessionConfig {
-        SessionConfig {
-            title: self.title.unwrap_or_default(),
-            content_id: self.content_id.unwrap_or_default(),
+    /// Returns `ReviewError::InvalidConfig` if required fields (`title`, `content_id`) are missing
+    /// or empty.
+    pub fn build(self) -> crate::error::ReviewResult<SessionConfig> {
+        let title = self
+            .title
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| crate::error::ReviewError::InvalidConfig("title is required".into()))?;
+        let content_id = self.content_id.filter(|c| !c.is_empty()).ok_or_else(|| {
+            crate::error::ReviewError::InvalidConfig("content_id is required".into())
+        })?;
+        Ok(SessionConfig {
+            title,
+            content_id,
             workflow_type: self.workflow_type.unwrap_or(WorkflowType::Simple),
             description: self.description,
             deadline: self.deadline,
             metadata: self.metadata,
-        }
+        })
     }
 }
 
@@ -429,13 +437,26 @@ mod tests {
             .workflow_type(WorkflowType::Simple)
             .description("Test description")
             .metadata("key", "value")
-            .build();
+            .build()
+            .expect("valid config");
 
         assert_eq!(config.title, "Test Session");
         assert_eq!(config.content_id, "video-123");
         assert_eq!(config.workflow_type, WorkflowType::Simple);
         assert_eq!(config.description, Some("Test description".to_string()));
         assert_eq!(config.metadata.get("key"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn test_session_config_builder_missing_title_errors() {
+        let result = SessionConfig::builder().content_id("video-123").build();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_session_config_builder_missing_content_id_errors() {
+        let result = SessionConfig::builder().title("My Review").build();
+        assert!(result.is_err());
     }
 
     #[test]

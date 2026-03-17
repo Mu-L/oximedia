@@ -108,6 +108,46 @@ impl ClipManager {
         self.database.count_clips().await
     }
 
+    /// Adds multiple clips in a single database transaction (bulk import).
+    ///
+    /// Significantly more efficient than calling `add_clip()` in a loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction or any individual save fails.
+    pub async fn add_clips(&self, clips: Vec<Clip>) -> ClipResult<Vec<ClipId>> {
+        let ids: Vec<ClipId> = clips.iter().map(|c| c.id).collect();
+        self.database.batch_save_clips(&clips).await?;
+        Ok(ids)
+    }
+
+    /// Lists clips with pagination.
+    ///
+    /// `page` is 0-indexed; `page_size` is the number of clips per page.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub async fn list_clips(&self, page: i64, page_size: i64) -> ClipResult<Vec<Clip>> {
+        self.database.get_clips_page(page, page_size).await
+    }
+
+    /// Searches clips by query string with pagination.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the search fails.
+    pub async fn search_paged(
+        &self,
+        query: &str,
+        page: i64,
+        page_size: i64,
+    ) -> ClipResult<Vec<Clip>> {
+        self.database
+            .search_clips_page(query, page, page_size)
+            .await
+    }
+
     // Search operations
 
     /// Searches clips by query string.

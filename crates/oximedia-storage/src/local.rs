@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn test_retention_policy_warm() {
-        let p = RetentionPolicy::warm(Duration::from_secs(3600));
+        let p = RetentionPolicy::warm(Duration::from_hours(1));
         assert_eq!(p.tier, StorageTier::Warm);
         assert!(!p.is_expired(std::time::SystemTime::now()));
     }
@@ -587,7 +587,7 @@ mod tests {
     fn test_retention_policy_cold_expired() {
         let very_old =
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
-        let p = RetentionPolicy::cold(Duration::from_secs(60));
+        let p = RetentionPolicy::cold(Duration::from_mins(1));
         assert!(p.is_expired(very_old));
     }
 

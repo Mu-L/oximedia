@@ -10,6 +10,248 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Widevine System ID constant (edef8ba9-79d6-4ace-a3c8-27dcd51d21ed)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Widevine DRM System ID as a 16-byte array (MPEG CENC / ISOBMFF PSSH).
+///
+/// UUID: `edef8ba9-79d6-4ace-a3c8-27dcd51d21ed`
+pub const WIDEVINE_SYSTEM_ID: [u8; 16] = [
+    0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed,
+];
+
+// ──────────────────────────────────────────────────────────────────────────────
+// WidevineConfig — high-level configuration for a Widevine-protected asset
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Top-level Widevine configuration that ties together a license server,
+/// a content provider, and the content identifier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WidevineConfig {
+    /// Full URL of the Widevine license server endpoint.
+    pub license_server_url: String,
+    /// Provider string registered with Google's Widevine infrastructure.
+    pub provider: String,
+    /// Opaque content identifier supplied to the license server.
+    pub content_id: Vec<u8>,
+}
+
+impl WidevineConfig {
+    /// Create a new `WidevineConfig`.
+    pub fn new(
+        license_server_url: impl Into<String>,
+        provider: impl Into<String>,
+        content_id: Vec<u8>,
+    ) -> Self {
+        Self {
+            license_server_url: license_server_url.into(),
+            provider: provider.into(),
+            content_id,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// WidevinePsshBox — binary PSSH box with Widevine-specific payload
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Protection scheme fourcc values used in the PSSH payload.
+pub mod protection_scheme {
+    /// Common Encryption CTR mode (`cenc`).
+    pub const CENC: u32 = 0x63656e63;
+    /// Common Encryption CBC mode (`cbcs`).
+    pub const CBCS: u32 = 0x63626373;
+}
+
+/// Widevine-specific PSSH payload as defined by the Widevine DASH/HLS
+/// content protection specification.
+///
+/// This struct provides a **binary-serialisable** view complementing the
+/// existing JSON-oriented [`WidevinePsshData`] type.  The serialisation
+/// format matches the PSSH v0/v1 box payload expected by Widevine CDMs:
+///
+/// ```text
+/// 4 bytes  : algorithm  (0 = UNENCRYPTED, 1 = AESCTR)
+/// 4 bytes  : key_id_count
+/// N × 16 bytes : key IDs
+/// 4 bytes  : provider length
+/// N bytes  : provider UTF-8
+/// 4 bytes  : content_id length
+/// N bytes  : content_id bytes
+/// 4 bytes  : protection_scheme fourcc
+/// ```
+///
+/// All multi-byte integers are **big-endian** to match the ISO-BMFF box
+/// convention.
+#[derive(Debug, Clone)]
+pub struct WidevinePsshBox {
+    /// 16-byte key IDs (each key ID must be exactly 16 bytes).
+    pub key_ids: Vec<Vec<u8>>,
+    /// Opaque content identifier.
+    pub content_id: Vec<u8>,
+    /// Provider name registered with Widevine.
+    pub provider: String,
+    /// Protection scheme fourcc — use [`protection_scheme::CENC`] or
+    /// [`protection_scheme::CBCS`].
+    pub protection_scheme: u32,
+}
+
+impl WidevinePsshBox {
+    /// Construct a new `WidevinePsshBox` with CENC as the default scheme.
+    ///
+    /// Returns an error if any key ID is not exactly 16 bytes long.
+    pub fn new(key_ids: Vec<Vec<u8>>, provider: &str) -> Result<Self> {
+        for (i, kid) in key_ids.iter().enumerate() {
+            if kid.len() != 16 {
+                return Err(DrmError::InvalidKey(format!(
+                    "key_id[{}] must be 16 bytes, got {}",
+                    i,
+                    kid.len()
+                )));
+            }
+        }
+        Ok(Self {
+            key_ids,
+            content_id: Vec::new(),
+            provider: provider.to_string(),
+            protection_scheme: protection_scheme::CENC,
+        })
+    }
+
+    /// Set the content identifier.
+    pub fn with_content_id(mut self, content_id: Vec<u8>) -> Self {
+        self.content_id = content_id;
+        self
+    }
+
+    /// Set the protection scheme (e.g. [`protection_scheme::CBCS`]).
+    pub fn with_protection_scheme(mut self, scheme: u32) -> Self {
+        self.protection_scheme = scheme;
+        self
+    }
+
+    /// Serialise the Widevine PSSH payload to bytes (big-endian, ISO-BMFF
+    /// PSSH box data field).
+    ///
+    /// The returned bytes do **not** include the outer 8-byte box header
+    /// (`size` + `'pssh'`); call [`Self::to_pssh_box`] for the complete
+    /// ISOBMFF box.
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+
+        // algorithm = 1 (AESCTR)
+        out.extend_from_slice(&1u32.to_be_bytes());
+
+        // key_id_count
+        out.extend_from_slice(&(self.key_ids.len() as u32).to_be_bytes());
+
+        // key IDs (each 16 bytes)
+        for kid in &self.key_ids {
+            out.extend_from_slice(kid);
+        }
+
+        // provider (length-prefixed UTF-8)
+        let provider_bytes = self.provider.as_bytes();
+        out.extend_from_slice(&(provider_bytes.len() as u32).to_be_bytes());
+        out.extend_from_slice(provider_bytes);
+
+        // content_id (length-prefixed)
+        out.extend_from_slice(&(self.content_id.len() as u32).to_be_bytes());
+        out.extend_from_slice(&self.content_id);
+
+        // protection_scheme fourcc
+        out.extend_from_slice(&self.protection_scheme.to_be_bytes());
+
+        out
+    }
+
+    /// Parse a Widevine PSSH payload byte buffer (the `data` field of a
+    /// PSSH box after the system-ID has been verified).
+    ///
+    /// Returns [`DrmError::PsshError`] on any structural mismatch.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        let mut pos = 0usize;
+
+        let read_u32 = |buf: &[u8], p: &mut usize| -> Result<u32> {
+            if *p + 4 > buf.len() {
+                return Err(DrmError::PsshError(
+                    "unexpected end of PSSH data".to_string(),
+                ));
+            }
+            let v = u32::from_be_bytes([buf[*p], buf[*p + 1], buf[*p + 2], buf[*p + 3]]);
+            *p += 4;
+            Ok(v)
+        };
+
+        let read_bytes = |buf: &[u8], p: &mut usize, len: usize| -> Result<Vec<u8>> {
+            if *p + len > buf.len() {
+                return Err(DrmError::PsshError(format!(
+                    "not enough bytes: need {}, have {}",
+                    len,
+                    buf.len() - *p
+                )));
+            }
+            let v = buf[*p..*p + len].to_vec();
+            *p += len;
+            Ok(v)
+        };
+
+        // algorithm (ignored — must be present)
+        let _algorithm = read_u32(data, &mut pos)?;
+
+        // key IDs
+        let key_id_count = read_u32(data, &mut pos)? as usize;
+        let mut key_ids = Vec::with_capacity(key_id_count);
+        for _ in 0..key_id_count {
+            let kid = read_bytes(data, &mut pos, 16)?;
+            key_ids.push(kid);
+        }
+
+        // provider
+        let provider_len = read_u32(data, &mut pos)? as usize;
+        let provider_bytes = read_bytes(data, &mut pos, provider_len)?;
+        let provider = String::from_utf8(provider_bytes)
+            .map_err(|e| DrmError::PsshError(format!("provider is not valid UTF-8: {e}")))?;
+
+        // content_id
+        let content_id_len = read_u32(data, &mut pos)? as usize;
+        let content_id = read_bytes(data, &mut pos, content_id_len)?;
+
+        // protection_scheme (optional; default to CENC if truncated)
+        let protection_scheme = if pos + 4 <= data.len() {
+            read_u32(data, &mut pos)?
+        } else {
+            protection_scheme::CENC
+        };
+
+        Ok(Self {
+            key_ids,
+            content_id,
+            provider,
+            protection_scheme,
+        })
+    }
+
+    /// Wrap the serialised payload in a complete ISO-BMFF PSSH box (version 0).
+    ///
+    /// Layout: `[size:4][pssh:4][version:1][flags:3][system_id:16][data_len:4][data:N]`
+    pub fn to_pssh_box(&self) -> Vec<u8> {
+        let payload = self.serialize();
+        let total_size: u32 = (4 + 4 + 1 + 3 + 16 + 4 + payload.len()) as u32;
+
+        let mut box_bytes = Vec::with_capacity(total_size as usize);
+        box_bytes.extend_from_slice(&total_size.to_be_bytes()); // box size
+        box_bytes.extend_from_slice(b"pssh"); // box type
+        box_bytes.push(0u8); // version = 0
+        box_bytes.extend_from_slice(&[0u8; 3]); // flags
+        box_bytes.extend_from_slice(&WIDEVINE_SYSTEM_ID); // system_id
+        box_bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        box_bytes.extend_from_slice(&payload);
+        box_bytes
+    }
+}
+
 /// Widevine PSSH data structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WidevinePsshData {
@@ -580,5 +822,86 @@ mod tests {
 
         let result = server.process_request(&request);
         assert!(result.is_err());
+    }
+
+    // ── Tests for new WidevineConfig / WidevinePsshBox / WIDEVINE_SYSTEM_ID ──
+
+    #[test]
+    fn test_widevine_system_id_bytes() {
+        assert_eq!(WIDEVINE_SYSTEM_ID[0], 0xed);
+        assert_eq!(WIDEVINE_SYSTEM_ID[15], 0xed);
+        assert_eq!(WIDEVINE_SYSTEM_ID.len(), 16);
+    }
+
+    #[test]
+    fn test_widevine_config_construction() {
+        let cfg = WidevineConfig::new(
+            "https://license.example.com/widevine",
+            "example_provider",
+            b"content-abc".to_vec(),
+        );
+        assert_eq!(cfg.provider, "example_provider");
+        assert_eq!(cfg.content_id, b"content-abc".to_vec());
+        assert!(cfg.license_server_url.contains("widevine"));
+    }
+
+    #[test]
+    fn test_widevine_pssh_box_serialize_parse_roundtrip() {
+        let key_ids: Vec<Vec<u8>> = vec![(0u8..16).collect(), (16u8..32).collect()];
+        let pssh_box = WidevinePsshBox::new(key_ids.clone(), "test_provider")
+            .expect("valid key_ids")
+            .with_content_id(b"my-content".to_vec())
+            .with_protection_scheme(protection_scheme::CENC);
+
+        let serialized = pssh_box.serialize();
+        let parsed = WidevinePsshBox::parse(&serialized).expect("parse should succeed");
+
+        assert_eq!(parsed.key_ids.len(), 2);
+        assert_eq!(parsed.key_ids[0], key_ids[0]);
+        assert_eq!(parsed.key_ids[1], key_ids[1]);
+        assert_eq!(parsed.provider, "test_provider");
+        assert_eq!(parsed.content_id, b"my-content".to_vec());
+        assert_eq!(parsed.protection_scheme, protection_scheme::CENC);
+    }
+
+    #[test]
+    fn test_widevine_pssh_box_rejects_bad_key_id() {
+        let bad_key_ids = vec![vec![0u8; 8]]; // only 8 bytes
+        let result = WidevinePsshBox::new(bad_key_ids, "provider");
+        assert!(result.is_err(), "should reject 8-byte key_id");
+    }
+
+    #[test]
+    fn test_widevine_pssh_box_to_pssh_box_header() {
+        let key_ids: Vec<Vec<u8>> = vec![(0u8..16).collect()];
+        let pssh_box = WidevinePsshBox::new(key_ids, "prov")
+            .expect("valid key_id")
+            .to_pssh_box();
+
+        assert!(pssh_box.len() >= 28, "PSSH box must be at least 28 bytes");
+        assert_eq!(&pssh_box[4..8], b"pssh", "box type must be 'pssh'");
+        assert_eq!(pssh_box[8], 0, "PSSH version field must be 0");
+        assert_eq!(&pssh_box[12..28], &WIDEVINE_SYSTEM_ID, "system_id mismatch");
+
+        // Verify declared box size matches actual buffer length
+        let declared_size =
+            u32::from_be_bytes([pssh_box[0], pssh_box[1], pssh_box[2], pssh_box[3]]) as usize;
+        assert_eq!(
+            declared_size,
+            pssh_box.len(),
+            "declared box size must match buffer length"
+        );
+    }
+
+    #[test]
+    fn test_widevine_pssh_box_cbcs_scheme() {
+        let key_ids: Vec<Vec<u8>> = vec![(0u8..16).collect()];
+        let pssh_box = WidevinePsshBox::new(key_ids, "prov")
+            .expect("valid key_id")
+            .with_protection_scheme(protection_scheme::CBCS);
+
+        let serialized = pssh_box.serialize();
+        let parsed = WidevinePsshBox::parse(&serialized).expect("parse should succeed");
+        assert_eq!(parsed.protection_scheme, protection_scheme::CBCS);
     }
 }

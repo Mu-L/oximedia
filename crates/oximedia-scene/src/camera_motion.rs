@@ -235,6 +235,106 @@ impl MotionEstimator {
         }
     }
 
+    /// Estimate camera motion using RANSAC for robustness against independent object motion.
+    ///
+    /// This variant uses the standard block-matching to collect local motion vectors,
+    /// then applies RANSAC to identify the inlier consensus representing true camera motion,
+    /// rejecting outliers caused by moving objects in the scene.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn estimate_ransac(
+        &self,
+        prev: &[u8],
+        curr: &[u8],
+        width: usize,
+        height: usize,
+        ransac_iterations: usize,
+        inlier_threshold: f64,
+    ) -> MotionAnalysis {
+        let total = width * height;
+        if total == 0 || prev.len() < total || curr.len() < total {
+            return MotionAnalysis {
+                global_motion: MotionVector::zero(),
+                motion_type: MotionType::Static,
+                confidence: 0.0,
+                scale_change: 1.0,
+                rotation_rad: 0.0,
+                magnitude: 0.0,
+                motion_variance: 0.0,
+            };
+        }
+
+        let block = self.config.block_size;
+        let blocks_x = width / block;
+        let blocks_y = height / block;
+
+        if blocks_x == 0 || blocks_y == 0 {
+            return MotionAnalysis {
+                global_motion: MotionVector::zero(),
+                motion_type: MotionType::Static,
+                confidence: 1.0,
+                scale_change: 1.0,
+                rotation_rad: 0.0,
+                magnitude: 0.0,
+                motion_variance: 0.0,
+            };
+        }
+
+        let search_range = block / 2;
+        let mut vectors: Vec<MotionVector> = Vec::with_capacity(blocks_x * blocks_y);
+
+        for by in 0..blocks_y {
+            for bx in 0..blocks_x {
+                let ox = bx * block;
+                let oy = by * block;
+                let mv = self.block_match(prev, curr, width, height, ox, oy, block, search_range);
+                vectors.push(mv);
+            }
+        }
+
+        if vectors.is_empty() {
+            return MotionAnalysis {
+                global_motion: MotionVector::zero(),
+                motion_type: MotionType::Static,
+                confidence: 1.0,
+                scale_change: 1.0,
+                rotation_rad: 0.0,
+                magnitude: 0.0,
+                motion_variance: 0.0,
+            };
+        }
+
+        // Use RANSAC instead of plain median
+        let ransac = ransac_global_motion(&vectors, inlier_threshold, ransac_iterations);
+        let global_motion = ransac.motion;
+        let magnitude = global_motion.magnitude();
+
+        let motion_variance = compute_motion_variance(&vectors, &global_motion);
+        let scale_change = estimate_scale(&vectors, width, height);
+        let rotation_rad = estimate_rotation(&vectors, width, height);
+
+        let motion_type = self.classify(
+            &global_motion,
+            magnitude,
+            motion_variance,
+            scale_change,
+            rotation_rad,
+        );
+
+        // Confidence boosted by RANSAC inlier ratio
+        let base_conf = compute_confidence(magnitude, motion_variance);
+        let confidence = (base_conf as f64 * ransac.inlier_ratio).clamp(0.0, 1.0);
+
+        MotionAnalysis {
+            global_motion,
+            motion_type,
+            confidence,
+            scale_change,
+            rotation_rad,
+            magnitude,
+            motion_variance,
+        }
+    }
+
     /// Block matching: find the best displacement for a block.
     #[allow(clippy::cast_precision_loss)]
     #[allow(clippy::too_many_arguments)]
@@ -342,6 +442,115 @@ impl Default for MotionEstimator {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// RANSAC-based robust homography estimation using block-matching motion vectors.
+///
+/// Returns the inlier consensus motion vector (translation-only model) that
+/// best describes the global camera motion while rejecting outlier vectors
+/// caused by independently moving objects.
+///
+/// # Arguments
+///
+/// * `vectors` – local motion vectors from block matching.
+/// * `inlier_threshold` – maximum pixel distance from the consensus model to be an inlier.
+/// * `iterations` – number of RANSAC iterations.
+#[allow(clippy::cast_precision_loss)]
+pub fn ransac_global_motion(
+    vectors: &[MotionVector],
+    inlier_threshold: f64,
+    iterations: usize,
+) -> RansacResult {
+    if vectors.len() < 2 {
+        let mv = if vectors.is_empty() {
+            MotionVector::zero()
+        } else {
+            vectors[0]
+        };
+        return RansacResult {
+            motion: mv,
+            inlier_count: vectors.len(),
+            inlier_ratio: 1.0,
+        };
+    }
+
+    let mut best_inliers = 0usize;
+    let mut best_dx = 0.0_f64;
+    let mut best_dy = 0.0_f64;
+
+    // Deterministic pseudo-random sampling using a linear congruential generator
+    // seeded by the first motion vector magnitudes (no external RNG needed).
+    let n = vectors.len();
+    let seed_val = {
+        let m = vectors[0].magnitude();
+        (m * 1_000_000.0) as u64 ^ (n as u64).wrapping_mul(6_364_136_223_846_793_005)
+    };
+    let mut lcg = seed_val.wrapping_add(1);
+
+    for _ in 0..iterations {
+        // Sample one hypothesis
+        lcg = lcg
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let idx = (lcg >> 33) as usize % n;
+        let hypothesis_dx = vectors[idx].dx;
+        let hypothesis_dy = vectors[idx].dy;
+
+        // Count inliers
+        let inliers = vectors
+            .iter()
+            .filter(|v| {
+                let ddx = v.dx - hypothesis_dx;
+                let ddy = v.dy - hypothesis_dy;
+                (ddx * ddx + ddy * ddy).sqrt() < inlier_threshold
+            })
+            .count();
+
+        if inliers > best_inliers {
+            best_inliers = inliers;
+            best_dx = hypothesis_dx;
+            best_dy = hypothesis_dy;
+        }
+    }
+
+    // Refine: average over all inliers
+    let inlier_vecs: Vec<&MotionVector> = vectors
+        .iter()
+        .filter(|v| {
+            let ddx = v.dx - best_dx;
+            let ddy = v.dy - best_dy;
+            (ddx * ddx + ddy * ddy).sqrt() < inlier_threshold
+        })
+        .collect();
+
+    let (refined_dx, refined_dy) = if inlier_vecs.is_empty() {
+        (best_dx, best_dy)
+    } else {
+        let sum_dx: f64 = inlier_vecs.iter().map(|v| v.dx).sum();
+        let sum_dy: f64 = inlier_vecs.iter().map(|v| v.dy).sum();
+        let k = inlier_vecs.len() as f64;
+        (sum_dx / k, sum_dy / k)
+    };
+
+    let inlier_count = inlier_vecs.len();
+    let inlier_ratio = inlier_count as f64 / n as f64;
+
+    RansacResult {
+        motion: MotionVector::new(refined_dx, refined_dy),
+        inlier_count,
+        inlier_ratio,
+    }
+}
+
+/// Result of RANSAC global motion estimation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RansacResult {
+    /// Estimated global motion (translation model).
+    pub motion: MotionVector,
+    /// Number of inlier vectors that agree with the model.
+    pub inlier_count: usize,
+    /// Fraction of inliers (0.0-1.0).
+    pub inlier_ratio: f64,
 }
 
 /// Compute median motion vector from a set of vectors.
@@ -599,6 +808,70 @@ mod tests {
         let estimator = MotionEstimator::with_config(config);
         let frame = vec![100_u8; 32 * 32];
         let result = estimator.estimate(&frame, &frame, 32, 32);
+        assert_eq!(result.motion_type, MotionType::Static);
+    }
+
+    // --- RANSAC tests ---
+
+    #[test]
+    fn test_ransac_global_motion_all_same() {
+        let vectors = vec![
+            MotionVector::new(3.0, 0.0),
+            MotionVector::new(3.0, 0.0),
+            MotionVector::new(3.0, 0.0),
+            MotionVector::new(3.0, 0.0),
+        ];
+        let result = ransac_global_motion(&vectors, 1.0, 50);
+        assert!((result.motion.dx - 3.0).abs() < 0.5);
+        assert!(result.inlier_ratio > 0.8);
+    }
+
+    #[test]
+    fn test_ransac_global_motion_with_outliers() {
+        // 4 consistent vectors + 1 large outlier
+        let vectors = vec![
+            MotionVector::new(2.0, 1.0),
+            MotionVector::new(2.0, 1.0),
+            MotionVector::new(2.0, 1.0),
+            MotionVector::new(2.0, 1.0),
+            MotionVector::new(50.0, 50.0), // outlier
+        ];
+        let result = ransac_global_motion(&vectors, 2.0, 100);
+        // Inlier ratio should be majority
+        assert!(result.inlier_ratio >= 0.6);
+        // Motion should be close to the consensus
+        assert!((result.motion.dx - 2.0).abs() < 5.0);
+    }
+
+    #[test]
+    fn test_ransac_single_vector() {
+        let vectors = vec![MotionVector::new(5.0, 3.0)];
+        let result = ransac_global_motion(&vectors, 1.0, 10);
+        assert!((result.motion.dx - 5.0).abs() < 0.1);
+        assert!((result.motion.dy - 3.0).abs() < 0.1);
+        assert_eq!(result.inlier_count, 1);
+    }
+
+    #[test]
+    fn test_ransac_empty_vectors() {
+        let vectors: Vec<MotionVector> = Vec::new();
+        let result = ransac_global_motion(&vectors, 1.0, 10);
+        assert_eq!(result.inlier_count, 0);
+        assert!((result.motion.magnitude()).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_estimate_ransac_identical_frames() {
+        let estimator = MotionEstimator::new();
+        let frame = vec![128_u8; 64 * 64];
+        let result = estimator.estimate_ransac(&frame, &frame, 64, 64, 20, 1.5);
+        assert_eq!(result.motion_type, MotionType::Static);
+    }
+
+    #[test]
+    fn test_estimate_ransac_empty_frames() {
+        let estimator = MotionEstimator::new();
+        let result = estimator.estimate_ransac(&[], &[], 0, 0, 10, 1.0);
         assert_eq!(result.motion_type, MotionType::Static);
     }
 }

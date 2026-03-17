@@ -154,7 +154,9 @@ impl DenoiseOperation {
                 h,
                 patch_radius,
                 search_radius,
-            } => Self::denoise_nlm_cpu(input, output, width, height, h, patch_radius, search_radius),
+            } => {
+                Self::denoise_nlm_cpu(input, output, width, height, h, patch_radius, search_radius)
+            }
         }
         // Suppress unused-variable warning on device until GPU path is wired up.
         .map(|()| {
@@ -206,9 +208,8 @@ impl DenoiseOperation {
                     for c in 0..4usize {
                         let mut acc = 0.0f32;
                         for (ki, &kv) in kernel.iter().enumerate() {
-                            let sx =
-                                (x as i64 + ki as i64 - radius as i64).clamp(0, w as i64 - 1)
-                                    as usize;
+                            let sx = (x as i64 + ki as i64 - radius as i64).clamp(0, w as i64 - 1)
+                                as usize;
                             acc += kv * f32::from(input[(y * w + sx) * 4 + c]);
                         }
                         row[x * 4 + c] = acc.round().clamp(0.0, 255.0) as u8;
@@ -281,8 +282,7 @@ impl DenoiseOperation {
                         let sx = (x as i64 + dx).clamp(0, w as i64 - 1) as usize;
                         let sy = (y as i64 + dy).clamp(0, h as i64 - 1) as usize;
 
-                        let spatial_dist_sq =
-                            (dx * dx + dy * dy) as f32;
+                        let spatial_dist_sq = (dx * dx + dy * dy) as f32;
                         let w_spatial = (-spatial_dist_sq * inv_two_ss_sq).exp();
 
                         let neighbor = [
@@ -362,8 +362,8 @@ impl DenoiseOperation {
                 for qy in
                     (py as i64 - sr as i64).max(0)..=(py as i64 + sr as i64).min(ht as i64 - 1)
                 {
-                    for qx in (px as i64 - sr as i64).max(0)
-                        ..=(px as i64 + sr as i64).min(w as i64 - 1)
+                    for qx in
+                        (px as i64 - sr as i64).max(0)..=(px as i64 + sr as i64).min(w as i64 - 1)
                     {
                         // Compute patch distance between (px,py) and (qx,qy).
                         let mut patch_dist_sq = 0.0f32;
@@ -381,8 +381,7 @@ impl DenoiseOperation {
                             }
                         }
 
-                        let w_nlm =
-                            (-patch_dist_sq * inv_h_sq_patch).exp();
+                        let w_nlm = (-patch_dist_sq * inv_h_sq_patch).exp();
                         weight_sum += w_nlm;
 
                         for c in 0..4 {
@@ -550,7 +549,9 @@ mod tests {
     }
 
     fn noisy_image(w: u32, h: u32) -> Vec<u8> {
-        (0..(w * h * 4)).map(|i| (i as u8).wrapping_mul(37)).collect()
+        (0..(w * h * 4))
+            .map(|i| (i as u8).wrapping_mul(37))
+            .collect()
     }
 
     // ---- DenoiseAlgorithm --------------------------------------------------
@@ -561,8 +562,7 @@ mod tests {
         let h = 16u32;
         let input = gray_image(w, h, 200);
         let mut output = vec![0u8; (w * h * 4) as usize];
-        let result =
-            DenoiseOperation::denoise_gaussian_cpu(&input, &mut output, w, h, 1.5);
+        let result = DenoiseOperation::denoise_gaussian_cpu(&input, &mut output, w, h, 1.5);
         assert!(result.is_ok());
         // A constant image should pass through unchanged (all values should be 200).
         for &v in &output {
@@ -576,8 +576,7 @@ mod tests {
         let h = 32u32;
         let input = noisy_image(w, h);
         let mut output = vec![0u8; (w * h * 4) as usize];
-        let result =
-            DenoiseOperation::denoise_gaussian_cpu(&input, &mut output, w, h, 2.0);
+        let result = DenoiseOperation::denoise_gaussian_cpu(&input, &mut output, w, h, 2.0);
         assert!(result.is_ok());
         // Output should not be all-zeros.
         assert!(output.iter().any(|&v| v > 0));
@@ -589,8 +588,7 @@ mod tests {
         let h = 8u32;
         let input = gray_image(w, h, 100);
         let mut output = vec![0u8; (w * h * 4) as usize];
-        let result =
-            DenoiseOperation::denoise_bilateral_cpu(&input, &mut output, w, h, 1.5, 30.0);
+        let result = DenoiseOperation::denoise_bilateral_cpu(&input, &mut output, w, h, 1.5, 30.0);
         assert!(result.is_ok());
         for &v in &output {
             assert_eq!(v, 100);
@@ -603,8 +601,7 @@ mod tests {
         let h = 8u32;
         let input = gray_image(w, h, 150);
         let mut output = vec![0u8; (w * h * 4) as usize];
-        let result =
-            DenoiseOperation::denoise_nlm_cpu(&input, &mut output, w, h, 10.0, 2, 5);
+        let result = DenoiseOperation::denoise_nlm_cpu(&input, &mut output, w, h, 10.0, 2, 5);
         assert!(result.is_ok());
         for &v in &output {
             assert_eq!(v, 150);

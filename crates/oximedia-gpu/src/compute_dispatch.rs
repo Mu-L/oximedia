@@ -332,6 +332,134 @@ impl DispatchTracker {
 }
 
 // ---------------------------------------------------------------------------
+// Data-driven (indirect) dispatch support
+// ---------------------------------------------------------------------------
+
+/// Strategy used to derive workgroup counts from a data-dependent element
+/// count at dispatch preparation time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataDispatchStrategy {
+    /// All elements are processed in a single 1D strip: `(ceil(n/wg), 1, 1)`.
+    Linear1D,
+    /// Elements are spread over a near-square 2D grid.
+    Square2D,
+    /// Fixed number of rows; columns derived from `ceil(n / (rows * wg_x))`.
+    FixedRowCount {
+        /// Number of rows in the Y dimension.
+        rows: u32,
+    },
+}
+
+/// Computes and stores dispatch parameters that depend on the number of data
+/// elements only known at dispatch-preparation time (e.g., after a GPU
+/// readback or a CPU-side counter).
+///
+/// In a real GPU pipeline this feeds an *indirect dispatch buffer*; here we
+/// compute the [`DispatchGrid`] on the CPU side for portability and testing.
+pub struct DataDrivenDispatch {
+    /// Workgroup size in X.
+    wg_x: u32,
+    /// Workgroup size in Y.
+    wg_y: u32,
+    strategy: DataDispatchStrategy,
+    /// Grid computed from the last call to [`Self::prepare`].
+    grid: Option<DispatchGrid>,
+    /// Element count from the last call to [`Self::prepare`].
+    last_element_count: u64,
+}
+
+impl DataDrivenDispatch {
+    /// Create a new data-driven dispatch helper.
+    ///
+    /// * `wg_x` / `wg_y` — workgroup size dimensions (must be ≥ 1).
+    /// * `strategy` — how to map element counts to workgroup grids.
+    #[must_use]
+    pub fn new(wg_x: u32, wg_y: u32, strategy: DataDispatchStrategy) -> Self {
+        let wg_x = wg_x.max(1);
+        let wg_y = wg_y.max(1);
+        Self {
+            wg_x,
+            wg_y,
+            strategy,
+            grid: None,
+            last_element_count: 0,
+        }
+    }
+
+    /// Convenience constructor for a 1D strip with `wg_size` threads per
+    /// workgroup.
+    #[must_use]
+    pub fn linear(wg_size: u32) -> Self {
+        Self::new(wg_size, 1, DataDispatchStrategy::Linear1D)
+    }
+
+    /// Convenience constructor for a 2D square grid with `wg_x × wg_y`
+    /// threads per workgroup.
+    #[must_use]
+    pub fn square(wg_x: u32, wg_y: u32) -> Self {
+        Self::new(wg_x, wg_y, DataDispatchStrategy::Square2D)
+    }
+
+    /// Prepare the dispatch grid for `element_count` data elements.
+    ///
+    /// Returns the resulting [`DispatchGrid`]; the value is also stored
+    /// internally and accessible via [`Self::grid`].
+    pub fn prepare(&mut self, element_count: u64) -> DispatchGrid {
+        self.last_element_count = element_count;
+        let n = element_count as u32;
+        let grid = match self.strategy {
+            DataDispatchStrategy::Linear1D => {
+                let x = n.div_ceil(self.wg_x);
+                DispatchGrid::new(x.max(1), 1, 1)
+            }
+            DataDispatchStrategy::Square2D => {
+                let threads_per_wg = self.wg_x * self.wg_y;
+                let total_wgs = n.div_ceil(threads_per_wg).max(1);
+                let side = (total_wgs as f64).sqrt().ceil() as u32;
+                let side = side.max(1);
+                DispatchGrid::new(side, side, 1)
+            }
+            DataDispatchStrategy::FixedRowCount { rows } => {
+                let rows = rows.max(1);
+                // Each row handles `cols` workgroups; each workgroup covers
+                // `wg_x` elements in X and implicitly one row in Y.
+                let total_wgs = n.div_ceil(self.wg_x * self.wg_y).max(1);
+                let cols = total_wgs.div_ceil(rows);
+                DispatchGrid::new(cols, rows, 1)
+            }
+        };
+        self.grid = Some(grid);
+        grid
+    }
+
+    /// The grid computed by the last [`Self::prepare`] call, or `None` if
+    /// [`Self::prepare`] has not yet been called.
+    #[must_use]
+    pub fn grid(&self) -> Option<DispatchGrid> {
+        self.grid
+    }
+
+    /// The element count supplied to the last [`Self::prepare`] call.
+    #[must_use]
+    pub fn last_element_count(&self) -> u64 {
+        self.last_element_count
+    }
+
+    /// Minimum elements coverable by the last computed grid.
+    ///
+    /// Returns 0 if [`Self::prepare`] has not been called.
+    #[must_use]
+    pub fn covered_elements(&self) -> u64 {
+        match self.grid {
+            None => 0,
+            Some(g) => {
+                u64::from(g.total_workgroups()) * u64::from(self.wg_x) * u64::from(self.wg_y)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -450,5 +578,77 @@ mod tests {
         dt.reset();
         assert!(dt.is_empty());
         assert_eq!(dt.total_threads(), 0);
+    }
+
+    // --- DataDrivenDispatch tests ---
+
+    #[test]
+    fn test_data_driven_linear_exact() {
+        let mut dd = DataDrivenDispatch::linear(64);
+        let g = dd.prepare(128);
+        assert_eq!(g.x, 2);
+        assert_eq!(g.y, 1);
+        assert_eq!(g.z, 1);
+    }
+
+    #[test]
+    fn test_data_driven_linear_rounds_up() {
+        let mut dd = DataDrivenDispatch::linear(64);
+        let g = dd.prepare(65);
+        assert_eq!(g.x, 2);
+    }
+
+    #[test]
+    fn test_data_driven_linear_zero_elements() {
+        let mut dd = DataDrivenDispatch::linear(64);
+        let g = dd.prepare(0);
+        // Must produce at least 1 workgroup
+        assert_eq!(g.x, 1);
+    }
+
+    #[test]
+    fn test_data_driven_square_covers_all_elements() {
+        let mut dd = DataDrivenDispatch::square(8, 8);
+        dd.prepare(500);
+        // covered_elements ≥ 500
+        assert!(dd.covered_elements() >= 500);
+    }
+
+    #[test]
+    fn test_data_driven_square_grid_is_square() {
+        let mut dd = DataDrivenDispatch::square(8, 8);
+        let g = dd.prepare(1024);
+        assert_eq!(g.x, g.y);
+    }
+
+    #[test]
+    fn test_data_driven_fixed_row_count() {
+        let mut dd = DataDrivenDispatch::new(8, 1, DataDispatchStrategy::FixedRowCount { rows: 4 });
+        let g = dd.prepare(256);
+        // 256 elements / 8 per wg = 32 workgroups; 32 / 4 rows = 8 cols
+        assert_eq!(g.y, 4);
+        assert_eq!(g.x, 8);
+    }
+
+    #[test]
+    fn test_data_driven_grid_none_before_prepare() {
+        let dd = DataDrivenDispatch::linear(32);
+        assert!(dd.grid().is_none());
+        assert_eq!(dd.covered_elements(), 0);
+    }
+
+    #[test]
+    fn test_data_driven_last_element_count_stored() {
+        let mut dd = DataDrivenDispatch::linear(16);
+        dd.prepare(999);
+        assert_eq!(dd.last_element_count(), 999);
+    }
+
+    #[test]
+    fn test_data_driven_covered_elements_gte_last_count() {
+        let mut dd = DataDrivenDispatch::square(4, 4);
+        let count = 137_u64;
+        dd.prepare(count);
+        assert!(dd.covered_elements() >= count);
     }
 }

@@ -236,7 +236,11 @@ pub fn extract_features(captions: &[FingerprintCaption]) -> StructuralFeatures {
 }
 
 /// Generate a structural fingerprint from features.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn structural_fingerprint(captions: &[FingerprintCaption]) -> String {
     let features = extract_features(captions);
     let mut data = Vec::new();
@@ -291,9 +295,8 @@ pub fn similarity(left: &[FingerprintCaption], right: &[FingerprintCaption]) -> 
     let rf = extract_features(right);
 
     // Compare structural features with normalized distances
-    let count_sim = 1.0
-        - (lf.count as f64 - rf.count as f64).abs()
-            / (lf.count.max(rf.count) as f64).max(1.0);
+    let count_sim =
+        1.0 - (lf.count as f64 - rf.count as f64).abs() / (lf.count.max(rf.count) as f64).max(1.0);
     let dur_sim = if lf.avg_duration_ms + rf.avg_duration_ms > 0.0 {
         1.0 - (lf.avg_duration_ms - rf.avg_duration_ms).abs()
             / lf.avg_duration_ms.max(rf.avg_duration_ms).max(1.0)

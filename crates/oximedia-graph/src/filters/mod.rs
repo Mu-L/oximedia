@@ -24,4 +24,4 @@ pub mod video;
 
 // Re-export commonly used filters
 pub use audio::AudioPassthrough;
-pub use video::{NullSink, PassthroughFilter};
+pub use video::{MergeFilter, NullSink, PassthroughFilter, RateLimitFilter, SplitFilter};

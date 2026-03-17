@@ -1,4 +1,11 @@
 //! PCM sample-format conversion utilities.
+//!
+//! This module also exposes SIMD-accelerated batch conversion routines via
+//! [`SimdConvert`].  On platforms where Rust's auto-vectoriser cannot be relied
+//! upon, the methods in [`SimdConvert`] use explicit loop structure and
+//! carefully chosen chunk sizes to maximise LLVM auto-vectorisation (128-bit
+//! and 256-bit SIMD where available).  All code is `#[forbid(unsafe_code)]`-
+//! compatible and falls back gracefully on any target.
 #![allow(dead_code)]
 
 /// PCM sample bit-depth descriptor.
@@ -154,6 +161,234 @@ impl FormatConverter {
     #[must_use]
     pub fn output_byte_size(&self, n_samples: usize) -> usize {
         n_samples * self.dst.byte_size()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SIMD-optimised batch conversion (auto-vectorised)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// SIMD-accelerated sample-format conversion utilities.
+///
+/// All methods are pure-Rust and use carefully structured loops that LLVM can
+/// auto-vectorise to SIMD instructions (SSE2, AVX2, NEON, etc.) on supporting
+/// targets.  There is no `unsafe` code; correctness is always guaranteed even
+/// on scalar-only targets.
+///
+/// # Supported conversions
+///
+/// | Source | Destination | Method |
+/// |--------|-------------|--------|
+/// | `f32`  | `i16`       | [`SimdConvert::f32_to_s16`] |
+/// | `i16`  | `f32`       | [`SimdConvert::s16_to_f32`] |
+/// | `f32`  | `f64`       | [`SimdConvert::f32_to_f64`] |
+/// | `f64`  | `f32`       | [`SimdConvert::f64_to_f32`] |
+/// | `f32`  | `u8`        | [`SimdConvert::f32_to_u8`] |
+/// | `u8`   | `f32`       | [`SimdConvert::u8_to_f32`] |
+/// | `f32`  | `i32`       | [`SimdConvert::f32_to_s32`] |
+/// | `i32`  | `f32`       | [`SimdConvert::s32_to_f32`] |
+pub struct SimdConvert;
+
+impl SimdConvert {
+    /// Convert normalised `f32` samples to 16-bit signed integers.
+    ///
+    /// Values outside `[-1, 1]` are clamped.  The output is scaled to
+    /// `[-32767, 32767]` (symmetric; –32768 is not produced).
+    ///
+    /// The inner loop processes 8 samples at a time to encourage LLVM to emit
+    /// 256-bit SIMD (AVX2) instructions on x86-64.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn f32_to_s16(input: &[f32]) -> Vec<i16> {
+        let mut out = vec![0_i16; input.len()];
+        // Process in chunks of 8 to hint at 256-bit SIMD (8 × i32 → 8 × i16)
+        let chunks = input.len() / 8;
+        for c in 0..chunks {
+            let base = c * 8;
+            let s0 = (input[base].clamp(-1.0, 1.0) * 32_767.0) as i16;
+            let s1 = (input[base + 1].clamp(-1.0, 1.0) * 32_767.0) as i16;
+            let s2 = (input[base + 2].clamp(-1.0, 1.0) * 32_767.0) as i16;
+            let s3 = (input[base + 3].clamp(-1.0, 1.0) * 32_767.0) as i16;
+            let s4 = (input[base + 4].clamp(-1.0, 1.0) * 32_767.0) as i16;
+            let s5 = (input[base + 5].clamp(-1.0, 1.0) * 32_767.0) as i16;
+            let s6 = (input[base + 6].clamp(-1.0, 1.0) * 32_767.0) as i16;
+            let s7 = (input[base + 7].clamp(-1.0, 1.0) * 32_767.0) as i16;
+            out[base] = s0;
+            out[base + 1] = s1;
+            out[base + 2] = s2;
+            out[base + 3] = s3;
+            out[base + 4] = s4;
+            out[base + 5] = s5;
+            out[base + 6] = s6;
+            out[base + 7] = s7;
+        }
+        // Scalar tail
+        for i in (chunks * 8)..input.len() {
+            out[i] = (input[i].clamp(-1.0, 1.0) * 32_767.0) as i16;
+        }
+        out
+    }
+
+    /// Convert 16-bit signed integers to normalised `f32` samples.
+    ///
+    /// Divides by 32_768.0 (not 32_767.0) for a symmetric mapping where
+    /// `i16::MAX` ≈ +0.99997 and `i16::MIN` = –1.0.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn s16_to_f32(input: &[i16]) -> Vec<f32> {
+        let mut out = vec![0.0_f32; input.len()];
+        let chunks = input.len() / 8;
+        for c in 0..chunks {
+            let base = c * 8;
+            out[base] = input[base] as f32 / 32_768.0;
+            out[base + 1] = input[base + 1] as f32 / 32_768.0;
+            out[base + 2] = input[base + 2] as f32 / 32_768.0;
+            out[base + 3] = input[base + 3] as f32 / 32_768.0;
+            out[base + 4] = input[base + 4] as f32 / 32_768.0;
+            out[base + 5] = input[base + 5] as f32 / 32_768.0;
+            out[base + 6] = input[base + 6] as f32 / 32_768.0;
+            out[base + 7] = input[base + 7] as f32 / 32_768.0;
+        }
+        for i in (chunks * 8)..input.len() {
+            out[i] = input[i] as f32 / 32_768.0;
+        }
+        out
+    }
+
+    /// Widen `f32` samples to `f64`.
+    #[must_use]
+    pub fn f32_to_f64(input: &[f32]) -> Vec<f64> {
+        let mut out = vec![0.0_f64; input.len()];
+        let chunks = input.len() / 4;
+        for c in 0..chunks {
+            let base = c * 4;
+            out[base] = input[base] as f64;
+            out[base + 1] = input[base + 1] as f64;
+            out[base + 2] = input[base + 2] as f64;
+            out[base + 3] = input[base + 3] as f64;
+        }
+        for i in (chunks * 4)..input.len() {
+            out[i] = input[i] as f64;
+        }
+        out
+    }
+
+    /// Narrow `f64` samples to `f32` (precision is lost).
+    #[must_use]
+    pub fn f64_to_f32(input: &[f64]) -> Vec<f32> {
+        let mut out = vec![0.0_f32; input.len()];
+        let chunks = input.len() / 4;
+        for c in 0..chunks {
+            let base = c * 4;
+            out[base] = input[base] as f32;
+            out[base + 1] = input[base + 1] as f32;
+            out[base + 2] = input[base + 2] as f32;
+            out[base + 3] = input[base + 3] as f32;
+        }
+        for i in (chunks * 4)..input.len() {
+            out[i] = input[i] as f32;
+        }
+        out
+    }
+
+    /// Convert normalised `f32` samples to unsigned 8-bit integers.
+    ///
+    /// Maps `[-1, 1]` → `[1, 255]` (biased, as per WAV U8 convention where
+    /// silence is 128).
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn f32_to_u8(input: &[f32]) -> Vec<u8> {
+        let mut out = vec![0_u8; input.len()];
+        for (i, &s) in input.iter().enumerate() {
+            let v = ((s.clamp(-1.0, 1.0) + 1.0) * 127.5).round() as u8;
+            out[i] = v;
+        }
+        out
+    }
+
+    /// Convert unsigned 8-bit integers to normalised `f32` samples.
+    ///
+    /// Inverts the mapping used by [`SimdConvert::f32_to_u8`].
+    #[must_use]
+    pub fn u8_to_f32(input: &[u8]) -> Vec<f32> {
+        let mut out = vec![0.0_f32; input.len()];
+        for (i, &b) in input.iter().enumerate() {
+            out[i] = (b as f32 / 127.5) - 1.0;
+        }
+        out
+    }
+
+    /// Convert normalised `f32` samples to 32-bit signed integers.
+    ///
+    /// Maps `[-1, 1]` → `[i32::MIN+1, i32::MAX]` (symmetric).
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn f32_to_s32(input: &[f32]) -> Vec<i32> {
+        let mut out = vec![0_i32; input.len()];
+        let scale = 2_147_483_647.0_f64; // i32::MAX
+        let chunks = input.len() / 4;
+        for c in 0..chunks {
+            let base = c * 4;
+            out[base] = (input[base] as f64 * scale).clamp(-scale, scale) as i32;
+            out[base + 1] = (input[base + 1] as f64 * scale).clamp(-scale, scale) as i32;
+            out[base + 2] = (input[base + 2] as f64 * scale).clamp(-scale, scale) as i32;
+            out[base + 3] = (input[base + 3] as f64 * scale).clamp(-scale, scale) as i32;
+        }
+        for i in (chunks * 4)..input.len() {
+            out[i] = (input[i] as f64 * scale).clamp(-scale, scale) as i32;
+        }
+        out
+    }
+
+    /// Convert 32-bit signed integers to normalised `f32` samples.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn s32_to_f32(input: &[i32]) -> Vec<f32> {
+        let mut out = vec![0.0_f32; input.len()];
+        let scale = 2_147_483_647.0_f32;
+        let chunks = input.len() / 4;
+        for c in 0..chunks {
+            let base = c * 4;
+            out[base] = input[base] as f32 / scale;
+            out[base + 1] = input[base + 1] as f32 / scale;
+            out[base + 2] = input[base + 2] as f32 / scale;
+            out[base + 3] = input[base + 3] as f32 / scale;
+        }
+        for i in (chunks * 4)..input.len() {
+            out[i] = input[i] as f32 / scale;
+        }
+        out
+    }
+
+    /// Interleave two mono channels into a stereo interleaved buffer.
+    ///
+    /// `left` and `right` must have the same length.  The shorter of the two
+    /// is used.  Returns `[L0, R0, L1, R1, …]`.
+    #[must_use]
+    pub fn interleave_stereo(left: &[f32], right: &[f32]) -> Vec<f32> {
+        let n = left.len().min(right.len());
+        let mut out = vec![0.0_f32; n * 2];
+        for i in 0..n {
+            out[i * 2] = left[i];
+            out[i * 2 + 1] = right[i];
+        }
+        out
+    }
+
+    /// De-interleave a stereo interleaved buffer into two mono channels.
+    ///
+    /// Input must be `[L0, R0, L1, R1, …]`.  If the length is odd, the last
+    /// sample is ignored.  Returns `(left, right)`.
+    #[must_use]
+    pub fn deinterleave_stereo(interleaved: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let n_frames = interleaved.len() / 2;
+        let mut left = vec![0.0_f32; n_frames];
+        let mut right = vec![0.0_f32; n_frames];
+        for i in 0..n_frames {
+            left[i] = interleaved[i * 2];
+            right[i] = interleaved[i * 2 + 1];
+        }
+        (left, right)
     }
 }
 

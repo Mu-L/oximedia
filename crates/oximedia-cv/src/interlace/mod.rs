@@ -13,11 +13,12 @@
 //!
 //! ## Basic Interlace Detection
 //!
-//! ```
+//! ```no_run
 //! use oximedia_cv::interlace::{InterlaceDetector, InterlaceDetectorConfig};
 //! use oximedia_codec::VideoFrame;
 //! use oximedia_core::PixelFormat;
 //!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = InterlaceDetectorConfig::default();
 //! let detector = InterlaceDetector::new(config);
 //!
@@ -27,15 +28,18 @@
 //! let info = detector.detect_interlacing(&[frame])?;
 //! println!("Content type: {:?}", info.content_type);
 //! println!("Confidence: {:.2}", info.confidence);
+//! Ok(())
+//! }
 //! ```
 //!
 //! ## Telecine Detection
 //!
-//! ```
+//! ```no_run
 //! use oximedia_cv::interlace::{TelecineDetector, TelecineDetectorConfig};
 //! use oximedia_codec::VideoFrame;
 //! use oximedia_core::PixelFormat;
 //!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = TelecineDetectorConfig::default();
 //! let mut detector = TelecineDetector::new(config);
 //!
@@ -51,6 +55,8 @@
 //! if info.is_telecine {
 //!     println!("Detected telecine: {:?}", info.pattern);
 //!     println!("Confidence: {:.2}", info.confidence);
+//! }
+//! Ok(())
 //! }
 //! ```
 

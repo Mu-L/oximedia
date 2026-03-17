@@ -331,9 +331,12 @@ pub enum Interpolation {
 /// ```
 /// use oximedia_cv::transform::{AffineTransform, affine::{transform_image, Interpolation}};
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let src = vec![100u8; 100];
 /// let transform = AffineTransform::rotation(std::f64::consts::PI / 4.0);
 /// let result = transform_image(&src, 10, 10, &transform, 10, 10, Interpolation::Bilinear)?;
+/// Ok(())
+/// }
 /// ```
 pub fn transform_image(
     src: &[u8],
@@ -651,11 +654,14 @@ fn solve_6x6(a: &[[f64; 6]; 6], b: &[f64; 6]) -> CvResult<[f64; 6]> {
 /// ```
 /// use oximedia_cv::transform::affine::warp_affine_image;
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // Identity warp on a 4×4 RGB image
 /// let src = vec![128u8; 4 * 4 * 3];
 /// let identity: [[f64; 3]; 2] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
 /// let dst = warp_affine_image(&src, 4, 4, 3, identity, 4, 4)?;
 /// assert_eq!(dst.len(), 4 * 4 * 3);
+/// Ok(())
+/// }
 /// ```
 pub fn warp_affine_image(
     src: &[u8],

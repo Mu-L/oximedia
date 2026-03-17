@@ -60,9 +60,11 @@ impl ColorKernel {
             .map_err(|e| AccelError::ShaderCompilation(format!("RGB to YUV shader: {e:?}")))?;
 
         let rgb_to_yuv_stage = PipelineShaderStageCreateInfo::new(
-            rgb_to_yuv_shader
-                .entry_point("main")
-                .expect("shader entry point 'main' not found"),
+            rgb_to_yuv_shader.entry_point("main").ok_or_else(|| {
+                AccelError::ShaderCompilation(
+                    "RGB to YUV shader: entry point 'main' not found".to_string(),
+                )
+            })?,
         );
 
         let rgb_to_yuv_layout = PipelineLayout::new(
@@ -87,9 +89,11 @@ impl ColorKernel {
             .map_err(|e| AccelError::ShaderCompilation(format!("YUV to RGB shader: {e:?}")))?;
 
         let yuv_to_rgb_stage = PipelineShaderStageCreateInfo::new(
-            yuv_to_rgb_shader
-                .entry_point("main")
-                .expect("shader entry point 'main' not found"),
+            yuv_to_rgb_shader.entry_point("main").ok_or_else(|| {
+                AccelError::ShaderCompilation(
+                    "YUV to RGB shader: entry point 'main' not found".to_string(),
+                )
+            })?,
         );
 
         let yuv_to_rgb_layout = PipelineLayout::new(

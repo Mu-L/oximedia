@@ -62,6 +62,7 @@
 //!
 //! let bitstream = assemble_tiles(&results);
 //! assert!(!bitstream.is_empty());
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 #![forbid(unsafe_code)]
@@ -368,6 +369,7 @@ pub trait TileEncodeOp: Send + Sync {
 ///
 /// let results = encoder.encode(&frame, &NullOp)?;
 /// assert_eq!(results.len(), 4);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub struct TileEncoder {
     config: Arc<TileConfig>,
@@ -724,6 +726,150 @@ impl TileEncodeStats {
         }
         Some(self.total_bytes as f64 / raw_luma_bytes as f64)
     }
+}
+
+// =============================================================================
+// Parallel Tile Decoding
+// =============================================================================
+
+/// Codec-specific tile decoding operation.
+///
+/// Implementors receive the compressed byte slice for one tile and return the
+/// decoded output (e.g. reconstructed pixel rows for a codec-agnostic buffer).
+///
+/// # Thread Safety
+///
+/// Implementations **must** be `Send + Sync` because [`decode_tiles_parallel`]
+/// drives them from Rayon work-stealing iterators.
+pub trait TileDecodeOp: Send + Sync {
+    /// Decode the byte slice `data` for the tile described by `coord`.
+    ///
+    /// Returns the decoded bytes for this tile (format is op-specific).
+    ///
+    /// # Errors
+    ///
+    /// Return a [`CodecError`] if decoding fails.
+    fn decode_tile(&self, coord: &TileCoord, data: &[u8]) -> CodecResult<Vec<u8>>;
+}
+
+/// Result produced by decoding a single tile.
+#[derive(Clone, Debug)]
+pub struct TileDecodeResult {
+    /// Spatial coordinates of the tile.
+    pub coord: TileCoord,
+    /// Decoded bytes for this tile.
+    pub data: Vec<u8>,
+}
+
+impl TileDecodeResult {
+    /// Create a new `TileDecodeResult`.
+    #[must_use]
+    pub fn new(coord: TileCoord, data: Vec<u8>) -> Self {
+        Self { coord, data }
+    }
+
+    /// Raster index (row * tile_cols + col).
+    #[must_use]
+    pub const fn index(&self) -> u32 {
+        self.coord.index
+    }
+
+    /// Decoded data size in bytes.
+    #[must_use]
+    pub fn decoded_size(&self) -> usize {
+        self.data.len()
+    }
+
+    /// True if the decoded data is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+}
+
+/// Decode a tile stream produced by [`assemble_tiles`] in parallel using Rayon
+/// work-stealing.
+///
+/// Each tile's compressed bytes are passed to `op.decode_tile()` concurrently.
+/// Results are returned sorted by raster index (tile 0 first).
+///
+/// # Errors
+///
+/// Returns the first [`CodecError`] encountered across all tiles, if any.
+///
+/// # Example
+///
+/// ```
+/// use oximedia_codec::tile::{
+///     TileConfig, TileEncoder, TileEncodeOp, TileDecodeOp, TileDecodeResult,
+///     TileCoord, assemble_tiles, decode_tiles_parallel,
+/// };
+/// use oximedia_codec::error::CodecResult;
+/// use oximedia_codec::frame::VideoFrame;
+/// use oximedia_core::PixelFormat;
+///
+/// struct PassthroughOp;
+///
+/// impl TileEncodeOp for PassthroughOp {
+///     fn encode_tile(&self, _f: &VideoFrame, _x: u32, _y: u32, w: u32, h: u32)
+///         -> CodecResult<Vec<u8>>
+///     {
+///         Ok(vec![42u8; (w * h) as usize])
+///     }
+/// }
+///
+/// impl TileDecodeOp for PassthroughOp {
+///     fn decode_tile(&self, _coord: &TileCoord, data: &[u8]) -> CodecResult<Vec<u8>> {
+///         Ok(data.to_vec())
+///     }
+/// }
+///
+/// let cfg = TileConfig::new(2, 2, 0)?;
+/// let encoder = TileEncoder::new(cfg, 64, 64);
+/// let mut frame = VideoFrame::new(PixelFormat::Yuv420p, 64, 64);
+/// frame.allocate();
+///
+/// let encoded = encoder.encode(&frame, &PassthroughOp)?;
+/// let stream = assemble_tiles(&encoded);
+/// let decoded = decode_tiles_parallel(&stream, &PassthroughOp, &encoder)?;
+/// assert_eq!(decoded.len(), 4);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn decode_tiles_parallel(
+    stream: &[u8],
+    op: &(impl TileDecodeOp + ?Sized),
+    encoder: &TileEncoder,
+) -> CodecResult<Vec<TileDecodeResult>> {
+    // Deserialise the tile byte payloads from the stream.
+    let tile_bytes = decode_tile_stream(stream)?;
+
+    let coords = encoder.coords();
+    if tile_bytes.len() != coords.len() {
+        return Err(CodecError::InvalidBitstream(format!(
+            "decode_tiles_parallel: stream has {} tiles, expected {}",
+            tile_bytes.len(),
+            coords.len()
+        )));
+    }
+
+    // Pair each tile with its coordinates then decode in parallel.
+    let pairs: Vec<(&TileCoord, &[u8])> = coords
+        .iter()
+        .zip(tile_bytes.iter().map(|v| v.as_slice()))
+        .collect();
+
+    let results: Vec<CodecResult<TileDecodeResult>> = pairs
+        .par_iter()
+        .map(|(coord, data)| {
+            let decoded = op.decode_tile(coord, data)?;
+            Ok(TileDecodeResult::new((*coord).clone(), decoded))
+        })
+        .collect();
+
+    // Collect, propagating the first error.
+    let mut decoded: Vec<TileDecodeResult> = results.into_iter().collect::<CodecResult<_>>()?;
+    decoded.sort_by_key(TileDecodeResult::index);
+    Ok(decoded)
 }
 
 // =============================================================================

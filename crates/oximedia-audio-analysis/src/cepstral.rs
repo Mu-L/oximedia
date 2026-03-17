@@ -315,6 +315,325 @@ pub fn mean_mfcc(frames: &[CepstralFrame]) -> Vec<f64> {
     mean
 }
 
+// ── Full MFCC extraction from raw audio samples ─────────────────────────────
+
+/// Configuration for full MFCC extraction from raw audio.
+#[derive(Debug, Clone)]
+pub struct MfccConfig {
+    /// Number of MFCC coefficients to extract (default 13).
+    pub num_coefficients: usize,
+    /// Number of Mel filter banks (default 26).
+    pub num_filters: usize,
+    /// FFT size (default 1024).
+    pub fft_size: usize,
+    /// Hop size between frames (default 512).
+    pub hop_size: usize,
+    /// Low frequency cutoff in Hz (default 20).
+    pub low_freq: f64,
+    /// High frequency cutoff in Hz (default 8000).
+    pub high_freq: f64,
+    /// Pre-emphasis coefficient (0.0 = none, 0.97 = typical, default 0.97).
+    pub pre_emphasis: f64,
+    /// Whether to include delta (first-derivative) features.
+    pub include_deltas: bool,
+    /// Whether to include delta-delta (second-derivative) features.
+    pub include_delta_deltas: bool,
+    /// Delta context window size (default 2).
+    pub delta_context: usize,
+    /// Whether to apply sinusoidal liftering (default true).
+    pub apply_lifter: bool,
+    /// Liftering coefficient (default 22).
+    pub lifter_coeff: usize,
+    /// Whether to replace C0 with log energy (default true).
+    pub use_energy: bool,
+}
+
+impl Default for MfccConfig {
+    fn default() -> Self {
+        Self {
+            num_coefficients: 13,
+            num_filters: 26,
+            fft_size: 1024,
+            hop_size: 512,
+            low_freq: 20.0,
+            high_freq: 8000.0,
+            pre_emphasis: 0.97,
+            include_deltas: true,
+            include_delta_deltas: false,
+            delta_context: 2,
+            apply_lifter: true,
+            lifter_coeff: 22,
+            use_energy: true,
+        }
+    }
+}
+
+/// Complete MFCC extraction result from raw audio.
+#[derive(Debug, Clone)]
+pub struct MfccResult {
+    /// MFCC coefficients per frame (num_frames x num_coefficients).
+    pub mfcc: Vec<Vec<f64>>,
+    /// Delta (first-derivative) MFCC coefficients per frame, if computed.
+    pub deltas: Option<Vec<Vec<f64>>>,
+    /// Delta-delta (second-derivative) coefficients per frame, if computed.
+    pub delta_deltas: Option<Vec<Vec<f64>>>,
+    /// Frame-level log energies.
+    pub frame_energies: Vec<f64>,
+    /// Number of frames extracted.
+    pub num_frames: usize,
+    /// Number of MFCC coefficients per frame.
+    pub num_coefficients: usize,
+    /// Sample rate of the analyzed audio.
+    pub sample_rate: f64,
+}
+
+/// Extract MFCCs from raw audio samples.
+///
+/// This is a complete pipeline: pre-emphasis -> framing -> windowing -> FFT ->
+/// power spectrum -> mel filter bank -> log compression -> DCT -> liftering ->
+/// optional deltas. Suitable for speech recognition and audio ML features.
+///
+/// # Arguments
+/// * `samples` - Mono audio samples (f32)
+/// * `sample_rate` - Sample rate in Hz
+/// * `config` - MFCC extraction configuration
+///
+/// # Returns
+/// `MfccResult` containing per-frame MFCC vectors and optional delta features.
+///
+/// # Errors
+/// Returns error if samples are too short or sample rate is invalid.
+pub fn extract_mfcc(
+    samples: &[f32],
+    sample_rate: f64,
+    config: &MfccConfig,
+) -> std::result::Result<MfccResult, crate::AnalysisError> {
+    if sample_rate <= 0.0 || sample_rate > 192_000.0 {
+        return Err(crate::AnalysisError::InvalidSampleRate(sample_rate as f32));
+    }
+    if samples.len() < config.fft_size {
+        return Err(crate::AnalysisError::InsufficientSamples {
+            needed: config.fft_size,
+            got: samples.len(),
+        });
+    }
+
+    let effective_high = config.high_freq.min(sample_rate / 2.0);
+
+    // Build mel filter bank
+    let mel_filters = build_mel_filters(
+        config.num_filters,
+        config.fft_size,
+        sample_rate,
+        config.low_freq,
+        effective_high,
+    );
+
+    // Pre-emphasis
+    let emphasized = if config.pre_emphasis > 0.0 {
+        let mut out = Vec::with_capacity(samples.len());
+        out.push(f64::from(samples[0]));
+        for i in 1..samples.len() {
+            out.push(f64::from(samples[i]) - config.pre_emphasis * f64::from(samples[i - 1]));
+        }
+        out
+    } else {
+        samples.iter().map(|&s| f64::from(s)).collect()
+    };
+
+    // Hann window
+    let window: Vec<f64> = (0..config.fft_size)
+        .map(|i| {
+            let x = PI * i as f64 / (config.fft_size.saturating_sub(1)) as f64;
+            0.5 * (1.0 - x.cos())
+        })
+        .collect();
+
+    let num_bins = config.fft_size / 2 + 1;
+
+    // Process frames
+    let num_frames = if emphasized.len() >= config.fft_size {
+        (emphasized.len() - config.fft_size) / config.hop_size + 1
+    } else {
+        0
+    };
+
+    let mut all_mfcc = Vec::with_capacity(num_frames);
+    let mut frame_energies = Vec::with_capacity(num_frames);
+
+    for frame_idx in 0..num_frames {
+        let start = frame_idx * config.hop_size;
+        let end = start + config.fft_size;
+        if end > emphasized.len() {
+            break;
+        }
+
+        let frame = &emphasized[start..end];
+
+        // Apply window
+        let windowed: Vec<f64> = frame.iter().zip(&window).map(|(&s, &w)| s * w).collect();
+
+        // Compute frame energy (before FFT for log energy feature)
+        let frame_energy: f64 = windowed.iter().map(|&x| x * x).sum();
+        let log_energy = if frame_energy > 1e-30 {
+            frame_energy.ln()
+        } else {
+            -69.0
+        };
+        frame_energies.push(log_energy);
+
+        // FFT using oxifft
+        let complex_input: Vec<oxifft::Complex<f64>> = windowed
+            .iter()
+            .map(|&s| oxifft::Complex::new(s, 0.0))
+            .collect();
+
+        let fft_output = oxifft::fft(&complex_input);
+
+        // Power spectrum
+        let power_spectrum: Vec<f64> = fft_output[..num_bins]
+            .iter()
+            .map(|c| c.re * c.re + c.im * c.im)
+            .collect();
+
+        // Apply mel filter bank
+        let mel_energies: Vec<f64> = mel_filters
+            .iter()
+            .map(|filter| {
+                let energy: f64 = filter
+                    .iter()
+                    .zip(power_spectrum.iter())
+                    .map(|(f, p)| f * p)
+                    .sum();
+                if energy > 1e-30 {
+                    energy.ln()
+                } else {
+                    -69.0
+                }
+            })
+            .collect();
+
+        // DCT-II to get MFCCs
+        let mut mfcc = dct_ii(&mel_energies, config.num_coefficients);
+
+        // Replace C0 with log energy if requested
+        if config.use_energy && !mfcc.is_empty() {
+            mfcc[0] = log_energy;
+        }
+
+        // Liftering
+        if config.apply_lifter {
+            lifter(&mut mfcc, config.lifter_coeff);
+        }
+
+        all_mfcc.push(mfcc);
+    }
+
+    // Compute deltas
+    let deltas = if config.include_deltas && !all_mfcc.is_empty() {
+        Some(compute_deltas_from_vecs(&all_mfcc, config.delta_context))
+    } else {
+        None
+    };
+
+    // Compute delta-deltas
+    let delta_deltas = if config.include_delta_deltas {
+        deltas
+            .as_ref()
+            .map(|d| compute_deltas_from_vecs(d, config.delta_context))
+    } else {
+        None
+    };
+
+    let actual_frames = all_mfcc.len();
+
+    Ok(MfccResult {
+        mfcc: all_mfcc,
+        deltas,
+        delta_deltas,
+        frame_energies,
+        num_frames: actual_frames,
+        num_coefficients: config.num_coefficients,
+        sample_rate,
+    })
+}
+
+/// Compute delta features from a sequence of coefficient vectors.
+#[allow(clippy::cast_precision_loss)]
+fn compute_deltas_from_vecs(frames: &[Vec<f64>], context: usize) -> Vec<Vec<f64>> {
+    let n = frames.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let num_coeffs = frames[0].len();
+    let denom: f64 = (1..=context).map(|k| 2.0 * (k as f64) * (k as f64)).sum();
+    let denom = if denom > 0.0 { denom } else { 1.0 };
+
+    let mut deltas = Vec::with_capacity(n);
+    for t in 0..n {
+        let mut delta = vec![0.0_f64; num_coeffs];
+        for k in 1..=context {
+            let prev = t.saturating_sub(k);
+            let next = if t + k < n { t + k } else { n - 1 };
+            for c in 0..num_coeffs {
+                delta[c] += k as f64 * (frames[next][c] - frames[prev][c]);
+            }
+        }
+        for d in &mut delta {
+            *d /= denom;
+        }
+        deltas.push(delta);
+    }
+    deltas
+}
+
+/// Compute MFCC variance across frames (useful for voice activity detection).
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn mfcc_variance(mfcc_result: &MfccResult) -> Vec<f64> {
+    if mfcc_result.mfcc.is_empty() {
+        return Vec::new();
+    }
+    let n = mfcc_result.num_coefficients;
+    let mean = mean_mfcc_from_vecs(&mfcc_result.mfcc);
+    let count = mfcc_result.mfcc.len() as f64;
+
+    let mut variance = vec![0.0_f64; n];
+    for frame in &mfcc_result.mfcc {
+        for (i, &v) in frame.iter().enumerate() {
+            if i < n {
+                variance[i] += (v - mean[i]) * (v - mean[i]);
+            }
+        }
+    }
+    for v in &mut variance {
+        *v /= count.max(1.0);
+    }
+    variance
+}
+
+/// Compute mean MFCC from raw coefficient vectors.
+#[allow(clippy::cast_precision_loss)]
+fn mean_mfcc_from_vecs(frames: &[Vec<f64>]) -> Vec<f64> {
+    if frames.is_empty() {
+        return Vec::new();
+    }
+    let n = frames[0].len();
+    let mut mean = vec![0.0_f64; n];
+    for frame in frames {
+        for (i, &v) in frame.iter().enumerate() {
+            if i < n {
+                mean[i] += v;
+            }
+        }
+    }
+    let count = frames.len() as f64;
+    for m in &mut mean {
+        *m /= count;
+    }
+    mean
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,5 +793,209 @@ mod tests {
         assert!((mean[0] - 1.0).abs() < 1e-10);
         assert!((mean[1] - 2.0).abs() < 1e-10);
         assert!((mean[2] - 3.0).abs() < 1e-10);
+    }
+
+    // ── extract_mfcc tests ──────────────────────────────────────────────────
+
+    fn generate_sine(freq: f64, sample_rate: f64, duration: f64) -> Vec<f32> {
+        let num_samples = (sample_rate * duration) as usize;
+        (0..num_samples)
+            .map(|i| {
+                let t = i as f64 / sample_rate;
+                (2.0 * PI * freq * t).sin() as f32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_extract_mfcc_basic() {
+        let samples = generate_sine(440.0, 16000.0, 0.5);
+        let config = MfccConfig::default();
+        let result = extract_mfcc(&samples, 16000.0, &config);
+        assert!(result.is_ok());
+        let result = result.expect("mfcc extraction should succeed");
+        assert!(result.num_frames > 0);
+        assert_eq!(result.num_coefficients, 13);
+        for frame in &result.mfcc {
+            assert_eq!(frame.len(), 13);
+        }
+    }
+
+    #[test]
+    fn test_extract_mfcc_with_deltas() {
+        let samples = generate_sine(300.0, 16000.0, 0.5);
+        let config = MfccConfig {
+            include_deltas: true,
+            include_delta_deltas: true,
+            ..MfccConfig::default()
+        };
+        let result = extract_mfcc(&samples, 16000.0, &config).expect("should succeed");
+        assert!(result.deltas.is_some());
+        assert!(result.delta_deltas.is_some());
+        let deltas = result.deltas.as_ref().expect("deltas should exist");
+        assert_eq!(deltas.len(), result.num_frames);
+        let dd = result
+            .delta_deltas
+            .as_ref()
+            .expect("delta-deltas should exist");
+        assert_eq!(dd.len(), result.num_frames);
+    }
+
+    #[test]
+    fn test_extract_mfcc_no_deltas() {
+        let samples = generate_sine(440.0, 16000.0, 0.3);
+        let config = MfccConfig {
+            include_deltas: false,
+            include_delta_deltas: false,
+            ..MfccConfig::default()
+        };
+        let result = extract_mfcc(&samples, 16000.0, &config).expect("should succeed");
+        assert!(result.deltas.is_none());
+        assert!(result.delta_deltas.is_none());
+    }
+
+    #[test]
+    fn test_extract_mfcc_invalid_sample_rate() {
+        let samples = vec![0.0_f32; 2048];
+        let config = MfccConfig::default();
+        let result = extract_mfcc(&samples, -1.0, &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_mfcc_too_short() {
+        let samples = vec![0.0_f32; 100];
+        let config = MfccConfig {
+            fft_size: 1024,
+            ..MfccConfig::default()
+        };
+        let result = extract_mfcc(&samples, 16000.0, &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_mfcc_energy_feature() {
+        let loud = generate_sine(440.0, 16000.0, 0.3);
+        let quiet: Vec<f32> = loud.iter().map(|&s| s * 0.01).collect();
+        let config = MfccConfig {
+            use_energy: true,
+            ..MfccConfig::default()
+        };
+        let r_loud = extract_mfcc(&loud, 16000.0, &config).expect("should succeed");
+        let r_quiet = extract_mfcc(&quiet, 16000.0, &config).expect("should succeed");
+        // Loud signal should have higher energy in C0
+        let loud_c0_mean: f64 =
+            r_loud.mfcc.iter().map(|f| f[0]).sum::<f64>() / r_loud.num_frames as f64;
+        let quiet_c0_mean: f64 =
+            r_quiet.mfcc.iter().map(|f| f[0]).sum::<f64>() / r_quiet.num_frames as f64;
+        assert!(
+            loud_c0_mean > quiet_c0_mean,
+            "Loud C0 ({loud_c0_mean}) should exceed quiet C0 ({quiet_c0_mean})"
+        );
+    }
+
+    #[test]
+    fn test_extract_mfcc_different_frequencies() {
+        let low = generate_sine(200.0, 16000.0, 0.5);
+        let high = generate_sine(2000.0, 16000.0, 0.5);
+        let config = MfccConfig::default();
+        let r_low = extract_mfcc(&low, 16000.0, &config).expect("should succeed");
+        let r_high = extract_mfcc(&high, 16000.0, &config).expect("should succeed");
+        // MFCCs should differ between low and high frequency signals
+        let mean_low = mean_mfcc_from_vecs(&r_low.mfcc);
+        let mean_high = mean_mfcc_from_vecs(&r_high.mfcc);
+        let dist: f64 = mean_low
+            .iter()
+            .zip(&mean_high)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f64>()
+            .sqrt();
+        assert!(
+            dist > 0.1,
+            "MFCCs for 200Hz and 2000Hz should differ, distance={dist}"
+        );
+    }
+
+    #[test]
+    fn test_extract_mfcc_no_pre_emphasis() {
+        let samples = generate_sine(440.0, 16000.0, 0.3);
+        let config = MfccConfig {
+            pre_emphasis: 0.0,
+            ..MfccConfig::default()
+        };
+        let result = extract_mfcc(&samples, 16000.0, &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mfcc_variance_nonzero_for_varying_signal() {
+        // Create a signal that changes over time (frequency sweep)
+        let sample_rate = 16000.0;
+        let num_samples = 8000;
+        let samples: Vec<f32> = (0..num_samples)
+            .map(|i| {
+                let t = i as f64 / sample_rate;
+                let freq = 200.0 + 2000.0 * t; // sweep from 200 to ~3200 Hz
+                (2.0 * PI * freq * t).sin() as f32
+            })
+            .collect();
+        let config = MfccConfig {
+            include_deltas: false,
+            ..MfccConfig::default()
+        };
+        let result = extract_mfcc(&samples, sample_rate, &config).expect("should succeed");
+        let var = mfcc_variance(&result);
+        assert!(!var.is_empty());
+        // At least some coefficients should have non-trivial variance
+        let total_var: f64 = var.iter().sum();
+        assert!(
+            total_var > 0.0,
+            "Varying signal should have nonzero MFCC variance"
+        );
+    }
+
+    #[test]
+    fn test_mfcc_variance_empty() {
+        let result = MfccResult {
+            mfcc: vec![],
+            deltas: None,
+            delta_deltas: None,
+            frame_energies: vec![],
+            num_frames: 0,
+            num_coefficients: 13,
+            sample_rate: 16000.0,
+        };
+        let var = mfcc_variance(&result);
+        assert!(var.is_empty());
+    }
+
+    #[test]
+    fn test_extract_mfcc_frame_count() {
+        let sample_rate = 16000.0;
+        let duration = 1.0;
+        let samples = generate_sine(440.0, sample_rate, duration);
+        let config = MfccConfig {
+            fft_size: 512,
+            hop_size: 256,
+            ..MfccConfig::default()
+        };
+        let result = extract_mfcc(&samples, sample_rate, &config).expect("should succeed");
+        let expected_frames = (samples.len() - config.fft_size) / config.hop_size + 1;
+        assert_eq!(result.num_frames, expected_frames);
+    }
+
+    #[test]
+    fn test_extract_mfcc_custom_coefficients() {
+        let samples = generate_sine(440.0, 16000.0, 0.3);
+        let config = MfccConfig {
+            num_coefficients: 20,
+            num_filters: 40,
+            ..MfccConfig::default()
+        };
+        let result = extract_mfcc(&samples, 16000.0, &config).expect("should succeed");
+        assert_eq!(result.num_coefficients, 20);
+        for frame in &result.mfcc {
+            assert_eq!(frame.len(), 20);
+        }
     }
 }

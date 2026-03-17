@@ -1,0 +1,23 @@
+[package]
+name = "oximedia-image-transform"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Cloudflare Images-compatible URL image transformation — on-the-fly resize, format negotiation, and optimization for OxiMedia"
+keywords = ["image-transform", "cdn", "cloudflare-images", "resize", "multimedia"]
+categories = ["multimedia", "web-programming", "multimedia::images"]
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]

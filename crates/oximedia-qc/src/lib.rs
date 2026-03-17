@@ -148,6 +148,7 @@ pub mod video_measure;
 pub mod database;
 
 use oximedia_core::{OxiError, OxiResult};
+use rayon::prelude::*;
 use std::time::Instant;
 
 /// Quality control system for media validation.
@@ -219,25 +220,35 @@ impl QualityControl {
         // Create context by probing the file
         let context = self.probe_file(file_path)?;
 
-        // Execute all applicable rules
+        // Execute all applicable rules in parallel using rayon
         let mut report = QcReport::new(file_path);
 
-        for rule in &self.rules {
-            if rule.is_applicable(&context) {
-                match rule.check(&context) {
-                    Ok(results) => report.add_results(results),
-                    Err(e) => {
-                        tracing::error!(
-                            rule = rule.name(),
-                            error = %e,
-                            "Rule execution failed"
-                        );
-                        report.add_result(rules::CheckResult::fail(
-                            rule.name(),
-                            rules::Severity::Error,
-                            format!("Rule execution failed: {e}"),
-                        ));
-                    }
+        // Collect parallel results: each applicable rule runs concurrently.
+        // Rules implement Send + Sync (guaranteed by the QcRule trait bound).
+        let parallel_results: Vec<Result<Vec<rules::CheckResult>, (String, String)>> = self
+            .rules
+            .par_iter()
+            .filter(|rule| rule.is_applicable(&context))
+            .map(|rule| {
+                rule.check(&context)
+                    .map_err(|e| (rule.name().to_string(), e.to_string()))
+            })
+            .collect();
+
+        for outcome in parallel_results {
+            match outcome {
+                Ok(results) => report.add_results(results),
+                Err((rule_name, err_msg)) => {
+                    tracing::error!(
+                        rule = rule_name,
+                        error = %err_msg,
+                        "Rule execution failed"
+                    );
+                    report.add_result(rules::CheckResult::fail(
+                        rule_name,
+                        rules::Severity::Error,
+                        format!("Rule execution failed: {err_msg}"),
+                    ));
                 }
             }
         }
@@ -1192,8 +1203,10 @@ impl QcPreset {
 // Re-export key types at crate root
 pub use batch::{BatchProcessor, BatchResults};
 pub use profiles::{ProfileManager, QcProfile};
-pub use report::{QcReport, ReportFormat};
-pub use rules::{CheckResult, QcContext, QcRule, RuleCategory, Severity, Thresholds};
+pub use report::{report_to_html, HtmlExportError, QcReport, ReportFormat};
+pub use rules::{
+    CheckResult, QcContext, QcRule, RuleCategory, Severity, SeverityClassifier, Thresholds,
+};
 
 #[cfg(feature = "database")]
 pub use database::QcDatabase;

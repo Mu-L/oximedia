@@ -217,11 +217,10 @@ fn predict_dc_8x8(ctx: &IntraPredContext, output: &mut [u8; 64]) {
         }
     }
 
-    let dc_value = if count > 0 {
-        (sum + count / 2) / count
-    } else {
-        128
-    };
+    let dc_value = count
+        .checked_div(2)
+        .and_then(|half| (sum + half).checked_div(count))
+        .unwrap_or(128);
 
     output.fill(dc_value as u8);
 }
@@ -545,11 +544,10 @@ pub fn predict_intra_4x4(
                 }
             }
 
-            let dc = if count > 0 {
-                (sum + count / 2) / count
-            } else {
-                128
-            };
+            let dc = count
+                .checked_div(2)
+                .and_then(|half| (sum + half).checked_div(count))
+                .unwrap_or(128);
 
             output.fill(dc as u8);
         }

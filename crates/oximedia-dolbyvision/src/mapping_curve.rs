@@ -141,16 +141,22 @@ impl PolynomialCoeffs {
         }
     }
 
-    /// Evaluate the polynomial at a given input.
+    /// Evaluate the polynomial at a given input using Horner's method.
+    ///
+    /// Horner's method rewrites `a·x³ + b·x² + c·x + d` as
+    /// `((a·x + b)·x + c)·x + d`, reducing multiplications from 6 to 3
+    /// and improving numerical stability.
     #[must_use]
     pub fn evaluate(&self, x: f64) -> f64 {
-        self.a * x * x * x + self.b * x * x + self.c * x + self.d
+        // Horner's method: p(x) = d + x*(c + x*(b + x*a))
+        self.d + x * (self.c + x * (self.b + x * self.a))
     }
 
-    /// Evaluate the derivative at a given input.
+    /// Evaluate the derivative `3a·x² + 2b·x + c` using Horner's method.
     #[must_use]
     pub fn derivative(&self, x: f64) -> f64 {
-        3.0 * self.a * x * x + 2.0 * self.b * x + self.c
+        // Horner: c + x*(2b + x*3a)
+        self.c + x * (2.0 * self.b + x * 3.0 * self.a)
     }
 }
 
@@ -602,5 +608,50 @@ mod tests {
     fn test_evaluate_nits_zero_peak() {
         let curve = MappingCurve::new(CurveType::Linear, 0.0, 1000.0);
         assert!((curve.evaluate_nits(500.0) - 0.0).abs() < f64::EPSILON);
+    }
+
+    /// Verify that Horner's method matches the naive expansion for arbitrary coefficients.
+    #[test]
+    fn test_horner_matches_naive() {
+        // Test several polynomials at multiple evaluation points.
+        let test_cases: &[(f64, f64, f64, f64)] = &[
+            // (a, b, c, d) — arbitrary coefficients
+            (1.0, -2.0, 3.0, -4.0),
+            (0.0, 0.0, 1.0, 0.0), // identity: f(x) = x
+            (2.5, 0.5, -1.5, 0.25),
+            (0.0, 0.0, 0.0, 7.0),   // constant 7
+            (-1.0, 3.0, -3.0, 1.0), // -(x-1)^3
+        ];
+        let eval_points = [0.0_f64, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0, -1.0, 2.0];
+
+        for &(a, b, c, d) in test_cases {
+            let coeffs = PolynomialCoeffs::new(a, b, c, d);
+            for &x in &eval_points {
+                // Naive expansion: a*x^3 + b*x^2 + c*x + d
+                let naive = a * x * x * x + b * x * x + c * x + d;
+                let horner = coeffs.evaluate(x);
+                assert!(
+                    (horner - naive).abs() < 1e-10,
+                    "Horner ({horner}) != naive ({naive}) for a={a} b={b} c={c} d={d} at x={x}"
+                );
+            }
+        }
+    }
+
+    /// Verify that Horner's derivative matches naive derivative expansion.
+    #[test]
+    fn test_horner_derivative_matches_naive() {
+        let coeffs = PolynomialCoeffs::new(2.0, -3.0, 1.5, 0.0);
+        let eval_points = [0.0_f64, 0.25, 0.5, 0.75, 1.0];
+
+        for &x in &eval_points {
+            // Naive: 3a*x^2 + 2b*x + c
+            let naive = 3.0 * coeffs.a * x * x + 2.0 * coeffs.b * x + coeffs.c;
+            let horner = coeffs.derivative(x);
+            assert!(
+                (horner - naive).abs() < 1e-10,
+                "Derivative Horner ({horner}) != naive ({naive}) at x={x}"
+            );
+        }
     }
 }

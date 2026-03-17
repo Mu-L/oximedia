@@ -212,6 +212,203 @@ impl CommandBuffer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Double-buffered command submission
+// ---------------------------------------------------------------------------
+
+/// Identifies one of the two command-buffer slots used in double buffering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferSlot {
+    /// First slot (index 0).
+    A,
+    /// Second slot (index 1).
+    B,
+}
+
+impl BufferSlot {
+    /// Return the other slot.
+    #[must_use]
+    pub fn flip(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
+        }
+    }
+
+    /// Numeric index of this slot.
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            Self::A => 0,
+            Self::B => 1,
+        }
+    }
+}
+
+/// Lifecycle state of a slot in [`DoubleBufferedSubmitter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotState {
+    /// No work has been recorded; slot is free.
+    Idle,
+    /// CPU is currently recording commands into this slot.
+    Recording,
+    /// Recorded and ready to send to the GPU queue.
+    ReadyToSubmit,
+    /// Submitted to the GPU queue; GPU may still be executing.
+    Inflight,
+    /// GPU execution finished; results are available.
+    Retired,
+}
+
+/// Double-buffered GPU command submission.
+///
+/// Maintains two independent [`CommandBuffer`] slots (A and B).  While the GPU
+/// executes the commands in slot B, the CPU records new work into slot A, and
+/// vice-versa.  This overlaps CPU recording with GPU execution to maximise
+/// throughput.
+///
+/// # Typical cycle (one frame)
+///
+/// ```text
+/// 1. begin_record(recording_slot)   → SlotState::Recording
+/// 2. … record commands …
+/// 3. finish_record(recording_slot)  → SlotState::ReadyToSubmit
+/// 4. submit(recording_slot)         → SlotState::Inflight
+/// 5. mark_retired(other_slot)       → SlotState::Retired (after GPU fence)
+/// 6. reset(retired_slot)            → SlotState::Idle
+/// ```
+pub struct DoubleBufferedSubmitter {
+    slots: [CommandBuffer; 2],
+    slot_states: [SlotState; 2],
+    /// The slot currently being recorded by the CPU.
+    active_slot: BufferSlot,
+    /// Number of full A→B→A cycles completed.
+    frame_count: u64,
+}
+
+impl DoubleBufferedSubmitter {
+    /// Create a new double-buffered submitter with both slots idle.
+    #[must_use]
+    pub fn new() -> Self {
+        let mut slot_a = CommandBuffer::new("DoubleBuffer-SlotA");
+        let mut slot_b = CommandBuffer::new("DoubleBuffer-SlotB");
+        // Reset both so they start in `Reset` state and can `begin()`.
+        slot_a.reset();
+        slot_b.reset();
+        Self {
+            slots: [slot_a, slot_b],
+            slot_states: [SlotState::Idle, SlotState::Idle],
+            active_slot: BufferSlot::A,
+            frame_count: 0,
+        }
+    }
+
+    /// Current state of `slot`.
+    #[must_use]
+    pub fn state(&self, slot: BufferSlot) -> SlotState {
+        self.slot_states[slot.index()]
+    }
+
+    /// The slot the CPU is currently (or will next) record into.
+    #[must_use]
+    pub fn active_slot(&self) -> BufferSlot {
+        self.active_slot
+    }
+
+    /// Total number of complete double-buffer cycles (frames) submitted.
+    #[must_use]
+    pub fn frame_count(&self) -> u64 {
+        self.frame_count
+    }
+
+    /// Begin recording commands into `slot`.
+    ///
+    /// Returns `false` if `slot` is not currently `Idle`.
+    pub fn begin_record(&mut self, slot: BufferSlot) -> bool {
+        if self.slot_states[slot.index()] != SlotState::Idle {
+            return false;
+        }
+        self.slots[slot.index()].begin();
+        self.slot_states[slot.index()] = SlotState::Recording;
+        self.active_slot = slot;
+        true
+    }
+
+    /// Record a command entry into the active recording slot.
+    ///
+    /// Returns `false` if `slot` is not in `Recording` state.
+    pub fn record(&mut self, slot: BufferSlot, entry: CommandEntry) -> bool {
+        if self.slot_states[slot.index()] != SlotState::Recording {
+            return false;
+        }
+        self.slots[slot.index()].record(entry);
+        true
+    }
+
+    /// Finish recording for `slot`.
+    ///
+    /// Returns `false` if `slot` is not in `Recording` state.
+    pub fn finish_record(&mut self, slot: BufferSlot) -> bool {
+        if self.slot_states[slot.index()] != SlotState::Recording {
+            return false;
+        }
+        let ok = self.slots[slot.index()].finish();
+        if ok {
+            self.slot_states[slot.index()] = SlotState::ReadyToSubmit;
+        }
+        ok
+    }
+
+    /// Submit the commands in `slot` to the (simulated) GPU queue.
+    ///
+    /// Returns the submitted commands on success, or `None` if `slot` is not
+    /// `ReadyToSubmit`.
+    pub fn submit(&mut self, slot: BufferSlot) -> Option<Vec<CommandEntry>> {
+        if self.slot_states[slot.index()] != SlotState::ReadyToSubmit {
+            return None;
+        }
+        let cmds = self.slots[slot.index()].submit()?;
+        self.slot_states[slot.index()] = SlotState::Inflight;
+        self.frame_count += 1;
+        Some(cmds)
+    }
+
+    /// Mark `slot` as retired (GPU execution complete).
+    ///
+    /// Returns `false` if `slot` is not `Inflight`.
+    pub fn mark_retired(&mut self, slot: BufferSlot) -> bool {
+        if self.slot_states[slot.index()] != SlotState::Inflight {
+            return false;
+        }
+        self.slot_states[slot.index()] = SlotState::Retired;
+        true
+    }
+
+    /// Reset `slot` to `Idle` so it can be recorded into again.
+    ///
+    /// Returns `false` if `slot` is not `Retired`.
+    pub fn reset_slot(&mut self, slot: BufferSlot) -> bool {
+        if self.slot_states[slot.index()] != SlotState::Retired {
+            return false;
+        }
+        self.slots[slot.index()].reset();
+        self.slot_states[slot.index()] = SlotState::Idle;
+        true
+    }
+
+    /// Number of commands recorded in `slot`.
+    #[must_use]
+    pub fn command_count(&self, slot: BufferSlot) -> usize {
+        self.slots[slot.index()].command_count()
+    }
+}
+
+impl Default for DoubleBufferedSubmitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,5 +567,107 @@ mod tests {
         buf.finish();
         // Calling finish again should return false
         assert!(!buf.finish());
+    }
+
+    // --- BufferSlot tests ---
+
+    #[test]
+    fn test_buffer_slot_flip() {
+        assert_eq!(BufferSlot::A.flip(), BufferSlot::B);
+        assert_eq!(BufferSlot::B.flip(), BufferSlot::A);
+    }
+
+    #[test]
+    fn test_buffer_slot_index() {
+        assert_eq!(BufferSlot::A.index(), 0);
+        assert_eq!(BufferSlot::B.index(), 1);
+    }
+
+    // --- DoubleBufferedSubmitter tests ---
+
+    #[test]
+    fn test_double_buffer_initial_state() {
+        let db = DoubleBufferedSubmitter::new();
+        assert_eq!(db.state(BufferSlot::A), SlotState::Idle);
+        assert_eq!(db.state(BufferSlot::B), SlotState::Idle);
+        assert_eq!(db.frame_count(), 0);
+    }
+
+    #[test]
+    fn test_double_buffer_begin_record() {
+        let mut db = DoubleBufferedSubmitter::new();
+        assert!(db.begin_record(BufferSlot::A));
+        assert_eq!(db.state(BufferSlot::A), SlotState::Recording);
+    }
+
+    #[test]
+    fn test_double_buffer_begin_record_fails_when_not_idle() {
+        let mut db = DoubleBufferedSubmitter::new();
+        db.begin_record(BufferSlot::A);
+        // Already Recording — cannot begin again
+        assert!(!db.begin_record(BufferSlot::A));
+    }
+
+    #[test]
+    fn test_double_buffer_full_cycle_slot_a() {
+        let mut db = DoubleBufferedSubmitter::new();
+        assert!(db.begin_record(BufferSlot::A));
+        db.record(BufferSlot::A, make_draw());
+        assert!(db.finish_record(BufferSlot::A));
+        assert_eq!(db.state(BufferSlot::A), SlotState::ReadyToSubmit);
+        let cmds = db.submit(BufferSlot::A).expect("submit should succeed");
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(db.state(BufferSlot::A), SlotState::Inflight);
+        assert_eq!(db.frame_count(), 1);
+        assert!(db.mark_retired(BufferSlot::A));
+        assert_eq!(db.state(BufferSlot::A), SlotState::Retired);
+        assert!(db.reset_slot(BufferSlot::A));
+        assert_eq!(db.state(BufferSlot::A), SlotState::Idle);
+    }
+
+    #[test]
+    fn test_double_buffer_interleaved_slots() {
+        let mut db = DoubleBufferedSubmitter::new();
+        // Record slot A
+        db.begin_record(BufferSlot::A);
+        db.record(BufferSlot::A, make_compute());
+        db.finish_record(BufferSlot::A);
+        // While A is ready-to-submit, record slot B
+        db.begin_record(BufferSlot::B);
+        db.record(BufferSlot::B, make_copy());
+        db.finish_record(BufferSlot::B);
+        // Submit both
+        assert!(db.submit(BufferSlot::A).is_some());
+        assert!(db.submit(BufferSlot::B).is_some());
+        assert_eq!(db.frame_count(), 2);
+    }
+
+    #[test]
+    fn test_double_buffer_submit_fails_when_not_ready() {
+        let mut db = DoubleBufferedSubmitter::new();
+        db.begin_record(BufferSlot::A);
+        // Not finished yet — submit should fail
+        assert!(db.submit(BufferSlot::A).is_none());
+    }
+
+    #[test]
+    fn test_double_buffer_mark_retired_fails_when_not_inflight() {
+        let mut db = DoubleBufferedSubmitter::new();
+        assert!(!db.mark_retired(BufferSlot::A));
+    }
+
+    #[test]
+    fn test_double_buffer_reset_slot_fails_when_not_retired() {
+        let mut db = DoubleBufferedSubmitter::new();
+        assert!(!db.reset_slot(BufferSlot::A));
+    }
+
+    #[test]
+    fn test_double_buffer_command_count() {
+        let mut db = DoubleBufferedSubmitter::new();
+        db.begin_record(BufferSlot::B);
+        db.record(BufferSlot::B, make_draw());
+        db.record(BufferSlot::B, make_draw());
+        assert_eq!(db.command_count(BufferSlot::B), 2);
     }
 }

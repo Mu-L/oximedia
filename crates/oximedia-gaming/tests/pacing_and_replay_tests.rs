@@ -248,6 +248,7 @@ fn test_replay_buffer_invalid_duration() {
         duration: 1,
         bitrate: 10000,
         audio_enabled: true,
+        framerate: 60,
     };
 
     assert!(ReplayBuffer::new(config).is_err());
@@ -256,6 +257,7 @@ fn test_replay_buffer_invalid_duration() {
         duration: 400,
         bitrate: 10000,
         audio_enabled: true,
+        framerate: 60,
     };
 
     assert!(ReplayBuffer::new(config).is_err());
@@ -270,6 +272,7 @@ fn test_replay_buffer_valid_durations() {
             duration,
             bitrate: 10000,
             audio_enabled: true,
+            framerate: 60,
         };
 
         assert!(ReplayBuffer::new(config).is_ok());
@@ -296,10 +299,11 @@ fn test_replay_buffer_duration() {
         duration: 60,
         bitrate: 10000,
         audio_enabled: true,
+        framerate: 60,
     };
 
     let buffer = ReplayBuffer::new(config).expect("valid replay buffer");
-    assert_eq!(buffer.duration(), Duration::from_secs(60));
+    assert_eq!(buffer.duration(), Duration::from_mins(1));
 }
 
 #[test]
@@ -386,10 +390,11 @@ fn test_replay_buffer_with_high_bitrate() {
         duration: 60,
         bitrate: 50000, // 50 Mbps for high quality
         audio_enabled: true,
+        framerate: 60,
     };
 
     let buffer = ReplayBuffer::new(config).expect("valid replay buffer");
-    assert_eq!(buffer.duration(), Duration::from_secs(60));
+    assert_eq!(buffer.duration(), Duration::from_mins(1));
 }
 
 #[test]

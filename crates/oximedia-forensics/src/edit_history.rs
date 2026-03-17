@@ -328,7 +328,7 @@ mod tests {
         let mut h = EditHistory::new();
         h.add(EditHistoryEntry::new(EditOperation::Crop, 1000));
         h.add(EditHistoryEntry::new(EditOperation::Transcode, 4600));
-        assert_eq!(h.span(), Some(Duration::from_secs(3600)));
+        assert_eq!(h.span(), Some(Duration::from_hours(1)));
     }
 
     #[test]

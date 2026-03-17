@@ -2,6 +2,7 @@
 name = "oximedia-denoise"
 description = "Video and audio denoising algorithms for media processing"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -18,7 +19,6 @@ oximedia-codec = { workspace = true, default-features = true }
 oximedia-graph = { workspace = true }
 thiserror = { workspace = true }
 rayon = { workspace = true }
-ndarray = { workspace = true }
 bytes = { workspace = true }
 
 [dev-dependencies]

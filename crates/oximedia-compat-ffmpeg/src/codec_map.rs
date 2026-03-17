@@ -91,6 +91,53 @@ static CODEC_TABLE: &[(&str, CodecEntry)] = &[
     ("h261", CodecEntry::substituted("av1")),
     ("mjpeg", CodecEntry::substituted("av1")),
     ("mjpegb", CodecEntry::substituted("av1")),
+    // ── H.264 hardware encoder aliases → AV1 substitution ───────────────────
+    ("h264_nvenc", CodecEntry::substituted("av1")),
+    ("h264_amf", CodecEntry::substituted("av1")),
+    ("h264_vaapi", CodecEntry::substituted("av1")),
+    ("h264_qsv", CodecEntry::substituted("av1")),
+    ("h264_videotoolbox", CodecEntry::substituted("av1")),
+    ("h264_v4l2m2m", CodecEntry::substituted("av1")),
+    ("h264_omx", CodecEntry::substituted("av1")),
+    ("h264_mf", CodecEntry::substituted("av1")),
+    ("h264_cuvid", CodecEntry::substituted("av1")),
+    // ── HEVC hardware encoder aliases → AV1 substitution ────────────────────
+    ("hevc_nvenc", CodecEntry::substituted("av1")),
+    ("hevc_amf", CodecEntry::substituted("av1")),
+    ("hevc_vaapi", CodecEntry::substituted("av1")),
+    ("hevc_qsv", CodecEntry::substituted("av1")),
+    ("hevc_videotoolbox", CodecEntry::substituted("av1")),
+    ("hevc_v4l2m2m", CodecEntry::substituted("av1")),
+    ("hevc_mf", CodecEntry::substituted("av1")),
+    ("hevc_cuvid", CodecEntry::substituted("av1")),
+    // ── MPEG-2/4 hardware decoder aliases → AV1 substitution ────────────────
+    ("mpeg2_cuvid", CodecEntry::substituted("av1")),
+    ("mpeg4_cuvid", CodecEntry::substituted("av1")),
+    ("mpeg2_qsv", CodecEntry::substituted("av1")),
+    ("mpeg4_v4l2m2m", CodecEntry::substituted("av1")),
+    // ── Additional patent-encumbered codecs ──────────────────────────────────
+    ("libxvid", CodecEntry::substituted("av1")),
+    ("flv1", CodecEntry::substituted("av1")),
+    ("svq1", CodecEntry::substituted("av1")),
+    ("svq3", CodecEntry::substituted("av1")),
+    ("cinepak", CodecEntry::substituted("av1")),
+    ("indeo3", CodecEntry::substituted("av1")),
+    ("indeo5", CodecEntry::substituted("av1")),
+    ("huffyuv", CodecEntry::direct("ffv1")),
+    ("ffvhuff", CodecEntry::direct("ffv1")),
+    // ── FFV1 lossless ────────────────────────────────────────────────────────
+    ("ffv1", CodecEntry::direct("ffv1")),
+    // ── VP9 hardware aliases ─────────────────────────────────────────────────
+    ("vp9_qsv", CodecEntry::direct("vp9")),
+    ("vp9_v4l2m2m", CodecEntry::direct("vp9")),
+    // ── Additional audio codecs ─────────────────────────────────────────────
+    ("speex", CodecEntry::substituted("opus")),
+    ("libspeex", CodecEntry::substituted("opus")),
+    ("nellymoser", CodecEntry::substituted("opus")),
+    ("g729", CodecEntry::substituted("opus")),
+    ("g723_1", CodecEntry::substituted("opus")),
+    ("adpcm_ms", CodecEntry::direct("flac")),
+    ("adpcm_ima_wav", CodecEntry::direct("flac")),
     // ── VP9 ───────────────────────────────────────────────────────────────────
     ("libvpx_vp9", CodecEntry::direct("vp9")),
     ("vp9", CodecEntry::direct("vp9")),
@@ -459,6 +506,100 @@ mod tests {
                 .lookup(name)
                 .unwrap_or_else(|| panic!("{} should be known", name));
             assert_eq!(e.oxi_name, "av1", "{} should map to av1", name);
+        }
+    }
+
+    #[test]
+    fn test_h264_hw_encoder_aliases() {
+        let map = CodecMap::new();
+        for name in &[
+            "h264_nvenc",
+            "h264_amf",
+            "h264_vaapi",
+            "h264_qsv",
+            "h264_videotoolbox",
+            "h264_v4l2m2m",
+            "h264_omx",
+            "h264_mf",
+            "h264_cuvid",
+        ] {
+            let e = map
+                .lookup(name)
+                .unwrap_or_else(|| panic!("{} should be known", name));
+            assert_eq!(e.oxi_name, "av1", "{} should map to av1", name);
+            assert!(
+                matches!(e.category, CodecCategory::PatentSubstituted),
+                "{} should be PatentSubstituted",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_hevc_hw_encoder_aliases() {
+        let map = CodecMap::new();
+        for name in &[
+            "hevc_nvenc",
+            "hevc_amf",
+            "hevc_vaapi",
+            "hevc_qsv",
+            "hevc_videotoolbox",
+            "hevc_v4l2m2m",
+            "hevc_mf",
+            "hevc_cuvid",
+        ] {
+            let e = map
+                .lookup(name)
+                .unwrap_or_else(|| panic!("{} should be known", name));
+            assert_eq!(e.oxi_name, "av1", "{} should map to av1", name);
+            assert!(
+                matches!(e.category, CodecCategory::PatentSubstituted),
+                "{} should be PatentSubstituted",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_ffv1_lossless_direct() {
+        let map = CodecMap::new();
+        let e = map
+            .lookup("ffv1")
+            .unwrap_or_else(|| panic!("ffv1 should be known"));
+        assert_eq!(e.oxi_name, "ffv1");
+        assert!(matches!(e.category, CodecCategory::DirectMatch));
+    }
+
+    #[test]
+    fn test_huffyuv_maps_to_ffv1() {
+        let map = CodecMap::new();
+        for name in &["huffyuv", "ffvhuff"] {
+            let e = map
+                .lookup(name)
+                .unwrap_or_else(|| panic!("{} should be known", name));
+            assert_eq!(e.oxi_name, "ffv1", "{} should map to ffv1", name);
+        }
+    }
+
+    #[test]
+    fn test_speex_maps_to_opus() {
+        let map = CodecMap::new();
+        for name in &["speex", "libspeex", "nellymoser", "g729", "g723_1"] {
+            let e = map
+                .lookup(name)
+                .unwrap_or_else(|| panic!("{} should be known", name));
+            assert_eq!(e.oxi_name, "opus", "{} should map to opus", name);
+        }
+    }
+
+    #[test]
+    fn test_adpcm_maps_to_flac() {
+        let map = CodecMap::new();
+        for name in &["adpcm_ms", "adpcm_ima_wav"] {
+            let e = map
+                .lookup(name)
+                .unwrap_or_else(|| panic!("{} should be known", name));
+            assert_eq!(e.oxi_name, "flac", "{} should map to flac", name);
         }
     }
 

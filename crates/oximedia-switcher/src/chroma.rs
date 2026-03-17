@@ -255,11 +255,14 @@ impl ChromaKey {
         }
         h_dist /= self.params.hue_tolerance.max(0.001);
 
-        // Saturation distance (penalize low saturation, high saturation is key color)
+        // Saturation distance: low saturation means "not the key colour".
+        // A fully-saturated pixel (s=1) contributes zero saturation distance.
         let s_dist = (1.0 - s) / self.params.saturation_tolerance.max(0.001);
 
-        // Value distance (less important for keying)
-        let v_dist = (v - 0.5).abs() / self.params.value_tolerance.max(0.001) * 0.5;
+        // Value distance: only penalize very dark pixels (v << 0.5).
+        // Bright, saturated pixels should not be penalized for having v=1.
+        // Use a one-sided penalty: v_dist is non-zero only for v < 0.5.
+        let v_dist = (0.5 - v).max(0.0) / self.params.value_tolerance.max(0.001) * 0.5;
 
         // Combined distance
         (h_dist * h_dist + s_dist * s_dist + v_dist * v_dist).sqrt()
@@ -292,29 +295,62 @@ impl ChromaKey {
     }
 
     /// Apply spill suppression to a pixel.
+    ///
+    /// Uses a weighted luminance-preserving algorithm: excess key-color channel
+    /// energy is replaced by the average of the other two channels, then
+    /// blended with the original by `spill_suppression`.
     pub fn suppress_spill(&self, r: u8, g: u8, b: u8) -> (u8, u8, u8) {
         if self.params.spill_suppression == 0.0 {
             return (r, g, b);
         }
 
         let (r_f, g_f, b_f) = (r as f32, g as f32, b as f32);
+        let strength = self.params.spill_suppression.clamp(0.0, 1.0);
 
         let (r_out, g_out, b_out) = match self.params.color {
             ChromaColor::Green => {
-                // Suppress green spill
-                let spill = (g_f - r_f.max(b_f)).max(0.0);
-                let suppressed = g_f - spill * self.params.spill_suppression;
-                (r_f, suppressed, b_f)
+                // Spill amount = how much green exceeds the average of R and B.
+                let other_avg = (r_f + b_f) * 0.5;
+                let spill = (g_f - other_avg).max(0.0);
+                // Replace excess green with the luminance-neutral average.
+                let g_corrected = g_f - spill * strength;
+                // Boost R and B slightly to compensate for lost luminance.
+                let luma_compensation = spill * strength * 0.3;
+                (
+                    (r_f + luma_compensation).min(255.0),
+                    g_corrected,
+                    (b_f + luma_compensation).min(255.0),
+                )
             }
             ChromaColor::Blue => {
-                // Suppress blue spill
-                let spill = (b_f - r_f.max(g_f)).max(0.0);
-                let suppressed = b_f - spill * self.params.spill_suppression;
-                (r_f, g_f, suppressed)
+                let other_avg = (r_f + g_f) * 0.5;
+                let spill = (b_f - other_avg).max(0.0);
+                let b_corrected = b_f - spill * strength;
+                let luma_compensation = spill * strength * 0.3;
+                (
+                    (r_f + luma_compensation).min(255.0),
+                    (g_f + luma_compensation).min(255.0),
+                    b_corrected,
+                )
             }
-            ChromaColor::Custom { .. } => {
-                // Generic spill suppression
-                (r_f, g_f, b_f)
+            ChromaColor::Custom { h, .. } => {
+                // Generic: rotate into HSV, desaturate the key hue component.
+                let (px_h, px_s, px_v) = rgb_to_hsv(r, g, b);
+                let target_h = h;
+                let mut h_dist = (px_h - target_h).abs();
+                if h_dist > 0.5 {
+                    h_dist = 1.0 - h_dist;
+                }
+                // Within hue tolerance, reduce saturation proportionally.
+                let tol = self.params.hue_tolerance.max(0.01);
+                if h_dist < tol {
+                    let spill_factor = (1.0 - h_dist / tol) * strength;
+                    let new_s = px_s * (1.0 - spill_factor);
+                    let (nr, ng, nb) = hsv_to_rgb(px_h, new_s, px_v);
+                    (nr as f32, ng as f32, nb as f32)
+                } else {
+                    (r_f, g_f, b_f)
+                }
             }
         };
 
@@ -325,12 +361,64 @@ impl ChromaKey {
         )
     }
 
-    /// Process a single pixel.
-    pub fn process_pixel(&self, r: u8, g: u8, b: u8) -> (u8, u8, u8, u8) {
-        let alpha = self.calculate_alpha(r, g, b);
-        let (r_out, g_out, b_out) = self.suppress_spill(r, g, b);
-        let alpha_u8 = (alpha * 255.0) as u8;
+    /// Apply edge softening to an already-computed alpha value.
+    ///
+    /// Edge softening uses a smooth Hermite curve in the transition zone
+    /// defined by `edge_softness`:
+    /// - Full transparency region: alpha below `clip`
+    /// - Transition zone: `edge_softness` wide (Hermite smoothstep)
+    /// - Full opacity: alpha beyond the transition zone
+    pub fn apply_edge_softening(&self, raw_alpha: f32) -> f32 {
+        if self.params.edge_softness <= 0.0 {
+            return raw_alpha.clamp(0.0, 1.0);
+        }
+        let soft = self.params.edge_softness.clamp(0.0, 1.0);
+        // Low boundary: alpha below which we are hard-keyed out.
+        let lo = self.params.clip.clamp(0.0, 1.0);
+        let hi = (lo + soft).min(1.0);
+        if raw_alpha <= lo {
+            0.0
+        } else if raw_alpha >= hi {
+            1.0
+        } else {
+            // Hermite smoothstep in [lo, hi].
+            let t = (raw_alpha - lo) / (hi - lo);
+            t * t * (3.0 - 2.0 * t)
+        }
+    }
 
+    /// Sample the key color and build an enhanced matte using the spill map.
+    ///
+    /// Returns `(alpha, spill_amount)` for a pixel, where `spill_amount`
+    /// is [0..1] indicating how much key-color contamination was detected.
+    pub fn analyze_pixel(&self, r: u8, g: u8, b: u8) -> (f32, f32) {
+        let (px_h, px_s, px_v) = rgb_to_hsv(r, g, b);
+        let distance = self.calculate_distance(px_h, px_s, px_v);
+
+        // Raw alpha from distance (before softening).
+        let raw_alpha = distance.clamp(0.0, 1.0);
+
+        // Edge-softened alpha.
+        let alpha = self.apply_edge_softening(raw_alpha);
+        let alpha_gain = ((alpha - self.params.clip.max(0.0)) * self.params.gain).clamp(0.0, 1.0);
+
+        // Spill amount: how much key-channel energy is present.
+        let (r_f, g_f, b_f) = (r as f32, g as f32, b as f32);
+        let spill = match self.params.color {
+            ChromaColor::Green => (g_f - r_f.max(b_f)).max(0.0) / 255.0,
+            ChromaColor::Blue => (b_f - r_f.max(g_f)).max(0.0) / 255.0,
+            ChromaColor::Custom { .. } => (1.0 - raw_alpha).max(0.0),
+        };
+
+        (alpha_gain, spill.clamp(0.0, 1.0))
+    }
+
+    /// Process a single pixel — returns (R, G, B, A) after spill suppression
+    /// and edge-softened alpha calculation.
+    pub fn process_pixel(&self, r: u8, g: u8, b: u8) -> (u8, u8, u8, u8) {
+        let (alpha_gain, _spill) = self.analyze_pixel(r, g, b);
+        let (r_out, g_out, b_out) = self.suppress_spill(r, g, b);
+        let alpha_u8 = (alpha_gain * 255.0) as u8;
         (r_out, g_out, b_out, alpha_u8)
     }
 
@@ -364,12 +452,8 @@ impl ChromaKey {
             let _cr_w = cr_plane.width as usize;
 
             // Chroma sub-sampling ratios
-            let h_ratio = if cb_w > 0 { luma_w / cb_w } else { 1 };
-            let v_ratio_cb = if cb_plane.height > 0 {
-                luma_h / cb_plane.height as usize
-            } else {
-                1
-            };
+            let h_ratio = luma_w.checked_div(cb_w).unwrap_or(1);
+            let v_ratio_cb = luma_h.checked_div(cb_plane.height as usize).unwrap_or(1);
 
             let mut alpha_out = Vec::with_capacity(pixel_count);
 
@@ -544,9 +628,10 @@ mod tests {
 
         // Green should be reduced
         assert!(g < 220);
-        // Red and blue should be unchanged or slightly adjusted
-        assert_eq!(r, 200);
-        assert_eq!(b, 180);
+        // Red and blue may receive a small luma-compensation boost to preserve
+        // luminance — allow up to 10 counts of adjustment
+        assert!(r >= 200 && r <= 210, "r={r} should be in 200..=210");
+        assert!(b >= 180 && b <= 190, "b={b} should be in 180..=190");
     }
 
     #[test]

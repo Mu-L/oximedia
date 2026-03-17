@@ -226,10 +226,13 @@ impl Default for PerspectiveTransform {
 /// ```
 /// use oximedia_cv::transform::perspective::find_homography;
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let src = vec![(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)];
 /// let dst = vec![(10.0, 10.0), (90.0, 10.0), (90.0, 90.0), (10.0, 90.0)];
 ///
 /// let transform = find_homography(&src, &dst)?;
+/// Ok(())
+/// }
 /// ```
 pub fn find_homography(
     src_points: &[(f64, f64)],
@@ -379,9 +382,12 @@ fn solve_8x8(a: &[[f64; 8]; 8], b: &[f64; 8]) -> CvResult<[f64; 8]> {
 /// ```
 /// use oximedia_cv::transform::{PerspectiveTransform, perspective::warp_perspective};
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let src = vec![100u8; 100];
 /// let transform = PerspectiveTransform::identity();
 /// let result = warp_perspective(&src, 10, 10, &transform, 10, 10)?;
+/// Ok(())
+/// }
 /// ```
 pub fn warp_perspective(
     src: &[u8],

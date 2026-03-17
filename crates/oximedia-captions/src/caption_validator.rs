@@ -291,6 +291,89 @@ impl Default for CaptionValidator {
     }
 }
 
+// ── Broadcast validator free functions ───────────────────────────────────────
+
+/// A minimal caption representation used by the broadcast validator helpers.
+/// Positions are stored as percentages (0.0–100.0) of the frame dimensions.
+#[derive(Debug, Clone)]
+pub struct BroadcastCaption {
+    /// Lines of text in this caption.
+    pub lines: Vec<String>,
+    /// Horizontal position as a percentage of frame width (0.0 = left edge).
+    pub x_pct: f32,
+    /// Vertical position as a percentage of frame height (0.0 = top edge).
+    pub y_pct: f32,
+    /// Width as a percentage of frame width.
+    pub w_pct: f32,
+    /// Height as a percentage of frame height.
+    pub h_pct: f32,
+}
+
+impl BroadcastCaption {
+    /// Create a caption with the given text lines and a default bottom-centre
+    /// position that fits within a 10 % safe-area margin on all sides.
+    #[must_use]
+    pub fn new(lines: Vec<String>) -> Self {
+        Self {
+            lines,
+            x_pct: 10.0,
+            y_pct: 80.0,
+            w_pct: 80.0,
+            h_pct: 15.0,
+        }
+    }
+
+    /// Convenience constructor for a single-line caption.
+    #[must_use]
+    pub fn single(text: impl Into<String>) -> Self {
+        Self::new(vec![text.into()])
+    }
+}
+
+/// Returns `true` when the caption has at most `max` lines.
+///
+/// A value of `0` for `max` is treated as "no limit" and always returns `true`.
+#[must_use]
+pub fn check_max_lines(caption: &BroadcastCaption, max: usize) -> bool {
+    if max == 0 {
+        return true;
+    }
+    caption.lines.len() <= max
+}
+
+/// Returns `true` when every line in the caption is within `max` characters.
+///
+/// A value of `0` for `max` is treated as "no limit" and always returns `true`.
+#[must_use]
+pub fn check_max_chars_per_line(caption: &BroadcastCaption, max: usize) -> bool {
+    if max == 0 {
+        return true;
+    }
+    caption.lines.iter().all(|l| l.chars().count() <= max)
+}
+
+/// Returns `true` when the caption's bounding box falls entirely inside the
+/// safe area defined by `safe_pct` margins on all four sides.
+///
+/// `safe_pct` is expressed as a percentage of the frame dimension (e.g. `10.0`
+/// means a 10 % margin on each side, leaving an 80 % × 80 % safe area).
+///
+/// A `safe_pct` of `0.0` means no margin requirement (always returns `true`).
+#[must_use]
+pub fn check_safe_area_margins(caption: &BroadcastCaption, safe_pct: f32) -> bool {
+    if safe_pct <= 0.0 {
+        return true;
+    }
+    let right_edge = caption.x_pct + caption.w_pct;
+    let bottom_edge = caption.y_pct + caption.h_pct;
+    let max_edge = 100.0 - safe_pct;
+
+    caption.x_pct >= safe_pct
+        && caption.y_pct >= safe_pct
+        && right_edge <= max_edge
+        && bottom_edge <= max_edge
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,5 +525,148 @@ mod tests {
         let caps = vec![good_cap(0, 400, "Short")];
         let violations = v.validate(&caps);
         assert!(!violations[0].message.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod broadcast_validator_tests {
+    use super::{
+        check_max_chars_per_line, check_max_lines, check_safe_area_margins, BroadcastCaption,
+    };
+
+    fn cap_2lines() -> BroadcastCaption {
+        BroadcastCaption::new(vec!["First line".to_string(), "Second line".to_string()])
+    }
+
+    // ── check_max_lines ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_max_lines_within_limit() {
+        let c = cap_2lines();
+        assert!(check_max_lines(&c, 2));
+        assert!(check_max_lines(&c, 3));
+    }
+
+    #[test]
+    fn test_max_lines_exceeds_limit() {
+        let c = cap_2lines();
+        assert!(!check_max_lines(&c, 1));
+    }
+
+    #[test]
+    fn test_max_lines_zero_means_unlimited() {
+        let c = BroadcastCaption::new(vec![
+            "L1".to_string(),
+            "L2".to_string(),
+            "L3".to_string(),
+            "L4".to_string(),
+        ]);
+        assert!(check_max_lines(&c, 0));
+    }
+
+    #[test]
+    fn test_max_lines_empty_caption() {
+        let c = BroadcastCaption::new(vec![]);
+        assert!(check_max_lines(&c, 2));
+    }
+
+    // ── check_max_chars_per_line ─────────────────────────────────────────────
+
+    #[test]
+    fn test_max_chars_per_line_within_limit() {
+        let c = BroadcastCaption::single("Hello world");
+        assert!(check_max_chars_per_line(&c, 42));
+    }
+
+    #[test]
+    fn test_max_chars_per_line_exactly_at_limit() {
+        let text = "a".repeat(32);
+        let c = BroadcastCaption::single(text);
+        assert!(check_max_chars_per_line(&c, 32));
+    }
+
+    #[test]
+    fn test_max_chars_per_line_exceeds_limit() {
+        let text = "a".repeat(33);
+        let c = BroadcastCaption::single(text);
+        assert!(!check_max_chars_per_line(&c, 32));
+    }
+
+    #[test]
+    fn test_max_chars_per_line_multiline_one_long() {
+        let c = BroadcastCaption::new(vec!["Short".to_string(), "a".repeat(50)]);
+        assert!(!check_max_chars_per_line(&c, 42));
+    }
+
+    #[test]
+    fn test_max_chars_per_line_zero_means_unlimited() {
+        let text = "a".repeat(200);
+        let c = BroadcastCaption::single(text);
+        assert!(check_max_chars_per_line(&c, 0));
+    }
+
+    // ── check_safe_area_margins ──────────────────────────────────────────────
+
+    #[test]
+    fn test_safe_area_inside() {
+        // x=10, y=80, w=80, h=15 → right=90, bottom=95; margins=5 → 0..95
+        // All edges within 5%..95%? left: 10>=5 ✓, top: 80>=5 ✓, right: 90<=95 ✓, bottom: 95<=95 ✓
+        let c = BroadcastCaption {
+            lines: vec!["text".to_string()],
+            x_pct: 10.0,
+            y_pct: 80.0,
+            w_pct: 80.0,
+            h_pct: 15.0,
+        };
+        assert!(check_safe_area_margins(&c, 5.0));
+    }
+
+    #[test]
+    fn test_safe_area_outside_left() {
+        let c = BroadcastCaption {
+            lines: vec!["text".to_string()],
+            x_pct: 3.0, // < 10% margin
+            y_pct: 10.0,
+            w_pct: 80.0,
+            h_pct: 15.0,
+        };
+        assert!(!check_safe_area_margins(&c, 10.0));
+    }
+
+    #[test]
+    fn test_safe_area_outside_bottom() {
+        let c = BroadcastCaption {
+            lines: vec!["text".to_string()],
+            x_pct: 10.0,
+            y_pct: 85.0,
+            w_pct: 80.0,
+            h_pct: 20.0, // bottom edge = 105% > (100-10)%=90%
+        };
+        assert!(!check_safe_area_margins(&c, 10.0));
+    }
+
+    #[test]
+    fn test_safe_area_zero_pct_always_ok() {
+        let c = BroadcastCaption {
+            lines: vec!["text".to_string()],
+            x_pct: 0.0,
+            y_pct: 0.0,
+            w_pct: 100.0,
+            h_pct: 100.0,
+        };
+        assert!(check_safe_area_margins(&c, 0.0));
+    }
+
+    #[test]
+    fn test_safe_area_standard_bottom_region_10pct_margin() {
+        // Standard bottom subtitle region used by ImscRegion::standard_bottom
+        let c = BroadcastCaption {
+            lines: vec!["Standard subtitle".to_string()],
+            x_pct: 10.0,
+            y_pct: 80.0,
+            w_pct: 80.0,
+            h_pct: 10.0, // bottom=90 which equals (100-10)=90 ✓
+        };
+        assert!(check_safe_area_margins(&c, 10.0));
     }
 }

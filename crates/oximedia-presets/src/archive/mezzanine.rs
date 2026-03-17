@@ -42,6 +42,7 @@ pub fn prores_proxy() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mov".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -71,6 +72,7 @@ pub fn prores_lt() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mov".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -100,6 +102,7 @@ pub fn prores_standard() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mov".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -130,6 +133,7 @@ pub fn prores_hq() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mov".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -160,6 +164,7 @@ pub fn prores_4444() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mov".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -190,6 +195,7 @@ pub fn dnxhd_proxy() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mxf".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -220,6 +226,7 @@ pub fn dnxhd_hq() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mxf".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -249,6 +256,7 @@ pub fn h264_mezzanine() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

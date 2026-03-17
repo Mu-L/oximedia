@@ -1,6 +1,7 @@
 //! Synchronization methods for multi-camera production.
 
 pub mod audio;
+pub mod cross_correlate;
 pub mod drift;
 pub mod genlock;
 pub mod temporal;

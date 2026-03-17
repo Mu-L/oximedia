@@ -48,8 +48,7 @@ impl HomographyMatrix {
     #[allow(clippy::cast_precision_loss)]
     pub fn determinant(&self) -> f64 {
         let d = &self.data;
-        d[0] * (d[4] * d[8] - d[5] * d[7])
-            - d[1] * (d[3] * d[8] - d[5] * d[6])
+        d[0] * (d[4] * d[8] - d[5] * d[7]) - d[1] * (d[3] * d[8] - d[5] * d[6])
             + d[2] * (d[3] * d[7] - d[4] * d[6])
     }
 
@@ -94,9 +93,8 @@ impl HomographyMatrix {
         let mut out = [0.0f64; 9];
         for row in 0..3 {
             for col in 0..3 {
-                out[row * 3 + col] = a[row * 3] * b[col]
-                    + a[row * 3 + 1] * b[3 + col]
-                    + a[row * 3 + 2] * b[6 + col];
+                out[row * 3 + col] =
+                    a[row * 3] * b[col] + a[row * 3 + 1] * b[3 + col] + a[row * 3 + 2] * b[6 + col];
             }
         }
         Self { data: out }
@@ -291,8 +289,7 @@ pub fn compute_homography_dlt(correspondences: &[PointCorrespondence]) -> Option
 
     // De-normalise: H = Td_inv * Hn * Ts
     let mut h_norm = HomographyMatrix::new([
-        h_vec[0], h_vec[1], h_vec[2], h_vec[3], h_vec[4], h_vec[5], h_vec[6], h_vec[7],
-        h_vec[8],
+        h_vec[0], h_vec[1], h_vec[2], h_vec[3], h_vec[4], h_vec[5], h_vec[6], h_vec[7], h_vec[8],
     ]);
 
     // T_s normalisation matrix

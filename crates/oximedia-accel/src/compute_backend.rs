@@ -285,7 +285,7 @@ impl KernelRegistry {
     /// Panics if the internal `RwLock` is poisoned (should never happen in
     /// normal operation).
     pub fn register(&self, name: &str, spirv: &[u8], label: &str) {
-        let mut map = self.kernels.write().expect("KernelRegistry RwLock poisoned");
+        let mut map = self.kernels.write().unwrap_or_else(|e| e.into_inner());
         map.insert(
             name.to_string(),
             KernelEntry {
@@ -304,7 +304,7 @@ impl KernelRegistry {
     /// Panics if the internal `RwLock` is poisoned.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<String> {
-        let map = self.kernels.read().expect("KernelRegistry RwLock poisoned");
+        let map = self.kernels.read().unwrap_or_else(|e| e.into_inner());
         map.get(name).map(|e| e.label.clone())
     }
 
@@ -315,7 +315,7 @@ impl KernelRegistry {
     /// Panics if the internal `RwLock` is poisoned.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.kernels.read().expect("KernelRegistry RwLock poisoned").len()
+        self.kernels.read().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Return `true` if no kernels have been registered.
@@ -325,7 +325,7 @@ impl KernelRegistry {
     /// Panics if the internal `RwLock` is poisoned.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.kernels.read().expect("KernelRegistry RwLock poisoned").is_empty()
+        self.kernels.read().unwrap_or_else(|e| e.into_inner()).is_empty()
     }
 
     /// List all registered kernel names.
@@ -335,7 +335,7 @@ impl KernelRegistry {
     /// Panics if the internal `RwLock` is poisoned.
     #[must_use]
     pub fn kernel_names(&self) -> Vec<String> {
-        let map = self.kernels.read().expect("KernelRegistry RwLock poisoned");
+        let map = self.kernels.read().unwrap_or_else(|e| e.into_inner());
         map.keys().cloned().collect()
     }
 }
@@ -515,7 +515,7 @@ impl VulkanComputeBackend {
     }
 
     fn track_alloc(&self, id: u64, size: u64) {
-        let mut allocs = self.allocations.write().expect("VulkanComputeBackend poisoned");
+        let mut allocs = self.allocations.write().unwrap_or_else(|e| e.into_inner());
         allocs.insert(id, size);
         let current = self.total_allocated.fetch_add(size, std::sync::atomic::Ordering::Relaxed) + size;
         let mut peak = self.peak_allocated.load(std::sync::atomic::Ordering::Relaxed);
@@ -533,7 +533,7 @@ impl VulkanComputeBackend {
     }
 
     fn track_free(&self, id: u64) {
-        let mut allocs = self.allocations.write().expect("VulkanComputeBackend poisoned");
+        let mut allocs = self.allocations.write().unwrap_or_else(|e| e.into_inner());
         if let Some(size) = allocs.remove(&id) {
             self.total_allocated.fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
         }
@@ -551,13 +551,13 @@ impl ComputeBackend for VulkanComputeBackend {
         let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.track_alloc(id, size);
         // Store a zeroed host-side shadow buffer.
-        let mut bufs = self.buffers.write().expect("VulkanComputeBackend buffers poisoned");
+        let mut bufs = self.buffers.write().unwrap_or_else(|e| e.into_inner());
         bufs.insert(id, vec![0u8; size as usize]);
         Ok(BufferHandle::new(id))
     }
 
     fn upload_buffer(&self, handle: &BufferHandle, data: &[u8]) -> AccelResult<()> {
-        let mut bufs = self.buffers.write().expect("VulkanComputeBackend buffers poisoned");
+        let mut bufs = self.buffers.write().unwrap_or_else(|e| e.into_inner());
         match bufs.get_mut(&handle.0) {
             Some(buf) if buf.len() == data.len() => {
                 buf.copy_from_slice(data);
@@ -574,7 +574,7 @@ impl ComputeBackend for VulkanComputeBackend {
     }
 
     fn download_buffer(&self, handle: &BufferHandle) -> AccelResult<Vec<u8>> {
-        let bufs = self.buffers.read().expect("VulkanComputeBackend buffers poisoned");
+        let bufs = self.buffers.read().unwrap_or_else(|e| e.into_inner());
         bufs.get(&handle.0)
             .map(Clone::clone)
             .ok_or_else(|| AccelError::BufferAllocation(format!("Invalid buffer handle: {}", handle.0)))
@@ -582,7 +582,7 @@ impl ComputeBackend for VulkanComputeBackend {
 
     fn free_buffer(&self, handle: BufferHandle) -> AccelResult<()> {
         self.track_free(handle.0);
-        let mut bufs = self.buffers.write().expect("VulkanComputeBackend buffers poisoned");
+        let mut bufs = self.buffers.write().unwrap_or_else(|e| e.into_inner());
         if bufs.remove(&handle.0).is_none() {
             return Err(AccelError::BufferAllocation(
                 format!("Double-free of buffer handle: {}", handle.0),
@@ -619,7 +619,7 @@ impl ComputeBackend for VulkanComputeBackend {
     }
 
     fn memory_stats(&self) -> GpuMemoryStats {
-        let allocs = self.allocations.read().expect("VulkanComputeBackend poisoned");
+        let allocs = self.allocations.read().unwrap_or_else(|e| e.into_inner());
         GpuMemoryStats {
             allocated_bytes: self.total_allocated.load(std::sync::atomic::Ordering::Relaxed),
             peak_bytes: self.peak_allocated.load(std::sync::atomic::Ordering::Relaxed),
@@ -689,18 +689,18 @@ impl ComputeBackend for CpuFallbackBackend {
     fn allocate_buffer(&self, size: u64) -> AccelResult<BufferHandle> {
         let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         {
-            let mut allocs = self.allocations.write().expect("CpuFallbackBackend poisoned");
+            let mut allocs = self.allocations.write().unwrap_or_else(|e| e.into_inner());
             allocs.insert(id, size);
         }
         let current = self.current_bytes.fetch_add(size, std::sync::atomic::Ordering::Relaxed) + size;
         self.update_peak(current);
-        let mut bufs = self.buffers.write().expect("CpuFallbackBackend buffers poisoned");
+        let mut bufs = self.buffers.write().unwrap_or_else(|e| e.into_inner());
         bufs.insert(id, vec![0u8; size as usize]);
         Ok(BufferHandle::new(id))
     }
 
     fn upload_buffer(&self, handle: &BufferHandle, data: &[u8]) -> AccelResult<()> {
-        let mut bufs = self.buffers.write().expect("CpuFallbackBackend buffers poisoned");
+        let mut bufs = self.buffers.write().unwrap_or_else(|e| e.into_inner());
         match bufs.get_mut(&handle.0) {
             Some(buf) if buf.len() == data.len() => {
                 buf.copy_from_slice(data);
@@ -717,7 +717,7 @@ impl ComputeBackend for CpuFallbackBackend {
     }
 
     fn download_buffer(&self, handle: &BufferHandle) -> AccelResult<Vec<u8>> {
-        let bufs = self.buffers.read().expect("CpuFallbackBackend buffers poisoned");
+        let bufs = self.buffers.read().unwrap_or_else(|e| e.into_inner());
         bufs.get(&handle.0)
             .map(Clone::clone)
             .ok_or_else(|| AccelError::BufferAllocation(format!("Invalid buffer handle: {}", handle.0)))
@@ -725,13 +725,13 @@ impl ComputeBackend for CpuFallbackBackend {
 
     fn free_buffer(&self, handle: BufferHandle) -> AccelResult<()> {
         let size = {
-            let mut allocs = self.allocations.write().expect("CpuFallbackBackend poisoned");
+            let mut allocs = self.allocations.write().unwrap_or_else(|e| e.into_inner());
             allocs.remove(&handle.0)
         };
         match size {
             Some(s) => {
                 self.current_bytes.fetch_sub(s, std::sync::atomic::Ordering::Relaxed);
-                let mut bufs = self.buffers.write().expect("CpuFallbackBackend buffers poisoned");
+                let mut bufs = self.buffers.write().unwrap_or_else(|e| e.into_inner());
                 bufs.remove(&handle.0);
                 Ok(())
             }
@@ -768,7 +768,7 @@ impl ComputeBackend for CpuFallbackBackend {
     }
 
     fn memory_stats(&self) -> GpuMemoryStats {
-        let allocs = self.allocations.read().expect("CpuFallbackBackend poisoned");
+        let allocs = self.allocations.read().unwrap_or_else(|e| e.into_inner());
         GpuMemoryStats {
             allocated_bytes: self.current_bytes.load(std::sync::atomic::Ordering::Relaxed),
             peak_bytes: self.peak_bytes.load(std::sync::atomic::Ordering::Relaxed),

@@ -2,9 +2,13 @@
 
 pub mod complexity;
 pub mod pattern;
+pub mod polyrhythm;
 
 pub use complexity::RhythmComplexity;
 pub use pattern::RhythmPattern;
+pub use polyrhythm::{
+    ExtendedRhythmResult, PolyrhythmAnalyzer, PolyrhythmPattern, SyncopationMetrics,
+};
 
 use crate::beat::onset::OnsetDetector;
 use crate::types::RhythmResult;

@@ -26,6 +26,35 @@ impl Default for ClickDetectorConfig {
     }
 }
 
+/// Severity classification of a detected click or pop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickSeverity {
+    /// Low-level transient, barely above threshold.
+    Low,
+    /// Moderate click, clearly audible.
+    Medium,
+    /// Heavy pop or loud impulse artifact.
+    High,
+}
+
+impl ClickSeverity {
+    /// Derive severity from normalised magnitude relative to the detection threshold.
+    ///
+    /// * `< 2×` threshold ratio → [`Low`](ClickSeverity::Low)
+    /// * `2× – 5×` → [`Medium`](ClickSeverity::Medium)
+    /// * `> 5×` → [`High`](ClickSeverity::High)
+    #[must_use]
+    pub fn from_ratio(magnitude_to_threshold_ratio: f32) -> Self {
+        if magnitude_to_threshold_ratio >= 5.0 {
+            Self::High
+        } else if magnitude_to_threshold_ratio >= 2.0 {
+            Self::Medium
+        } else {
+            Self::Low
+        }
+    }
+}
+
 /// Detected click or pop.
 #[derive(Debug, Clone)]
 pub struct Click {
@@ -33,8 +62,15 @@ pub struct Click {
     pub start: usize,
     /// End sample index (exclusive).
     pub end: usize,
-    /// Peak magnitude.
+    /// Peak magnitude of the difference signal at detection.
     pub magnitude: f32,
+    /// Severity classification derived from magnitude vs threshold ratio.
+    pub severity: ClickSeverity,
+    /// Confidence score in [0.0, 1.0]: how certain the detector is this is a real click.
+    ///
+    /// Computed from the ratio of the peak magnitude to the adaptive threshold and
+    /// normalised by the configured `threshold_multiplier`.
+    pub confidence: f32,
 }
 
 /// Click detector.
@@ -52,13 +88,16 @@ impl ClickDetector {
 
     /// Detect clicks in samples.
     ///
+    /// Each returned [`Click`] is annotated with [`ClickSeverity`] and a `confidence`
+    /// score in \[0, 1\] so callers can triage and prioritise restoration effort.
+    ///
     /// # Arguments
     ///
     /// * `samples` - Input samples
     ///
     /// # Returns
     ///
-    /// List of detected clicks.
+    /// List of detected clicks with severity and confidence.
     pub fn detect(&self, samples: &[f32]) -> RestoreResult<Vec<Click>> {
         if samples.len() < 3 {
             return Ok(Vec::new());
@@ -70,14 +109,14 @@ impl ClickDetector {
             diff.push((samples[i] - samples[i - 1]).abs());
         }
 
-        // Compute adaptive threshold based on median
+        // Compute adaptive threshold based on median + MAD
         let threshold = self.compute_threshold(&diff);
 
         // Find regions above threshold
         let mut clicks = Vec::new();
         let mut in_click = false;
         let mut click_start = 0;
-        let mut peak_magnitude = 0.0;
+        let mut peak_magnitude = 0.0f32;
 
         for (i, &d) in diff.iter().enumerate() {
             if !in_click && d > threshold {
@@ -94,13 +133,18 @@ impl ClickDetector {
                     let duration = i - click_start;
                     if duration >= self.config.min_duration && duration <= self.config.max_duration
                     {
+                        let (severity, confidence) =
+                            self.compute_severity_confidence(peak_magnitude, threshold);
                         clicks.push(Click {
                             start: click_start,
                             end: i,
                             magnitude: peak_magnitude,
+                            severity,
+                            confidence,
                         });
                     }
                     in_click = false;
+                    peak_magnitude = 0.0;
                 }
             }
         }
@@ -109,15 +153,45 @@ impl ClickDetector {
         if in_click {
             let duration = diff.len() - click_start;
             if duration >= self.config.min_duration && duration <= self.config.max_duration {
+                let (severity, confidence) =
+                    self.compute_severity_confidence(peak_magnitude, threshold);
                 clicks.push(Click {
                     start: click_start,
                     end: diff.len(),
                     magnitude: peak_magnitude,
+                    severity,
+                    confidence,
                 });
             }
         }
 
         Ok(clicks)
+    }
+
+    /// Compute severity and confidence for a detected click.
+    ///
+    /// `confidence` is the clamped ratio of `peak_magnitude / threshold`, normalised
+    /// to the range \[0, 1\] by considering the `threshold_multiplier` as an upper
+    /// reference (ratio ≥ `threshold_multiplier × 3` → confidence 1.0).
+    fn compute_severity_confidence(
+        &self,
+        peak_magnitude: f32,
+        threshold: f32,
+    ) -> (ClickSeverity, f32) {
+        let ratio = if threshold > f32::EPSILON {
+            peak_magnitude / threshold
+        } else {
+            1.0
+        };
+
+        let severity = ClickSeverity::from_ratio(ratio);
+
+        // Confidence: ratio of 1.0 (just at threshold) → 0.0 confidence;
+        // ratio of `threshold_multiplier * 3` or above → 1.0 confidence.
+        let upper_ref = self.config.threshold_multiplier * 3.0;
+        let confidence = ((ratio - 1.0) / (upper_ref - 1.0).max(f32::EPSILON)).clamp(0.0, 1.0);
+
+        (severity, confidence)
     }
 
     /// Compute adaptive threshold using median-based method.
@@ -156,6 +230,10 @@ impl ClickDetector {
 
 /// Detect clicks using a simple energy-based method.
 ///
+/// Severity and confidence are set to [`ClickSeverity::Medium`] / `0.5` by default
+/// since this simpler method does not have access to an adaptive threshold for
+/// precise scoring.  Callers that need accurate severity should use [`ClickDetector`].
+///
 /// # Arguments
 ///
 /// * `samples` - Input samples
@@ -193,11 +271,18 @@ pub fn detect_clicks_simple(samples: &[f32], threshold: f32, window_size: usize)
                 }
             }
 
+            // Simple confidence: clamped ratio of energy to threshold
+            let ratio = avg_energy / threshold.max(f32::EPSILON);
+            let confidence = ((ratio - 1.0) / 9.0).clamp(0.0, 1.0);
+            let severity = ClickSeverity::from_ratio(ratio);
+
             // New click
             clicks.push(Click {
                 start: i.saturating_sub(window_size),
                 end: i + window_size,
                 magnitude: avg_energy,
+                severity,
+                confidence,
             });
         }
     }
@@ -226,6 +311,33 @@ mod tests {
     }
 
     #[test]
+    fn test_click_severity_and_confidence_populated() {
+        let mut samples = vec![0.0f32; 1000];
+        // Large amplitude impulse — should produce high severity / confidence
+        samples[300] = 5.0;
+        samples[301] = -5.0;
+
+        let detector = ClickDetector::new(ClickDetectorConfig::default());
+        let clicks = detector.detect(&samples).expect("should succeed in test");
+
+        assert!(!clicks.is_empty(), "impulse should be detected");
+        for click in &clicks {
+            assert!(
+                click.confidence >= 0.0 && click.confidence <= 1.0,
+                "confidence out of range: {}",
+                click.confidence
+            );
+        }
+    }
+
+    #[test]
+    fn test_click_severity_levels() {
+        assert_eq!(ClickSeverity::from_ratio(1.5), ClickSeverity::Low);
+        assert_eq!(ClickSeverity::from_ratio(3.0), ClickSeverity::Medium);
+        assert_eq!(ClickSeverity::from_ratio(6.0), ClickSeverity::High);
+    }
+
+    #[test]
     fn test_detect_clicks_simple() {
         let mut samples = vec![0.0; 1000];
 
@@ -234,6 +346,10 @@ mod tests {
 
         let clicks = detect_clicks_simple(&samples, 0.1, 5);
         assert!(!clicks.is_empty());
+        // Severity and confidence must be valid
+        for c in &clicks {
+            assert!(c.confidence >= 0.0 && c.confidence <= 1.0);
+        }
     }
 
     #[test]

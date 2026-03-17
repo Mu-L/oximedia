@@ -1,10 +1,10 @@
 [package]
 name = "oximedia-forensics"
 version.workspace = true
-edition = "2021"
-authors = ["OxiMedia Contributors"]
+edition.workspace = true
+authors.workspace = true
 description = "Video and image forensics and tampering detection for OxiMedia"
-license = "Apache-2.0"
+license.workspace = true
 readme = "README.md"
 homepage.workspace = true
 repository.workspace = true

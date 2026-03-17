@@ -344,6 +344,186 @@ impl PrnuFingerprint {
     }
 }
 
+/// Per-region noise variance map for localized tampering detection.
+///
+/// Divides the image into a grid of regions and estimates the noise variance
+/// in each. Regions with noise variance significantly different from the
+/// global distribution are flagged as potential tampering.
+#[derive(Debug, Clone)]
+pub struct RegionNoiseVarianceMap {
+    /// Width of the grid (number of regions horizontally).
+    pub grid_width: usize,
+    /// Height of the grid (number of regions vertically).
+    pub grid_height: usize,
+    /// Per-region noise variance values (row-major order).
+    pub variances: Vec<f64>,
+    /// Global median noise variance.
+    pub global_median_variance: f64,
+    /// Flagged regions (row, col) where variance is anomalous.
+    pub flagged_regions: Vec<(usize, usize)>,
+    /// Overall anomaly score (0.0..1.0).
+    pub anomaly_score: f64,
+}
+
+impl RegionNoiseVarianceMap {
+    /// Get variance at grid position.
+    #[must_use]
+    pub fn get_variance(&self, row: usize, col: usize) -> Option<f64> {
+        if col < self.grid_width && row < self.grid_height {
+            self.variances.get(row * self.grid_width + col).copied()
+        } else {
+            None
+        }
+    }
+
+    /// Get the mean variance.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn mean_variance(&self) -> f64 {
+        if self.variances.is_empty() {
+            return 0.0;
+        }
+        self.variances.iter().sum::<f64>() / self.variances.len() as f64
+    }
+
+    /// Check if a specific region is flagged.
+    #[must_use]
+    pub fn is_flagged(&self, row: usize, col: usize) -> bool {
+        self.flagged_regions.contains(&(row, col))
+    }
+}
+
+/// Compute per-region noise variance map for localized tampering detection.
+///
+/// The image is represented as rows of pixel values (grayscale or single-channel).
+/// `region_size` controls the granularity (in pixels).
+/// `threshold_sigmas` is the number of MAD-based standard deviations for flagging.
+#[allow(clippy::cast_precision_loss)]
+#[must_use]
+pub fn compute_region_noise_variance(
+    pixel_rows: &[Vec<f64>],
+    region_size: usize,
+    threshold_sigmas: f64,
+) -> RegionNoiseVarianceMap {
+    if pixel_rows.is_empty() || region_size == 0 {
+        return RegionNoiseVarianceMap {
+            grid_width: 0,
+            grid_height: 0,
+            variances: Vec::new(),
+            global_median_variance: 0.0,
+            flagged_regions: Vec::new(),
+            anomaly_score: 0.0,
+        };
+    }
+
+    let height = pixel_rows.len();
+    let width = pixel_rows[0].len();
+    let grid_h = height / region_size;
+    let grid_w = width / region_size;
+
+    if grid_h == 0 || grid_w == 0 {
+        return RegionNoiseVarianceMap {
+            grid_width: grid_w,
+            grid_height: grid_h,
+            variances: Vec::new(),
+            global_median_variance: 0.0,
+            flagged_regions: Vec::new(),
+            anomaly_score: 0.0,
+        };
+    }
+
+    let mut variances = Vec::with_capacity(grid_h * grid_w);
+
+    for br in 0..grid_h {
+        for bc in 0..grid_w {
+            let mut block_pixels = Vec::new();
+            for r in 0..region_size {
+                let row_idx = br * region_size + r;
+                if row_idx < height {
+                    for c in 0..region_size {
+                        let col_idx = bc * region_size + c;
+                        if col_idx < pixel_rows[row_idx].len() {
+                            block_pixels.push(pixel_rows[row_idx][col_idx]);
+                        }
+                    }
+                }
+            }
+
+            // Compute local variance using high-pass filtered data.
+            let noise_sigma = estimate_noise_mad(&block_pixels);
+            let variance = noise_sigma * noise_sigma;
+            variances.push(variance);
+        }
+    }
+
+    // Compute median variance (robust centre estimate).
+    let global_median_variance = {
+        let mut sorted = variances.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        if sorted.is_empty() {
+            0.0
+        } else if sorted.len() % 2 == 0 {
+            (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
+        } else {
+            sorted[sorted.len() / 2]
+        }
+    };
+
+    // Compute MAD of variances.
+    let mut abs_devs: Vec<f64> = variances
+        .iter()
+        .map(|&v| (v - global_median_variance).abs())
+        .collect();
+    abs_devs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mad = if abs_devs.is_empty() {
+        0.0
+    } else {
+        abs_devs[abs_devs.len() / 2]
+    };
+    let sigma_est = mad * 1.4826;
+
+    // Flag regions.
+    let mut flagged_regions = Vec::new();
+    for (idx, &v) in variances.iter().enumerate() {
+        let row = idx / grid_w;
+        let col = idx % grid_w;
+        if sigma_est > 1e-10 {
+            let z = (v - global_median_variance).abs() / sigma_est;
+            if z > threshold_sigmas {
+                flagged_regions.push((row, col));
+            }
+        } else if (v - global_median_variance).abs() > 1e-10 {
+            flagged_regions.push((row, col));
+        }
+    }
+
+    // Anomaly score: ratio of flagged regions.
+    let total = variances.len() as f64;
+    let anomaly_score = if total > 0.0 {
+        (flagged_regions.len() as f64 / total).min(1.0)
+    } else {
+        0.0
+    };
+
+    RegionNoiseVarianceMap {
+        grid_width: grid_w,
+        grid_height: grid_h,
+        variances,
+        global_median_variance,
+        flagged_regions,
+        anomaly_score,
+    }
+}
+
+/// Convenience: compute region noise variance with default threshold of 2.5 sigma.
+#[must_use]
+pub fn compute_region_noise_variance_default(
+    pixel_rows: &[Vec<f64>],
+    region_size: usize,
+) -> RegionNoiseVarianceMap {
+    compute_region_noise_variance(pixel_rows, region_size, 2.5)
+}
+
 /// Summary of noise analysis across different noise types.
 #[derive(Debug, Clone)]
 pub struct NoiseAnalysisSummary {
@@ -550,5 +730,88 @@ mod tests {
         summary.inconsistency_score = 0.2;
         summary.evaluate(0.5);
         assert!(!summary.tampering_suspected);
+    }
+
+    // ---- Region noise variance tests ----
+
+    #[test]
+    fn test_region_noise_variance_empty() {
+        let map = compute_region_noise_variance(&[], 4, 2.5);
+        assert_eq!(map.grid_width, 0);
+        assert_eq!(map.grid_height, 0);
+        assert!(map.variances.is_empty());
+        assert!(map.anomaly_score.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_region_noise_variance_uniform() {
+        let rows: Vec<Vec<f64>> = (0..16).map(|_| vec![128.0; 16]).collect();
+        let map = compute_region_noise_variance(&rows, 8, 2.5);
+        assert_eq!(map.grid_width, 2);
+        assert_eq!(map.grid_height, 2);
+        assert_eq!(map.variances.len(), 4);
+        // Uniform image: all variances should be zero, no flagged regions.
+        assert!(map.flagged_regions.is_empty());
+        assert!(map.anomaly_score < 0.01);
+    }
+
+    #[test]
+    fn test_region_noise_variance_with_outlier() {
+        // 3 uniform regions and 1 noisy region.
+        let mut rows: Vec<Vec<f64>> = (0..16).map(|_| vec![128.0; 16]).collect();
+        // Add noise to top-left block.
+        for r in 0..8 {
+            for c in 0..8 {
+                rows[r][c] = if (r + c) % 2 == 0 { 200.0 } else { 50.0 };
+            }
+        }
+        let map = compute_region_noise_variance(&rows, 8, 2.0);
+        assert!(!map.flagged_regions.is_empty());
+        assert!(map.anomaly_score > 0.0);
+    }
+
+    #[test]
+    fn test_region_noise_variance_get() {
+        let rows: Vec<Vec<f64>> = (0..8).map(|_| vec![100.0; 8]).collect();
+        let map = compute_region_noise_variance(&rows, 4, 2.5);
+        assert!(map.get_variance(0, 0).is_some());
+        assert!(map.get_variance(5, 5).is_none());
+    }
+
+    #[test]
+    fn test_region_noise_variance_mean() {
+        let rows: Vec<Vec<f64>> = (0..8).map(|_| vec![100.0; 8]).collect();
+        let map = compute_region_noise_variance(&rows, 4, 2.5);
+        // All zero noise => mean variance should be ~0.
+        assert!(map.mean_variance() < 0.01);
+    }
+
+    #[test]
+    fn test_region_noise_variance_is_flagged() {
+        let mut rows: Vec<Vec<f64>> = (0..8).map(|_| vec![128.0; 8]).collect();
+        for r in 0..4 {
+            for c in 0..4 {
+                rows[r][c] = if (r + c) % 2 == 0 { 250.0 } else { 10.0 };
+            }
+        }
+        let map = compute_region_noise_variance(&rows, 4, 2.0);
+        // Top-left block should be flagged.
+        assert!(map.is_flagged(0, 0));
+    }
+
+    #[test]
+    fn test_region_noise_variance_default_threshold() {
+        let rows: Vec<Vec<f64>> = (0..16).map(|_| vec![128.0; 16]).collect();
+        let map = compute_region_noise_variance_default(&rows, 8);
+        assert_eq!(map.grid_width, 2);
+        assert!(map.flagged_regions.is_empty());
+    }
+
+    #[test]
+    fn test_region_noise_variance_region_too_large() {
+        let rows: Vec<Vec<f64>> = (0..4).map(|_| vec![128.0; 4]).collect();
+        let map = compute_region_noise_variance(&rows, 8, 2.5);
+        // Grid is 0x0 since region_size > image size.
+        assert!(map.variances.is_empty());
     }
 }

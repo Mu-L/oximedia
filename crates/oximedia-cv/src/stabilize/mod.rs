@@ -24,7 +24,10 @@ pub mod transform;
 use crate::error::{CvError, CvResult};
 use oximedia_codec::VideoFrame;
 
-pub use motion::{HomographyEstimator, MotionEstimator, TransformMatrix};
+pub use motion::{
+    GyroscopeData, GyroscopeFusionConfig, HomographyEstimator, HybridMotionEstimator,
+    MotionEstimator, TransformMatrix,
+};
 pub use rolling_shutter::RollingShutterCorrector;
 pub use smooth::{AdaptiveSmoother, GaussianSmoother, LowPassFilter, MotionSmoother};
 pub use transform::{BorderMode, FrameWarper};

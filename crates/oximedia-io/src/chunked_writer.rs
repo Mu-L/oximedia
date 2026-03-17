@@ -259,6 +259,152 @@ impl<W: Write> Write for AlignedChunkWriter<W> {
 }
 
 // ---------------------------------------------------------------------------
+// CoalescingWriter — batches small writes into larger I/O operations
+// ---------------------------------------------------------------------------
+
+/// Statistics tracked by the `CoalescingWriter`.
+#[derive(Debug, Clone, Default)]
+pub struct CoalesceStats {
+    /// Number of `write()` calls received from the caller.
+    pub writes_received: u64,
+    /// Number of actual write operations issued to the inner writer.
+    pub writes_issued: u64,
+    /// Total bytes written.
+    pub total_bytes: u64,
+}
+
+impl CoalesceStats {
+    /// Coalescing ratio: how many caller writes were batched per issued write.
+    ///
+    /// Returns `0.0` if no writes have been issued.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn coalesce_ratio(&self) -> f64 {
+        if self.writes_issued == 0 {
+            0.0
+        } else {
+            self.writes_received as f64 / self.writes_issued as f64
+        }
+    }
+}
+
+/// Trigger condition for flushing the coalescing buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoalesceTrigger {
+    /// Flush when the buffer reaches at least this many bytes.
+    Size(usize),
+    /// Flush when this many individual writes have accumulated.
+    Count(u64),
+    /// Flush when either size or count threshold is reached.
+    Either { size: usize, count: u64 },
+}
+
+/// A writer that coalesces multiple small writes into larger batches
+/// before flushing to the underlying writer.
+///
+/// This is particularly useful when many small writes (e.g. metadata fields,
+/// small NAL units) would otherwise cause excessive I/O syscalls.
+pub struct CoalescingWriter<W> {
+    inner: W,
+    buffer: Vec<u8>,
+    trigger: CoalesceTrigger,
+    writes_in_buffer: u64,
+    stats: CoalesceStats,
+}
+
+impl<W: Write> CoalescingWriter<W> {
+    /// Create a new coalescing writer with the given trigger.
+    pub fn new(inner: W, trigger: CoalesceTrigger) -> Self {
+        let initial_cap = match trigger {
+            CoalesceTrigger::Size(s) | CoalesceTrigger::Either { size: s, .. } => s,
+            CoalesceTrigger::Count(_) => 4096,
+        };
+        Self {
+            inner,
+            buffer: Vec::with_capacity(initial_cap),
+            trigger,
+            writes_in_buffer: 0,
+            stats: CoalesceStats::default(),
+        }
+    }
+
+    /// Return a snapshot of accumulated statistics.
+    #[must_use]
+    pub fn stats(&self) -> CoalesceStats {
+        self.stats.clone()
+    }
+
+    /// Return the number of bytes currently buffered.
+    #[must_use]
+    pub fn buffered_len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Flush the coalescing buffer and the inner writer, then return the
+    /// inner writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if flushing fails.
+    pub fn into_inner(mut self) -> io::Result<W> {
+        self.flush_buffer()?;
+        self.inner.flush()?;
+        Ok(self.inner)
+    }
+
+    /// Flush any buffered data and the inner writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if writing or flushing fails.
+    pub fn finish(&mut self) -> io::Result<()> {
+        self.flush_buffer()?;
+        self.inner.flush()
+    }
+
+    /// Check if the trigger condition is met and flush if so.
+    fn maybe_flush(&mut self) -> io::Result<()> {
+        let should_flush = match self.trigger {
+            CoalesceTrigger::Size(s) => self.buffer.len() >= s,
+            CoalesceTrigger::Count(c) => self.writes_in_buffer >= c,
+            CoalesceTrigger::Either { size, count } => {
+                self.buffer.len() >= size || self.writes_in_buffer >= count
+            }
+        };
+        if should_flush {
+            self.flush_buffer()?;
+        }
+        Ok(())
+    }
+
+    /// Flush the internal buffer to the inner writer.
+    fn flush_buffer(&mut self) -> io::Result<()> {
+        if !self.buffer.is_empty() {
+            self.inner.write_all(&self.buffer)?;
+            self.stats.writes_issued += 1;
+            self.stats.total_bytes += self.buffer.len() as u64;
+            self.buffer.clear();
+            self.writes_in_buffer = 0;
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for CoalescingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        self.writes_in_buffer += 1;
+        self.stats.writes_received += 1;
+        self.maybe_flush()?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -409,5 +555,132 @@ mod tests {
     fn test_aligned_non_power_of_two_panics() {
         let mut out = Vec::new();
         let _w = AlignedChunkWriter::new(&mut out, 3);
+    }
+
+    // ── CoalescingWriter ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_coalescing_size_trigger() {
+        let mut out = Vec::new();
+        {
+            let mut w = CoalescingWriter::new(&mut out, CoalesceTrigger::Size(10));
+            // Write several small chunks
+            w.write_all(b"aaa").expect("write");
+            w.write_all(b"bbb").expect("write");
+            w.write_all(b"cccc").expect("write"); // total 10 => flush
+            w.finish().expect("finish");
+        }
+        assert_eq!(out, b"aaabbbcccc");
+    }
+
+    #[test]
+    fn test_coalescing_count_trigger() {
+        let mut out = Vec::new();
+        {
+            let mut w = CoalescingWriter::new(&mut out, CoalesceTrigger::Count(3));
+            w.write_all(b"a").expect("write");
+            w.write_all(b"b").expect("write");
+            w.write_all(b"c").expect("write"); // 3 writes => flush
+            w.finish().expect("finish");
+        }
+        assert_eq!(out, b"abc");
+    }
+
+    #[test]
+    fn test_coalescing_either_trigger() {
+        let mut out = Vec::new();
+        {
+            let mut w = CoalescingWriter::new(
+                &mut out,
+                CoalesceTrigger::Either {
+                    size: 100,
+                    count: 2,
+                },
+            );
+            w.write_all(b"x").expect("write");
+            w.write_all(b"y").expect("write"); // count=2 triggers flush
+            w.finish().expect("finish");
+        }
+        assert_eq!(out, b"xy");
+    }
+
+    #[test]
+    fn test_coalescing_stats() {
+        let mut out = Vec::new();
+        let mut w = CoalescingWriter::new(&mut out, CoalesceTrigger::Size(100));
+        // Write 5 small chunks that don't trigger flush
+        for _ in 0..5 {
+            w.write_all(b"hi").expect("write");
+        }
+        w.finish().expect("finish");
+
+        let stats = w.stats();
+        assert_eq!(stats.writes_received, 5);
+        assert_eq!(stats.writes_issued, 1); // one coalesced write
+        assert_eq!(stats.total_bytes, 10);
+        assert!((stats.coalesce_ratio() - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_coalescing_empty_finish() {
+        let mut out = Vec::new();
+        {
+            let mut w = CoalescingWriter::new(&mut out, CoalesceTrigger::Size(10));
+            w.finish().expect("finish");
+            assert_eq!(w.stats().writes_issued, 0);
+        }
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_coalescing_large_write_triggers_immediately() {
+        let mut out = Vec::new();
+        {
+            let mut w = CoalescingWriter::new(&mut out, CoalesceTrigger::Size(5));
+            w.write_all(b"abcdefgh").expect("write"); // 8 > 5 => flush
+            let stats = w.stats();
+            assert_eq!(stats.writes_issued, 1);
+            w.finish().expect("finish");
+        }
+        assert_eq!(out, b"abcdefgh");
+    }
+
+    #[test]
+    fn test_coalescing_buffered_len() {
+        let mut out = Vec::new();
+        let mut w = CoalescingWriter::new(&mut out, CoalesceTrigger::Size(100));
+        w.write_all(b"hello").expect("write");
+        assert_eq!(w.buffered_len(), 5);
+        w.finish().expect("finish");
+        assert_eq!(w.buffered_len(), 0);
+    }
+
+    #[test]
+    fn test_coalescing_into_inner() {
+        let out = Vec::new();
+        let mut w = CoalescingWriter::new(out, CoalesceTrigger::Size(100));
+        w.write_all(b"data").expect("write");
+        let result = w.into_inner().expect("into_inner");
+        assert_eq!(result, b"data");
+    }
+
+    #[test]
+    fn test_coalescing_ratio_zero_when_empty() {
+        let stats = CoalesceStats::default();
+        assert_eq!(stats.coalesce_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_coalescing_multiple_flushes() {
+        let mut out = Vec::new();
+        {
+            let mut w = CoalescingWriter::new(&mut out, CoalesceTrigger::Size(4));
+            w.write_all(b"aaaa").expect("write"); // triggers flush (4 >= 4)
+            w.write_all(b"bbbb").expect("write"); // triggers flush
+            w.write_all(b"cc").expect("write"); // below threshold
+            w.finish().expect("finish");
+            assert_eq!(w.stats().writes_issued, 3); // 2 triggered + 1 finish
+        }
+        assert_eq!(out, b"aaaabbbbcc");
     }
 }

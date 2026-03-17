@@ -48,17 +48,24 @@
 //! muxer.write_trailer().await?;
 //! ```
 
+pub mod cmaf;
 pub mod flac;
 pub mod interleave;
 pub mod matroska;
+pub mod mp4;
 pub mod mpegts;
 pub mod ogg;
 mod traits;
 pub mod wav;
 pub mod y4m;
 
+pub use cmaf::{CmafBrand, CmafConfig, CmafMuxer, CmafSample, CmafSegment, CmafTrack, TrackType};
 pub use flac::FlacMuxer;
 pub use matroska::MatroskaMuxer;
+pub use mp4::{
+    AudioCodecInfo, BasicMp4Error, BasicMp4Muxer, FourCC, Mp4Config, Mp4Mode, Mp4Muxer, Mp4Sample,
+    Mp4TrackWriter, SimpleMp4Config, SimpleMp4Error, SimpleMp4Muxer, TrackCodec, VideoCodecInfo,
+};
 pub use mpegts::MpegTsMuxer;
 pub use ogg::OggMuxer;
 pub use traits::{Muxer, MuxerConfig, OutputFormat};

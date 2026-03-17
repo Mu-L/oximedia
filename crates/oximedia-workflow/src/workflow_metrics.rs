@@ -348,3 +348,384 @@ mod tests {
         assert!((s.mean() - 42.0).abs() < 1e-9);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Workflow-level execution metrics and aggregator
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Per-step timing and resource metrics captured during a workflow run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepMetric {
+    /// Step identifier.
+    pub step_id: String,
+    /// Wall-clock time at which the step started.
+    pub started_at: std::time::SystemTime,
+    /// How long the step took to complete (seconds).
+    pub duration_secs: f64,
+    /// Whether the step completed successfully.
+    pub success: bool,
+    /// How many retry attempts were consumed.
+    pub retries: u32,
+    /// Optional output size in bytes (e.g. transcoded file size).
+    pub output_size_bytes: Option<u64>,
+    /// Optional CPU time consumed by the step (seconds).
+    pub cpu_seconds: Option<f64>,
+}
+
+impl StepMetric {
+    /// Construct a minimal step metric with only the required fields.
+    #[must_use]
+    pub fn new(step_id: impl Into<String>, duration_secs: f64, success: bool) -> Self {
+        Self {
+            step_id: step_id.into(),
+            started_at: std::time::SystemTime::now(),
+            duration_secs,
+            success,
+            retries: 0,
+            output_size_bytes: None,
+            cpu_seconds: None,
+        }
+    }
+}
+
+/// Execution metrics for a single workflow run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowRunMetrics {
+    /// Workflow identifier.
+    pub workflow_id: String,
+    /// Wall-clock time at which the workflow started.
+    pub started_at: std::time::SystemTime,
+    /// Wall-clock time at which the workflow completed (if finished).
+    pub completed_at: Option<std::time::SystemTime>,
+    /// Per-step metrics collected during this run.
+    pub step_metrics: Vec<StepMetric>,
+    /// Total wall-clock duration of the workflow (seconds), if complete.
+    pub total_duration_secs: Option<f64>,
+    /// Whether the workflow completed successfully.
+    pub success: Option<bool>,
+}
+
+impl WorkflowRunMetrics {
+    /// Create a new metrics record for a workflow that has just started.
+    #[must_use]
+    pub fn new(workflow_id: impl Into<String>) -> Self {
+        Self {
+            workflow_id: workflow_id.into(),
+            started_at: std::time::SystemTime::now(),
+            completed_at: None,
+            step_metrics: Vec::new(),
+            total_duration_secs: None,
+            success: None,
+        }
+    }
+
+    /// Mark the workflow as finished and compute the total duration.
+    pub fn finish(&mut self, success: bool) {
+        let now = std::time::SystemTime::now();
+        self.completed_at = Some(now);
+        self.success = Some(success);
+        self.total_duration_secs = now
+            .duration_since(self.started_at)
+            .map(|d| d.as_secs_f64())
+            .ok();
+    }
+}
+
+/// Accumulates [`WorkflowRunMetrics`] across many runs and computes aggregate
+/// statistics.
+pub struct WorkflowMetricsAggregator {
+    history: Vec<WorkflowRunMetrics>,
+    max_history: usize,
+}
+
+impl WorkflowMetricsAggregator {
+    /// Create a new aggregator that retains at most `max_history` workflow runs.
+    ///
+    /// When `max_history` is exceeded the oldest entry is evicted.
+    #[must_use]
+    pub fn new(max_history: usize) -> Self {
+        Self {
+            history: Vec::new(),
+            max_history,
+        }
+    }
+
+    /// Add a completed workflow run to the history.
+    ///
+    /// If the history is at capacity the oldest entry is removed first.
+    pub fn record(&mut self, metrics: WorkflowRunMetrics) {
+        if self.max_history > 0 && self.history.len() >= self.max_history {
+            self.history.remove(0);
+        }
+        self.history.push(metrics);
+    }
+
+    /// Number of workflow runs currently in the history.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Return `true` when no runs have been recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.history.is_empty()
+    }
+
+    /// Mean total duration across all completed runs, or `None` when no
+    /// completed run is present.
+    #[must_use]
+    pub fn avg_duration_secs(&self) -> Option<f64> {
+        let durations: Vec<f64> = self
+            .history
+            .iter()
+            .filter_map(|m| m.total_duration_secs)
+            .collect();
+        if durations.is_empty() {
+            None
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            Some(durations.iter().sum::<f64>() / durations.len() as f64)
+        }
+    }
+
+    /// Fraction of runs (0.0–1.0) that completed successfully.
+    ///
+    /// Runs without a recorded `success` value are excluded from the
+    /// denominator.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn success_rate(&self) -> f64 {
+        let finished: Vec<bool> = self.history.iter().filter_map(|m| m.success).collect();
+        if finished.is_empty() {
+            return 0.0;
+        }
+        let successes = finished.iter().filter(|&&s| s).count();
+        successes as f64 / finished.len() as f64
+    }
+
+    /// 95th-percentile total duration across all completed runs, or `None`
+    /// when fewer than two completed runs are present.
+    #[must_use]
+    pub fn p95_duration_secs(&self) -> Option<f64> {
+        let mut durations: Vec<f64> = self
+            .history
+            .iter()
+            .filter_map(|m| m.total_duration_secs)
+            .collect();
+        if durations.is_empty() {
+            return None;
+        }
+        durations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        #[allow(clippy::cast_precision_loss)]
+        let idx = ((durations.len() as f64 * 0.95).ceil() as usize).saturating_sub(1);
+        let idx = idx.min(durations.len() - 1);
+        Some(durations[idx])
+    }
+
+    /// Return the `n` slowest steps by average duration across all runs.
+    ///
+    /// Returns `(step_id, avg_duration_secs)` pairs sorted by descending
+    /// average duration.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn slowest_steps(&self, n: usize) -> Vec<(String, f64)> {
+        let mut totals: HashMap<String, (f64, usize)> = HashMap::new();
+        for run in &self.history {
+            for step in &run.step_metrics {
+                let entry = totals.entry(step.step_id.clone()).or_insert((0.0, 0));
+                entry.0 += step.duration_secs;
+                entry.1 += 1;
+            }
+        }
+        let mut avgs: Vec<(String, f64)> = totals
+            .into_iter()
+            .map(|(id, (total, count))| (id, total / count as f64))
+            .collect();
+        avgs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        avgs.truncate(n);
+        avgs
+    }
+
+    /// Return failure rates per step, sorted by descending failure rate.
+    ///
+    /// Returns `(step_id, failure_rate)` where `failure_rate` is in `0.0..=1.0`.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn failure_rate_by_step(&self) -> Vec<(String, f64)> {
+        let mut counts: HashMap<String, (usize, usize)> = HashMap::new(); // (total, failures)
+        for run in &self.history {
+            for step in &run.step_metrics {
+                let entry = counts.entry(step.step_id.clone()).or_insert((0, 0));
+                entry.0 += 1;
+                if !step.success {
+                    entry.1 += 1;
+                }
+            }
+        }
+        let mut rates: Vec<(String, f64)> = counts
+            .into_iter()
+            .map(|(id, (total, failures))| (id, failures as f64 / total as f64))
+            .collect();
+        rates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        rates
+    }
+
+    /// Read-only view of all recorded runs.
+    #[must_use]
+    pub fn history(&self) -> &[WorkflowRunMetrics] {
+        &self.history
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod aggregator_tests {
+    use super::*;
+
+    fn make_run(
+        id: &str,
+        duration: f64,
+        success: bool,
+        steps: Vec<StepMetric>,
+    ) -> WorkflowRunMetrics {
+        WorkflowRunMetrics {
+            workflow_id: id.to_string(),
+            started_at: std::time::SystemTime::now(),
+            completed_at: Some(std::time::SystemTime::now()),
+            step_metrics: steps,
+            total_duration_secs: Some(duration),
+            success: Some(success),
+        }
+    }
+
+    fn make_step(id: &str, duration: f64, success: bool) -> StepMetric {
+        StepMetric::new(id, duration, success)
+    }
+
+    #[test]
+    fn test_aggregator_new_is_empty() {
+        let agg = WorkflowMetricsAggregator::new(100);
+        assert!(agg.is_empty());
+        assert_eq!(agg.len(), 0);
+    }
+
+    #[test]
+    fn test_record_increments_len() {
+        let mut agg = WorkflowMetricsAggregator::new(100);
+        agg.record(make_run("wf-1", 10.0, true, vec![]));
+        assert_eq!(agg.len(), 1);
+    }
+
+    #[test]
+    fn test_max_history_evicts_oldest() {
+        let mut agg = WorkflowMetricsAggregator::new(2);
+        agg.record(make_run("wf-1", 10.0, true, vec![]));
+        agg.record(make_run("wf-2", 20.0, true, vec![]));
+        agg.record(make_run("wf-3", 30.0, true, vec![]));
+        assert_eq!(agg.len(), 2);
+        // Oldest (wf-1) should have been evicted.
+        assert_eq!(agg.history()[0].workflow_id, "wf-2");
+    }
+
+    #[test]
+    fn test_avg_duration_secs_correct() {
+        let mut agg = WorkflowMetricsAggregator::new(100);
+        agg.record(make_run("wf-1", 10.0, true, vec![]));
+        agg.record(make_run("wf-2", 30.0, true, vec![]));
+        let avg = agg.avg_duration_secs().expect("should have avg");
+        assert!((avg - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_avg_duration_none_when_empty() {
+        let agg = WorkflowMetricsAggregator::new(100);
+        assert!(agg.avg_duration_secs().is_none());
+    }
+
+    #[test]
+    fn test_success_rate_all_success() {
+        let mut agg = WorkflowMetricsAggregator::new(100);
+        agg.record(make_run("wf-1", 10.0, true, vec![]));
+        agg.record(make_run("wf-2", 10.0, true, vec![]));
+        assert!((agg.success_rate() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_success_rate_half_success() {
+        let mut agg = WorkflowMetricsAggregator::new(100);
+        agg.record(make_run("wf-1", 10.0, true, vec![]));
+        agg.record(make_run("wf-2", 10.0, false, vec![]));
+        assert!((agg.success_rate() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_success_rate_zero_when_empty() {
+        let agg = WorkflowMetricsAggregator::new(100);
+        assert!((agg.success_rate() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_p95_duration_secs() {
+        let mut agg = WorkflowMetricsAggregator::new(100);
+        // 20 values: 1..=20; p95 index = ceil(20 * 0.95) - 1 = 18 → value 19
+        for i in 1u32..=20 {
+            agg.record(make_run(&format!("wf-{i}"), f64::from(i), true, vec![]));
+        }
+        let p95 = agg.p95_duration_secs().expect("should have p95");
+        assert!((p95 - 19.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_p95_none_when_empty() {
+        let agg = WorkflowMetricsAggregator::new(100);
+        assert!(agg.p95_duration_secs().is_none());
+    }
+
+    #[test]
+    fn test_slowest_steps_returns_top_n() {
+        let mut agg = WorkflowMetricsAggregator::new(100);
+        agg.record(make_run(
+            "wf-1",
+            100.0,
+            true,
+            vec![
+                make_step("transcode", 80.0, true),
+                make_step("ingest", 10.0, true),
+                make_step("deliver", 5.0, true),
+            ],
+        ));
+        let slowest = agg.slowest_steps(2);
+        assert_eq!(slowest.len(), 2);
+        assert_eq!(slowest[0].0, "transcode");
+        assert_eq!(slowest[1].0, "ingest");
+    }
+
+    #[test]
+    fn test_failure_rate_by_step_sorted_desc() {
+        let mut agg = WorkflowMetricsAggregator::new(100);
+        // transcode fails 2/2, ingest fails 0/2
+        for _ in 0..2 {
+            agg.record(make_run(
+                "wf",
+                10.0,
+                false,
+                vec![
+                    make_step("transcode", 5.0, false),
+                    make_step("ingest", 2.0, true),
+                ],
+            ));
+        }
+        let rates = agg.failure_rate_by_step();
+        assert!(!rates.is_empty());
+        assert_eq!(rates[0].0, "transcode");
+        assert!((rates[0].1 - 1.0).abs() < 1e-9);
+        let ingest_rate = rates
+            .iter()
+            .find(|(id, _)| id == "ingest")
+            .map(|(_, r)| *r)
+            .unwrap_or(0.0);
+        assert!((ingest_rate - 0.0).abs() < 1e-9);
+    }
+}

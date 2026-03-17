@@ -362,6 +362,330 @@ fn escape_xml(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+// ─── PREMIS Rights ────────────────────────────────────────────────────────────
+
+/// The basis for a PREMIS rights statement (§1.2.3 of the PREMIS Data Dictionary).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RightsBasis {
+    /// Copyright protection
+    Copyright,
+    /// License agreement
+    License,
+    /// Statute or regulation
+    Statute,
+    /// Other / institutional policy
+    Other(String),
+}
+
+impl RightsBasis {
+    /// Human-readable label used in XML serialization.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Copyright => "copyright",
+            Self::License => "license",
+            Self::Statute => "statute",
+            Self::Other(_) => "other",
+        }
+    }
+}
+
+/// Copyright status values following PREMIS controlled vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyrightStatus {
+    /// Under copyright protection
+    Copyrighted,
+    /// In the public domain
+    PublicDomain,
+    /// Copyright status unknown
+    Unknown,
+}
+
+impl CopyrightStatus {
+    fn label(&self) -> &str {
+        match self {
+            Self::Copyrighted => "copyrighted",
+            Self::PublicDomain => "publicdomain",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// A PREMIS rights statement describing the access permissions for a digital object.
+///
+/// Implements the `<premis:rights>` element per PREMIS Data Dictionary v3.0.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PremisRights {
+    /// Unique identifier for this rights statement
+    pub rights_statement_id: String,
+    /// The basis for this rights statement
+    pub rights_basis: RightsBasis,
+    /// Copyright status (populated when `rights_basis == Copyright`)
+    pub copyright_status: Option<CopyrightStatus>,
+    /// Jurisdiction (e.g. `"US"`, `"EU"`)
+    pub copyright_jurisdiction: Option<String>,
+    /// Copyright determination note (free text)
+    pub copyright_note: Option<String>,
+    /// License terms (populated when `rights_basis == License`)
+    pub license_terms: Option<String>,
+    /// License URI (e.g. `"https://creativecommons.org/licenses/by/4.0/"`)
+    pub license_uri: Option<String>,
+    /// Start date of the rights grant (`YYYY-MM-DD`)
+    pub start_date: Option<String>,
+    /// End date of the rights grant (`YYYY-MM-DD` or `"open"` for perpetual)
+    pub end_date: Option<String>,
+    /// Rights granted (e.g. `["disseminate", "reproduce"]`)
+    pub acts_granted: Vec<String>,
+    /// Restrictions (free text)
+    pub restriction_note: Option<String>,
+}
+
+impl PremisRights {
+    /// Create a new rights statement with the given identifier and basis.
+    #[must_use]
+    pub fn new(rights_statement_id: impl Into<String>, rights_basis: RightsBasis) -> Self {
+        Self {
+            rights_statement_id: rights_statement_id.into(),
+            rights_basis,
+            copyright_status: None,
+            copyright_jurisdiction: None,
+            copyright_note: None,
+            license_terms: None,
+            license_uri: None,
+            start_date: None,
+            end_date: None,
+            acts_granted: Vec::new(),
+            restriction_note: None,
+        }
+    }
+
+    /// Set copyright status.
+    #[must_use]
+    pub fn with_copyright_status(mut self, status: CopyrightStatus) -> Self {
+        self.copyright_status = Some(status);
+        self
+    }
+
+    /// Set copyright jurisdiction.
+    #[must_use]
+    pub fn with_copyright_jurisdiction(mut self, jurisdiction: impl Into<String>) -> Self {
+        self.copyright_jurisdiction = Some(jurisdiction.into());
+        self
+    }
+
+    /// Set copyright note.
+    #[must_use]
+    pub fn with_copyright_note(mut self, note: impl Into<String>) -> Self {
+        self.copyright_note = Some(note.into());
+        self
+    }
+
+    /// Set license terms.
+    #[must_use]
+    pub fn with_license_terms(mut self, terms: impl Into<String>) -> Self {
+        self.license_terms = Some(terms.into());
+        self
+    }
+
+    /// Set license URI.
+    #[must_use]
+    pub fn with_license_uri(mut self, uri: impl Into<String>) -> Self {
+        self.license_uri = Some(uri.into());
+        self
+    }
+
+    /// Set rights start date (`YYYY-MM-DD`).
+    #[must_use]
+    pub fn with_start_date(mut self, date: impl Into<String>) -> Self {
+        self.start_date = Some(date.into());
+        self
+    }
+
+    /// Set rights end date (`YYYY-MM-DD` or `"open"`).
+    #[must_use]
+    pub fn with_end_date(mut self, date: impl Into<String>) -> Self {
+        self.end_date = Some(date.into());
+        self
+    }
+
+    /// Add an act granted (e.g. `"disseminate"`, `"reproduce"`, `"publish"`).
+    #[must_use]
+    pub fn with_act_granted(mut self, act: impl Into<String>) -> Self {
+        self.acts_granted.push(act.into());
+        self
+    }
+
+    /// Set a restriction note.
+    #[must_use]
+    pub fn with_restriction_note(mut self, note: impl Into<String>) -> Self {
+        self.restriction_note = Some(note.into());
+        self
+    }
+
+    /// Serialize this rights statement to a PREMIS v3 `<premis:rights>` XML fragment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if string formatting fails (infallible in practice).
+    pub fn to_xml(&self) -> Result<String> {
+        let mut xml = String::new();
+        xml.push_str("  <rights>\n");
+        xml.push_str("    <rightsStatement>\n");
+        xml.push_str(&format!(
+            "      <rightsStatementIdentifier>{}</rightsStatementIdentifier>\n",
+            escape_xml(&self.rights_statement_id)
+        ));
+        xml.push_str(&format!(
+            "      <rightsBasis>{}</rightsBasis>\n",
+            self.rights_basis.label()
+        ));
+
+        // Copyright sub-element
+        if self.rights_basis == RightsBasis::Copyright {
+            xml.push_str("      <copyrightInformation>\n");
+            if let Some(ref status) = self.copyright_status {
+                xml.push_str(&format!(
+                    "        <copyrightStatus>{}</copyrightStatus>\n",
+                    status.label()
+                ));
+            }
+            if let Some(ref jur) = self.copyright_jurisdiction {
+                xml.push_str(&format!(
+                    "        <copyrightJurisdiction>{}</copyrightJurisdiction>\n",
+                    escape_xml(jur)
+                ));
+            }
+            if let Some(ref note) = self.copyright_note {
+                xml.push_str(&format!(
+                    "        <copyrightNote>{}</copyrightNote>\n",
+                    escape_xml(note)
+                ));
+            }
+            xml.push_str("      </copyrightInformation>\n");
+        }
+
+        // License sub-element
+        if self.rights_basis == RightsBasis::License {
+            xml.push_str("      <licenseInformation>\n");
+            if let Some(ref uri) = self.license_uri {
+                xml.push_str(&format!(
+                    "        <licenseIdentifier>{}</licenseIdentifier>\n",
+                    escape_xml(uri)
+                ));
+            }
+            if let Some(ref terms) = self.license_terms {
+                xml.push_str(&format!(
+                    "        <licenseTerms>{}</licenseTerms>\n",
+                    escape_xml(terms)
+                ));
+            }
+            xml.push_str("      </licenseInformation>\n");
+        }
+
+        // Other basis note
+        if let RightsBasis::Other(ref other_note) = self.rights_basis {
+            xml.push_str("      <otherRightsInformation>\n");
+            xml.push_str(&format!(
+                "        <otherRightsBasis>{}</otherRightsBasis>\n",
+                escape_xml(other_note)
+            ));
+            xml.push_str("      </otherRightsInformation>\n");
+        }
+
+        // Rights granted
+        for act in &self.acts_granted {
+            xml.push_str("      <rightsGranted>\n");
+            xml.push_str(&format!("        <act>{}</act>\n", escape_xml(act)));
+            if let Some(ref sd) = self.start_date {
+                xml.push_str(&format!(
+                    "        <termOfGrant><startDate>{}</startDate>",
+                    escape_xml(sd)
+                ));
+                if let Some(ref ed) = self.end_date {
+                    xml.push_str(&format!("<endDate>{}</endDate>", escape_xml(ed)));
+                }
+                xml.push_str("</termOfGrant>\n");
+            }
+            if let Some(ref note) = self.restriction_note {
+                xml.push_str(&format!(
+                    "        <rightsGrantedNote>{}</rightsGrantedNote>\n",
+                    escape_xml(note)
+                ));
+            }
+            xml.push_str("      </rightsGranted>\n");
+        }
+
+        xml.push_str("    </rightsStatement>\n");
+        xml.push_str("  </rights>\n");
+        Ok(xml)
+    }
+
+    /// Serialize a full PREMIS XML document containing only this rights statement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if XML serialization fails.
+    pub fn to_premis_xml(&self) -> Result<String> {
+        let mut xml = String::new();
+        xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        xml.push_str("<premis xmlns=\"http://www.loc.gov/premis/v3\" version=\"3.0\">\n");
+        xml.push_str(&self.to_xml()?);
+        xml.push_str("</premis>\n");
+        Ok(xml)
+    }
+}
+
+/// Extend `PremisMetadata` to carry rights statements.
+///
+/// This newtype wraps `PremisMetadata` and adds a `rights` field, providing
+/// full-document XML serialization via `to_xml_with_rights`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PremisMetadataWithRights {
+    /// Core PREMIS metadata (objects + events).
+    pub premis: PremisMetadata,
+    /// Rights statements.
+    pub rights: Vec<PremisRights>,
+}
+
+impl PremisMetadataWithRights {
+    /// Create a new wrapper.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a rights statement.
+    #[must_use]
+    pub fn with_rights(mut self, rights: PremisRights) -> Self {
+        self.rights.push(rights);
+        self
+    }
+
+    /// Serialize the full PREMIS document including rights statements.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if XML serialization fails.
+    pub fn to_xml(&self) -> Result<String> {
+        let mut xml = String::new();
+        xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        xml.push_str("<premis xmlns=\"http://www.loc.gov/premis/v3\" version=\"3.0\">\n");
+
+        for object in &self.premis.objects {
+            xml.push_str(&object.to_xml()?);
+        }
+        for event in &self.premis.events {
+            xml.push_str(&event.to_xml()?);
+        }
+        for rights in &self.rights {
+            xml.push_str(&rights.to_xml()?);
+        }
+
+        xml.push_str("</premis>\n");
+        Ok(xml)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,5 +748,105 @@ mod tests {
         let metadata = PremisMetadata::for_file(file.path()).expect("operation should succeed");
         assert_eq!(metadata.objects.len(), 1);
         assert_eq!(metadata.events.len(), 1);
+    }
+
+    // ── PremisRights tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_premis_rights_copyright_xml() {
+        let rights = PremisRights::new("rights-001", RightsBasis::Copyright)
+            .with_copyright_status(CopyrightStatus::Copyrighted)
+            .with_copyright_jurisdiction("US")
+            .with_copyright_note("Copyright 2025 COOLJAPAN OU")
+            .with_act_granted("disseminate")
+            .with_start_date("2025-01-01")
+            .with_end_date("open");
+
+        let xml = rights.to_xml().expect("XML serialization should succeed");
+        assert!(xml.contains("<rightsBasis>copyright</rightsBasis>"));
+        assert!(xml.contains("<copyrightStatus>copyrighted</copyrightStatus>"));
+        assert!(xml.contains("<copyrightJurisdiction>US</copyrightJurisdiction>"));
+        assert!(xml.contains("Copyright 2025 COOLJAPAN OU"));
+        assert!(xml.contains("<act>disseminate</act>"));
+        assert!(xml.contains("<startDate>2025-01-01</startDate>"));
+        assert!(xml.contains("<endDate>open</endDate>"));
+    }
+
+    #[test]
+    fn test_premis_rights_license_xml() {
+        let rights = PremisRights::new("rights-002", RightsBasis::License)
+            .with_license_terms("Attribution 4.0 International")
+            .with_license_uri("https://creativecommons.org/licenses/by/4.0/")
+            .with_act_granted("reproduce")
+            .with_act_granted("publish");
+
+        let xml = rights.to_xml().expect("XML serialization should succeed");
+        assert!(xml.contains("<rightsBasis>license</rightsBasis>"));
+        assert!(xml.contains("creativecommons.org"));
+        assert!(xml.contains("Attribution 4.0 International"));
+        assert!(xml.contains("<act>reproduce</act>"));
+        assert!(xml.contains("<act>publish</act>"));
+    }
+
+    #[test]
+    fn test_premis_rights_other_xml() {
+        let rights = PremisRights::new(
+            "rights-003",
+            RightsBasis::Other("institutional policy".to_string()),
+        )
+        .with_restriction_note("Internal use only");
+
+        let xml = rights.to_xml().expect("XML serialization should succeed");
+        assert!(xml.contains("<rightsBasis>other</rightsBasis>"));
+        assert!(xml.contains("institutional policy"));
+    }
+
+    #[test]
+    fn test_premis_rights_full_premis_document() {
+        let rights = PremisRights::new("rights-004", RightsBasis::License)
+            .with_license_uri("https://creativecommons.org/publicdomain/zero/1.0/")
+            .with_license_terms("CC0 1.0 Universal");
+
+        let xml = rights
+            .to_premis_xml()
+            .expect("XML serialization should succeed");
+        assert!(xml.contains("<?xml version=\"1.0\""));
+        assert!(xml.contains("<premis xmlns=\"http://www.loc.gov/premis/v3\""));
+        assert!(xml.contains("</premis>"));
+        assert!(xml.contains("rights-004"));
+    }
+
+    #[test]
+    fn test_premis_metadata_with_rights() {
+        let premis_core = PremisMetadata::new().with_object(PremisObject {
+            identifier: "obj-100".to_string(),
+            object_type: ObjectType::File,
+            original_name: Some("archive.mkv".to_string()),
+            size: Some(2048),
+            format: Some("video/x-matroska".to_string()),
+            creation_date: chrono::Utc::now(),
+            checksums: Vec::new(),
+        });
+
+        let rights = PremisRights::new("rights-100", RightsBasis::Copyright)
+            .with_copyright_status(CopyrightStatus::PublicDomain);
+
+        let doc = PremisMetadataWithRights {
+            premis: premis_core,
+            rights: vec![rights],
+        };
+
+        let xml = doc.to_xml().expect("serialization should succeed");
+        assert!(xml.contains("obj-100"));
+        assert!(xml.contains("<rightsBasis>copyright</rightsBasis>"));
+        assert!(xml.contains("<copyrightStatus>publicdomain</copyrightStatus>"));
+    }
+
+    #[test]
+    fn test_rights_basis_label() {
+        assert_eq!(RightsBasis::Copyright.label(), "copyright");
+        assert_eq!(RightsBasis::License.label(), "license");
+        assert_eq!(RightsBasis::Statute.label(), "statute");
+        assert_eq!(RightsBasis::Other("custom".to_string()).label(), "other");
     }
 }

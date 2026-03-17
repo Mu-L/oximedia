@@ -158,6 +158,133 @@ fn compute_patch_distance(
     }
 }
 
+/// Tiled Non-Local Means filter for improved cache locality.
+///
+/// Divides the frame into overlapping tiles and processes each tile
+/// independently. This improves cache utilisation because the tile data
+/// (input pixels + neighbourhood search) fits better in L1/L2 cache,
+/// reducing cache misses on large frames.
+///
+/// Tile boundary pixels are averaged from overlapping tile contributions
+/// so the output is seamless.
+///
+/// # Arguments
+/// * `frame`       - Input video frame
+/// * `strength`    - Denoising strength (0.0 – 1.0)
+/// * `tile_size`   - Side length of each processing tile in pixels (power of 2, e.g. 32)
+///
+/// # Returns
+/// Filtered video frame
+pub fn tiled_nlmeans_filter(
+    frame: &VideoFrame,
+    strength: f32,
+    tile_size: usize,
+) -> DenoiseResult<VideoFrame> {
+    if frame.planes.is_empty() {
+        return Err(DenoiseError::ProcessingError(
+            "Frame has no planes".to_string(),
+        ));
+    }
+
+    let tile_size = tile_size.max(16);
+
+    // NLM parameters
+    let h = 10.0 * strength;
+    let patch_size = 7;
+    let search_window = 21;
+    let search_radius = search_window / 2;
+    let overlap = search_radius; // Overlap tiles by half the search window
+
+    let mut output = frame.clone();
+
+    output
+        .planes
+        .iter_mut()
+        .enumerate()
+        .try_for_each(|(plane_idx, plane)| {
+            let input_plane = &frame.planes[plane_idx];
+            let (width, height) = frame.plane_dimensions(plane_idx);
+            let w = width as usize;
+            let h_px = height as usize;
+            let stride = plane.stride;
+
+            // Accumulation buffers: sum of weighted values and sum of weights.
+            let buf_len = h_px * stride;
+            let mut acc_sum = vec![0.0f32; buf_len];
+            let mut acc_weight = vec![0.0f32; buf_len];
+
+            let effective_step = tile_size.saturating_sub(overlap).max(1);
+            let mut ty = 0;
+            while ty < h_px {
+                let tile_y_end = (ty + tile_size).min(h_px);
+
+                let mut tx = 0;
+                while tx < w {
+                    let tile_x_end = (tx + tile_size).min(w);
+
+                    // For each pixel in this tile, compute NLM and accumulate
+                    for y in ty..tile_y_end {
+                        for x in tx..tile_x_end {
+                            let patch_radius = patch_size / 2;
+                            let h2 = h * h;
+
+                            let search_y_min = (y as i32 - search_radius as i32).max(0) as usize;
+                            let search_y_max = (y + search_radius + 1).min(h_px);
+                            let search_x_min = (x as i32 - search_radius as i32).max(0) as usize;
+                            let search_x_max = (x + search_radius + 1).min(w);
+
+                            let mut pixel_sum = 0.0f32;
+                            let mut pixel_weight_sum = 0.0f32;
+
+                            for sy in search_y_min..search_y_max {
+                                for sx in search_x_min..search_x_max {
+                                    let dist = compute_patch_distance(
+                                        input_plane.data.as_ref(),
+                                        w,
+                                        h_px,
+                                        stride,
+                                        x,
+                                        y,
+                                        sx,
+                                        sy,
+                                        patch_radius,
+                                    );
+                                    let w_val = (-dist / h2).exp();
+                                    pixel_sum +=
+                                        f32::from(input_plane.data[sy * stride + sx]) * w_val;
+                                    pixel_weight_sum += w_val;
+                                }
+                            }
+
+                            let idx = y * stride + x;
+                            acc_sum[idx] += pixel_sum;
+                            acc_weight[idx] += pixel_weight_sum;
+                        }
+                    }
+
+                    tx += effective_step;
+                }
+                ty += effective_step;
+            }
+
+            // Normalise
+            for y in 0..h_px {
+                for x in 0..w {
+                    let idx = y * stride + x;
+                    plane.data[idx] = if acc_weight[idx] > 0.0 {
+                        (acc_sum[idx] / acc_weight[idx]).round().clamp(0.0, 255.0) as u8
+                    } else {
+                        input_plane.data[idx]
+                    };
+                }
+            }
+
+            Ok::<(), DenoiseError>(())
+        })?;
+
+    Ok(output)
+}
+
 /// Fast Non-Local Means using integral images.
 pub fn fast_nlmeans_filter(frame: &VideoFrame, strength: f32) -> DenoiseResult<VideoFrame> {
     if frame.planes.is_empty() {
@@ -235,6 +362,55 @@ mod tests {
         frame.allocate();
 
         let result = nlmeans_filter(&frame, 0.3);
+        assert!(result.is_ok());
+    }
+
+    // -------------------------------------------------------------------
+    // Tiled NLM tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_tiled_nlmeans_basic() {
+        let mut frame = VideoFrame::new(PixelFormat::Yuv420p, 32, 32);
+        frame.allocate();
+        let result = tiled_nlmeans_filter(&frame, 0.5, 16);
+        assert!(result.is_ok());
+        let f = result.expect("tiled nlm should succeed");
+        assert_eq!(f.width, 32);
+        assert_eq!(f.height, 32);
+    }
+
+    #[test]
+    fn test_tiled_nlmeans_uniform_frame() {
+        // Uniform frame should remain uniform after denoising.
+        let mut frame = VideoFrame::new(PixelFormat::Yuv420p, 24, 24);
+        frame.allocate();
+        // Fill luma with a fixed value
+        let stride = frame.planes[0].stride;
+        for y in 0..24usize {
+            for x in 0..24usize {
+                frame.planes[0].data[y * stride + x] = 128;
+            }
+        }
+        let result = tiled_nlmeans_filter(&frame, 0.5, 12).expect("should succeed");
+        let out_stride = result.planes[0].stride;
+        for y in 0..24usize {
+            for x in 0..24usize {
+                let v = result.planes[0].data[y * out_stride + x];
+                assert!(
+                    (v as i32 - 128).abs() <= 1,
+                    "uniform frame should stay uniform at ({x},{y}): got {v}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_tiled_nlmeans_large_tile() {
+        // Tile larger than frame → should still work
+        let mut frame = VideoFrame::new(PixelFormat::Yuv420p, 20, 20);
+        frame.allocate();
+        let result = tiled_nlmeans_filter(&frame, 0.3, 64);
         assert!(result.is_ok());
     }
 }

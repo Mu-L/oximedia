@@ -489,6 +489,413 @@ pub fn detect_out_of_gamut(frame: &[u8], width: u32, height: u32) -> bool {
     false
 }
 
+// =============================================================================
+// 10-bit and 12-bit precision support
+// =============================================================================
+
+/// Bit depth precision for waveform analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaveformBitDepth {
+    /// Standard 8-bit precision (0-255).
+    Bit8,
+    /// 10-bit precision (0-1023), stored as u16 little-endian.
+    Bit10,
+    /// 12-bit precision (0-4095), stored as u16 little-endian.
+    Bit12,
+}
+
+impl WaveformBitDepth {
+    /// Returns the maximum sample value for this bit depth.
+    #[must_use]
+    pub const fn max_value(self) -> u16 {
+        match self {
+            Self::Bit8 => 255,
+            Self::Bit10 => 1023,
+            Self::Bit12 => 4095,
+        }
+    }
+
+    /// Returns the number of bytes per sample for this bit depth.
+    #[must_use]
+    pub const fn bytes_per_sample(self) -> usize {
+        match self {
+            Self::Bit8 => 1,
+            Self::Bit10 | Self::Bit12 => 2,
+        }
+    }
+
+    /// Returns the number of bits for this depth.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        match self {
+            Self::Bit8 => 8,
+            Self::Bit10 => 10,
+            Self::Bit12 => 12,
+        }
+    }
+}
+
+/// Converts a high-precision RGB pixel to luma (BT.709).
+///
+/// Input values are in `[0, max_value]` for the given bit depth.
+/// Returns luma in `[0.0, 1.0]` normalized range.
+#[must_use]
+fn rgb16_to_luma_normalized(r: u16, g: u16, b: u16, max_val: f32) -> f32 {
+    let r_f = f32::from(r) / max_val;
+    let g_f = f32::from(g) / max_val;
+    let b_f = f32::from(b) / max_val;
+    // BT.709 luma coefficients
+    (0.2126 * r_f + 0.7152 * g_f + 0.0722 * b_f).clamp(0.0, 1.0)
+}
+
+/// Reads an RGB pixel from a high-bit-depth frame (u16 LE per component).
+///
+/// Returns `(r, g, b)` clamped to `max_val`.
+fn read_pixel_u16(frame: &[u8], offset: usize, max_val: u16) -> Option<(u16, u16, u16)> {
+    if offset + 6 > frame.len() {
+        return None;
+    }
+    let r = u16::from_le_bytes([frame[offset], frame[offset + 1]]).min(max_val);
+    let g = u16::from_le_bytes([frame[offset + 2], frame[offset + 3]]).min(max_val);
+    let b = u16::from_le_bytes([frame[offset + 4], frame[offset + 5]]).min(max_val);
+    Some((r, g, b))
+}
+
+/// Generates a luma waveform with configurable bit depth precision.
+///
+/// For 10-bit and 12-bit frames, `frame` contains u16 little-endian samples
+/// (6 bytes per pixel: R16 G16 B16).  For 8-bit, standard RGB24 is expected.
+///
+/// # Errors
+///
+/// Returns an error if frame data is insufficient for the given dimensions and bit depth.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub fn generate_luma_waveform_hd(
+    frame: &[u8],
+    width: u32,
+    height: u32,
+    config: &ScopeConfig,
+    bit_depth: WaveformBitDepth,
+) -> OxiResult<ScopeData> {
+    let bytes_per_pixel = bit_depth.bytes_per_sample() * 3;
+    let expected_size = (width as usize) * (height as usize) * bytes_per_pixel;
+    if frame.len() < expected_size {
+        return Err(oximedia_core::OxiError::InvalidData(format!(
+            "Frame data too small for {}-bit: expected {expected_size}, got {}",
+            bit_depth.bits(),
+            frame.len()
+        )));
+    }
+
+    let scope_width = config.width;
+    let scope_height = config.height;
+    let max_val = bit_depth.max_value();
+    let max_val_f = f32::from(max_val);
+
+    let mut canvas = Canvas::new(scope_width, scope_height);
+    let mut accumulator = vec![0u32; (scope_width * scope_height) as usize];
+
+    for y in 0..height {
+        for x in 0..width {
+            let luma_norm = match bit_depth {
+                WaveformBitDepth::Bit8 => {
+                    let pixel_idx = ((y * width + x) * 3) as usize;
+                    let r = frame[pixel_idx];
+                    let g = frame[pixel_idx + 1];
+                    let b = frame[pixel_idx + 2];
+                    let (luma, _, _) = rgb_to_ycbcr(r, g, b);
+                    f32::from(luma) / 255.0
+                }
+                WaveformBitDepth::Bit10 | WaveformBitDepth::Bit12 => {
+                    let offset = ((y * width + x) as usize) * 6;
+                    match read_pixel_u16(frame, offset, max_val) {
+                        Some((r, g, b)) => rgb16_to_luma_normalized(r, g, b, max_val_f),
+                        None => continue,
+                    }
+                }
+            };
+
+            // Map normalized luma [0,1] to scope coordinates
+            let scope_x = (x * scope_width) / width;
+            let mapped = (luma_norm * (scope_height - 1) as f32) as u32;
+            let mapped = mapped.min(scope_height - 1);
+            let scope_y = scope_height - 1 - mapped;
+
+            let idx = (scope_y * scope_width + scope_x) as usize;
+            if idx < accumulator.len() {
+                accumulator[idx] = accumulator[idx].saturating_add(1);
+            }
+        }
+    }
+
+    let max_count = accumulator.iter().copied().max().unwrap_or(1);
+
+    for y in 0..scope_height {
+        for x in 0..scope_width {
+            let idx = (y * scope_width + x) as usize;
+            let count = accumulator[idx];
+            if count > 0 {
+                let normalized = ((count as f32 / max_count as f32).sqrt() * 255.0) as u8;
+                canvas.accumulate_pixel(x, y, normalized);
+            }
+        }
+    }
+
+    if config.show_graticule {
+        crate::render::draw_waveform_graticule(&mut canvas, config);
+    }
+    if config.show_labels {
+        draw_waveform_labels(&mut canvas);
+    }
+
+    Ok(ScopeData {
+        width: scope_width,
+        height: scope_height,
+        data: canvas.data,
+        scope_type: ScopeType::WaveformLuma,
+    })
+}
+
+/// Generates an RGB parade waveform with configurable bit depth precision.
+///
+/// # Errors
+///
+/// Returns an error if frame data is insufficient.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub fn generate_rgb_parade_hd(
+    frame: &[u8],
+    width: u32,
+    height: u32,
+    config: &ScopeConfig,
+    bit_depth: WaveformBitDepth,
+) -> OxiResult<ScopeData> {
+    let bytes_per_pixel = bit_depth.bytes_per_sample() * 3;
+    let expected_size = (width as usize) * (height as usize) * bytes_per_pixel;
+    if frame.len() < expected_size {
+        return Err(oximedia_core::OxiError::InvalidData(format!(
+            "Frame data too small for {}-bit: expected {expected_size}, got {}",
+            bit_depth.bits(),
+            frame.len()
+        )));
+    }
+
+    let scope_width = config.width;
+    let scope_height = config.height;
+    let section_width = scope_width / 3;
+    let max_val = bit_depth.max_value();
+    let max_val_f = f32::from(max_val);
+
+    let mut canvas = Canvas::new(scope_width, scope_height);
+    let mut accumulators = [
+        vec![0u32; (section_width * scope_height) as usize],
+        vec![0u32; (section_width * scope_height) as usize],
+        vec![0u32; (section_width * scope_height) as usize],
+    ];
+
+    for y in 0..height {
+        for x in 0..width {
+            let rgb_norm: [f32; 3] = match bit_depth {
+                WaveformBitDepth::Bit8 => {
+                    let pixel_idx = ((y * width + x) * 3) as usize;
+                    [
+                        f32::from(frame[pixel_idx]) / 255.0,
+                        f32::from(frame[pixel_idx + 1]) / 255.0,
+                        f32::from(frame[pixel_idx + 2]) / 255.0,
+                    ]
+                }
+                WaveformBitDepth::Bit10 | WaveformBitDepth::Bit12 => {
+                    let offset = ((y * width + x) as usize) * 6;
+                    match read_pixel_u16(frame, offset, max_val) {
+                        Some((r, g, b)) => [
+                            f32::from(r) / max_val_f,
+                            f32::from(g) / max_val_f,
+                            f32::from(b) / max_val_f,
+                        ],
+                        None => continue,
+                    }
+                }
+            };
+
+            let scope_x = (x * section_width) / width;
+
+            for (channel, &value) in rgb_norm.iter().enumerate() {
+                let mapped = (value * (scope_height - 1) as f32) as u32;
+                let mapped = mapped.min(scope_height - 1);
+                let scope_y = scope_height - 1 - mapped;
+                let idx = (scope_y * section_width + scope_x) as usize;
+
+                if idx < accumulators[channel].len() {
+                    accumulators[channel][idx] = accumulators[channel][idx].saturating_add(1);
+                }
+            }
+        }
+    }
+
+    let max_count = accumulators
+        .iter()
+        .flat_map(|acc| acc.iter().copied())
+        .max()
+        .unwrap_or(1);
+
+    let colors = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]];
+
+    for (channel, accumulator) in accumulators.iter().enumerate() {
+        let offset_x = section_width * channel as u32;
+
+        for y in 0..scope_height {
+            for x in 0..section_width {
+                let idx = (y * section_width + x) as usize;
+                let count = accumulator[idx];
+                if count > 0 {
+                    let normalized = ((count as f32 / max_count as f32).sqrt() * 255.0) as u8;
+                    let color = [
+                        ((colors[channel][0] as u16 * u16::from(normalized)) / 255) as u8,
+                        ((colors[channel][1] as u16 * u16::from(normalized)) / 255) as u8,
+                        ((colors[channel][2] as u16 * u16::from(normalized)) / 255) as u8,
+                        255,
+                    ];
+                    canvas.set_pixel(offset_x + x, y, color);
+                }
+            }
+        }
+    }
+
+    if config.show_graticule {
+        crate::render::draw_parade_graticule(&mut canvas, config, 3);
+    }
+    if config.show_labels {
+        draw_parade_labels(&mut canvas, &["R", "G", "B"]);
+    }
+
+    Ok(ScopeData {
+        width: scope_width,
+        height: scope_height,
+        data: canvas.data,
+        scope_type: ScopeType::WaveformRgbParade,
+    })
+}
+
+/// Waveform statistics for high-bit-depth frames.
+#[derive(Debug, Clone)]
+pub struct WaveformStatsHd {
+    /// Average luma in normalized range [0.0, 1.0].
+    pub avg_luma: f64,
+    /// Minimum luma in normalized range [0.0, 1.0].
+    pub min_luma: f64,
+    /// Maximum luma in normalized range [0.0, 1.0].
+    pub max_luma: f64,
+    /// Standard deviation of luma.
+    pub std_dev: f64,
+    /// Percentage of pixels below broadcast-legal black level.
+    pub black_clip_percent: f64,
+    /// Percentage of pixels above broadcast-legal white level.
+    pub white_clip_percent: f64,
+    /// Bit depth used for analysis.
+    pub bit_depth: WaveformBitDepth,
+}
+
+/// Computes waveform statistics for any bit depth.
+///
+/// For 10/12-bit, legal black = 64/256 and legal white = 940/3760 of max value.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn compute_waveform_stats_hd(
+    frame: &[u8],
+    width: u32,
+    height: u32,
+    bit_depth: WaveformBitDepth,
+) -> WaveformStatsHd {
+    let pixel_count = (width as u64) * (height as u64);
+    if pixel_count == 0 {
+        return WaveformStatsHd {
+            avg_luma: 0.0,
+            min_luma: 0.0,
+            max_luma: 0.0,
+            std_dev: 0.0,
+            black_clip_percent: 0.0,
+            white_clip_percent: 0.0,
+            bit_depth,
+        };
+    }
+
+    let max_val = bit_depth.max_value();
+    let max_val_f = f32::from(max_val);
+
+    // Broadcast-legal thresholds (normalized)
+    let (black_threshold, white_threshold) = match bit_depth {
+        WaveformBitDepth::Bit8 => (16.0 / 255.0, 235.0 / 255.0),
+        WaveformBitDepth::Bit10 => (64.0 / 1023.0, 940.0 / 1023.0),
+        WaveformBitDepth::Bit12 => (256.0 / 4095.0, 3760.0 / 4095.0),
+    };
+
+    let mut sum = 0.0_f64;
+    let mut min_luma = 1.0_f64;
+    let mut max_luma_val = 0.0_f64;
+    let mut black_count = 0u64;
+    let mut white_count = 0u64;
+    let mut luma_values = Vec::with_capacity(pixel_count as usize);
+
+    for y in 0..height {
+        for x in 0..width {
+            let luma_norm: f64 = match bit_depth {
+                WaveformBitDepth::Bit8 => {
+                    let pixel_idx = ((y * width + x) * 3) as usize;
+                    if pixel_idx + 2 >= frame.len() {
+                        continue;
+                    }
+                    let r = frame[pixel_idx];
+                    let g = frame[pixel_idx + 1];
+                    let b = frame[pixel_idx + 2];
+                    let (luma, _, _) = rgb_to_ycbcr(r, g, b);
+                    f64::from(luma) / 255.0
+                }
+                WaveformBitDepth::Bit10 | WaveformBitDepth::Bit12 => {
+                    let offset = ((y * width + x) as usize) * 6;
+                    match read_pixel_u16(frame, offset, max_val) {
+                        Some((r, g, b)) => f64::from(rgb16_to_luma_normalized(r, g, b, max_val_f)),
+                        None => continue,
+                    }
+                }
+            };
+
+            sum += luma_norm;
+            min_luma = min_luma.min(luma_norm);
+            max_luma_val = max_luma_val.max(luma_norm);
+            luma_values.push(luma_norm);
+
+            if luma_norm < f64::from(black_threshold) {
+                black_count += 1;
+            }
+            if luma_norm > f64::from(white_threshold) {
+                white_count += 1;
+            }
+        }
+    }
+
+    let actual_count = luma_values.len() as f64;
+    let avg = if actual_count > 0.0 {
+        sum / actual_count
+    } else {
+        0.0
+    };
+
+    let variance: f64 = luma_values
+        .iter()
+        .map(|&v| (v - avg) * (v - avg))
+        .sum::<f64>()
+        / actual_count.max(1.0);
+
+    WaveformStatsHd {
+        avg_luma: avg,
+        min_luma,
+        max_luma: max_luma_val,
+        std_dev: variance.sqrt(),
+        black_clip_percent: (black_count as f64 / actual_count.max(1.0)) * 100.0,
+        white_clip_percent: (white_count as f64 / actual_count.max(1.0)) * 100.0,
+        bit_depth,
+    }
+}
+
 /// Calculates waveform statistics.
 #[derive(Debug, Clone)]
 pub struct WaveformStats {
@@ -687,5 +1094,183 @@ mod tests {
         assert!(stats.avg_luma < 255.0);
         assert!(stats.min_luma <= stats.max_luma);
         assert!(stats.std_dev >= 0.0);
+    }
+
+    // ── WaveformBitDepth tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_bit_depth_max_value() {
+        assert_eq!(WaveformBitDepth::Bit8.max_value(), 255);
+        assert_eq!(WaveformBitDepth::Bit10.max_value(), 1023);
+        assert_eq!(WaveformBitDepth::Bit12.max_value(), 4095);
+    }
+
+    #[test]
+    fn test_bit_depth_bytes_per_sample() {
+        assert_eq!(WaveformBitDepth::Bit8.bytes_per_sample(), 1);
+        assert_eq!(WaveformBitDepth::Bit10.bytes_per_sample(), 2);
+        assert_eq!(WaveformBitDepth::Bit12.bytes_per_sample(), 2);
+    }
+
+    #[test]
+    fn test_bit_depth_bits() {
+        assert_eq!(WaveformBitDepth::Bit8.bits(), 8);
+        assert_eq!(WaveformBitDepth::Bit10.bits(), 10);
+        assert_eq!(WaveformBitDepth::Bit12.bits(), 12);
+    }
+
+    #[test]
+    fn test_generate_luma_waveform_hd_8bit() {
+        let frame = create_test_frame(32, 32);
+        let config = small_scope_config();
+        let result = generate_luma_waveform_hd(&frame, 32, 32, &config, WaveformBitDepth::Bit8);
+        assert!(result.is_ok());
+        let scope = result.expect("8-bit HD waveform should succeed");
+        assert_eq!(scope.width, config.width);
+        assert_eq!(scope.height, config.height);
+    }
+
+    fn create_10bit_frame(width: u32, height: u32) -> Vec<u8> {
+        let mut frame = Vec::with_capacity((width * height * 6) as usize);
+        for y in 0..height {
+            let value = ((y as u16) * 1023) / height as u16;
+            for _x in 0..width {
+                // R, G, B each as u16 LE
+                frame.extend_from_slice(&value.to_le_bytes());
+                frame.extend_from_slice(&value.to_le_bytes());
+                frame.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        frame
+    }
+
+    fn create_12bit_frame(width: u32, height: u32) -> Vec<u8> {
+        let mut frame = Vec::with_capacity((width * height * 6) as usize);
+        for y in 0..height {
+            let value = ((y as u32 * 4095) / height) as u16;
+            for _x in 0..width {
+                frame.extend_from_slice(&value.to_le_bytes());
+                frame.extend_from_slice(&value.to_le_bytes());
+                frame.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        frame
+    }
+
+    #[test]
+    fn test_generate_luma_waveform_hd_10bit() {
+        let frame = create_10bit_frame(32, 32);
+        let config = small_scope_config();
+        let result = generate_luma_waveform_hd(&frame, 32, 32, &config, WaveformBitDepth::Bit10);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_generate_luma_waveform_hd_12bit() {
+        let frame = create_12bit_frame(32, 32);
+        let config = small_scope_config();
+        let result = generate_luma_waveform_hd(&frame, 32, 32, &config, WaveformBitDepth::Bit12);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_generate_rgb_parade_hd_10bit() {
+        let frame = create_10bit_frame(32, 32);
+        let config = small_scope_config();
+        let result = generate_rgb_parade_hd(&frame, 32, 32, &config, WaveformBitDepth::Bit10);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_generate_rgb_parade_hd_12bit() {
+        let frame = create_12bit_frame(32, 32);
+        let config = small_scope_config();
+        let result = generate_rgb_parade_hd(&frame, 32, 32, &config, WaveformBitDepth::Bit12);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_generate_luma_waveform_hd_invalid_size() {
+        let frame = vec![0u8; 10];
+        let config = small_scope_config();
+        let result = generate_luma_waveform_hd(&frame, 32, 32, &config, WaveformBitDepth::Bit10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_compute_waveform_stats_hd_8bit() {
+        let frame = create_test_frame(32, 32);
+        let stats = compute_waveform_stats_hd(&frame, 32, 32, WaveformBitDepth::Bit8);
+        assert!(stats.avg_luma > 0.0);
+        assert!(stats.avg_luma < 1.0);
+        assert!(stats.min_luma <= stats.max_luma);
+        assert!(stats.std_dev >= 0.0);
+        assert_eq!(stats.bit_depth, WaveformBitDepth::Bit8);
+    }
+
+    #[test]
+    fn test_compute_waveform_stats_hd_10bit() {
+        let frame = create_10bit_frame(32, 32);
+        let stats = compute_waveform_stats_hd(&frame, 32, 32, WaveformBitDepth::Bit10);
+        assert!(stats.avg_luma > 0.0);
+        assert!(stats.avg_luma < 1.0);
+        assert_eq!(stats.bit_depth, WaveformBitDepth::Bit10);
+    }
+
+    #[test]
+    fn test_compute_waveform_stats_hd_12bit() {
+        let frame = create_12bit_frame(32, 32);
+        let stats = compute_waveform_stats_hd(&frame, 32, 32, WaveformBitDepth::Bit12);
+        assert!(stats.avg_luma > 0.0);
+        assert_eq!(stats.bit_depth, WaveformBitDepth::Bit12);
+    }
+
+    #[test]
+    fn test_compute_waveform_stats_hd_zero_dimensions() {
+        let stats = compute_waveform_stats_hd(&[], 0, 0, WaveformBitDepth::Bit8);
+        assert_eq!(stats.avg_luma, 0.0);
+        assert_eq!(stats.std_dev, 0.0);
+    }
+
+    #[test]
+    fn test_rgb16_to_luma_normalized_black() {
+        let luma = rgb16_to_luma_normalized(0, 0, 0, 1023.0);
+        assert!(luma.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_rgb16_to_luma_normalized_white() {
+        let luma = rgb16_to_luma_normalized(1023, 1023, 1023, 1023.0);
+        assert!((luma - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_read_pixel_u16_valid() {
+        let r: u16 = 512;
+        let g: u16 = 768;
+        let b: u16 = 256;
+        let mut data = Vec::new();
+        data.extend_from_slice(&r.to_le_bytes());
+        data.extend_from_slice(&g.to_le_bytes());
+        data.extend_from_slice(&b.to_le_bytes());
+        let result = read_pixel_u16(&data, 0, 1023);
+        assert_eq!(result, Some((512, 768, 256)));
+    }
+
+    #[test]
+    fn test_read_pixel_u16_too_short() {
+        let data = vec![0u8; 4];
+        assert!(read_pixel_u16(&data, 0, 1023).is_none());
+    }
+
+    #[test]
+    fn test_read_pixel_u16_clamps() {
+        let high: u16 = 2000;
+        let mut data = Vec::new();
+        data.extend_from_slice(&high.to_le_bytes());
+        data.extend_from_slice(&high.to_le_bytes());
+        data.extend_from_slice(&high.to_le_bytes());
+        let result = read_pixel_u16(&data, 0, 1023);
+        assert_eq!(result, Some((1023, 1023, 1023)));
     }
 }

@@ -47,11 +47,15 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod audio_scope;
+pub mod audio_vectorscope;
 pub mod bit_depth_scope;
+pub mod chroma_level_scope;
 pub mod cie;
+pub mod cie_chromaticity;
 pub mod clipping_detector;
 pub mod color_temperature;
 pub mod compliance;
+pub mod exposure_histogram;
 pub mod exposure_meter;
 pub mod false_color;
 pub mod false_color_mapping;
@@ -60,6 +64,7 @@ pub mod focus_assist;
 pub mod gamut_scope;
 pub mod hdr;
 pub mod histogram;
+pub mod histogram_3d;
 pub mod histogram_stats;
 pub mod lissajous;
 pub mod loudness_scope;
@@ -69,9 +74,14 @@ pub mod parade;
 pub mod peaking;
 pub mod render;
 pub mod rgb_balance;
+pub mod safe_area_overlay;
+pub mod scope_comparison;
 pub mod scope_layout;
+pub mod scope_recording;
+pub mod scope_snapshot;
 pub mod signal_stats;
 pub mod stats;
+pub mod timecode_overlay;
 pub mod vectorscope;
 pub mod vectorscope_targets;
 pub mod waveform;

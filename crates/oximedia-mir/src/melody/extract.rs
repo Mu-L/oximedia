@@ -71,7 +71,7 @@ impl MelodyExtractor {
 
     /// Extract dominant pitch from a frame using salience.
     #[allow(clippy::cast_precision_loss)]
-    fn extract_pitch(&self, frame: &[rustfft::num_complex::Complex<f32>]) -> (f32, f32) {
+    fn extract_pitch(&self, frame: &[oxifft::Complex<f32>]) -> (f32, f32) {
         let mag = crate::utils::magnitude_spectrum(frame);
 
         // Find peaks in magnitude spectrum

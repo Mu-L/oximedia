@@ -1,7 +1,8 @@
 //! Dynamics compression effects.
 //!
 //! Provides professional compressor, limiter, and expander with industry-standard
-//! gain computer and level detector designs.
+//! gain computer and level detector designs. Includes sidechain input support
+//! for frequency-conscious compression and ducking applications.
 
 #![allow(dead_code)]
 #![allow(clippy::cast_precision_loss)]
@@ -209,6 +210,72 @@ impl GainReduction {
     }
 }
 
+/// Sidechain filter type for frequency-conscious compression.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SidechainFilter {
+    /// No filtering on sidechain signal.
+    None,
+    /// High-pass filter at given frequency (Hz) for de-essing / sibilance detection.
+    HighPass(f32),
+    /// Low-pass filter at given frequency (Hz) for bass-focused compression.
+    LowPass(f32),
+    /// Band-pass filter centered at given frequency (Hz) with Q factor.
+    BandPass(f32, f32),
+}
+
+/// One-pole filter state for sidechain filtering.
+#[derive(Debug, Clone)]
+struct OnePoleFilter {
+    /// Previous output sample.
+    prev: f32,
+    /// Filter coefficient.
+    coeff: f32,
+    /// Filter mode.
+    is_highpass: bool,
+}
+
+impl OnePoleFilter {
+    fn new_highpass(cutoff_hz: f32, sample_rate: f32) -> Self {
+        let rc = 1.0 / (2.0 * std::f32::consts::PI * cutoff_hz);
+        let dt = 1.0 / sample_rate;
+        let coeff = rc / (rc + dt);
+        Self {
+            prev: 0.0,
+            coeff,
+            is_highpass: true,
+        }
+    }
+
+    fn new_lowpass(cutoff_hz: f32, sample_rate: f32) -> Self {
+        let rc = 1.0 / (2.0 * std::f32::consts::PI * cutoff_hz);
+        let dt = 1.0 / sample_rate;
+        let coeff = dt / (rc + dt);
+        Self {
+            prev: 0.0,
+            coeff,
+            is_highpass: false,
+        }
+    }
+
+    fn process(&mut self, input: f32) -> f32 {
+        if self.is_highpass {
+            let _output = self.coeff * (self.prev + input - self.prev);
+            // Simple high-pass: output = coeff * (prev_output + input - prev_input)
+            // Use a simplified version:
+            let hp_output = self.coeff * self.prev + self.coeff * (input - self.prev);
+            self.prev = input;
+            hp_output
+        } else {
+            self.prev += self.coeff * (input - self.prev);
+            self.prev
+        }
+    }
+
+    fn reset(&mut self) {
+        self.prev = 0.0;
+    }
+}
+
 /// Professional dynamics compressor.
 pub struct Compressor {
     config: CompressorConfig,
@@ -220,6 +287,10 @@ pub struct Compressor {
     pub gain_reduction: GainReduction,
     /// Smoothed gain reduction in dB (for smooth ballistics).
     smoothed_gr_db: f32,
+    /// Optional sidechain filter.
+    sidechain_filter_type: SidechainFilter,
+    /// Sidechain filter state.
+    sc_filter: Option<OnePoleFilter>,
 }
 
 impl Compressor {
@@ -233,7 +304,37 @@ impl Compressor {
             gain_reduction_linear: 1.0,
             gain_reduction: GainReduction::new(4800),
             smoothed_gr_db: 0.0,
+            sidechain_filter_type: SidechainFilter::None,
+            sc_filter: None,
         }
+    }
+
+    /// Set a sidechain filter for frequency-conscious compression.
+    ///
+    /// When set, the filter is applied to the sidechain signal before
+    /// level detection. This enables:
+    /// - **De-essing**: `SidechainFilter::HighPass(4000.0)` to detect sibilance
+    /// - **Bass compression**: `SidechainFilter::LowPass(200.0)` for bass-only triggering
+    pub fn set_sidechain_filter(&mut self, filter: SidechainFilter, sample_rate: u32) {
+        self.sidechain_filter_type = filter;
+        #[allow(clippy::cast_precision_loss)]
+        let sr = sample_rate as f32;
+        self.sc_filter = match filter {
+            SidechainFilter::None => None,
+            SidechainFilter::HighPass(freq) => Some(OnePoleFilter::new_highpass(freq, sr)),
+            SidechainFilter::LowPass(freq) => Some(OnePoleFilter::new_lowpass(freq, sr)),
+            SidechainFilter::BandPass(freq, _q) => {
+                // Approximate band-pass as cascaded HP + LP
+                // For a proper implementation, use a biquad; this is a reasonable approximation
+                Some(OnePoleFilter::new_highpass(freq * 0.7, sr))
+            }
+        };
+    }
+
+    /// Get the current sidechain filter type.
+    #[must_use]
+    pub fn sidechain_filter(&self) -> SidechainFilter {
+        self.sidechain_filter_type
     }
 
     fn db_to_linear(db: f32) -> f32 {
@@ -300,11 +401,71 @@ impl Compressor {
             .collect()
     }
 
+    /// Process with external sidechain input.
+    ///
+    /// The compressor uses `sidechain` for level detection but applies
+    /// gain reduction to the `input` signal. This is useful for:
+    /// - De-essing (sidechain is EQ'd high-frequency band)
+    /// - Ducking (sidechain is voiceover, input is music)
+    /// - Frequency-conscious compression (sidechain is filtered version)
+    ///
+    /// Both buffers must be the same length.
+    #[must_use]
+    pub fn process_sidechain(
+        &mut self,
+        input: &[f32],
+        sidechain: &[f32],
+        sample_rate: u32,
+    ) -> Vec<f32> {
+        let len = input.len().min(sidechain.len());
+        let attack = Self::attack_coeff(self.config.attack_ms, sample_rate);
+        let release = Self::release_coeff(self.config.release_ms, sample_rate);
+        let makeup = Self::db_to_linear(self.config.makeup_gain_db);
+        let gr_attack = Self::attack_coeff(self.config.attack_ms, sample_rate);
+        let gr_release = Self::release_coeff(self.config.release_ms, sample_rate);
+
+        let mut output = Vec::with_capacity(len);
+
+        for i in 0..len {
+            // Optionally filter the sidechain signal
+            let sc_sample = if let Some(ref mut filter) = self.sc_filter {
+                filter.process(sidechain[i])
+            } else {
+                sidechain[i]
+            };
+
+            // Detect level from SIDECHAIN signal
+            let level = self.detector.process(sc_sample, attack, release);
+            let level_db = Self::linear_to_db(level);
+
+            // Compute gain reduction based on sidechain level
+            let gr_db = self.gain_computer.compute_gain(level_db, &self.config);
+
+            // Smooth gain reduction
+            if gr_db < self.smoothed_gr_db {
+                self.smoothed_gr_db += gr_attack * (gr_db - self.smoothed_gr_db);
+            } else {
+                self.smoothed_gr_db += gr_release * (gr_db - self.smoothed_gr_db);
+            }
+
+            self.gain_reduction_linear = Self::db_to_linear(self.smoothed_gr_db);
+            self.gain_reduction.update(self.smoothed_gr_db);
+
+            // Apply gain reduction to INPUT signal
+            output.push(input[i] * self.gain_reduction_linear * makeup);
+        }
+
+        output
+    }
+
     /// Reset compressor state.
     pub fn reset(&mut self) {
         self.detector.reset();
         self.gain_reduction_linear = 1.0;
         self.smoothed_gr_db = 0.0;
+        if let Some(ref mut filter) = self.sc_filter {
+            filter.reset();
+        }
     }
 
     /// Get current gain reduction in dB.
@@ -505,7 +666,7 @@ mod tests {
             ..CompressorConfig::standard()
         };
         let mut computer = GainComputerState::new();
-        // 10dB above threshold with 4:1 ratio → 7.5dB of reduction
+        // 10dB above threshold with 4:1 ratio
         let gr = computer.compute_gain(0.0, &config);
         // Gain reduction should be negative (attenuation)
         assert!(
@@ -597,5 +758,220 @@ mod tests {
         let _ = comp.process(&vec![0.9f32; 512], 48000);
         comp.reset();
         assert_eq!(comp.smoothed_gr_db, 0.0);
+    }
+
+    // --- Sidechain compressor tests ---
+
+    #[test]
+    fn test_sidechain_compressor_output_finite() {
+        let config = CompressorConfig::standard();
+        let mut comp = Compressor::new(config, 48000);
+        let input: Vec<f32> = (0..512).map(|i| (i as f32 * 0.01).sin()).collect();
+        let sidechain: Vec<f32> = vec![0.9; 512]; // loud sidechain
+        let output = comp.process_sidechain(&input, &sidechain, 48000);
+        assert_eq!(output.len(), 512);
+        assert!(output.iter().all(|&s| s.is_finite()));
+    }
+
+    #[test]
+    fn test_sidechain_compressor_applies_reduction_from_sidechain() {
+        let config = CompressorConfig {
+            threshold_db: -6.0,
+            ratio: 10.0,
+            attack_ms: 1.0,
+            release_ms: 50.0,
+            knee_db: 0.0,
+            makeup_gain_db: 0.0,
+        };
+        let mut comp = Compressor::new(config, 48000);
+
+        // Input is quiet but sidechain is loud: should still compress
+        let input = vec![0.5f32; 2048];
+        let sidechain = vec![0.9f32; 2048];
+        let output = comp.process_sidechain(&input, &sidechain, 48000);
+
+        // Output RMS should be less than input RMS (gain reduction from sidechain)
+        let in_rms: f32 = (input.iter().map(|&s| s * s).sum::<f32>() / input.len() as f32).sqrt();
+        let out_rms: f32 =
+            (output.iter().map(|&s| s * s).sum::<f32>() / output.len() as f32).sqrt();
+        assert!(
+            out_rms < in_rms,
+            "Sidechain compression should reduce input: in={in_rms}, out={out_rms}"
+        );
+    }
+
+    #[test]
+    fn test_sidechain_silent_no_compression() {
+        let config = CompressorConfig {
+            threshold_db: -20.0,
+            ratio: 10.0,
+            attack_ms: 1.0,
+            release_ms: 50.0,
+            knee_db: 0.0,
+            makeup_gain_db: 0.0,
+        };
+        let mut comp = Compressor::new(config, 48000);
+
+        // Input is loud but sidechain is silent: should not compress
+        let input = vec![0.5f32; 2048];
+        let sidechain = vec![0.0f32; 2048];
+        let output = comp.process_sidechain(&input, &sidechain, 48000);
+
+        // Output should be approximately same as input (no sidechain trigger)
+        for (&inp, &out) in input.iter().zip(output.iter()) {
+            assert!(
+                (out - inp).abs() < 0.01,
+                "Silent sidechain should not compress: in={inp}, out={out}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sidechain_different_from_normal() {
+        let config = CompressorConfig {
+            threshold_db: -10.0,
+            ratio: 8.0,
+            attack_ms: 1.0,
+            release_ms: 50.0,
+            knee_db: 0.0,
+            makeup_gain_db: 0.0,
+        };
+
+        // Normal compression on quiet signal
+        let mut comp1 = Compressor::new(config.clone(), 48000);
+        let quiet_input = vec![0.05f32; 1024];
+        let normal_output = comp1.process(&quiet_input, 48000);
+
+        // Sidechain with loud trigger on same quiet signal
+        let mut comp2 = Compressor::new(config, 48000);
+        let loud_sidechain = vec![0.9f32; 1024];
+        let sc_output = comp2.process_sidechain(&quiet_input, &loud_sidechain, 48000);
+
+        // Sidechain output should be quieter due to loud sidechain trigger
+        let normal_rms: f32 =
+            (normal_output.iter().map(|&s| s * s).sum::<f32>() / normal_output.len() as f32).sqrt();
+        let sc_rms: f32 =
+            (sc_output.iter().map(|&s| s * s).sum::<f32>() / sc_output.len() as f32).sqrt();
+        assert!(
+            sc_rms < normal_rms,
+            "Sidechain with loud trigger should produce lower output: normal={normal_rms}, sc={sc_rms}"
+        );
+    }
+
+    // --- Sidechain filter tests ---
+
+    #[test]
+    fn test_sidechain_filter_highpass() {
+        let config = CompressorConfig {
+            threshold_db: -10.0,
+            ratio: 8.0,
+            attack_ms: 1.0,
+            release_ms: 50.0,
+            knee_db: 0.0,
+            makeup_gain_db: 0.0,
+        };
+        let mut comp = Compressor::new(config, 48000);
+        comp.set_sidechain_filter(SidechainFilter::HighPass(4000.0), 48000);
+        assert_eq!(comp.sidechain_filter(), SidechainFilter::HighPass(4000.0));
+
+        // Low-frequency sidechain should be filtered out, reducing compression
+        let input = vec![0.5f32; 2048];
+        // 100 Hz sidechain (below 4kHz HPF) — should be attenuated
+        let sidechain: Vec<f32> = (0..2048)
+            .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 100.0 / 48000.0).sin() * 0.9)
+            .collect();
+        let output = comp.process_sidechain(&input, &sidechain, 48000);
+        assert!(output.iter().all(|&s| s.is_finite()));
+    }
+
+    #[test]
+    fn test_sidechain_filter_lowpass() {
+        let config = CompressorConfig::standard();
+        let mut comp = Compressor::new(config, 48000);
+        comp.set_sidechain_filter(SidechainFilter::LowPass(200.0), 48000);
+        assert_eq!(comp.sidechain_filter(), SidechainFilter::LowPass(200.0));
+
+        let input = vec![0.5f32; 1024];
+        let sidechain = vec![0.9f32; 1024];
+        let output = comp.process_sidechain(&input, &sidechain, 48000);
+        assert!(output.iter().all(|&s| s.is_finite()));
+    }
+
+    #[test]
+    fn test_sidechain_filter_bandpass() {
+        let config = CompressorConfig::standard();
+        let mut comp = Compressor::new(config, 48000);
+        comp.set_sidechain_filter(SidechainFilter::BandPass(1000.0, 1.0), 48000);
+
+        let input = vec![0.5f32; 1024];
+        let sidechain = vec![0.9f32; 1024];
+        let output = comp.process_sidechain(&input, &sidechain, 48000);
+        assert!(output.iter().all(|&s| s.is_finite()));
+    }
+
+    #[test]
+    fn test_sidechain_filter_none() {
+        let config = CompressorConfig::standard();
+        let mut comp = Compressor::new(config, 48000);
+        comp.set_sidechain_filter(SidechainFilter::None, 48000);
+        assert_eq!(comp.sidechain_filter(), SidechainFilter::None);
+        assert!(comp.sc_filter.is_none());
+    }
+
+    #[test]
+    fn test_sidechain_filter_reset() {
+        let config = CompressorConfig::standard();
+        let mut comp = Compressor::new(config, 48000);
+        comp.set_sidechain_filter(SidechainFilter::HighPass(2000.0), 48000);
+
+        // Process some samples
+        let input = vec![0.5f32; 512];
+        let sidechain = vec![0.9f32; 512];
+        let _ = comp.process_sidechain(&input, &sidechain, 48000);
+
+        // Reset should clear filter state
+        comp.reset();
+        assert_eq!(comp.smoothed_gr_db, 0.0);
+    }
+
+    #[test]
+    fn test_sidechain_hpf_attenuates_low_freq_trigger() {
+        // With HPF at 4kHz, a low-frequency sidechain should trigger LESS compression
+        // than the same sidechain without filtering
+        let config = CompressorConfig {
+            threshold_db: -10.0,
+            ratio: 10.0,
+            attack_ms: 1.0,
+            release_ms: 50.0,
+            knee_db: 0.0,
+            makeup_gain_db: 0.0,
+        };
+
+        // Without filter
+        let mut comp_no_filter = Compressor::new(config.clone(), 48000);
+
+        // With HPF
+        let mut comp_hpf = Compressor::new(config, 48000);
+        comp_hpf.set_sidechain_filter(SidechainFilter::HighPass(4000.0), 48000);
+
+        let input = vec![0.5f32; 4096];
+        // Low-frequency sidechain (100Hz)
+        let sidechain: Vec<f32> = (0..4096)
+            .map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 100.0 / 48000.0).sin() * 0.9)
+            .collect();
+
+        let out_no_filter = comp_no_filter.process_sidechain(&input, &sidechain, 48000);
+        let out_hpf = comp_hpf.process_sidechain(&input, &sidechain, 48000);
+
+        let rms_no_filter: f32 =
+            (out_no_filter.iter().map(|&s| s * s).sum::<f32>() / out_no_filter.len() as f32).sqrt();
+        let rms_hpf: f32 =
+            (out_hpf.iter().map(|&s| s * s).sum::<f32>() / out_hpf.len() as f32).sqrt();
+
+        // HPF should pass through more signal (less compression from filtered-out bass)
+        assert!(
+            rms_hpf >= rms_no_filter - 0.01,
+            "HPF should reduce compression from bass sidechain: no_filter={rms_no_filter}, hpf={rms_hpf}"
+        );
     }
 }

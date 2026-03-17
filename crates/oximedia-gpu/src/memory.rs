@@ -3,7 +3,7 @@
 //! This module provides memory allocation tracking, usage statistics,
 //! and memory pool management for GPU buffers.
 
-use crate::{GpuBuffer, GpuDevice, Result};
+use crate::{GpuBuffer, GpuDevice, GpuError, Result};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -236,16 +236,39 @@ impl ManagedBuffer {
         }
     }
 
-    /// Get a reference to the buffer
+    /// Get a reference to the buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the buffer has already been released via [`ManagedBuffer::take`].
+    /// Under normal usage this cannot happen because `take()` consumes `self`.
     #[must_use]
     pub fn buffer(&self) -> &GpuBuffer {
-        self.buffer.as_ref().expect("Buffer already released")
+        self.buffer
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("ManagedBuffer accessed after buffer was released"))
     }
 
-    /// Take ownership of the buffer, preventing automatic deallocation
-    #[must_use]
-    pub fn take(mut self) -> GpuBuffer {
-        self.buffer.take().expect("Buffer already released")
+    /// Fallible variant of [`ManagedBuffer::buffer`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpuError::Internal`] if the buffer has already been released.
+    pub fn try_buffer(&self) -> Result<&GpuBuffer> {
+        self.buffer
+            .as_ref()
+            .ok_or_else(|| GpuError::Internal("Buffer already released".to_string()))
+    }
+
+    /// Take ownership of the buffer, preventing automatic deallocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GpuError::Internal`] if the buffer has already been released.
+    pub fn take(mut self) -> Result<GpuBuffer> {
+        self.buffer
+            .take()
+            .ok_or_else(|| GpuError::Internal("Buffer already released".to_string()))
     }
 }
 

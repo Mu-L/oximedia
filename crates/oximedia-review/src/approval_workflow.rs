@@ -372,6 +372,105 @@ impl ApprovalWorkflow {
     pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.metadata.insert(key.into(), value.into());
     }
+
+    /// Evaluate conditional auto-approve rules against the supplied issue counts.
+    ///
+    /// If every `ConditionalApprovalRule` in `rules` passes, the current stage
+    /// (if active) is transitioned to `Approved` automatically and `true` is
+    /// returned.  Returns `false` when no rules are provided, the current stage
+    /// is not active, or at least one rule fails.
+    pub fn try_conditional_approve(
+        &mut self,
+        rules: &[ConditionalApprovalRule],
+        context: &ApprovalRuleContext,
+    ) -> bool {
+        if rules.is_empty() {
+            return false;
+        }
+        let current = match self.stages.get(self.current_stage) {
+            Some(s) if s.status == StageStatus::Active => s,
+            _ => return false,
+        };
+        // Reject short-circuits the whole check.
+        if current.has_rejection() {
+            return false;
+        }
+        let all_pass = rules.iter().all(|r| r.evaluate(context));
+        if all_pass {
+            if let Some(stage) = self.stages.get_mut(self.current_stage) {
+                stage.status = StageStatus::Approved;
+            }
+        }
+        all_pass
+    }
+}
+
+// ── Conditional approval rules ───────────────────────────────────────────────
+
+/// Context values used when evaluating conditional approval rules.
+#[derive(Debug, Clone, Default)]
+pub struct ApprovalRuleContext {
+    /// Total number of open issues tracked against this session.
+    pub open_issue_count: usize,
+    /// Total number of unresolved comments in the session.
+    pub unresolved_comment_count: usize,
+    /// How many required approvers have already approved (across all stages).
+    pub existing_approval_count: usize,
+    /// Free-form key-value pairs for user-defined conditions.
+    pub custom: HashMap<String, String>,
+}
+
+impl ApprovalRuleContext {
+    /// Create an empty context.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns `true` when there are no open issues and no unresolved comments.
+    #[must_use]
+    pub fn all_issues_resolved(&self) -> bool {
+        self.open_issue_count == 0 && self.unresolved_comment_count == 0
+    }
+}
+
+/// A single rule that must be satisfied for conditional auto-approval.
+#[derive(Debug, Clone)]
+pub enum ConditionalApprovalRule {
+    /// Auto-approve only when all tracked issues are resolved.
+    AllIssuesResolved,
+    /// Auto-approve when the number of open issues is at or below a threshold.
+    OpenIssuesAtMost(usize),
+    /// Auto-approve when all comments are resolved (zero unresolved).
+    AllCommentsResolved,
+    /// Auto-approve when a specific custom key equals a given value.
+    CustomKeyEquals {
+        /// The key to look up in `ApprovalRuleContext::custom`.
+        key: String,
+        /// Expected value.
+        expected: String,
+    },
+    /// Logical AND — all inner rules must pass.
+    All(Vec<ConditionalApprovalRule>),
+    /// Logical OR — at least one inner rule must pass.
+    Any(Vec<ConditionalApprovalRule>),
+}
+
+impl ConditionalApprovalRule {
+    /// Evaluate this rule against the provided context.
+    #[must_use]
+    pub fn evaluate(&self, ctx: &ApprovalRuleContext) -> bool {
+        match self {
+            Self::AllIssuesResolved => ctx.all_issues_resolved(),
+            Self::OpenIssuesAtMost(n) => ctx.open_issue_count <= *n,
+            Self::AllCommentsResolved => ctx.unresolved_comment_count == 0,
+            Self::CustomKeyEquals { key, expected } => {
+                ctx.custom.get(key).map(String::as_str) == Some(expected.as_str())
+            }
+            Self::All(rules) => rules.iter().all(|r| r.evaluate(ctx)),
+            Self::Any(rules) => rules.iter().any(|r| r.evaluate(ctx)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -551,5 +650,135 @@ mod tests {
     fn test_workflow_start_empty_returns_false() {
         let mut wf = make_workflow();
         assert!(!wf.start(0));
+    }
+
+    // ── Conditional approval rule tests ─────────────────────────────────────
+
+    fn all_clear_ctx() -> ApprovalRuleContext {
+        ApprovalRuleContext {
+            open_issue_count: 0,
+            unresolved_comment_count: 0,
+            existing_approval_count: 0,
+            custom: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_rule_all_issues_resolved_passes_when_clear() {
+        let ctx = all_clear_ctx();
+        assert!(ConditionalApprovalRule::AllIssuesResolved.evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_rule_all_issues_resolved_fails_with_open_issues() {
+        let mut ctx = all_clear_ctx();
+        ctx.open_issue_count = 2;
+        assert!(!ConditionalApprovalRule::AllIssuesResolved.evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_rule_open_issues_at_most() {
+        let mut ctx = all_clear_ctx();
+        ctx.open_issue_count = 3;
+        assert!(ConditionalApprovalRule::OpenIssuesAtMost(3).evaluate(&ctx));
+        assert!(ConditionalApprovalRule::OpenIssuesAtMost(5).evaluate(&ctx));
+        assert!(!ConditionalApprovalRule::OpenIssuesAtMost(2).evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_rule_all_comments_resolved() {
+        let mut ctx = all_clear_ctx();
+        assert!(ConditionalApprovalRule::AllCommentsResolved.evaluate(&ctx));
+        ctx.unresolved_comment_count = 1;
+        assert!(!ConditionalApprovalRule::AllCommentsResolved.evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_rule_custom_key_equals() {
+        let mut ctx = all_clear_ctx();
+        ctx.custom.insert("status".into(), "green".into());
+        assert!(ConditionalApprovalRule::CustomKeyEquals {
+            key: "status".into(),
+            expected: "green".into(),
+        }
+        .evaluate(&ctx));
+        assert!(!ConditionalApprovalRule::CustomKeyEquals {
+            key: "status".into(),
+            expected: "red".into(),
+        }
+        .evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_rule_all_compound() {
+        let ctx = all_clear_ctx();
+        let rule = ConditionalApprovalRule::All(vec![
+            ConditionalApprovalRule::AllIssuesResolved,
+            ConditionalApprovalRule::AllCommentsResolved,
+        ]);
+        assert!(rule.evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_rule_any_compound() {
+        let mut ctx = all_clear_ctx();
+        ctx.open_issue_count = 5; // AllIssuesResolved will fail
+        let rule = ConditionalApprovalRule::Any(vec![
+            ConditionalApprovalRule::AllIssuesResolved,
+            ConditionalApprovalRule::OpenIssuesAtMost(10), // this passes
+        ]);
+        assert!(rule.evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_try_conditional_approve_auto_approves_when_rules_pass() {
+        let mut wf = make_workflow();
+        wf.add_stage(make_stage(1, "Review"));
+        wf.start(0);
+
+        let ctx = all_clear_ctx();
+        let rules = vec![ConditionalApprovalRule::AllIssuesResolved];
+        let approved = wf.try_conditional_approve(&rules, &ctx);
+        assert!(approved);
+        assert_eq!(
+            wf.current().expect("stage exists").status,
+            StageStatus::Approved
+        );
+    }
+
+    #[test]
+    fn test_try_conditional_approve_skips_when_rules_fail() {
+        let mut wf = make_workflow();
+        wf.add_stage(make_stage(1, "Review"));
+        wf.start(0);
+
+        let mut ctx = all_clear_ctx();
+        ctx.open_issue_count = 1; // rule will fail
+        let rules = vec![ConditionalApprovalRule::AllIssuesResolved];
+        let approved = wf.try_conditional_approve(&rules, &ctx);
+        assert!(!approved);
+        assert_eq!(
+            wf.current().expect("stage exists").status,
+            StageStatus::Active
+        );
+    }
+
+    #[test]
+    fn test_try_conditional_approve_empty_rules_returns_false() {
+        let mut wf = make_workflow();
+        wf.add_stage(make_stage(1, "Review"));
+        wf.start(0);
+        assert!(!wf.try_conditional_approve(&[], &all_clear_ctx()));
+    }
+
+    #[test]
+    fn test_context_all_issues_resolved() {
+        let ctx = all_clear_ctx();
+        assert!(ctx.all_issues_resolved());
+        let ctx2 = ApprovalRuleContext {
+            open_issue_count: 1,
+            ..all_clear_ctx()
+        };
+        assert!(!ctx2.all_issues_resolved());
     }
 }

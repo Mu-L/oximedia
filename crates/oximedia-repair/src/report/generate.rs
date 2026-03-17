@@ -98,6 +98,7 @@ mod tests {
             description: "Test issue".to_string(),
             location: Some(100),
             fixable: true,
+            confidence: 0.8,
         };
 
         let report = generate_issue_report(&issue);
@@ -115,6 +116,7 @@ mod tests {
                 description: "Header corrupt".to_string(),
                 location: None,
                 fixable: true,
+                confidence: 0.8,
             },
             Issue {
                 issue_type: IssueType::MissingIndex,
@@ -122,6 +124,7 @@ mod tests {
                 description: "Index missing".to_string(),
                 location: None,
                 fixable: false,
+                confidence: 0.8,
             },
         ];
 

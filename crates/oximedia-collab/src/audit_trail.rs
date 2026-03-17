@@ -126,6 +126,57 @@ impl AuditEntry {
     }
 }
 
+// ---------------------------------------------------------------------------
+// OTLP helpers (private)
+// ---------------------------------------------------------------------------
+
+/// Build the per-entry `attributes` array for an OTLP log record.
+fn otlp_attributes_for_entry(entry: &AuditEntry) -> Vec<serde_json::Value> {
+    use serde_json::{json, Value};
+
+    let mut attrs: Vec<Value> = vec![
+        json!({ "key": "user.id",   "value": { "stringValue": entry.user_id   } }),
+        json!({ "key": "user.name", "value": { "stringValue": entry.user_name } }),
+        json!({ "key": "action",    "value": { "stringValue": entry.action.label() } }),
+        json!({ "key": "seq",       "value": { "intValue": entry.seq.to_string() } }),
+    ];
+
+    // Attach action-specific attributes.
+    match &entry.action {
+        AuditAction::Viewed { resource_id }
+        | AuditAction::Created { resource_id }
+        | AuditAction::Deleted { resource_id }
+        | AuditAction::LockAcquired { resource_id }
+        | AuditAction::LockReleased { resource_id } => {
+            attrs.push(json!({ "key": "resource.id", "value": { "stringValue": resource_id } }));
+        }
+        AuditAction::Modified { resource_id, field } => {
+            attrs.push(json!({ "key": "resource.id", "value": { "stringValue": resource_id } }));
+            attrs.push(json!({ "key": "resource.field", "value": { "stringValue": field } }));
+        }
+        AuditAction::CommentAdded { comment_id } => {
+            attrs.push(json!({ "key": "comment.id", "value": { "stringValue": comment_id } }));
+        }
+        AuditAction::ApprovalDecision { decision } => {
+            attrs.push(json!({ "key": "approval.decision", "value": { "stringValue": decision } }));
+        }
+        AuditAction::InviteCreated { token } | AuditAction::InviteRevoked { token } => {
+            attrs.push(json!({ "key": "invite.token", "value": { "stringValue": token } }));
+        }
+        AuditAction::UserJoined | AuditAction::UserLeft => {}
+    }
+
+    if let Some(notes) = &entry.notes {
+        attrs.push(json!({ "key": "notes", "value": { "stringValue": notes } }));
+    }
+
+    attrs
+}
+
+// ---------------------------------------------------------------------------
+// AuditTrail
+// ---------------------------------------------------------------------------
+
 /// An append-only audit trail for a collaboration session.
 #[derive(Debug, Default)]
 pub struct AuditTrail {
@@ -215,6 +266,55 @@ impl AuditTrail {
             *map.entry(e.user_id.as_str()).or_insert(0) += 1;
         }
         map
+    }
+
+    /// Serialize all audit entries as a single OTLP-compatible JSON document.
+    ///
+    /// The result follows the OpenTelemetry log data model:
+    /// `resourceLogs[].scopeLogs[].logRecords[]`
+    ///
+    /// Each `logRecord` carries:
+    /// - `timeUnixNano`: the entry timestamp converted to nanoseconds (string).
+    /// - `body.stringValue`: the human-readable `description()` of the entry.
+    /// - `attributes`: a list of key/value attribute pairs with OTLP typing.
+    #[must_use]
+    pub fn export_otlp_json(&self) -> String {
+        use serde_json::json;
+
+        let log_records: Vec<serde_json::Value> = self
+            .entries
+            .iter()
+            .map(|entry| {
+                // OTLP timestamps are nanoseconds expressed as a decimal string.
+                let time_unix_nano = (entry.timestamp * 1_000_000_000).to_string();
+
+                json!({
+                    "timeUnixNano": time_unix_nano,
+                    "body": { "stringValue": entry.description() },
+                    "attributes": otlp_attributes_for_entry(entry),
+                })
+            })
+            .collect();
+
+        let otlp = json!({
+            "resourceLogs": [
+                {
+                    "resource": {
+                        "attributes": [
+                            { "key": "service.name", "value": { "stringValue": "oximedia-collab" } }
+                        ]
+                    },
+                    "scopeLogs": [
+                        {
+                            "scope": { "name": "oximedia_collab::audit_trail" },
+                            "logRecords": log_records
+                        }
+                    ]
+                }
+            ]
+        });
+
+        otlp.to_string()
     }
 }
 
@@ -387,5 +487,37 @@ mod tests {
                 .expect("collab test operation should succeed"),
             2
         );
+    }
+
+    #[test]
+    fn trail_export_otlp_json_structure() {
+        let trail = make_trail();
+        let json_str = trail.export_otlp_json();
+
+        // Must parse as valid JSON.
+        let v: serde_json::Value =
+            serde_json::from_str(&json_str).expect("OTLP export must be valid JSON");
+
+        // Top-level key.
+        assert!(v.get("resourceLogs").is_some(), "must have resourceLogs");
+
+        // Drill into logRecords.
+        let log_records = &v["resourceLogs"][0]["scopeLogs"][0]["logRecords"];
+        assert!(log_records.is_array(), "logRecords must be an array");
+        assert_eq!(
+            log_records.as_array().expect("array").len(),
+            5,
+            "one record per audit entry"
+        );
+
+        // Each record has the required fields.
+        let first = &log_records[0];
+        assert!(first.get("timeUnixNano").is_some());
+        assert!(first["body"].get("stringValue").is_some());
+        assert!(first.get("attributes").is_some());
+
+        // Service name attribute on resource.
+        let resource_attrs = &v["resourceLogs"][0]["resource"]["attributes"];
+        assert!(resource_attrs[0]["key"].as_str() == Some("service.name"));
     }
 }

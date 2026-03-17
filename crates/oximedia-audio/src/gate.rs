@@ -33,6 +33,11 @@ pub struct GateConfig {
     pub floor_db: f32,
     /// Sample rate in Hz.
     pub sample_rate: f32,
+    /// Look-ahead delay in seconds (0.0 = disabled).
+    ///
+    /// When enabled, the gate analyses the signal ahead of time so it can
+    /// open *before* the transient arrives, preserving the attack of the sound.
+    pub lookahead_secs: f32,
 }
 
 impl Default for GateConfig {
@@ -45,6 +50,7 @@ impl Default for GateConfig {
             hold_secs: 0.1,
             floor_db: -80.0,
             sample_rate: 48_000.0,
+            lookahead_secs: 0.0,
         }
     }
 }
@@ -68,6 +74,12 @@ pub struct NoiseGate {
     release_coeff: f32,
     /// Floor gain (linear).
     floor_gain: f32,
+    /// Look-ahead delay buffer (ring buffer).
+    lookahead_buffer: Vec<f32>,
+    /// Write position in the look-ahead buffer.
+    lookahead_write_pos: usize,
+    /// Number of look-ahead samples (0 = disabled).
+    lookahead_samples: usize,
 }
 
 impl NoiseGate {
@@ -78,6 +90,12 @@ impl NoiseGate {
         let attack_coeff = Self::time_coeff(config.attack_secs, config.sample_rate);
         let release_coeff = Self::time_coeff(config.release_secs, config.sample_rate);
         let floor_gain = db_to_linear(config.floor_db);
+        let lookahead_samples = if config.lookahead_secs > 0.0 {
+            (config.lookahead_secs * config.sample_rate).round() as usize
+        } else {
+            0
+        };
+        let lookahead_buffer = vec![0.0; lookahead_samples.max(1)];
 
         Self {
             config,
@@ -89,6 +107,9 @@ impl NoiseGate {
             attack_coeff,
             release_coeff,
             floor_gain,
+            lookahead_buffer,
+            lookahead_write_pos: 0,
+            lookahead_samples,
         }
     }
 
@@ -157,7 +178,16 @@ impl NoiseGate {
                 self.release_coeff * self.current_gain + (1.0 - self.release_coeff) * target_gain;
         }
 
-        input * self.current_gain
+        // Look-ahead: apply gain to the *delayed* sample so the gate opens
+        // before the transient arrives.
+        if self.lookahead_samples > 0 {
+            let delayed = self.lookahead_buffer[self.lookahead_write_pos];
+            self.lookahead_buffer[self.lookahead_write_pos] = input;
+            self.lookahead_write_pos = (self.lookahead_write_pos + 1) % self.lookahead_buffer.len();
+            delayed * self.current_gain
+        } else {
+            input * self.current_gain
+        }
     }
 
     /// Process a buffer of samples in-place.
@@ -187,6 +217,30 @@ impl NoiseGate {
         self.envelope = 0.0;
         self.hold_samples_remaining = 0;
         self.current_gain = 0.0;
+        self.lookahead_buffer.fill(0.0);
+        self.lookahead_write_pos = 0;
+    }
+
+    /// Set the look-ahead time.
+    ///
+    /// A non-zero value introduces a delay and allows the gate to open
+    /// before the transient arrives, preserving the attack of the sound.
+    #[allow(dead_code)]
+    pub fn set_lookahead(&mut self, lookahead_secs: f32) {
+        self.config.lookahead_secs = lookahead_secs;
+        self.lookahead_samples = if lookahead_secs > 0.0 {
+            (lookahead_secs * self.config.sample_rate).round() as usize
+        } else {
+            0
+        };
+        self.lookahead_buffer = vec![0.0; self.lookahead_samples.max(1)];
+        self.lookahead_write_pos = 0;
+    }
+
+    /// Get the current look-ahead delay in samples.
+    #[allow(dead_code)]
+    pub fn lookahead_samples(&self) -> usize {
+        self.lookahead_samples
     }
 
     /// Update hold time.
@@ -201,6 +255,91 @@ impl NoiseGate {
     pub fn set_floor_db(&mut self, floor_db: f32) {
         self.config.floor_db = floor_db;
         self.floor_gain = db_to_linear(floor_db);
+    }
+
+    /// Process a single sample using an external **sidechain** key signal.
+    ///
+    /// The gate state machine is driven by `key` (the sidechain input) while
+    /// the actual gating is applied to `input` (the programme signal).
+    /// A common use-case is a gate keyed by a kick drum to tighten a bass guitar.
+    ///
+    /// When the look-ahead buffer is enabled the delayed `input` sample is
+    /// output with the gain computed from the current `key` sample, so the gate
+    /// opens before the transient in the programme signal arrives.
+    #[allow(dead_code)]
+    pub fn process_sample_sidechain(&mut self, input: f32, key: f32) -> f32 {
+        // Envelope follower driven by the key signal
+        let abs_key = key.abs();
+        if abs_key > self.envelope {
+            self.envelope = self.attack_coeff * self.envelope + (1.0 - self.attack_coeff) * abs_key;
+        } else {
+            self.envelope =
+                self.release_coeff * self.envelope + (1.0 - self.release_coeff) * abs_key;
+        }
+
+        let level_db = linear_to_db(self.envelope);
+
+        // State machine (same as self-keyed version)
+        match self.state {
+            GateState::Closed => {
+                if level_db >= self.config.threshold_db {
+                    self.state = GateState::Open;
+                    self.hold_samples_remaining = self.hold_samples_total;
+                }
+            }
+            GateState::Open => {
+                if level_db < self.config.close_threshold_db {
+                    self.state = GateState::Holding;
+                    self.hold_samples_remaining = self.hold_samples_total;
+                } else {
+                    self.hold_samples_remaining = self.hold_samples_total;
+                }
+            }
+            GateState::Holding => {
+                if level_db >= self.config.threshold_db {
+                    self.state = GateState::Open;
+                    self.hold_samples_remaining = self.hold_samples_total;
+                } else if self.hold_samples_remaining == 0 {
+                    self.state = GateState::Closed;
+                } else {
+                    self.hold_samples_remaining -= 1;
+                }
+            }
+        }
+
+        let target_gain = match self.state {
+            GateState::Open | GateState::Holding => 1.0,
+            GateState::Closed => self.floor_gain,
+        };
+
+        if target_gain > self.current_gain {
+            self.current_gain =
+                self.attack_coeff * self.current_gain + (1.0 - self.attack_coeff) * target_gain;
+        } else {
+            self.current_gain =
+                self.release_coeff * self.current_gain + (1.0 - self.release_coeff) * target_gain;
+        }
+
+        if self.lookahead_samples > 0 {
+            let delayed = self.lookahead_buffer[self.lookahead_write_pos];
+            self.lookahead_buffer[self.lookahead_write_pos] = input;
+            self.lookahead_write_pos = (self.lookahead_write_pos + 1) % self.lookahead_buffer.len();
+            delayed * self.current_gain
+        } else {
+            input * self.current_gain
+        }
+    }
+
+    /// Process a buffer of samples using an external sidechain key buffer.
+    ///
+    /// `samples` and `key_samples` must be the same length. The output is
+    /// written back into `samples`.
+    #[allow(dead_code)]
+    pub fn process_buffer_sidechain(&mut self, samples: &mut [f32], key_samples: &[f32]) {
+        for (i, s) in samples.iter_mut().enumerate() {
+            let key = key_samples.get(i).copied().unwrap_or(0.0);
+            *s = self.process_sample_sidechain(*s, key);
+        }
     }
 }
 
@@ -344,5 +483,137 @@ mod tests {
     fn test_hysteresis_close_threshold_lower() {
         let config = GateConfig::default();
         assert!(config.close_threshold_db <= config.threshold_db);
+    }
+
+    // --- Sidechain tests ---
+
+    #[test]
+    fn test_sidechain_gate_opens_on_loud_key() {
+        // Gate with threshold at -40 dBFS
+        let config = GateConfig {
+            threshold_db: -40.0,
+            close_threshold_db: -45.0,
+            attack_secs: 0.001,
+            release_secs: 0.05,
+            hold_secs: 0.1,
+            floor_db: -80.0,
+            sample_rate: 48_000.0,
+            lookahead_secs: 0.0,
+        };
+        let mut g = NoiseGate::new(config);
+
+        // Key signal well above threshold; programme signal is low-level noise
+        let key = vec![0.1_f32; 10_000]; // above threshold linear ≈ 0.01
+        let mut prog = vec![0.05_f32; 10_000];
+        g.process_buffer_sidechain(&mut prog, &key);
+
+        // Gate should have opened — programme allowed through
+        assert_eq!(g.state(), GateState::Open);
+        let tail_val = prog[9_000];
+        assert!(
+            tail_val > 0.01,
+            "Gate should pass programme; tail={tail_val}"
+        );
+    }
+
+    #[test]
+    fn test_sidechain_gate_stays_closed_with_silent_key() {
+        let mut g = make_gate();
+        let key = vec![0.0_f32; 5_000];
+        let mut prog = vec![0.05_f32; 5_000];
+        g.process_buffer_sidechain(&mut prog, &key);
+        assert_eq!(g.state(), GateState::Closed);
+    }
+
+    #[test]
+    fn test_sidechain_output_is_finite() {
+        let mut g = make_gate();
+        for i in 0..2000_usize {
+            let key = (i as f32 * 0.01).sin();
+            let prog = (i as f32 * 0.007).sin() * 0.5;
+            let out = g.process_sample_sidechain(prog, key);
+            assert!(
+                out.is_finite(),
+                "sidechain gate output must be finite at {i}"
+            );
+        }
+    }
+
+    // --- Look-ahead delay tests ---
+
+    #[test]
+    fn test_gate_lookahead_disabled_by_default() {
+        let g = make_gate();
+        assert_eq!(g.lookahead_samples(), 0);
+    }
+
+    #[test]
+    fn test_gate_lookahead_creates_delay() {
+        let config = GateConfig {
+            lookahead_secs: 0.005,
+            ..GateConfig::default()
+        };
+        let g = NoiseGate::new(config);
+        assert_eq!(g.lookahead_samples(), 240);
+    }
+
+    #[test]
+    fn test_gate_lookahead_output_delayed() {
+        let config = GateConfig {
+            lookahead_secs: 0.001, // 48 samples at 48 kHz
+            threshold_db: -100.0,  // gate always open
+            close_threshold_db: -110.0,
+            ..GateConfig::default()
+        };
+        let mut g = NoiseGate::new(config);
+        let delay = g.lookahead_samples();
+        assert!(delay > 0);
+
+        // First `delay` outputs should be zeros (from the delay buffer init)
+        for i in 0..delay {
+            let out = g.process_sample(1.0);
+            assert!(
+                out.abs() < 0.1,
+                "sample {i} should be near-zero (delayed), got {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_gate_lookahead_output_finite() {
+        let config = GateConfig {
+            lookahead_secs: 0.002,
+            ..GateConfig::default()
+        };
+        let mut g = NoiseGate::new(config);
+        for _ in 0..5000 {
+            let out = g.process_sample(0.05);
+            assert!(out.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_gate_set_lookahead_runtime() {
+        let mut g = make_gate();
+        assert_eq!(g.lookahead_samples(), 0);
+        g.set_lookahead(0.01);
+        assert_eq!(g.lookahead_samples(), 480);
+    }
+
+    #[test]
+    fn test_gate_lookahead_reset_clears_buffer() {
+        let config = GateConfig {
+            lookahead_secs: 0.005,
+            ..GateConfig::default()
+        };
+        let mut g = NoiseGate::new(config);
+        for _ in 0..500 {
+            g.process_sample(0.1);
+        }
+        g.reset();
+        assert_eq!(g.lookahead_write_pos, 0);
+        for &s in &g.lookahead_buffer {
+            assert_eq!(s, 0.0);
+        }
     }
 }

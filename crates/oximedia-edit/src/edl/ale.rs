@@ -32,7 +32,7 @@
 //! CLIP002\tA001\t01:00:10:00\t01:00:15:00\t00:00:05:00\t1\t2
 //! ```
 
-use super::{Edl, EdlError, EdlEvent, EdlResult, EditType, Timecode};
+use super::{EditType, Edl, EdlEvent, EdlResult, Timecode};
 use oximedia_core::Rational;
 use std::collections::HashMap;
 
@@ -126,7 +126,7 @@ impl AleParser {
         // Update parser settings from header
         if let Some(fps) = header.get("FPS") {
             if let Ok(fps_val) = fps.parse::<i32>() {
-                self.frame_rate = Rational::new(fps_val, 1);
+                self.frame_rate = Rational::new(i64::from(fps_val), 1);
             }
         }
 
@@ -146,11 +146,7 @@ impl AleParser {
     }
 
     /// Parse a header line (key-value pair).
-    fn parse_header_line(
-        &self,
-        line: &str,
-        header: &mut HashMap<String, String>,
-    ) -> EdlResult<()> {
+    fn parse_header_line(&self, line: &str, header: &mut HashMap<String, String>) -> EdlResult<()> {
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() >= 2 {
             header.insert(parts[0].to_string(), parts[1].to_string());
@@ -232,17 +228,10 @@ impl AleParser {
         };
 
         // For ALE, record timecode is typically sequential
-        let record_in = Timecode::from_frames(
-            (number as i64 - 1) * 150,
-            self.frame_rate,
-            false,
-        );
+        let record_in = Timecode::from_frames((number as i64 - 1) * 150, self.frame_rate, false);
         let duration = source_out.to_frames() - source_in.to_frames();
-        let record_out = Timecode::from_frames(
-            record_in.to_frames() + duration,
-            self.frame_rate,
-            false,
-        );
+        let record_out =
+            Timecode::from_frames(record_in.to_frames() + duration, self.frame_rate, false);
 
         // Determine track type
         let track = if let Some(tracks) = row.get("Tracks") {
@@ -373,7 +362,8 @@ impl AleWriter {
                 "Start" | "Mark In" => event.source_in.format(),
                 "End" | "Mark Out" => event.source_out.format(),
                 "Duration" => {
-                    let duration_frames = event.source_out.to_frames() - event.source_in.to_frames();
+                    let duration_frames =
+                        event.source_out.to_frames() - event.source_in.to_frames();
                     Timecode::from_frames(
                         duration_frames,
                         event.source_in.frame_rate,
@@ -386,11 +376,7 @@ impl AleWriter {
                     .get("scene")
                     .unwrap_or(&String::new())
                     .clone(),
-                "Take" => event
-                    .metadata
-                    .get("take")
-                    .unwrap_or(&String::new())
-                    .clone(),
+                "Take" => event.metadata.get("take").unwrap_or(&String::new()).clone(),
                 "Tracks" => event.track.clone(),
                 _ => event
                     .metadata

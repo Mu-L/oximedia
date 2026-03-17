@@ -338,6 +338,277 @@ impl ResourcePool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dynamic resource scaling
+// ---------------------------------------------------------------------------
+
+/// Scaling policy for a resource.
+#[derive(Debug, Clone)]
+pub enum ScalingPolicy {
+    /// Fixed capacity — no scaling.
+    Fixed,
+    /// Step scaling: increase by `step_size` when utilisation exceeds
+    /// `scale_up_threshold`, decrease when below `scale_down_threshold`.
+    Step {
+        /// Utilisation threshold to trigger scale-up.
+        scale_up_threshold: f64,
+        /// Utilisation threshold to trigger scale-down.
+        scale_down_threshold: f64,
+        /// Amount to add/remove per scaling event.
+        step_size: u64,
+        /// Minimum capacity (never scale below this).
+        min_capacity: u64,
+        /// Maximum capacity (never scale above this).
+        max_capacity: u64,
+    },
+    /// Target tracking: adjust capacity to maintain a target utilisation.
+    TargetTracking {
+        /// Target utilisation (0.0..1.0).
+        target_utilisation: f64,
+        /// Minimum capacity.
+        min_capacity: u64,
+        /// Maximum capacity.
+        max_capacity: u64,
+    },
+}
+
+/// The result of a scaling evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScalingAction {
+    /// No change needed.
+    NoChange,
+    /// Scale up by this amount.
+    ScaleUp(u64),
+    /// Scale down by this amount.
+    ScaleDown(u64),
+}
+
+impl std::fmt::Display for ScalingAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoChange => write!(f, "no change"),
+            Self::ScaleUp(n) => write!(f, "scale up by {n}"),
+            Self::ScaleDown(n) => write!(f, "scale down by {n}"),
+        }
+    }
+}
+
+/// Record of a scaling event.
+#[derive(Debug, Clone)]
+pub struct ScalingEvent {
+    /// Resource that was scaled.
+    pub resource_id: ResourceId,
+    /// Action taken.
+    pub action: ScalingAction,
+    /// Capacity before scaling.
+    pub old_capacity: u64,
+    /// Capacity after scaling.
+    pub new_capacity: u64,
+    /// Utilisation at the time of scaling.
+    pub utilisation: f64,
+    /// Timestamp (ms since epoch).
+    pub timestamp_ms: u64,
+}
+
+/// Manager for dynamic resource scaling.
+#[derive(Debug)]
+pub struct ResourceScaler {
+    /// Scaling policies keyed by resource ID.
+    policies: HashMap<ResourceId, ScalingPolicy>,
+    /// History of scaling events.
+    history: Vec<ScalingEvent>,
+    /// Maximum history entries.
+    max_history: usize,
+    /// Cooldown between scaling events per resource (ms).
+    cooldown_ms: u64,
+    /// Last scale time per resource.
+    last_scale_time: HashMap<ResourceId, u64>,
+}
+
+impl ResourceScaler {
+    /// Create a new resource scaler.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            policies: HashMap::new(),
+            history: Vec::new(),
+            max_history: 1000,
+            cooldown_ms: 60_000, // 1 minute default
+            last_scale_time: HashMap::new(),
+        }
+    }
+
+    /// Set the cooldown period between scaling events.
+    #[must_use]
+    pub fn with_cooldown_ms(mut self, ms: u64) -> Self {
+        self.cooldown_ms = ms;
+        self
+    }
+
+    /// Register a scaling policy for a resource.
+    pub fn set_policy(&mut self, resource_id: ResourceId, policy: ScalingPolicy) {
+        self.policies.insert(resource_id, policy);
+    }
+
+    /// Evaluate whether a resource should be scaled.
+    #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    pub fn evaluate(&self, resource: &ResourceDescriptor) -> ScalingAction {
+        let policy = match self.policies.get(&resource.id) {
+            Some(p) => p,
+            None => return ScalingAction::NoChange,
+        };
+
+        let util = resource.utilisation();
+
+        match policy {
+            ScalingPolicy::Fixed => ScalingAction::NoChange,
+            ScalingPolicy::Step {
+                scale_up_threshold,
+                scale_down_threshold,
+                step_size,
+                min_capacity,
+                max_capacity,
+            } => {
+                if util >= *scale_up_threshold && resource.capacity < *max_capacity {
+                    let new_cap = (resource.capacity + step_size).min(*max_capacity);
+                    let delta = new_cap - resource.capacity;
+                    if delta > 0 {
+                        ScalingAction::ScaleUp(delta)
+                    } else {
+                        ScalingAction::NoChange
+                    }
+                } else if util <= *scale_down_threshold && resource.capacity > *min_capacity {
+                    let new_cap = resource
+                        .capacity
+                        .saturating_sub(*step_size)
+                        .max(*min_capacity);
+                    // Don't scale down below what's allocated
+                    let new_cap = new_cap.max(resource.allocated);
+                    let delta = resource.capacity - new_cap;
+                    if delta > 0 {
+                        ScalingAction::ScaleDown(delta)
+                    } else {
+                        ScalingAction::NoChange
+                    }
+                } else {
+                    ScalingAction::NoChange
+                }
+            }
+            ScalingPolicy::TargetTracking {
+                target_utilisation,
+                min_capacity,
+                max_capacity,
+            } => {
+                if resource.capacity == 0 || *target_utilisation <= 0.0 {
+                    return ScalingAction::NoChange;
+                }
+
+                let desired = (resource.allocated as f64 / target_utilisation).ceil() as u64;
+                let desired = desired.clamp(*min_capacity, *max_capacity);
+
+                if desired > resource.capacity {
+                    ScalingAction::ScaleUp(desired - resource.capacity)
+                } else if desired < resource.capacity {
+                    let delta = resource.capacity - desired;
+                    // Don't scale below allocated
+                    if desired >= resource.allocated {
+                        ScalingAction::ScaleDown(delta)
+                    } else {
+                        ScalingAction::NoChange
+                    }
+                } else {
+                    ScalingAction::NoChange
+                }
+            }
+        }
+    }
+
+    /// Apply a scaling action to a resource pool, respecting cooldown.
+    ///
+    /// Returns `true` if the action was applied, `false` if skipped (cooldown).
+    pub fn apply(
+        &mut self,
+        pool: &mut ResourcePool,
+        resource_id: &ResourceId,
+        now_ms: u64,
+    ) -> Option<ScalingEvent> {
+        // Check cooldown
+        if let Some(&last_time) = self.last_scale_time.get(resource_id) {
+            if now_ms.saturating_sub(last_time) < self.cooldown_ms {
+                return None;
+            }
+        }
+
+        let resource = pool.get_resource(resource_id)?.clone();
+        let action = self.evaluate(&resource);
+
+        if action == ScalingAction::NoChange {
+            return None;
+        }
+
+        let old_capacity = resource.capacity;
+        let new_capacity = match &action {
+            ScalingAction::ScaleUp(delta) => old_capacity + delta,
+            ScalingAction::ScaleDown(delta) => old_capacity.saturating_sub(*delta),
+            ScalingAction::NoChange => return None,
+        };
+
+        // Apply the scaling
+        if let Some(res) = pool.resources.get_mut(resource_id) {
+            res.capacity = new_capacity;
+        }
+
+        let event = ScalingEvent {
+            resource_id: resource_id.clone(),
+            action,
+            old_capacity,
+            new_capacity,
+            utilisation: resource.utilisation(),
+            timestamp_ms: now_ms,
+        };
+
+        self.last_scale_time.insert(resource_id.clone(), now_ms);
+        self.history.push(event.clone());
+        if self.history.len() > self.max_history {
+            self.history.remove(0);
+        }
+
+        Some(event)
+    }
+
+    /// Get scaling history.
+    #[must_use]
+    pub fn history(&self) -> &[ScalingEvent] {
+        &self.history
+    }
+
+    /// Get history for a specific resource.
+    #[must_use]
+    pub fn history_for(&self, resource_id: &ResourceId) -> Vec<&ScalingEvent> {
+        self.history
+            .iter()
+            .filter(|e| &e.resource_id == resource_id)
+            .collect()
+    }
+
+    /// Number of registered policies.
+    #[must_use]
+    pub fn policy_count(&self) -> usize {
+        self.policies.len()
+    }
+}
+
+impl Default for ResourceScaler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,5 +783,270 @@ mod tests {
             .expect("should succeed in test");
         assert_eq!(pool.active_allocations(), 2);
         pool.release(t2.token_id).expect("should succeed in test");
+    }
+
+    // --- Dynamic resource scaling tests ---
+
+    #[test]
+    fn test_scaler_fixed_policy() {
+        let scaler = ResourceScaler::new();
+        let resource = cpu_resource();
+        assert_eq!(scaler.evaluate(&resource), ScalingAction::NoChange);
+    }
+
+    #[test]
+    fn test_scaler_step_scale_up() {
+        let mut scaler = ResourceScaler::new();
+        scaler.set_policy(
+            ResourceId::new("cpu"),
+            ScalingPolicy::Step {
+                scale_up_threshold: 0.8,
+                scale_down_threshold: 0.2,
+                step_size: 4,
+                min_capacity: 4,
+                max_capacity: 32,
+            },
+        );
+
+        let mut resource = cpu_resource(); // capacity = 8
+        resource.allocated = 7; // utilisation = 7/8 = 0.875 > 0.8
+
+        assert_eq!(scaler.evaluate(&resource), ScalingAction::ScaleUp(4));
+    }
+
+    #[test]
+    fn test_scaler_step_scale_down() {
+        let mut scaler = ResourceScaler::new();
+        scaler.set_policy(
+            ResourceId::new("cpu"),
+            ScalingPolicy::Step {
+                scale_up_threshold: 0.8,
+                scale_down_threshold: 0.2,
+                step_size: 4,
+                min_capacity: 4,
+                max_capacity: 32,
+            },
+        );
+
+        let mut resource = cpu_resource(); // capacity = 8
+        resource.allocated = 1; // utilisation = 1/8 = 0.125 < 0.2
+
+        assert_eq!(scaler.evaluate(&resource), ScalingAction::ScaleDown(4));
+    }
+
+    #[test]
+    fn test_scaler_step_capped_at_max() {
+        let mut scaler = ResourceScaler::new();
+        scaler.set_policy(
+            ResourceId::new("cpu"),
+            ScalingPolicy::Step {
+                scale_up_threshold: 0.8,
+                scale_down_threshold: 0.2,
+                step_size: 100,
+                min_capacity: 4,
+                max_capacity: 10,
+            },
+        );
+
+        let mut resource = cpu_resource(); // capacity = 8
+        resource.allocated = 7; // 87.5% > 80%
+
+        // Should scale up to max (10), so delta = 2
+        assert_eq!(scaler.evaluate(&resource), ScalingAction::ScaleUp(2));
+    }
+
+    #[test]
+    fn test_scaler_step_capped_at_min() {
+        let mut scaler = ResourceScaler::new();
+        scaler.set_policy(
+            ResourceId::new("cpu"),
+            ScalingPolicy::Step {
+                scale_up_threshold: 0.8,
+                scale_down_threshold: 0.2,
+                step_size: 100,
+                min_capacity: 6,
+                max_capacity: 32,
+            },
+        );
+
+        let mut resource = cpu_resource(); // capacity = 8
+        resource.allocated = 0; // 0% < 20%
+
+        // Should scale down to min (6), so delta = 2
+        assert_eq!(scaler.evaluate(&resource), ScalingAction::ScaleDown(2));
+    }
+
+    #[test]
+    fn test_scaler_target_tracking_scale_up() {
+        let mut scaler = ResourceScaler::new();
+        scaler.set_policy(
+            ResourceId::new("cpu"),
+            ScalingPolicy::TargetTracking {
+                target_utilisation: 0.5,
+                min_capacity: 4,
+                max_capacity: 32,
+            },
+        );
+
+        let mut resource = cpu_resource(); // capacity = 8
+        resource.allocated = 7; // desired = ceil(7/0.5) = 14
+
+        assert_eq!(scaler.evaluate(&resource), ScalingAction::ScaleUp(6));
+    }
+
+    #[test]
+    fn test_scaler_target_tracking_scale_down() {
+        let mut scaler = ResourceScaler::new();
+        scaler.set_policy(
+            ResourceId::new("cpu"),
+            ScalingPolicy::TargetTracking {
+                target_utilisation: 0.5,
+                min_capacity: 4,
+                max_capacity: 32,
+            },
+        );
+
+        let mut resource = ResourceDescriptor::new(ResourceId::new("cpu"), 16, "CPU", "cores");
+        resource.allocated = 2; // desired = ceil(2/0.5) = 4
+
+        assert_eq!(scaler.evaluate(&resource), ScalingAction::ScaleDown(12));
+    }
+
+    #[test]
+    fn test_scaler_target_tracking_at_target() {
+        let mut scaler = ResourceScaler::new();
+        scaler.set_policy(
+            ResourceId::new("cpu"),
+            ScalingPolicy::TargetTracking {
+                target_utilisation: 0.5,
+                min_capacity: 4,
+                max_capacity: 32,
+            },
+        );
+
+        let mut resource = cpu_resource(); // capacity = 8
+        resource.allocated = 4; // desired = ceil(4/0.5) = 8 == capacity
+
+        assert_eq!(scaler.evaluate(&resource), ScalingAction::NoChange);
+    }
+
+    #[test]
+    fn test_scaler_apply_to_pool() {
+        let mut pool = ResourcePool::new();
+        pool.register(cpu_resource()); // capacity = 8
+
+        // Allocate 7 of 8 to trigger scale-up
+        let req = ResourceRequest::new(ResourceId::new("cpu"), 7);
+        let _t = pool.allocate(&req).expect("allocate");
+
+        let mut scaler = ResourceScaler::new().with_cooldown_ms(0);
+        scaler.set_policy(
+            ResourceId::new("cpu"),
+            ScalingPolicy::Step {
+                scale_up_threshold: 0.8,
+                scale_down_threshold: 0.2,
+                step_size: 4,
+                min_capacity: 4,
+                max_capacity: 32,
+            },
+        );
+
+        let event = scaler.apply(&mut pool, &ResourceId::new("cpu"), 1000);
+        assert!(event.is_some());
+        let event = event.expect("event");
+        assert_eq!(event.old_capacity, 8);
+        assert_eq!(event.new_capacity, 12);
+
+        let resource = pool
+            .get_resource(&ResourceId::new("cpu"))
+            .expect("resource");
+        assert_eq!(resource.capacity, 12);
+    }
+
+    #[test]
+    fn test_scaler_cooldown() {
+        let mut pool = ResourcePool::new();
+        pool.register(cpu_resource());
+        let req = ResourceRequest::new(ResourceId::new("cpu"), 7);
+        let _t = pool.allocate(&req).expect("allocate");
+
+        let mut scaler = ResourceScaler::new().with_cooldown_ms(60_000);
+        scaler.set_policy(
+            ResourceId::new("cpu"),
+            ScalingPolicy::Step {
+                scale_up_threshold: 0.8,
+                scale_down_threshold: 0.2,
+                step_size: 4,
+                min_capacity: 4,
+                max_capacity: 32,
+            },
+        );
+
+        // First apply should work
+        let event = scaler.apply(&mut pool, &ResourceId::new("cpu"), 1000);
+        assert!(event.is_some());
+
+        // Second apply within cooldown should not
+        let event = scaler.apply(&mut pool, &ResourceId::new("cpu"), 2000);
+        assert!(event.is_none());
+
+        // After cooldown it should work again
+        let event = scaler.apply(&mut pool, &ResourceId::new("cpu"), 70_000);
+        // May or may not trigger since capacity changed; depends on new utilisation
+        // The point is the cooldown is respected
+        let _ = event;
+    }
+
+    #[test]
+    fn test_scaler_history() {
+        let mut pool = ResourcePool::new();
+        pool.register(cpu_resource());
+        let req = ResourceRequest::new(ResourceId::new("cpu"), 7);
+        let _t = pool.allocate(&req).expect("allocate");
+
+        let mut scaler = ResourceScaler::new().with_cooldown_ms(0);
+        scaler.set_policy(
+            ResourceId::new("cpu"),
+            ScalingPolicy::Step {
+                scale_up_threshold: 0.8,
+                scale_down_threshold: 0.2,
+                step_size: 4,
+                min_capacity: 4,
+                max_capacity: 32,
+            },
+        );
+
+        scaler.apply(&mut pool, &ResourceId::new("cpu"), 1000);
+        assert_eq!(scaler.history().len(), 1);
+
+        let cpu_history = scaler.history_for(&ResourceId::new("cpu"));
+        assert_eq!(cpu_history.len(), 1);
+        assert_eq!(cpu_history[0].old_capacity, 8);
+    }
+
+    #[test]
+    fn test_scaling_action_display() {
+        assert_eq!(ScalingAction::NoChange.to_string(), "no change");
+        assert_eq!(ScalingAction::ScaleUp(4).to_string(), "scale up by 4");
+        assert_eq!(ScalingAction::ScaleDown(2).to_string(), "scale down by 2");
+    }
+
+    #[test]
+    fn test_scaler_policy_count() {
+        let mut scaler = ResourceScaler::new();
+        assert_eq!(scaler.policy_count(), 0);
+        scaler.set_policy(ResourceId::new("cpu"), ScalingPolicy::Fixed);
+        assert_eq!(scaler.policy_count(), 1);
+    }
+
+    #[test]
+    fn test_scaler_unknown_resource() {
+        let mut scaler = ResourceScaler::new();
+        let mut pool = ResourcePool::new();
+        pool.register(cpu_resource());
+
+        // No policy registered for gpu
+        let event = scaler.apply(&mut pool, &ResourceId::new("gpu"), 1000);
+        assert!(event.is_none());
     }
 }

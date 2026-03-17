@@ -435,3 +435,248 @@ mod tests {
         assert!((gb - 0.0).abs() < f64::EPSILON);
     }
 }
+
+// ============================================================================
+// Multi-Resolution Smart Proxy
+// ============================================================================
+
+/// A named proxy variant at a specific resolution tier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolutionVariant {
+    /// Human-readable tier label (e.g. "quarter", "half", "full").
+    pub label: String,
+    /// Fraction of source resolution (0.0 < scale ≤ 1.0).
+    pub scale: f32,
+    /// Explicit resolution (width, height), computed from source + scale.
+    pub resolution: (u32, u32),
+    /// Codec identifier.
+    pub codec: String,
+    /// Bitrate in kbit/s.
+    pub bitrate_kbps: u32,
+}
+
+impl ResolutionVariant {
+    /// Construct a variant from a source resolution and a scale factor.
+    ///
+    /// Width and height are rounded down to the nearest even number to keep
+    /// them compatible with YUV 4:2:0 encoding.
+    #[must_use]
+    pub fn from_source(
+        label: impl Into<String>,
+        source: (u32, u32),
+        scale: f32,
+        codec: impl Into<String>,
+        base_bitrate_kbps: u32,
+    ) -> Self {
+        let (sw, sh) = source;
+        let w = ((sw as f32 * scale) as u32) & !1; // even
+        let h = ((sh as f32 * scale) as u32) & !1;
+        let actual_scale = (w * h) as f32 / ((sw * sh).max(1) as f32);
+        let bitrate = (base_bitrate_kbps as f32 * actual_scale) as u32;
+        Self {
+            label: label.into(),
+            scale,
+            resolution: (w.max(2), h.max(2)),
+            codec: codec.into(),
+            bitrate_kbps: bitrate.max(200),
+        }
+    }
+}
+
+/// A multi-resolution proxy set containing quarter, half, and full variants.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiResolutionProxy {
+    /// Source file path.
+    pub source_path: String,
+    /// Quarter-resolution variant (25% area).
+    pub quarter: ResolutionVariant,
+    /// Half-resolution variant (50% area).
+    pub half: ResolutionVariant,
+    /// Full-resolution variant.
+    pub full: ResolutionVariant,
+}
+
+impl MultiResolutionProxy {
+    /// Build a complete multi-resolution proxy set from a source spec.
+    ///
+    /// All three variants share the same codec as the preferred NLE codec for
+    /// `software`. Bitrates are derived from `base_bitrate_kbps` scaled by
+    /// pixel-area ratio.
+    #[must_use]
+    pub fn from_source(
+        source_path: impl Into<String>,
+        source_resolution: (u32, u32),
+        codec: impl Into<String>,
+        base_bitrate_kbps: u32,
+    ) -> Self {
+        let codec = codec.into();
+        let path = source_path.into();
+        Self {
+            source_path: path,
+            quarter: ResolutionVariant::from_source(
+                "quarter",
+                source_resolution,
+                0.5, // 0.5 linear → 0.25 area
+                &codec,
+                base_bitrate_kbps,
+            ),
+            half: ResolutionVariant::from_source(
+                "half",
+                source_resolution,
+                0.707, // √0.5 linear → 0.5 area
+                &codec,
+                base_bitrate_kbps,
+            ),
+            full: ResolutionVariant::from_source(
+                "full",
+                source_resolution,
+                1.0,
+                &codec,
+                base_bitrate_kbps,
+            ),
+        }
+    }
+}
+
+/// Selects the best `ResolutionVariant` for a given display window size.
+///
+/// The algorithm picks the smallest variant whose resolution is at least as
+/// large as the display window in both dimensions, falling back to `full` if
+/// no variant meets the threshold.
+pub struct DisplayAwareSelector;
+
+impl DisplayAwareSelector {
+    /// Choose the appropriate variant for a display of `(display_w, display_h)` pixels.
+    ///
+    /// Selection rules (applied in order, first match wins):
+    /// 1. If display area ≤ quarter area → use `quarter`
+    /// 2. If display area ≤ half area    → use `half`
+    /// 3. Otherwise                      → use `full`
+    #[must_use]
+    pub fn select<'a>(
+        proxy: &'a MultiResolutionProxy,
+        display: (u32, u32),
+    ) -> &'a ResolutionVariant {
+        let display_area = display.0 as u64 * display.1 as u64;
+        let (qw, qh) = proxy.quarter.resolution;
+        let quarter_area = qw as u64 * qh as u64;
+        let (hw, hh) = proxy.half.resolution;
+        let half_area = hw as u64 * hh as u64;
+
+        if display_area <= quarter_area {
+            &proxy.quarter
+        } else if display_area <= half_area {
+            &proxy.half
+        } else {
+            &proxy.full
+        }
+    }
+
+    /// Select and return the label string for the chosen variant.
+    #[must_use]
+    pub fn select_label(proxy: &MultiResolutionProxy, display: (u32, u32)) -> &str {
+        Self::select(proxy, display).label.as_str()
+    }
+}
+
+#[cfg(test)]
+mod multi_res_tests {
+    use super::*;
+
+    fn make_proxy() -> MultiResolutionProxy {
+        MultiResolutionProxy::from_source("/src/4k.mov", (3840, 2160), "h264", 50_000)
+    }
+
+    #[test]
+    fn test_multi_res_variants_created() {
+        let p = make_proxy();
+        // quarter: 3840*0.5=1920, 2160*0.5=1080
+        assert_eq!(p.quarter.resolution, (1920, 1080));
+        // half: 3840*0.707≈2714 (even), 2160*0.707≈1527 (even)
+        let (hw, hh) = p.half.resolution;
+        assert!(hw > 1920 && hw < 3840);
+        assert!(hh > 1080 && hh < 2160);
+        // full
+        assert_eq!(p.full.resolution, (3840, 2160));
+    }
+
+    #[test]
+    fn test_variant_label() {
+        let p = make_proxy();
+        assert_eq!(p.quarter.label, "quarter");
+        assert_eq!(p.half.label, "half");
+        assert_eq!(p.full.label, "full");
+    }
+
+    #[test]
+    fn test_variant_scale() {
+        let p = make_proxy();
+        assert!((p.quarter.scale - 0.5).abs() < 1e-3);
+        assert!((p.full.scale - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_display_aware_selects_quarter_for_small_display() {
+        let p = make_proxy();
+        // 960×540 is smaller than quarter (1920×1080)
+        let label = DisplayAwareSelector::select_label(&p, (960, 540));
+        assert_eq!(label, "quarter");
+    }
+
+    #[test]
+    fn test_display_aware_selects_half_for_medium_display() {
+        let p = make_proxy();
+        // 1920×1080 fits quarter exactly — select quarter
+        // 2000×1200 > quarter (1920×1080) but ≤ half → half
+        let label = DisplayAwareSelector::select_label(&p, (2000, 1200));
+        assert_eq!(label, "half");
+    }
+
+    #[test]
+    fn test_display_aware_selects_full_for_large_display() {
+        let p = make_proxy();
+        // 3840×2160 is the full display
+        let label = DisplayAwareSelector::select_label(&p, (3840, 2160));
+        assert_eq!(label, "full");
+    }
+
+    #[test]
+    fn test_display_aware_exact_quarter_area() {
+        let p = make_proxy();
+        let (qw, qh) = p.quarter.resolution;
+        // Exactly the quarter area should resolve to quarter
+        let label = DisplayAwareSelector::select_label(&p, (qw, qh));
+        assert_eq!(label, "quarter");
+    }
+
+    #[test]
+    fn test_bitrate_scales_with_area() {
+        let p = make_proxy();
+        // Quarter has smaller bitrate than half which has smaller than full
+        assert!(p.quarter.bitrate_kbps < p.half.bitrate_kbps);
+        assert!(p.half.bitrate_kbps < p.full.bitrate_kbps);
+    }
+
+    #[test]
+    fn test_select_returns_reference() {
+        let p = make_proxy();
+        let variant = DisplayAwareSelector::select(&p, (640, 360));
+        assert!(!variant.label.is_empty());
+    }
+
+    #[test]
+    fn test_multi_res_codec_propagated() {
+        let p = MultiResolutionProxy::from_source("/a.mov", (1920, 1080), "prores_proxy", 20_000);
+        assert_eq!(p.quarter.codec, "prores_proxy");
+        assert_eq!(p.half.codec, "prores_proxy");
+        assert_eq!(p.full.codec, "prores_proxy");
+    }
+
+    #[test]
+    fn test_resolution_variant_from_source_even_dimensions() {
+        // Source 1001×999 → even rounding
+        let v = ResolutionVariant::from_source("half", (1001, 999), 0.5, "h264", 10_000);
+        assert_eq!(v.resolution.0 % 2, 0);
+        assert_eq!(v.resolution.1 % 2, 0);
+    }
+}

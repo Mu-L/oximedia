@@ -821,6 +821,312 @@ impl PermissionManager {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Attribute-Based Access Control (ABAC)
+// ---------------------------------------------------------------------------
+
+/// An attribute value used in ABAC policy conditions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AttributeValue {
+    /// A string value (e.g. department name, classification label).
+    Str(String),
+    /// A boolean flag.
+    Bool(bool),
+    /// An integer value (e.g. clearance level).
+    Int(i64),
+    /// A list of string values (e.g. project memberships).
+    List(Vec<String>),
+}
+
+impl std::fmt::Display for AttributeValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Str(s) => write!(f, "{s}"),
+            Self::Bool(b) => write!(f, "{b}"),
+            Self::Int(i) => write!(f, "{i}"),
+            Self::List(v) => write!(f, "[{}]", v.join(", ")),
+        }
+    }
+}
+
+/// Comparison operator for ABAC conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComparisonOp {
+    /// Attribute must equal the expected value.
+    Equals,
+    /// Attribute must NOT equal the expected value.
+    NotEquals,
+    /// Attribute (Int) must be greater than or equal to expected (Int).
+    GreaterOrEqual,
+    /// Attribute (Int) must be less than expected (Int).
+    LessThan,
+    /// Attribute (List) must contain the expected (Str) value.
+    Contains,
+    /// Attribute (Str) must be one of the expected (List) values.
+    In,
+}
+
+/// A single ABAC condition comparing an attribute against an expected value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbacCondition {
+    /// The attribute key to evaluate (looked up in subject/resource/env
+    /// attribute maps).
+    pub attribute_key: String,
+    /// Source of the attribute.
+    pub attribute_source: AttributeSource,
+    /// Comparison operator.
+    pub operator: ComparisonOp,
+    /// Expected value to compare against.
+    pub expected: AttributeValue,
+}
+
+/// Where the attribute is drawn from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttributeSource {
+    /// The requesting user / subject.
+    Subject,
+    /// The target resource (asset, collection, …).
+    Resource,
+    /// Environmental context (time of day, IP range, …).
+    Environment,
+}
+
+impl AbacCondition {
+    /// Evaluate this condition against the given attribute maps. Returns
+    /// `true` if the condition is satisfied.
+    #[must_use]
+    pub fn evaluate(&self, attributes: &AbacContext) -> bool {
+        let map = match self.attribute_source {
+            AttributeSource::Subject => &attributes.subject,
+            AttributeSource::Resource => &attributes.resource,
+            AttributeSource::Environment => &attributes.environment,
+        };
+
+        let actual = match map.get(&self.attribute_key) {
+            Some(v) => v,
+            None => return false,
+        };
+
+        match self.operator {
+            ComparisonOp::Equals => actual == &self.expected,
+            ComparisonOp::NotEquals => actual != &self.expected,
+            ComparisonOp::GreaterOrEqual => {
+                if let (AttributeValue::Int(a), AttributeValue::Int(e)) = (actual, &self.expected) {
+                    *a >= *e
+                } else {
+                    false
+                }
+            }
+            ComparisonOp::LessThan => {
+                if let (AttributeValue::Int(a), AttributeValue::Int(e)) = (actual, &self.expected) {
+                    *a < *e
+                } else {
+                    false
+                }
+            }
+            ComparisonOp::Contains => {
+                if let (AttributeValue::List(list), AttributeValue::Str(needle)) =
+                    (actual, &self.expected)
+                {
+                    list.contains(needle)
+                } else {
+                    false
+                }
+            }
+            ComparisonOp::In => {
+                if let (AttributeValue::Str(val), AttributeValue::List(allowed)) =
+                    (actual, &self.expected)
+                {
+                    allowed.contains(val)
+                } else {
+                    false
+                }
+            }
+        }
+    }
+}
+
+/// The effect of an ABAC policy when all conditions are met.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolicyEffect {
+    /// Allow the action.
+    Allow,
+    /// Deny the action.
+    Deny,
+}
+
+/// An ABAC policy: a set of conditions that, when all satisfied, produce an
+/// effect (Allow or Deny) for one or more permissions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbacPolicy {
+    /// Human-readable name.
+    pub name: String,
+    /// Description of the policy's purpose.
+    pub description: String,
+    /// Priority (lower = evaluated first; first matching policy wins).
+    pub priority: u32,
+    /// Whether this policy is currently enabled.
+    pub enabled: bool,
+    /// Conditions that must ALL be satisfied (logical AND).
+    pub conditions: Vec<AbacCondition>,
+    /// Permissions this policy applies to (empty = all permissions).
+    pub target_permissions: Vec<Permission>,
+    /// The effect if all conditions match.
+    pub effect: PolicyEffect,
+}
+
+impl AbacPolicy {
+    /// Create a new ABAC policy.
+    pub fn new(name: impl Into<String>, effect: PolicyEffect) -> Self {
+        Self {
+            name: name.into(),
+            description: String::new(),
+            priority: 100,
+            enabled: true,
+            conditions: Vec::new(),
+            target_permissions: Vec::new(),
+            effect,
+        }
+    }
+
+    /// Set the description.
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        self.description = desc.into();
+        self
+    }
+
+    /// Set the priority.
+    pub fn with_priority(mut self, p: u32) -> Self {
+        self.priority = p;
+        self
+    }
+
+    /// Add a condition.
+    pub fn with_condition(mut self, cond: AbacCondition) -> Self {
+        self.conditions.push(cond);
+        self
+    }
+
+    /// Set target permissions.
+    pub fn with_target_permissions(mut self, perms: Vec<Permission>) -> Self {
+        self.target_permissions = perms;
+        self
+    }
+
+    /// Check if all conditions are satisfied by the given context.
+    #[must_use]
+    pub fn matches(&self, context: &AbacContext) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        self.conditions.iter().all(|c| c.evaluate(context))
+    }
+
+    /// Check if this policy applies to a specific permission.
+    #[must_use]
+    pub fn applies_to_permission(&self, permission: &Permission) -> bool {
+        self.target_permissions.is_empty() || self.target_permissions.contains(permission)
+    }
+}
+
+/// Context for ABAC evaluation, containing subject, resource, and
+/// environment attributes.
+#[derive(Debug, Clone, Default)]
+pub struct AbacContext {
+    /// Attributes of the requesting subject (user).
+    pub subject: HashMap<String, AttributeValue>,
+    /// Attributes of the target resource.
+    pub resource: HashMap<String, AttributeValue>,
+    /// Environmental attributes (time, IP, etc.).
+    pub environment: HashMap<String, AttributeValue>,
+}
+
+impl AbacContext {
+    /// Create an empty context.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set a subject attribute.
+    pub fn with_subject(mut self, key: impl Into<String>, value: AttributeValue) -> Self {
+        self.subject.insert(key.into(), value);
+        self
+    }
+
+    /// Set a resource attribute.
+    pub fn with_resource(mut self, key: impl Into<String>, value: AttributeValue) -> Self {
+        self.resource.insert(key.into(), value);
+        self
+    }
+
+    /// Set an environment attribute.
+    pub fn with_environment(mut self, key: impl Into<String>, value: AttributeValue) -> Self {
+        self.environment.insert(key.into(), value);
+        self
+    }
+}
+
+/// The ABAC policy engine that evaluates access decisions based on
+/// attribute conditions, complementing RBAC.
+#[derive(Debug, Default)]
+pub struct AbacEngine {
+    policies: Vec<AbacPolicy>,
+}
+
+impl AbacEngine {
+    /// Create a new empty ABAC engine.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a policy.
+    pub fn add_policy(&mut self, policy: AbacPolicy) {
+        self.policies.push(policy);
+        self.policies.sort_by_key(|p| p.priority);
+    }
+
+    /// Return the number of policies.
+    #[must_use]
+    pub fn policy_count(&self) -> usize {
+        self.policies.len()
+    }
+
+    /// Evaluate all policies for a given permission and context.
+    ///
+    /// Returns the effect of the first matching policy, or `None` if no
+    /// policy matches (in which case the caller should fall back to RBAC).
+    #[must_use]
+    pub fn evaluate(&self, permission: &Permission, context: &AbacContext) -> Option<PolicyEffect> {
+        for policy in &self.policies {
+            if policy.applies_to_permission(permission) && policy.matches(context) {
+                return Some(policy.effect);
+            }
+        }
+        None
+    }
+
+    /// Convenience: returns `true` if ABAC explicitly allows, `false` if
+    /// explicitly denies, `None` if no policy matched.
+    #[must_use]
+    pub fn is_allowed(&self, permission: &Permission, context: &AbacContext) -> Option<bool> {
+        self.evaluate(permission, context)
+            .map(|e| e == PolicyEffect::Allow)
+    }
+
+    /// Return all policies (read-only).
+    #[must_use]
+    pub fn policies(&self) -> &[AbacPolicy] {
+        &self.policies
+    }
+
+    /// Remove all policies.
+    pub fn clear(&mut self) {
+        self.policies.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -876,5 +1182,425 @@ mod tests {
 
         assert_eq!(req.username, "testuser");
         assert_eq!(req.role, "viewer");
+    }
+
+    // -----------------------------------------------------------------------
+    // ABAC tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_attribute_value_display() {
+        assert_eq!(AttributeValue::Str("hello".into()).to_string(), "hello");
+        assert_eq!(AttributeValue::Bool(true).to_string(), "true");
+        assert_eq!(AttributeValue::Int(42).to_string(), "42");
+        assert_eq!(
+            AttributeValue::List(vec!["a".into(), "b".into()]).to_string(),
+            "[a, b]"
+        );
+    }
+
+    #[test]
+    fn test_abac_condition_equals() {
+        let cond = AbacCondition {
+            attribute_key: "department".into(),
+            attribute_source: AttributeSource::Subject,
+            operator: ComparisonOp::Equals,
+            expected: AttributeValue::Str("engineering".into()),
+        };
+        let ctx = AbacContext::new()
+            .with_subject("department", AttributeValue::Str("engineering".into()));
+        assert!(cond.evaluate(&ctx));
+
+        let ctx2 =
+            AbacContext::new().with_subject("department", AttributeValue::Str("marketing".into()));
+        assert!(!cond.evaluate(&ctx2));
+    }
+
+    #[test]
+    fn test_abac_condition_not_equals() {
+        let cond = AbacCondition {
+            attribute_key: "status".into(),
+            attribute_source: AttributeSource::Resource,
+            operator: ComparisonOp::NotEquals,
+            expected: AttributeValue::Str("archived".into()),
+        };
+        let ctx = AbacContext::new().with_resource("status", AttributeValue::Str("active".into()));
+        assert!(cond.evaluate(&ctx));
+
+        let ctx2 =
+            AbacContext::new().with_resource("status", AttributeValue::Str("archived".into()));
+        assert!(!cond.evaluate(&ctx2));
+    }
+
+    #[test]
+    fn test_abac_condition_greater_or_equal() {
+        let cond = AbacCondition {
+            attribute_key: "clearance".into(),
+            attribute_source: AttributeSource::Subject,
+            operator: ComparisonOp::GreaterOrEqual,
+            expected: AttributeValue::Int(3),
+        };
+        let ctx_high = AbacContext::new().with_subject("clearance", AttributeValue::Int(5));
+        assert!(cond.evaluate(&ctx_high));
+
+        let ctx_exact = AbacContext::new().with_subject("clearance", AttributeValue::Int(3));
+        assert!(cond.evaluate(&ctx_exact));
+
+        let ctx_low = AbacContext::new().with_subject("clearance", AttributeValue::Int(2));
+        assert!(!cond.evaluate(&ctx_low));
+    }
+
+    #[test]
+    fn test_abac_condition_less_than() {
+        let cond = AbacCondition {
+            attribute_key: "hour".into(),
+            attribute_source: AttributeSource::Environment,
+            operator: ComparisonOp::LessThan,
+            expected: AttributeValue::Int(18),
+        };
+        let ctx = AbacContext::new().with_environment("hour", AttributeValue::Int(9));
+        assert!(cond.evaluate(&ctx));
+
+        let ctx2 = AbacContext::new().with_environment("hour", AttributeValue::Int(20));
+        assert!(!cond.evaluate(&ctx2));
+    }
+
+    #[test]
+    fn test_abac_condition_contains() {
+        let cond = AbacCondition {
+            attribute_key: "projects".into(),
+            attribute_source: AttributeSource::Subject,
+            operator: ComparisonOp::Contains,
+            expected: AttributeValue::Str("alpha".into()),
+        };
+        let ctx = AbacContext::new().with_subject(
+            "projects",
+            AttributeValue::List(vec!["alpha".into(), "beta".into()]),
+        );
+        assert!(cond.evaluate(&ctx));
+
+        let ctx2 =
+            AbacContext::new().with_subject("projects", AttributeValue::List(vec!["gamma".into()]));
+        assert!(!cond.evaluate(&ctx2));
+    }
+
+    #[test]
+    fn test_abac_condition_in() {
+        let cond = AbacCondition {
+            attribute_key: "region".into(),
+            attribute_source: AttributeSource::Environment,
+            operator: ComparisonOp::In,
+            expected: AttributeValue::List(vec!["us".into(), "eu".into()]),
+        };
+        let ctx = AbacContext::new().with_environment("region", AttributeValue::Str("eu".into()));
+        assert!(cond.evaluate(&ctx));
+
+        let ctx2 = AbacContext::new().with_environment("region", AttributeValue::Str("ap".into()));
+        assert!(!cond.evaluate(&ctx2));
+    }
+
+    #[test]
+    fn test_abac_condition_missing_attribute() {
+        let cond = AbacCondition {
+            attribute_key: "missing".into(),
+            attribute_source: AttributeSource::Subject,
+            operator: ComparisonOp::Equals,
+            expected: AttributeValue::Bool(true),
+        };
+        let ctx = AbacContext::new();
+        assert!(!cond.evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_abac_condition_type_mismatch() {
+        let cond = AbacCondition {
+            attribute_key: "level".into(),
+            attribute_source: AttributeSource::Subject,
+            operator: ComparisonOp::GreaterOrEqual,
+            expected: AttributeValue::Int(5),
+        };
+        // Provide a string instead of an int.
+        let ctx = AbacContext::new().with_subject("level", AttributeValue::Str("high".into()));
+        assert!(!cond.evaluate(&ctx));
+    }
+
+    #[test]
+    fn test_abac_policy_matches() {
+        let policy =
+            AbacPolicy::new("eng_allow", PolicyEffect::Allow).with_condition(AbacCondition {
+                attribute_key: "department".into(),
+                attribute_source: AttributeSource::Subject,
+                operator: ComparisonOp::Equals,
+                expected: AttributeValue::Str("engineering".into()),
+            });
+        let ctx = AbacContext::new()
+            .with_subject("department", AttributeValue::Str("engineering".into()));
+        assert!(policy.matches(&ctx));
+    }
+
+    #[test]
+    fn test_abac_policy_disabled() {
+        let mut policy = AbacPolicy::new("disabled", PolicyEffect::Deny);
+        policy.enabled = false;
+        let ctx = AbacContext::new();
+        assert!(!policy.matches(&ctx));
+    }
+
+    #[test]
+    fn test_abac_policy_applies_to_all_permissions() {
+        let policy = AbacPolicy::new("blanket", PolicyEffect::Allow);
+        assert!(policy.applies_to_permission(&Permission::AssetRead));
+        assert!(policy.applies_to_permission(&Permission::AssetDelete));
+    }
+
+    #[test]
+    fn test_abac_policy_applies_to_specific_permissions() {
+        let policy = AbacPolicy::new("read_only", PolicyEffect::Allow)
+            .with_target_permissions(vec![Permission::AssetRead]);
+        assert!(policy.applies_to_permission(&Permission::AssetRead));
+        assert!(!policy.applies_to_permission(&Permission::AssetDelete));
+    }
+
+    #[test]
+    fn test_abac_engine_empty() {
+        let engine = AbacEngine::new();
+        assert_eq!(engine.policy_count(), 0);
+        let ctx = AbacContext::new();
+        assert!(engine.evaluate(&Permission::AssetRead, &ctx).is_none());
+    }
+
+    #[test]
+    fn test_abac_engine_allow_policy() {
+        let mut engine = AbacEngine::new();
+        engine.add_policy(
+            AbacPolicy::new("allow_eng", PolicyEffect::Allow).with_condition(AbacCondition {
+                attribute_key: "department".into(),
+                attribute_source: AttributeSource::Subject,
+                operator: ComparisonOp::Equals,
+                expected: AttributeValue::Str("engineering".into()),
+            }),
+        );
+        let ctx = AbacContext::new()
+            .with_subject("department", AttributeValue::Str("engineering".into()));
+        assert_eq!(
+            engine.evaluate(&Permission::AssetRead, &ctx),
+            Some(PolicyEffect::Allow)
+        );
+        assert_eq!(engine.is_allowed(&Permission::AssetRead, &ctx), Some(true));
+    }
+
+    #[test]
+    fn test_abac_engine_deny_policy() {
+        let mut engine = AbacEngine::new();
+        engine.add_policy(
+            AbacPolicy::new("deny_external", PolicyEffect::Deny).with_condition(AbacCondition {
+                attribute_key: "is_external".into(),
+                attribute_source: AttributeSource::Subject,
+                operator: ComparisonOp::Equals,
+                expected: AttributeValue::Bool(true),
+            }),
+        );
+        let ctx = AbacContext::new().with_subject("is_external", AttributeValue::Bool(true));
+        assert_eq!(
+            engine.evaluate(&Permission::AssetDelete, &ctx),
+            Some(PolicyEffect::Deny)
+        );
+        assert_eq!(
+            engine.is_allowed(&Permission::AssetDelete, &ctx),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_abac_engine_priority_ordering() {
+        let mut engine = AbacEngine::new();
+        // Lower priority number = evaluated first.
+        engine.add_policy(AbacPolicy::new("allow_all", PolicyEffect::Allow).with_priority(200));
+        engine.add_policy(
+            AbacPolicy::new("deny_guests", PolicyEffect::Deny)
+                .with_priority(10)
+                .with_condition(AbacCondition {
+                    attribute_key: "role".into(),
+                    attribute_source: AttributeSource::Subject,
+                    operator: ComparisonOp::Equals,
+                    expected: AttributeValue::Str("guest".into()),
+                }),
+        );
+        // Guest user: deny policy matches first.
+        let guest_ctx =
+            AbacContext::new().with_subject("role", AttributeValue::Str("guest".into()));
+        assert_eq!(
+            engine.evaluate(&Permission::AssetRead, &guest_ctx),
+            Some(PolicyEffect::Deny)
+        );
+        // Non-guest: deny doesn't match, allow does.
+        let admin_ctx =
+            AbacContext::new().with_subject("role", AttributeValue::Str("admin".into()));
+        assert_eq!(
+            engine.evaluate(&Permission::AssetRead, &admin_ctx),
+            Some(PolicyEffect::Allow)
+        );
+    }
+
+    #[test]
+    fn test_abac_engine_no_match_returns_none() {
+        let mut engine = AbacEngine::new();
+        engine.add_policy(
+            AbacPolicy::new("specific", PolicyEffect::Allow).with_condition(AbacCondition {
+                attribute_key: "department".into(),
+                attribute_source: AttributeSource::Subject,
+                operator: ComparisonOp::Equals,
+                expected: AttributeValue::Str("finance".into()),
+            }),
+        );
+        let ctx = AbacContext::new().with_subject("department", AttributeValue::Str("hr".into()));
+        assert!(engine.evaluate(&Permission::AssetRead, &ctx).is_none());
+        assert!(engine.is_allowed(&Permission::AssetRead, &ctx).is_none());
+    }
+
+    #[test]
+    fn test_abac_engine_multiple_conditions_and() {
+        let mut engine = AbacEngine::new();
+        engine.add_policy(
+            AbacPolicy::new("restricted", PolicyEffect::Allow)
+                .with_condition(AbacCondition {
+                    attribute_key: "clearance".into(),
+                    attribute_source: AttributeSource::Subject,
+                    operator: ComparisonOp::GreaterOrEqual,
+                    expected: AttributeValue::Int(3),
+                })
+                .with_condition(AbacCondition {
+                    attribute_key: "classification".into(),
+                    attribute_source: AttributeSource::Resource,
+                    operator: ComparisonOp::Equals,
+                    expected: AttributeValue::Str("secret".into()),
+                }),
+        );
+
+        // Both conditions met.
+        let ctx_ok = AbacContext::new()
+            .with_subject("clearance", AttributeValue::Int(5))
+            .with_resource("classification", AttributeValue::Str("secret".into()));
+        assert_eq!(
+            engine.evaluate(&Permission::AssetRead, &ctx_ok),
+            Some(PolicyEffect::Allow)
+        );
+
+        // Only one condition met.
+        let ctx_low = AbacContext::new()
+            .with_subject("clearance", AttributeValue::Int(1))
+            .with_resource("classification", AttributeValue::Str("secret".into()));
+        assert!(engine.evaluate(&Permission::AssetRead, &ctx_low).is_none());
+    }
+
+    #[test]
+    fn test_abac_engine_permission_targeting() {
+        let mut engine = AbacEngine::new();
+        engine.add_policy(
+            AbacPolicy::new("read_only_for_viewers", PolicyEffect::Allow)
+                .with_target_permissions(vec![Permission::AssetRead])
+                .with_condition(AbacCondition {
+                    attribute_key: "role".into(),
+                    attribute_source: AttributeSource::Subject,
+                    operator: ComparisonOp::Equals,
+                    expected: AttributeValue::Str("viewer".into()),
+                }),
+        );
+        let ctx = AbacContext::new().with_subject("role", AttributeValue::Str("viewer".into()));
+        assert_eq!(
+            engine.evaluate(&Permission::AssetRead, &ctx),
+            Some(PolicyEffect::Allow)
+        );
+        // Policy does not target AssetDelete.
+        assert!(engine.evaluate(&Permission::AssetDelete, &ctx).is_none());
+    }
+
+    #[test]
+    fn test_abac_engine_clear() {
+        let mut engine = AbacEngine::new();
+        engine.add_policy(AbacPolicy::new("p1", PolicyEffect::Allow));
+        engine.add_policy(AbacPolicy::new("p2", PolicyEffect::Deny));
+        assert_eq!(engine.policy_count(), 2);
+        engine.clear();
+        assert_eq!(engine.policy_count(), 0);
+    }
+
+    #[test]
+    fn test_abac_engine_policies_ref() {
+        let mut engine = AbacEngine::new();
+        engine.add_policy(AbacPolicy::new("alpha", PolicyEffect::Allow).with_priority(10));
+        engine.add_policy(AbacPolicy::new("beta", PolicyEffect::Deny).with_priority(5));
+        let policies = engine.policies();
+        assert_eq!(policies.len(), 2);
+        // Should be sorted by priority (5 before 10).
+        assert_eq!(policies[0].name, "beta");
+        assert_eq!(policies[1].name, "alpha");
+    }
+
+    #[test]
+    fn test_abac_context_builder() {
+        let ctx = AbacContext::new()
+            .with_subject("name", AttributeValue::Str("alice".into()))
+            .with_resource("type", AttributeValue::Str("video".into()))
+            .with_environment("hour", AttributeValue::Int(14));
+        assert_eq!(
+            ctx.subject.get("name"),
+            Some(&AttributeValue::Str("alice".into()))
+        );
+        assert_eq!(
+            ctx.resource.get("type"),
+            Some(&AttributeValue::Str("video".into()))
+        );
+        assert_eq!(ctx.environment.get("hour"), Some(&AttributeValue::Int(14)));
+    }
+
+    #[test]
+    fn test_abac_environment_time_restriction() {
+        let mut engine = AbacEngine::new();
+        // Only allow downloads during business hours (9-17).
+        engine.add_policy(
+            AbacPolicy::new("business_hours", PolicyEffect::Allow)
+                .with_target_permissions(vec![Permission::AssetDownload])
+                .with_condition(AbacCondition {
+                    attribute_key: "hour".into(),
+                    attribute_source: AttributeSource::Environment,
+                    operator: ComparisonOp::GreaterOrEqual,
+                    expected: AttributeValue::Int(9),
+                })
+                .with_condition(AbacCondition {
+                    attribute_key: "hour".into(),
+                    attribute_source: AttributeSource::Environment,
+                    operator: ComparisonOp::LessThan,
+                    expected: AttributeValue::Int(17),
+                }),
+        );
+
+        let ctx_ok = AbacContext::new().with_environment("hour", AttributeValue::Int(10));
+        assert_eq!(
+            engine.evaluate(&Permission::AssetDownload, &ctx_ok),
+            Some(PolicyEffect::Allow)
+        );
+
+        let ctx_after = AbacContext::new().with_environment("hour", AttributeValue::Int(20));
+        assert!(engine
+            .evaluate(&Permission::AssetDownload, &ctx_after)
+            .is_none());
+    }
+
+    #[test]
+    fn test_abac_policy_serialization() {
+        let policy = AbacPolicy::new("test_ser", PolicyEffect::Deny)
+            .with_description("serialization test")
+            .with_condition(AbacCondition {
+                attribute_key: "k".into(),
+                attribute_source: AttributeSource::Subject,
+                operator: ComparisonOp::Equals,
+                expected: AttributeValue::Str("v".into()),
+            });
+        let json = serde_json::to_string(&policy).expect("should succeed in test");
+        let deser: AbacPolicy = serde_json::from_str(&json).expect("should succeed in test");
+        assert_eq!(deser.name, "test_ser");
+        assert_eq!(deser.effect, PolicyEffect::Deny);
+        assert_eq!(deser.conditions.len(), 1);
     }
 }

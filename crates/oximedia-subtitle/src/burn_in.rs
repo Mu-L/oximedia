@@ -913,3 +913,776 @@ mod tests {
         assert_eq!(glyph.bitmap.len(), (glyph.width * glyph.height) as usize);
     }
 }
+
+// ============================================================================
+// BitmapFont + SubtitleBurnIn (high-level burn-in engine)
+// ============================================================================
+
+use crate::format_converter::SubtitleEntry;
+
+/// A simple monochrome bitmap font where each glyph is stored as a `Vec<bool>`
+/// in row-major order (left-to-right, top-to-bottom).
+///
+/// Default glyph cell is 8 wide × 12 tall (96 bools per glyph).
+pub struct BitmapFont {
+    /// Width of each glyph cell in pixels.
+    pub glyph_width: u32,
+    /// Height of each glyph cell in pixels.
+    pub glyph_height: u32,
+    /// Map from character to its bitmap (row-major, true = ink pixel).
+    pub glyphs: std::collections::HashMap<char, Vec<bool>>,
+}
+
+impl BitmapFont {
+    /// Build a basic 8×12 ASCII bitmap font covering 0x20..=0x7E.
+    ///
+    /// Glyphs are hand-coded patterns. Characters not in the set fall back to
+    /// a filled block.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn basic_ascii() -> Self {
+        let mut glyphs = std::collections::HashMap::new();
+
+        // Helper: convert a &[u8; 12] row-byte array (each byte = 8 pixels,
+        // MSB = leftmost pixel) into Vec<bool>.
+        fn from_rows(rows: &[u8; 12]) -> Vec<bool> {
+            let mut out = Vec::with_capacity(96);
+            for &row in rows {
+                for bit in (0..8).rev() {
+                    out.push((row >> bit) & 1 != 0);
+                }
+            }
+            out
+        }
+
+        // Space
+        glyphs.insert(' ', vec![false; 96]);
+
+        // Digits
+        glyphs.insert(
+            '0',
+            from_rows(&[
+                0b00111100, 0b01100110, 0b01100110, 0b01101110, 0b01110110, 0b01100110, 0b01100110,
+                0b01100110, 0b01100110, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '1',
+            from_rows(&[
+                0b00011000, 0b00111000, 0b01111000, 0b00011000, 0b00011000, 0b00011000, 0b00011000,
+                0b00011000, 0b00011000, 0b01111110, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '2',
+            from_rows(&[
+                0b00111100, 0b01100110, 0b01100110, 0b00000110, 0b00001100, 0b00011000, 0b00110000,
+                0b01100000, 0b01100110, 0b01111110, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '3',
+            from_rows(&[
+                0b00111100, 0b01100110, 0b00000110, 0b00000110, 0b00011100, 0b00000110, 0b00000110,
+                0b00000110, 0b01100110, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '4',
+            from_rows(&[
+                0b00001100, 0b00011100, 0b00111100, 0b01101100, 0b01101100, 0b01111110, 0b00001100,
+                0b00001100, 0b00001100, 0b00011110, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '5',
+            from_rows(&[
+                0b01111110, 0b01100000, 0b01100000, 0b01100000, 0b01111100, 0b00000110, 0b00000110,
+                0b00000110, 0b01100110, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '6',
+            from_rows(&[
+                0b00111100, 0b01100110, 0b01100000, 0b01100000, 0b01111100, 0b01100110, 0b01100110,
+                0b01100110, 0b01100110, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '7',
+            from_rows(&[
+                0b01111110, 0b01100110, 0b00000110, 0b00001100, 0b00011000, 0b00011000, 0b00011000,
+                0b00011000, 0b00011000, 0b00011000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '8',
+            from_rows(&[
+                0b00111100, 0b01100110, 0b01100110, 0b01100110, 0b00111100, 0b01100110, 0b01100110,
+                0b01100110, 0b01100110, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '9',
+            from_rows(&[
+                0b00111100, 0b01100110, 0b01100110, 0b01100110, 0b00111110, 0b00000110, 0b00000110,
+                0b00000110, 0b01100110, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+
+        // Uppercase A–Z (minimal but recognisable)
+        glyphs.insert(
+            'A',
+            from_rows(&[
+                0b00011000, 0b00111100, 0b01100110, 0b01100110, 0b01100110, 0b01111110, 0b01100110,
+                0b01100110, 0b01100110, 0b01100110, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'B',
+            from_rows(&[
+                0b01111100, 0b01100110, 0b01100110, 0b01100110, 0b01111100, 0b01100110, 0b01100110,
+                0b01100110, 0b01100110, 0b01111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'C',
+            from_rows(&[
+                0b00111100, 0b01100110, 0b01100000, 0b01100000, 0b01100000, 0b01100000, 0b01100000,
+                0b01100000, 0b01100110, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'D',
+            from_rows(&[
+                0b01111000, 0b01101100, 0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110,
+                0b01100110, 0b01101100, 0b01111000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'E',
+            from_rows(&[
+                0b01111110, 0b01100000, 0b01100000, 0b01100000, 0b01111100, 0b01100000, 0b01100000,
+                0b01100000, 0b01100000, 0b01111110, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'F',
+            from_rows(&[
+                0b01111110, 0b01100000, 0b01100000, 0b01100000, 0b01111100, 0b01100000, 0b01100000,
+                0b01100000, 0b01100000, 0b01100000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'G',
+            from_rows(&[
+                0b00111100, 0b01100110, 0b01100000, 0b01100000, 0b01101110, 0b01100110, 0b01100110,
+                0b01100110, 0b01100110, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'H',
+            from_rows(&[
+                0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01111110, 0b01100110, 0b01100110,
+                0b01100110, 0b01100110, 0b01100110, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'I',
+            from_rows(&[
+                0b00111100, 0b00011000, 0b00011000, 0b00011000, 0b00011000, 0b00011000, 0b00011000,
+                0b00011000, 0b00011000, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'J',
+            from_rows(&[
+                0b00011110, 0b00001100, 0b00001100, 0b00001100, 0b00001100, 0b00001100, 0b00001100,
+                0b01101100, 0b01101100, 0b00111000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'K',
+            from_rows(&[
+                0b01100110, 0b01101100, 0b01111000, 0b01110000, 0b01100000, 0b01100000, 0b01110000,
+                0b01111000, 0b01101100, 0b01100110, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'L',
+            from_rows(&[
+                0b01100000, 0b01100000, 0b01100000, 0b01100000, 0b01100000, 0b01100000, 0b01100000,
+                0b01100000, 0b01100000, 0b01111110, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'M',
+            from_rows(&[
+                0b01000010, 0b01100110, 0b01111110, 0b01111110, 0b01011010, 0b01000010, 0b01000010,
+                0b01000010, 0b01000010, 0b01000010, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'N',
+            from_rows(&[
+                0b01100010, 0b01110010, 0b01111010, 0b01111110, 0b01101110, 0b01100110, 0b01100110,
+                0b01100110, 0b01100110, 0b01100110, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'O',
+            from_rows(&[
+                0b00111100, 0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110,
+                0b01100110, 0b01100110, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'P',
+            from_rows(&[
+                0b01111100, 0b01100110, 0b01100110, 0b01100110, 0b01111100, 0b01100000, 0b01100000,
+                0b01100000, 0b01100000, 0b01100000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'Q',
+            from_rows(&[
+                0b00111100, 0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01110110,
+                0b00111110, 0b00000110, 0b00000111, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'R',
+            from_rows(&[
+                0b01111100, 0b01100110, 0b01100110, 0b01100110, 0b01111100, 0b01111000, 0b01101100,
+                0b01100110, 0b01100110, 0b01100110, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'S',
+            from_rows(&[
+                0b00111100, 0b01100110, 0b01100000, 0b01100000, 0b00111100, 0b00000110, 0b00000110,
+                0b00000110, 0b01100110, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'T',
+            from_rows(&[
+                0b01111110, 0b01011010, 0b00011000, 0b00011000, 0b00011000, 0b00011000, 0b00011000,
+                0b00011000, 0b00011000, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'U',
+            from_rows(&[
+                0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110,
+                0b01100110, 0b01100110, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'V',
+            from_rows(&[
+                0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110,
+                0b00111100, 0b00111100, 0b00011000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'W',
+            from_rows(&[
+                0b01000010, 0b01000010, 0b01000010, 0b01000010, 0b01011010, 0b01011010, 0b01111110,
+                0b01100110, 0b01100110, 0b01000010, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'X',
+            from_rows(&[
+                0b01100110, 0b01100110, 0b00111100, 0b00011000, 0b00011000, 0b00011000, 0b00011000,
+                0b00111100, 0b01100110, 0b01100110, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'Y',
+            from_rows(&[
+                0b01100110, 0b01100110, 0b01100110, 0b00111100, 0b00011000, 0b00011000, 0b00011000,
+                0b00011000, 0b00011000, 0b00111100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            'Z',
+            from_rows(&[
+                0b01111110, 0b00000110, 0b00001100, 0b00011000, 0b00110000, 0b00110000, 0b00110000,
+                0b01100000, 0b01100000, 0b01111110, 0b00000000, 0b00000000,
+            ]),
+        );
+
+        // Lowercase a-z (simplified versions sharing uppercase patterns where sensible)
+        for ch in 'a'..='z' {
+            let upper = ch.to_ascii_uppercase();
+            if let Some(g) = glyphs.get(&upper).cloned() {
+                glyphs.entry(ch).or_insert(g);
+            }
+        }
+
+        // Common punctuation
+        glyphs.insert(
+            '.',
+            from_rows(&[
+                0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+                0b00000000, 0b00011000, 0b00011000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            ',',
+            from_rows(&[
+                0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+                0b00011000, 0b00011000, 0b00110000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '!',
+            from_rows(&[
+                0b00011000, 0b00011000, 0b00011000, 0b00011000, 0b00011000, 0b00011000, 0b00011000,
+                0b00000000, 0b00011000, 0b00011000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '?',
+            from_rows(&[
+                0b00111100, 0b01100110, 0b00000110, 0b00001100, 0b00011000, 0b00011000, 0b00011000,
+                0b00000000, 0b00011000, 0b00011000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '-',
+            from_rows(&[
+                0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b01111110, 0b00000000, 0b00000000,
+                0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            ':',
+            from_rows(&[
+                0b00000000, 0b00000000, 0b00011000, 0b00011000, 0b00000000, 0b00000000, 0b00011000,
+                0b00011000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '\'',
+            from_rows(&[
+                0b00011000, 0b00011000, 0b00011000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+                0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '"',
+            from_rows(&[
+                0b01100110, 0b01100110, 0b01000100, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+                0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            '(',
+            from_rows(&[
+                0b00001100, 0b00011000, 0b00110000, 0b01100000, 0b01100000, 0b01100000, 0b01100000,
+                0b00110000, 0b00011000, 0b00001100, 0b00000000, 0b00000000,
+            ]),
+        );
+        glyphs.insert(
+            ')',
+            from_rows(&[
+                0b00110000, 0b00011000, 0b00001100, 0b00000110, 0b00000110, 0b00000110, 0b00000110,
+                0b00001100, 0b00011000, 0b00110000, 0b00000000, 0b00000000,
+            ]),
+        );
+
+        Self {
+            glyph_width: 8,
+            glyph_height: 12,
+            glyphs,
+        }
+    }
+
+    /// Render a string into a 2D boolean grid scaled by `scale`.
+    ///
+    /// Returns a `Vec<Vec<bool>>` where each inner `Vec` is one row of pixels
+    /// and the total width is `text.len() * glyph_width * scale`.
+    #[must_use]
+    pub fn render_text(&self, text: &str, scale: u32) -> Vec<Vec<bool>> {
+        if scale == 0 || text.is_empty() {
+            return Vec::new();
+        }
+
+        let scale = scale as usize;
+        let gw = self.glyph_width as usize * scale;
+        let gh = self.glyph_height as usize * scale;
+        let total_width = text.chars().count() * gw;
+
+        let mut grid = vec![vec![false; total_width]; gh];
+        let fallback = vec![true; (self.glyph_width * self.glyph_height) as usize];
+
+        for (char_idx, ch) in text.chars().enumerate() {
+            let bitmap = self.glyphs.get(&ch).unwrap_or(&fallback);
+            let x_offset = char_idx * gw;
+
+            for src_row in 0..self.glyph_height as usize {
+                for src_col in 0..self.glyph_width as usize {
+                    let src_idx = src_row * self.glyph_width as usize + src_col;
+                    let ink = bitmap.get(src_idx).copied().unwrap_or(false);
+                    if ink {
+                        for dy in 0..scale {
+                            let dst_row = src_row * scale + dy;
+                            for dx in 0..scale {
+                                let dst_col = x_offset + src_col * scale + dx;
+                                if dst_row < gh && dst_col < total_width {
+                                    grid[dst_row][dst_col] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        grid
+    }
+}
+
+/// Configuration for subtitle burn-in via `SubtitleBurnIn`.
+#[derive(Debug, Clone)]
+pub struct SubtitleBurnInConfig {
+    /// Font size in pixels (default 32).
+    pub font_size: u32,
+    /// Pixels from the bottom edge.
+    pub margin_bottom: u32,
+    /// Pixels from the left/right edges.
+    pub margin_horizontal: u32,
+    /// Text foreground colour (RGB, default white).
+    pub text_color: (u8, u8, u8),
+    /// Outline colour (RGB, default black).
+    pub outline_color: (u8, u8, u8),
+    /// Outline width in pixels (default 2).
+    pub outline_width: u32,
+    /// Optional RGBA background box.
+    pub background: Option<(u8, u8, u8, u8)>,
+    /// Padding around text inside the background box.
+    pub box_padding: u32,
+}
+
+impl Default for SubtitleBurnInConfig {
+    fn default() -> Self {
+        Self {
+            font_size: 32,
+            margin_bottom: 24,
+            margin_horizontal: 16,
+            text_color: (255, 255, 255),
+            outline_color: (0, 0, 0),
+            outline_width: 2,
+            background: None,
+            box_padding: 4,
+        }
+    }
+}
+
+/// High-level subtitle burn-in engine.
+///
+/// Uses a `BitmapFont` to rasterize subtitle text directly onto an RGBA frame
+/// buffer without any native library dependencies.
+pub struct SubtitleBurnIn {
+    /// Rendering configuration.
+    pub config: SubtitleBurnInConfig,
+    font: BitmapFont,
+}
+
+impl SubtitleBurnIn {
+    /// Create a new `SubtitleBurnIn` with the given configuration.
+    #[must_use]
+    pub fn new(config: SubtitleBurnInConfig) -> Self {
+        Self {
+            font: BitmapFont::basic_ascii(),
+            config,
+        }
+    }
+
+    /// Return all subtitle entries that are active (visible) at `pts_ms`.
+    #[must_use]
+    pub fn get_active<'a>(entries: &'a [SubtitleEntry], pts_ms: u64) -> Vec<&'a SubtitleEntry> {
+        entries.iter().filter(|e| e.is_active_at(pts_ms)).collect()
+    }
+
+    /// Burn the active subtitle text onto an RGBA frame buffer.
+    ///
+    /// - `frame`: mutable slice of `width * height * 4` bytes (RGBA8)
+    /// - `width`, `height`: frame dimensions
+    /// - `entries`: full list of subtitle entries
+    /// - `pts_ms`: current presentation timestamp in milliseconds
+    ///
+    /// The scale factor is derived from `config.font_size / glyph_height`.
+    #[allow(clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    pub fn burn_frame(
+        &self,
+        frame: &mut [u8],
+        width: u32,
+        height: u32,
+        entries: &[SubtitleEntry],
+        pts_ms: u64,
+    ) {
+        let active = Self::get_active(entries, pts_ms);
+        if active.is_empty() {
+            return;
+        }
+
+        let expected = (width * height * 4) as usize;
+        if frame.len() < expected {
+            return;
+        }
+
+        // Combine active subtitle texts (one per line)
+        let text: String = active
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+
+        let scale = (self.config.font_size / self.font.glyph_height).max(1);
+        let grid = self.font.render_text(&text, scale);
+        if grid.is_empty() {
+            return;
+        }
+
+        let render_h = grid.len() as u32;
+        let render_w = grid[0].len() as u32;
+
+        // Center horizontally; place at bottom margin
+        let x_start = if render_w >= width {
+            0u32
+        } else {
+            (width - render_w) / 2
+        };
+        let y_start = if render_h + self.config.margin_bottom >= height {
+            0u32
+        } else {
+            height - render_h - self.config.margin_bottom
+        };
+
+        // Draw background box if configured
+        if let Some((br, bg_c, bb, ba)) = self.config.background {
+            let pad = self.config.box_padding;
+            let bx0 = x_start.saturating_sub(pad);
+            let by0 = y_start.saturating_sub(pad);
+            let bx1 = (x_start + render_w + pad).min(width);
+            let by1 = (y_start + render_h + pad).min(height);
+            let alpha_f = ba as f32 / 255.0;
+            for py in by0..by1 {
+                for px in bx0..bx1 {
+                    let idx = ((py * width + px) * 4) as usize;
+                    if idx + 3 < frame.len() {
+                        let inv = 1.0 - alpha_f;
+                        frame[idx] = (br as f32 * alpha_f + frame[idx] as f32 * inv) as u8;
+                        frame[idx + 1] =
+                            (bg_c as f32 * alpha_f + frame[idx + 1] as f32 * inv) as u8;
+                        frame[idx + 2] = (bb as f32 * alpha_f + frame[idx + 2] as f32 * inv) as u8;
+                        frame[idx + 3] = frame[idx + 3]
+                            .saturating_add(((255.0 - frame[idx + 3] as f32) * alpha_f) as u8);
+                    }
+                }
+            }
+        }
+
+        // Helper: blend an opaque (r,g,b) pixel onto the frame at (px, py)
+        let blend_pixel = |frame: &mut [u8], px: u32, py: u32, r: u8, g: u8, b: u8| {
+            if px >= width || py >= height {
+                return;
+            }
+            let idx = ((py * width + px) * 4) as usize;
+            if idx + 3 < frame.len() {
+                frame[idx] = r;
+                frame[idx + 1] = g;
+                frame[idx + 2] = b;
+                frame[idx + 3] = 255;
+            }
+        };
+
+        // Draw outline by rendering shifted text in 8 directions
+        let ow = self.config.outline_width;
+        let (or_c, og, ob) = self.config.outline_color;
+        if ow > 0 {
+            for row in 0..render_h {
+                for col in 0..render_w {
+                    let ink = grid
+                        .get(row as usize)
+                        .and_then(|r| r.get(col as usize))
+                        .copied()
+                        .unwrap_or(false);
+                    if !ink {
+                        continue;
+                    }
+                    for dy in 0..=(ow * 2) {
+                        for dx in 0..=(ow * 2) {
+                            let ox = (x_start + col + dx).saturating_sub(ow);
+                            let oy = (y_start + row + dy).saturating_sub(ow);
+                            blend_pixel(frame, ox, oy, or_c, og, ob);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Draw the text itself
+        let (tr, tg, tb) = self.config.text_color;
+        for row in 0..render_h {
+            for col in 0..render_w {
+                let ink = grid
+                    .get(row as usize)
+                    .and_then(|r| r.get(col as usize))
+                    .copied()
+                    .unwrap_or(false);
+                if ink {
+                    blend_pixel(frame, x_start + col, y_start + row, tr, tg, tb);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bitmap_tests {
+    use super::*;
+    use crate::format_converter::SubtitleEntry;
+
+    #[test]
+    fn test_bitmap_font_glyph_size() {
+        let font = BitmapFont::basic_ascii();
+        assert_eq!(font.glyph_width, 8);
+        assert_eq!(font.glyph_height, 12);
+    }
+
+    #[test]
+    fn test_bitmap_font_has_ascii_digits() {
+        let font = BitmapFont::basic_ascii();
+        for ch in '0'..='9' {
+            assert!(font.glyphs.contains_key(&ch), "Missing glyph for {ch}");
+        }
+    }
+
+    #[test]
+    fn test_bitmap_font_has_uppercase() {
+        let font = BitmapFont::basic_ascii();
+        for ch in 'A'..='Z' {
+            assert!(font.glyphs.contains_key(&ch), "Missing glyph for {ch}");
+        }
+    }
+
+    #[test]
+    fn test_bitmap_font_has_lowercase() {
+        let font = BitmapFont::basic_ascii();
+        for ch in 'a'..='z' {
+            assert!(font.glyphs.contains_key(&ch), "Missing glyph for {ch}");
+        }
+    }
+
+    #[test]
+    fn test_bitmap_font_glyph_correct_length() {
+        let font = BitmapFont::basic_ascii();
+        let expected = (font.glyph_width * font.glyph_height) as usize;
+        for (ch, glyph) in &font.glyphs {
+            assert_eq!(
+                glyph.len(),
+                expected,
+                "Glyph for '{ch}' has wrong length: {}",
+                glyph.len()
+            );
+        }
+    }
+
+    #[test]
+    fn test_render_text_dimensions() {
+        let font = BitmapFont::basic_ascii();
+        let grid = font.render_text("AB", 2);
+        // height = glyph_height * scale = 12 * 2 = 24
+        assert_eq!(grid.len(), 24);
+        // width = 2 chars * glyph_width * scale = 2 * 8 * 2 = 32
+        assert_eq!(grid[0].len(), 32);
+    }
+
+    #[test]
+    fn test_render_text_empty_string() {
+        let font = BitmapFont::basic_ascii();
+        let grid = font.render_text("", 2);
+        assert!(grid.is_empty());
+    }
+
+    #[test]
+    fn test_render_text_scale_zero_returns_empty() {
+        let font = BitmapFont::basic_ascii();
+        let grid = font.render_text("A", 0);
+        assert!(grid.is_empty());
+    }
+
+    #[test]
+    fn test_burn_in_new() {
+        let cfg = SubtitleBurnInConfig::default();
+        let burn = SubtitleBurnIn::new(cfg);
+        assert_eq!(burn.config.font_size, 32);
+    }
+
+    #[test]
+    fn test_get_active_returns_matching_entries() {
+        let entries = vec![
+            SubtitleEntry::new(1, 1_000, 4_000, "hello"),
+            SubtitleEntry::new(2, 5_000, 8_000, "world"),
+        ];
+        let active = SubtitleBurnIn::get_active(&entries, 2_000);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].text, "hello");
+    }
+
+    #[test]
+    fn test_get_active_no_match() {
+        let entries = vec![SubtitleEntry::new(1, 1_000, 4_000, "hello")];
+        let active = SubtitleBurnIn::get_active(&entries, 9_000);
+        assert!(active.is_empty());
+    }
+
+    #[test]
+    fn test_burn_frame_modifies_pixels() {
+        let burn = SubtitleBurnIn::new(SubtitleBurnInConfig::default());
+        let w = 320u32;
+        let h = 240u32;
+        let mut frame = vec![0u8; (w * h * 4) as usize];
+        let entries = vec![SubtitleEntry::new(1, 0, 5_000, "Hi")];
+        burn.burn_frame(&mut frame, w, h, &entries, 1_000);
+        let any_nonzero = frame.iter().any(|&b| b > 0);
+        assert!(any_nonzero, "burn_frame should paint some pixels");
+    }
+
+    #[test]
+    fn test_burn_frame_no_active_entries_noop() {
+        let burn = SubtitleBurnIn::new(SubtitleBurnInConfig::default());
+        let w = 320u32;
+        let h = 240u32;
+        let mut frame = vec![0u8; (w * h * 4) as usize];
+        let entries = vec![SubtitleEntry::new(1, 10_000, 15_000, "Not visible")];
+        burn.burn_frame(&mut frame, w, h, &entries, 1_000);
+        // No entries active → frame unchanged
+        assert!(frame.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_burn_frame_with_background_box() {
+        let mut cfg = SubtitleBurnInConfig::default();
+        cfg.background = Some((0, 0, 0, 128));
+        let burn = SubtitleBurnIn::new(cfg);
+        let w = 320u32;
+        let h = 240u32;
+        let mut frame = vec![0u8; (w * h * 4) as usize];
+        let entries = vec![SubtitleEntry::new(1, 0, 5_000, "Box")];
+        burn.burn_frame(&mut frame, w, h, &entries, 1_000);
+        let any_nonzero = frame.iter().any(|&b| b > 0);
+        assert!(any_nonzero, "background box should paint pixels");
+    }
+}
+
+// Soft-shadow rendering — extracted to `soft_shadow` module.
+pub use crate::soft_shadow::{
+    gaussian_blur_alpha, render_soft_shadow_rgba, SoftShadowConfig, TextBitmap,
+};

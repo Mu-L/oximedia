@@ -539,6 +539,284 @@ impl RateLimiter {
     }
 }
 
+// ── Per-endpoint rate limiting ─────────────────────────────────────────────
+
+/// Configuration for endpoint-specific rate limits.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct EndpointRateLimit {
+    /// Route pattern (e.g. "/api/v1/media/upload", "/api/v1/auth/login").
+    pub pattern: String,
+    /// Maximum requests per window for this endpoint.
+    pub requests_per_window: u32,
+    /// Window duration in milliseconds.
+    pub window_ms: u64,
+}
+
+impl EndpointRateLimit {
+    /// Creates a new endpoint rate limit.
+    #[allow(dead_code)]
+    pub fn new(pattern: impl Into<String>, requests_per_window: u32, window_ms: u64) -> Self {
+        Self {
+            pattern: pattern.into(),
+            requests_per_window,
+            window_ms,
+        }
+    }
+}
+
+/// Configuration for per-user rate limits based on user role or tier.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct UserTierRateLimit {
+    /// Tier name (e.g. "free", "pro", "enterprise", "admin").
+    pub tier: String,
+    /// Requests per window for this tier.
+    pub requests_per_window: u32,
+    /// Window duration in milliseconds.
+    pub window_ms: u64,
+}
+
+impl UserTierRateLimit {
+    /// Creates a new user tier rate limit.
+    #[allow(dead_code)]
+    pub fn new(tier: impl Into<String>, requests_per_window: u32, window_ms: u64) -> Self {
+        Self {
+            tier: tier.into(),
+            requests_per_window,
+            window_ms,
+        }
+    }
+}
+
+/// A tiered rate limiter that supports per-user and per-endpoint rate limits.
+///
+/// When checking a request, the limiter evaluates limits in this order:
+/// 1. Endpoint-specific limit (if matched)
+/// 2. User-tier limit (if the user has a tier assigned)
+/// 3. Global fallback limit
+///
+/// The **most restrictive** applicable limit determines whether the request
+/// is allowed.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct TieredRateLimiter {
+    /// Global fallback rate limit policy.
+    global_policy: RateLimitPolicy,
+    /// Per-endpoint rate limits.
+    endpoint_limits: Vec<EndpointRateLimit>,
+    /// Per-user-tier rate limits.
+    tier_limits: Vec<UserTierRateLimit>,
+    /// Per-key (composite key: "tier:user_id:endpoint") fixed-window limiters.
+    limiters: std::collections::HashMap<String, FixedWindowLimiter>,
+}
+
+impl TieredRateLimiter {
+    /// Creates a new tiered rate limiter with the given global fallback.
+    #[allow(dead_code)]
+    pub fn new(global_policy: RateLimitPolicy) -> Self {
+        Self {
+            global_policy,
+            endpoint_limits: Vec::new(),
+            tier_limits: Vec::new(),
+            limiters: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Registers an endpoint-specific rate limit.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn with_endpoint_limit(mut self, limit: EndpointRateLimit) -> Self {
+        self.endpoint_limits.push(limit);
+        self
+    }
+
+    /// Registers a user-tier rate limit.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn with_tier_limit(mut self, limit: UserTierRateLimit) -> Self {
+        self.tier_limits.push(limit);
+        self
+    }
+
+    /// Finds the endpoint rate limit for a given path, using prefix matching.
+    #[allow(dead_code)]
+    fn find_endpoint_limit(&self, path: &str) -> Option<&EndpointRateLimit> {
+        // Find the most specific (longest pattern) match
+        self.endpoint_limits
+            .iter()
+            .filter(|el| path.starts_with(&el.pattern))
+            .max_by_key(|el| el.pattern.len())
+    }
+
+    /// Finds the user-tier rate limit for a given tier name.
+    #[allow(dead_code)]
+    fn find_tier_limit(&self, tier: &str) -> Option<&UserTierRateLimit> {
+        self.tier_limits.iter().find(|tl| tl.tier == tier)
+    }
+
+    /// Checks whether a request is allowed given the composite identity.
+    ///
+    /// # Arguments
+    ///
+    /// * `client_id` - Unique identifier for the client (user ID or IP).
+    /// * `path` - The request path (for endpoint-specific limits).
+    /// * `tier` - Optional user tier (e.g. "free", "pro").
+    /// * `now_ms` - Current timestamp in milliseconds.
+    ///
+    /// Returns a `TieredRateLimitResult` describing which limits were checked.
+    #[allow(dead_code)]
+    pub fn check(
+        &mut self,
+        client_id: &str,
+        path: &str,
+        tier: Option<&str>,
+        now_ms: u64,
+    ) -> TieredRateLimitResult {
+        let mut results = Vec::new();
+
+        // 1. Check endpoint-specific limit
+        if let Some(ep_limit) = self.find_endpoint_limit(path).cloned() {
+            let key = format!("ep:{}:{}", ep_limit.pattern, client_id);
+            let limiter = self.limiters.entry(key).or_insert_with(|| {
+                FixedWindowLimiter::new(ep_limit.window_ms, ep_limit.requests_per_window, now_ms)
+            });
+            let allowed = limiter.allow(now_ms);
+            let remaining = limiter.remaining(now_ms);
+            results.push(LimitCheckResult {
+                scope: LimitScope::Endpoint(ep_limit.pattern.clone()),
+                allowed,
+                remaining,
+                window_ms: ep_limit.window_ms,
+            });
+        }
+
+        // 2. Check user-tier limit
+        if let Some(tier_name) = tier {
+            if let Some(tier_limit) = self.find_tier_limit(tier_name).cloned() {
+                let key = format!("tier:{}:{}", tier_name, client_id);
+                let limiter = self.limiters.entry(key).or_insert_with(|| {
+                    FixedWindowLimiter::new(
+                        tier_limit.window_ms,
+                        tier_limit.requests_per_window,
+                        now_ms,
+                    )
+                });
+                let allowed = limiter.allow(now_ms);
+                let remaining = limiter.remaining(now_ms);
+                results.push(LimitCheckResult {
+                    scope: LimitScope::UserTier(tier_name.to_string()),
+                    allowed,
+                    remaining,
+                    window_ms: tier_limit.window_ms,
+                });
+            }
+        }
+
+        // 3. Check global limit
+        {
+            let key = format!("global:{}", client_id);
+            let limiter = self.limiters.entry(key).or_insert_with(|| {
+                FixedWindowLimiter::new(
+                    self.global_policy.window_ms,
+                    self.global_policy.requests_per_window,
+                    now_ms,
+                )
+            });
+            let allowed = limiter.allow(now_ms);
+            let remaining = limiter.remaining(now_ms);
+            results.push(LimitCheckResult {
+                scope: LimitScope::Global,
+                allowed,
+                remaining,
+                window_ms: self.global_policy.window_ms,
+            });
+        }
+
+        TieredRateLimitResult { checks: results }
+    }
+
+    /// Removes all limiters for a given client ID across all scopes.
+    #[allow(dead_code)]
+    pub fn reset_client(&mut self, client_id: &str) {
+        self.limiters
+            .retain(|key, _| !key.ends_with(&format!(":{}", client_id)));
+    }
+
+    /// Returns the total number of tracked limiters.
+    #[allow(dead_code)]
+    pub fn limiter_count(&self) -> usize {
+        self.limiters.len()
+    }
+
+    /// Removes all limiters that have been idle (no check within their window).
+    #[allow(dead_code)]
+    pub fn cleanup_idle(&mut self, now_ms: u64) {
+        self.limiters
+            .retain(|_, limiter| limiter.remaining(now_ms) < limiter.max_requests);
+    }
+}
+
+/// The scope at which a rate limit was applied.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LimitScope {
+    /// Global fallback limit.
+    Global,
+    /// Endpoint-specific limit (contains the matched pattern).
+    Endpoint(String),
+    /// User-tier limit (contains the tier name).
+    UserTier(String),
+}
+
+/// Result of a single scope's rate limit check.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct LimitCheckResult {
+    /// Which scope was checked.
+    pub scope: LimitScope,
+    /// Whether this scope allowed the request.
+    pub allowed: bool,
+    /// Remaining quota in this scope's current window.
+    pub remaining: u32,
+    /// Window duration in milliseconds.
+    pub window_ms: u64,
+}
+
+/// Aggregated result of a tiered rate limit check.
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct TieredRateLimitResult {
+    /// Individual check results from each applicable scope.
+    pub checks: Vec<LimitCheckResult>,
+}
+
+impl TieredRateLimitResult {
+    /// Returns `true` if **all** applicable scopes allowed the request.
+    #[allow(dead_code)]
+    pub fn is_allowed(&self) -> bool {
+        self.checks.iter().all(|c| c.allowed)
+    }
+
+    /// Returns the most restrictive scope (lowest remaining quota).
+    #[allow(dead_code)]
+    pub fn most_restrictive(&self) -> Option<&LimitCheckResult> {
+        self.checks.iter().min_by_key(|c| c.remaining)
+    }
+
+    /// Returns the minimum remaining quota across all checked scopes.
+    #[allow(dead_code)]
+    pub fn min_remaining(&self) -> u32 {
+        self.checks.iter().map(|c| c.remaining).min().unwrap_or(0)
+    }
+
+    /// Returns the scope that denied the request, if any.
+    #[allow(dead_code)]
+    pub fn denied_by(&self) -> Option<&LimitScope> {
+        self.checks.iter().find(|c| !c.allowed).map(|c| &c.scope)
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
@@ -858,5 +1136,199 @@ mod tests {
         // Both hit their limit
         assert!(!rl.check("a", 2).is_allowed());
         assert!(!rl.check("b", 2).is_allowed());
+    }
+
+    // ── TieredRateLimiter ────────────────────────────────────────────────────
+
+    #[test]
+    fn tiered_limiter_global_only() {
+        let mut trl = TieredRateLimiter::new(RateLimitPolicy {
+            requests_per_window: 3,
+            window_ms: 10_000,
+        });
+        assert!(trl.check("user1", "/api/v1/media", None, 0).is_allowed());
+        assert!(trl.check("user1", "/api/v1/media", None, 1).is_allowed());
+        assert!(trl.check("user1", "/api/v1/media", None, 2).is_allowed());
+        assert!(!trl.check("user1", "/api/v1/media", None, 3).is_allowed());
+    }
+
+    #[test]
+    fn tiered_limiter_endpoint_specific_limit() {
+        let mut trl = TieredRateLimiter::new(RateLimitPolicy {
+            requests_per_window: 100,
+            window_ms: 60_000,
+        })
+        .with_endpoint_limit(EndpointRateLimit::new("/api/v1/auth/login", 3, 60_000));
+
+        // Login endpoint is restricted to 3 per window
+        for i in 0..3 {
+            let r = trl.check("user1", "/api/v1/auth/login", None, i);
+            assert!(r.is_allowed(), "request {} should be allowed", i);
+        }
+        let r = trl.check("user1", "/api/v1/auth/login", None, 3);
+        assert!(!r.is_allowed());
+        assert_eq!(
+            r.denied_by(),
+            Some(&LimitScope::Endpoint("/api/v1/auth/login".to_string()))
+        );
+    }
+
+    #[test]
+    fn tiered_limiter_endpoint_does_not_affect_other_paths() {
+        let mut trl = TieredRateLimiter::new(RateLimitPolicy {
+            requests_per_window: 100,
+            window_ms: 60_000,
+        })
+        .with_endpoint_limit(EndpointRateLimit::new("/api/v1/auth/login", 1, 60_000));
+
+        // Hit the login limit
+        trl.check("user1", "/api/v1/auth/login", None, 0);
+        assert!(!trl
+            .check("user1", "/api/v1/auth/login", None, 1)
+            .is_allowed());
+
+        // Other endpoints still allowed
+        assert!(trl.check("user1", "/api/v1/media", None, 2).is_allowed());
+    }
+
+    #[test]
+    fn tiered_limiter_user_tier_limit() {
+        let mut trl = TieredRateLimiter::new(RateLimitPolicy {
+            requests_per_window: 100,
+            window_ms: 60_000,
+        })
+        .with_tier_limit(UserTierRateLimit::new("free", 5, 60_000))
+        .with_tier_limit(UserTierRateLimit::new("pro", 50, 60_000));
+
+        // Free user gets 5
+        for i in 0..5 {
+            assert!(trl
+                .check("free-user", "/api/v1/media", Some("free"), i)
+                .is_allowed());
+        }
+        let r = trl.check("free-user", "/api/v1/media", Some("free"), 5);
+        assert!(!r.is_allowed());
+        assert_eq!(
+            r.denied_by(),
+            Some(&LimitScope::UserTier("free".to_string()))
+        );
+
+        // Pro user still has quota
+        for i in 0..10 {
+            assert!(trl
+                .check("pro-user", "/api/v1/media", Some("pro"), i)
+                .is_allowed());
+        }
+    }
+
+    #[test]
+    fn tiered_limiter_most_restrictive_wins() {
+        let mut trl = TieredRateLimiter::new(RateLimitPolicy {
+            requests_per_window: 100,
+            window_ms: 60_000,
+        })
+        .with_endpoint_limit(EndpointRateLimit::new("/api/v1/media/upload", 2, 60_000))
+        .with_tier_limit(UserTierRateLimit::new("free", 5, 60_000));
+
+        // Free user uploading: endpoint limit (2) is more restrictive than tier (5)
+        assert!(trl
+            .check("user1", "/api/v1/media/upload", Some("free"), 0)
+            .is_allowed());
+        assert!(trl
+            .check("user1", "/api/v1/media/upload", Some("free"), 1)
+            .is_allowed());
+        // 3rd request: endpoint limit hit even though tier and global still have quota
+        assert!(!trl
+            .check("user1", "/api/v1/media/upload", Some("free"), 2)
+            .is_allowed());
+    }
+
+    #[test]
+    fn tiered_limiter_min_remaining() {
+        let mut trl = TieredRateLimiter::new(RateLimitPolicy {
+            requests_per_window: 10,
+            window_ms: 60_000,
+        })
+        .with_tier_limit(UserTierRateLimit::new("free", 3, 60_000));
+
+        let r = trl.check("user1", "/api/v1/media", Some("free"), 0);
+        // tier: 3-1=2, global: 10-1=9 → min = 2
+        assert_eq!(r.min_remaining(), 2);
+    }
+
+    #[test]
+    fn tiered_limiter_reset_client() {
+        let mut trl = TieredRateLimiter::new(RateLimitPolicy {
+            requests_per_window: 2,
+            window_ms: 10_000,
+        });
+        trl.check("user1", "/api/v1/media", None, 0);
+        trl.check("user1", "/api/v1/media", None, 1);
+        assert!(!trl.check("user1", "/api/v1/media", None, 2).is_allowed());
+
+        trl.reset_client("user1");
+        assert!(trl.check("user1", "/api/v1/media", None, 3).is_allowed());
+    }
+
+    #[test]
+    fn tiered_limiter_separate_users_independent() {
+        let mut trl = TieredRateLimiter::new(RateLimitPolicy {
+            requests_per_window: 2,
+            window_ms: 10_000,
+        });
+        trl.check("user1", "/api/v1/media", None, 0);
+        trl.check("user1", "/api/v1/media", None, 1);
+        assert!(!trl.check("user1", "/api/v1/media", None, 2).is_allowed());
+        // user2 is independent
+        assert!(trl.check("user2", "/api/v1/media", None, 2).is_allowed());
+    }
+
+    #[test]
+    fn tiered_limiter_most_specific_endpoint_matched() {
+        let mut trl = TieredRateLimiter::new(RateLimitPolicy {
+            requests_per_window: 100,
+            window_ms: 60_000,
+        })
+        .with_endpoint_limit(EndpointRateLimit::new("/api/v1/media", 10, 60_000))
+        .with_endpoint_limit(EndpointRateLimit::new("/api/v1/media/upload", 2, 60_000));
+
+        // /api/v1/media/upload matches the more specific pattern
+        assert!(trl
+            .check("u1", "/api/v1/media/upload", None, 0)
+            .is_allowed());
+        assert!(trl
+            .check("u1", "/api/v1/media/upload", None, 1)
+            .is_allowed());
+        assert!(!trl
+            .check("u1", "/api/v1/media/upload", None, 2)
+            .is_allowed());
+    }
+
+    #[test]
+    fn tiered_limiter_count() {
+        let mut trl = TieredRateLimiter::new(RateLimitPolicy {
+            requests_per_window: 10,
+            window_ms: 10_000,
+        });
+        assert_eq!(trl.limiter_count(), 0);
+        trl.check("user1", "/api/v1/media", None, 0);
+        assert_eq!(trl.limiter_count(), 1); // global:user1
+        trl.check("user2", "/api/v1/media", None, 0);
+        assert_eq!(trl.limiter_count(), 2); // global:user1, global:user2
+    }
+
+    #[test]
+    fn tiered_limiter_endpoint_rate_limit_new() {
+        let erl = EndpointRateLimit::new("/api/v1/upload", 5, 30_000);
+        assert_eq!(erl.pattern, "/api/v1/upload");
+        assert_eq!(erl.requests_per_window, 5);
+        assert_eq!(erl.window_ms, 30_000);
+    }
+
+    #[test]
+    fn tiered_limiter_user_tier_rate_limit_new() {
+        let trl = UserTierRateLimit::new("enterprise", 1000, 60_000);
+        assert_eq!(trl.tier, "enterprise");
+        assert_eq!(trl.requests_per_window, 1000);
     }
 }

@@ -11,10 +11,11 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```
 //! use oximedia_edit::{Timeline, TimelineEditor, Clip, ClipType};
 //! use oximedia_core::Rational;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create a timeline
 //! let mut timeline = Timeline::new(
 //!     Rational::new(1, 1000),  // 1ms timebase
@@ -32,6 +33,8 @@
 //! let mut editor = TimelineEditor::new();
 //! timeline.set_playhead(2500); // Seek to 2.5 seconds
 //! editor.split_at_playhead(&mut timeline)?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Architecture
@@ -93,29 +96,48 @@ pub mod auto_edit;
 pub mod blade_tool;
 pub mod clip;
 pub mod clip_speed;
+pub mod collab_edit;
 pub mod color_grade_edit;
+pub mod color_label;
 pub mod edit;
 pub mod edit_context;
 pub mod edit_preset;
+pub mod edl;
 pub mod effect;
 pub mod error;
+pub mod export;
+pub mod frame_prefetch;
 pub mod fx_strip;
 pub mod group;
 pub mod group_edit;
 pub mod history;
+pub mod history_tree;
+pub mod incremental_render;
 pub mod insert_mode;
+pub mod interval_tree;
+pub mod magnetic_snap;
 pub mod marker;
 pub mod marker_edit;
+pub mod multi_export;
+pub mod multicam;
 pub mod multitrack;
 pub mod nested_sequence;
+pub mod parallel_render;
+pub mod pip;
+pub mod proxy;
 pub mod render;
+pub mod render_queue;
 pub mod ripple;
 pub mod selection;
 pub mod slip_slide;
+pub mod smart_trim;
 pub mod timeline;
+pub mod timeline_export;
+pub mod title_overlay;
 pub mod track_lock;
 pub mod transition;
 pub mod trim_mode;
+pub mod waveform;
 
 // Re-export commonly used items
 pub use clip::{Clip, ClipId, ClipRef, ClipSelection, ClipType, Clipboard};
@@ -129,9 +151,11 @@ pub use group::{
     ClipGroup, ClipLink, CompoundClip, CompoundClipManager, GroupManager, LinkManager, LinkType,
 };
 pub use marker::{InOutPoints, Marker, MarkerId, MarkerManager, MarkerType, Region, RegionManager};
+#[cfg(not(target_arch = "wasm32"))]
+pub use render::BackgroundRenderer;
 pub use render::{
-    BackgroundRenderer, ExportRenderer, ExportSettings, PreviewRenderer, RenderConfig, RenderFrame,
-    RenderQuality, TimelineRenderer,
+    ExportRenderer, ExportSettings, PreviewRenderer, RawFrameCache, RenderConfig, RenderFrame,
+    RenderQuality, TimelineRenderer, RAW_FRAME_CACHE_CAPACITY,
 };
 pub use timeline::{PlaybackState, Timeline, TimelineConfig, Track, TrackType};
 pub use transition::{

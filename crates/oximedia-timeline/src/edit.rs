@@ -95,6 +95,34 @@ pub enum EditOperation {
         /// Offset to apply.
         offset: Duration,
     },
+    /// Three-point edit: two source points + one timeline point (or vice-versa).
+    ///
+    /// Uses the timeline's in/out markers together with the clip's source
+    /// in/out to place the clip.  Exactly three of the four edit points must
+    /// be defined; the fourth is calculated automatically.
+    ThreePoint {
+        /// Target track.
+        track_id: TrackId,
+        /// Clip to insert.
+        clip: Clip,
+        /// Override for the timeline in-point (uses `Timeline::in_point` when `None`).
+        timeline_in_override: Option<Position>,
+    },
+    /// Four-point edit with fit-to-fill.
+    ///
+    /// Both source in/out AND timeline in/out are specified.  The clip
+    /// speed is adjusted so that the source range fills the timeline range
+    /// exactly (fit-to-fill).
+    FourPoint {
+        /// Target track.
+        track_id: TrackId,
+        /// Clip to insert.
+        clip: Clip,
+        /// Override for the timeline in-point (uses `Timeline::in_point` when `None`).
+        timeline_in_override: Option<Position>,
+        /// Override for the timeline out-point (uses `Timeline::out_point` when `None`).
+        timeline_out_override: Option<Position>,
+    },
 }
 
 impl Timeline {
@@ -394,13 +422,34 @@ impl Timeline {
 
     /// Three-point edit: Uses in/out points to determine clip placement.
     ///
+    /// Uses the timeline's `in_point` marker (or the `timeline_in_override`
+    /// if supplied) as the destination in-point and performs an insert edit
+    /// starting there.  The clip's source in/out points already encode the
+    /// source window, so only one timeline anchor is required.
+    ///
     /// # Errors
     ///
-    /// Returns error if insufficient points set.
+    /// Returns error if no timeline in-point is available and no override is
+    /// supplied.
     pub fn three_point_edit(&mut self, track_id: TrackId, clip: Clip) -> TimelineResult<()> {
-        // For three-point editing, we need source in/out and one timeline point,
-        // or source in and timeline in/out
-        let timeline_in = self.in_point.ok_or_else(|| {
+        self.three_point_edit_with_override(track_id, clip, None)
+    }
+
+    /// Three-point edit with an explicit timeline in-point override.
+    ///
+    /// When `timeline_in_override` is `Some`, it takes precedence over the
+    /// timeline's stored `in_point` marker.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if no timeline in-point is available.
+    pub fn three_point_edit_with_override(
+        &mut self,
+        track_id: TrackId,
+        clip: Clip,
+        timeline_in_override: Option<Position>,
+    ) -> TimelineResult<()> {
+        let timeline_in = timeline_in_override.or(self.in_point).ok_or_else(|| {
             TimelineError::Other("Timeline in point not set for three-point edit".to_string())
         })?;
 
@@ -409,26 +458,129 @@ impl Timeline {
 
     /// Four-point edit with fit-to-fill.
     ///
+    /// Both source in/out (embedded in `clip`) AND timeline in/out are
+    /// specified.  The clip's speed is adjusted so the source duration
+    /// exactly fills the timeline window (fit-to-fill).
+    ///
     /// # Errors
     ///
-    /// Returns error if insufficient points set.
-    pub fn four_point_edit(&mut self, track_id: TrackId, mut clip: Clip) -> TimelineResult<()> {
-        let timeline_in = self.in_point.ok_or_else(|| {
+    /// Returns error if insufficient points set or speed would be out of range.
+    pub fn four_point_edit(&mut self, track_id: TrackId, clip: Clip) -> TimelineResult<()> {
+        self.four_point_edit_with_overrides(track_id, clip, None, None)
+    }
+
+    /// Four-point edit with explicit timeline in/out overrides.
+    ///
+    /// When `timeline_in_override` / `timeline_out_override` are `Some` they
+    /// take precedence over the timeline's stored in/out markers.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if points are unavailable or speed would be invalid.
+    pub fn four_point_edit_with_overrides(
+        &mut self,
+        track_id: TrackId,
+        mut clip: Clip,
+        timeline_in_override: Option<Position>,
+        timeline_out_override: Option<Position>,
+    ) -> TimelineResult<()> {
+        let timeline_in = timeline_in_override.or(self.in_point).ok_or_else(|| {
             TimelineError::Other("Timeline in point not set for four-point edit".to_string())
         })?;
 
-        let timeline_out = self.out_point.ok_or_else(|| {
+        let timeline_out = timeline_out_override.or(self.out_point).ok_or_else(|| {
             TimelineError::Other("Timeline out point not set for four-point edit".to_string())
         })?;
+
+        if timeline_out.value() <= timeline_in.value() {
+            return Err(TimelineError::Other(
+                "Four-point edit: timeline out must be after timeline in".to_string(),
+            ));
+        }
 
         let timeline_duration = Duration::new(timeline_out.value() - timeline_in.value());
         let source_duration = clip.source_duration();
 
-        // Calculate speed to fit
-        let speed_factor = timeline_duration.value() as f64 / source_duration.value() as f64;
+        if source_duration.value() == 0 {
+            return Err(TimelineError::Other(
+                "Four-point edit: source clip has zero duration".to_string(),
+            ));
+        }
+
+        // Calculate speed to fit: speed = source / timeline_window so that
+        // timeline_duration() = source_duration / speed = timeline_window.
+        // speed < 1.0 means slow-down (source fills a longer timeline window),
+        // speed > 1.0 means speed-up (source fills a shorter window).
+        let speed_factor = source_duration.value() as f64 / timeline_duration.value() as f64;
         clip.set_speed(crate::types::Speed::new(speed_factor)?)?;
 
         self.overwrite_clip(track_id, clip, timeline_in)
+    }
+
+    /// Applies an [`EditOperation`] to this timeline.
+    ///
+    /// This is a convenience dispatcher that translates the enum variant into
+    /// the corresponding mutating method call.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as the underlying method called for each variant.
+    pub fn apply_operation(&mut self, op: EditOperation) -> TimelineResult<()> {
+        match op {
+            EditOperation::Insert {
+                track_id,
+                clip,
+                position,
+            } => self.insert_clip(track_id, clip, position),
+            EditOperation::Overwrite {
+                track_id,
+                clip,
+                position,
+            } => self.overwrite_clip(track_id, clip, position),
+            EditOperation::Delete { track_id, clip_id } => self.delete_clip(track_id, clip_id),
+            EditOperation::Lift { track_id, clip_id } => self.lift_clip(track_id, clip_id),
+            EditOperation::Split {
+                track_id,
+                clip_id,
+                position,
+            } => self.split_clip(track_id, clip_id, position).map(|_| ()),
+            EditOperation::Slip {
+                track_id,
+                clip_id,
+                offset,
+            } => self.slip_edit(track_id, clip_id, offset),
+            EditOperation::Slide {
+                track_id,
+                clip_id,
+                new_position,
+            } => self.slide_edit(track_id, clip_id, new_position),
+            EditOperation::Roll {
+                track_id,
+                clip_id,
+                offset,
+            } => self.roll_edit(track_id, clip_id, offset),
+            EditOperation::Ripple {
+                track_id,
+                clip_id,
+                offset,
+            } => self.ripple_edit(track_id, clip_id, offset),
+            EditOperation::ThreePoint {
+                track_id,
+                clip,
+                timeline_in_override,
+            } => self.three_point_edit_with_override(track_id, clip, timeline_in_override),
+            EditOperation::FourPoint {
+                track_id,
+                clip,
+                timeline_in_override,
+                timeline_out_override,
+            } => self.four_point_edit_with_overrides(
+                track_id,
+                clip,
+                timeline_in_override,
+                timeline_out_override,
+            ),
+        }
     }
 }
 
@@ -640,5 +792,145 @@ mod tests {
         assert_eq!(clip.timeline_in.value(), 50);
         assert_eq!(clip.source_in.value(), 0); // Source points unchanged
         assert_eq!(clip.source_out.value(), 100);
+    }
+
+    #[test]
+    fn test_three_point_edit_with_override() {
+        let mut timeline = create_test_timeline();
+        let track_id = timeline
+            .add_video_track("V1")
+            .expect("should succeed in test");
+
+        let clip = create_test_clip("ThreePoint", 0, 50);
+        timeline
+            .three_point_edit_with_override(track_id, clip, Some(Position::new(100)))
+            .expect("should succeed in test");
+
+        let track = timeline
+            .get_track(track_id)
+            .expect("should succeed in test");
+        assert_eq!(track.clips.len(), 1);
+        assert_eq!(track.clips[0].timeline_in.value(), 100);
+    }
+
+    #[test]
+    fn test_three_point_edit_uses_timeline_in_point() {
+        let mut timeline = create_test_timeline();
+        timeline.in_point = Some(Position::new(50));
+        let track_id = timeline
+            .add_video_track("V1")
+            .expect("should succeed in test");
+
+        let clip = create_test_clip("ThreePoint", 0, 30);
+        timeline
+            .three_point_edit(track_id, clip)
+            .expect("should succeed in test");
+
+        let track = timeline
+            .get_track(track_id)
+            .expect("should succeed in test");
+        assert_eq!(track.clips[0].timeline_in.value(), 50);
+    }
+
+    #[test]
+    fn test_three_point_edit_no_in_point_fails() {
+        let mut timeline = create_test_timeline();
+        // in_point is None by default
+        let track_id = timeline
+            .add_video_track("V1")
+            .expect("should succeed in test");
+        let clip = create_test_clip("X", 0, 50);
+        assert!(timeline.three_point_edit(track_id, clip).is_err());
+    }
+
+    #[test]
+    fn test_four_point_edit_with_overrides_fit_to_fill() {
+        let mut timeline = create_test_timeline();
+        let track_id = timeline
+            .add_video_track("V1")
+            .expect("should succeed in test");
+
+        // Source is 50 frames; timeline window is 100 frames → speed should be 0.5
+        let clip = create_test_clip("FourPoint", 0, 50);
+        timeline
+            .four_point_edit_with_overrides(
+                track_id,
+                clip,
+                Some(Position::new(0)),
+                Some(Position::new(100)),
+            )
+            .expect("should succeed in test");
+
+        let track = timeline
+            .get_track(track_id)
+            .expect("should succeed in test");
+        assert_eq!(track.clips.len(), 1);
+        let c = &track.clips[0];
+        assert_eq!(c.timeline_in.value(), 0);
+        // Speed is 0.5 → timeline_duration() = source_duration / 0.5 = 100
+        assert_eq!(c.timeline_duration().value(), 100);
+    }
+
+    #[test]
+    fn test_four_point_edit_invalid_range_fails() {
+        let mut timeline = create_test_timeline();
+        let track_id = timeline
+            .add_video_track("V1")
+            .expect("should succeed in test");
+        let clip = create_test_clip("FourPoint", 0, 50);
+        // Out before In — must fail
+        let result = timeline.four_point_edit_with_overrides(
+            track_id,
+            clip,
+            Some(Position::new(100)),
+            Some(Position::new(50)),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_apply_operation_three_point() {
+        let mut timeline = create_test_timeline();
+        let track_id = timeline
+            .add_video_track("V1")
+            .expect("should succeed in test");
+        let clip = create_test_clip("Op3P", 0, 40);
+        let op = EditOperation::ThreePoint {
+            track_id,
+            clip,
+            timeline_in_override: Some(Position::new(20)),
+        };
+        timeline
+            .apply_operation(op)
+            .expect("should succeed in test");
+
+        let track = timeline
+            .get_track(track_id)
+            .expect("should succeed in test");
+        assert_eq!(track.clips[0].timeline_in.value(), 20);
+    }
+
+    #[test]
+    fn test_apply_operation_four_point() {
+        let mut timeline = create_test_timeline();
+        let track_id = timeline
+            .add_video_track("V1")
+            .expect("should succeed in test");
+        let clip = create_test_clip("Op4P", 0, 60);
+        let op = EditOperation::FourPoint {
+            track_id,
+            clip,
+            timeline_in_override: Some(Position::new(0)),
+            timeline_out_override: Some(Position::new(120)),
+        };
+        timeline
+            .apply_operation(op)
+            .expect("should succeed in test");
+
+        let track = timeline
+            .get_track(track_id)
+            .expect("should succeed in test");
+        // 60 source frames stretched to 120 timeline frames → speed = 0.5
+        assert_eq!(track.clips[0].timeline_duration().value(), 120);
     }
 }

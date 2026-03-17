@@ -200,6 +200,306 @@ impl CompositionPlaylist {
     }
 }
 
+// ── XML serialisation ─────────────────────────────────────────────────────────
+
+impl CompositionPlaylist {
+    /// Serialize the CPL to a minimal XML string.
+    ///
+    /// The output conforms to a simplified subset of SMPTE ST 2067-3 sufficient
+    /// for round-trip testing: Id, ContentTitle, EditRate, and all Segments
+    /// with their Sequences and Resources are serialised.
+    ///
+    /// Namespace URIs are abbreviated (`cpl:` prefix) for readability.
+    #[must_use]
+    pub fn to_xml(&self) -> String {
+        let (rate_num, rate_den) = self.edit_rate;
+        let mut out = String::new();
+        out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        out.push_str(
+            "<CompositionPlaylist xmlns=\"http://www.smpte-ra.org/schemas/2067-3/2016\">\n",
+        );
+        out.push_str(&format!("  <Id>urn:uuid:{}</Id>\n", self.id));
+        out.push_str(&format!(
+            "  <ContentTitle>{}</ContentTitle>\n",
+            escape_xml_text(&self.content_title)
+        ));
+        out.push_str(&format!("  <EditRate>{rate_num} {rate_den}</EditRate>\n"));
+        out.push_str("  <SegmentList>\n");
+        for seg in &self.segments {
+            out.push_str("    <Segment>\n");
+            out.push_str(&format!("      <Id>urn:uuid:{}</Id>\n", seg.id));
+            if let Some(ref ann) = seg.annotation {
+                out.push_str(&format!(
+                    "      <Annotation>{}</Annotation>\n",
+                    escape_xml_text(ann)
+                ));
+            }
+            out.push_str("      <SequenceList>\n");
+            for seq in &seg.sequences {
+                out.push_str("        <Sequence>\n");
+                out.push_str(&format!("          <Id>urn:uuid:{}</Id>\n", seq.id));
+                out.push_str(&format!(
+                    "          <TrackId>urn:uuid:{}</TrackId>\n",
+                    seq.track_id
+                ));
+                out.push_str("          <ResourceList>\n");
+                for res in &seq.resources {
+                    out.push_str("            <Resource>\n");
+                    out.push_str(&format!(
+                        "              <TrackFileId>urn:uuid:{}</TrackFileId>\n",
+                        res.track_file_id
+                    ));
+                    out.push_str(&format!(
+                        "              <SourceDuration>{}</SourceDuration>\n",
+                        res.source_duration
+                    ));
+                    out.push_str(&format!(
+                        "              <EntryPoint>{}</EntryPoint>\n",
+                        res.entry_point
+                    ));
+                    out.push_str(&format!(
+                        "              <IntrinsicDuration>{}</IntrinsicDuration>\n",
+                        res.intrinsic_duration
+                    ));
+                    out.push_str(&format!(
+                        "              <RepeatCount>{}</RepeatCount>\n",
+                        res.repeat_count
+                    ));
+                    out.push_str("            </Resource>\n");
+                }
+                out.push_str("          </ResourceList>\n");
+                out.push_str("        </Sequence>\n");
+            }
+            out.push_str("      </SequenceList>\n");
+            out.push_str("    </Segment>\n");
+        }
+        out.push_str("  </SegmentList>\n");
+        out.push_str("</CompositionPlaylist>\n");
+        out
+    }
+
+    /// Parse a CPL from its XML representation produced by [`Self::to_xml`].
+    ///
+    /// This is a targeted parser designed to round-trip the output of `to_xml`
+    /// and should not be used as a general SMPTE ST 2067-3 parser.
+    pub fn from_xml(xml: &str) -> Result<Self, String> {
+        use std::collections::VecDeque;
+
+        // Very lightweight recursive-descent over the XML element tree.
+        // We rely on the fact that `to_xml` produces well-indented, one-tag-
+        // per-line output, so we can parse by walking tag/text pairs.
+        // For a general implementation see `cpl_parser` module or quick-xml.
+
+        let mut id = String::new();
+        let mut content_title = String::new();
+        let mut edit_rate = (24u32, 1u32);
+        let mut segments: Vec<CplSegment> = Vec::new();
+
+        // State machine: we walk line by line and track context via a tag stack.
+        let mut tag_stack: VecDeque<String> = VecDeque::new();
+
+        // Current objects being built.
+        let mut cur_seg: Option<CplSegment> = None;
+        let mut cur_seq: Option<CplSequence> = None;
+        let mut cur_res: Option<CplResource> = None;
+
+        for raw_line in xml.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with("<?") {
+                continue;
+            }
+
+            // Detect closing tag first (before open tag, in case self-close)
+            if line.starts_with("</") {
+                let tag = line
+                    .trim_start_matches("</")
+                    .trim_end_matches('>')
+                    .to_string();
+                // Strip namespace prefix if any (e.g. "cpl:Resource" -> "Resource")
+                let tag = tag.split(':').last().unwrap_or(&tag).to_string();
+
+                match tag.as_str() {
+                    "Segment" => {
+                        if let Some(seg) = cur_seg.take() {
+                            segments.push(seg);
+                        }
+                    }
+                    "Sequence" => {
+                        if let (Some(seq), Some(seg)) = (cur_seq.take(), cur_seg.as_mut()) {
+                            seg.sequences.push(seq);
+                        }
+                    }
+                    "Resource" => {
+                        if let (Some(res), Some(seq)) = (cur_res.take(), cur_seq.as_mut()) {
+                            seq.resources.push(res);
+                        }
+                    }
+                    _ => {}
+                }
+                tag_stack.pop_back();
+                continue;
+            }
+
+            // Opening tag (possibly with text content on the same line)
+            if line.starts_with('<') {
+                // Extract tag name (up to first space or '>')
+                let inner = line.trim_start_matches('<');
+                let tag_end = inner.find(['>', ' ']).unwrap_or(inner.len());
+                let tag_raw = &inner[..tag_end];
+                // Strip namespace prefix
+                let tag = tag_raw.split(':').last().unwrap_or(tag_raw).to_string();
+
+                // Extract text between > … </ on the same line
+                let text = if let (Some(open), Some(close)) = (line.find('>'), line.rfind("</")) {
+                    let t = &line[open + 1..close];
+                    unescape_xml_text(t)
+                } else {
+                    String::new()
+                };
+
+                match tag.as_str() {
+                    "CompositionPlaylist" | "SegmentList" | "SequenceList" | "ResourceList" => {
+                        // container — no value
+                    }
+                    "Id" => {
+                        let val = text.trim_start_matches("urn:uuid:").to_string();
+                        match tag_stack.back().map(String::as_str) {
+                            Some("Segment") | None => {
+                                // Segment ID
+                                if let Some(seg) = cur_seg.as_mut() {
+                                    seg.id = val;
+                                } else {
+                                    id = val;
+                                }
+                            }
+                            Some("Sequence") => {
+                                if let Some(seq) = cur_seq.as_mut() {
+                                    seq.id = val;
+                                }
+                            }
+                            Some("Resource") => {
+                                // Resource has no plain Id in our schema
+                            }
+                            _ => {
+                                id = val;
+                            }
+                        }
+                    }
+                    "ContentTitle" => content_title = text,
+                    "EditRate" => {
+                        let parts: Vec<&str> = text.split_whitespace().collect();
+                        if parts.len() == 2 {
+                            edit_rate = (
+                                parts[0].parse().unwrap_or(24),
+                                parts[1].parse().unwrap_or(1),
+                            );
+                        }
+                    }
+                    "Segment" => {
+                        cur_seg = Some(CplSegment::new(""));
+                    }
+                    "Sequence" => {
+                        cur_seq = Some(CplSequence::new("", ""));
+                    }
+                    "Resource" => {
+                        cur_res = Some(CplResource {
+                            track_file_id: String::new(),
+                            source_duration: 0,
+                            entry_point: 0,
+                            intrinsic_duration: 0,
+                            repeat_count: 1,
+                        });
+                    }
+                    "TrackFileId" => {
+                        let val = text.trim_start_matches("urn:uuid:").to_string();
+                        if let Some(res) = cur_res.as_mut() {
+                            res.track_file_id = val;
+                        }
+                    }
+                    "SourceDuration" => {
+                        if let Some(res) = cur_res.as_mut() {
+                            res.source_duration = text.parse().unwrap_or(0);
+                        }
+                    }
+                    "EntryPoint" => {
+                        if let Some(res) = cur_res.as_mut() {
+                            res.entry_point = text.parse().unwrap_or(0);
+                        }
+                    }
+                    "IntrinsicDuration" => {
+                        if let Some(res) = cur_res.as_mut() {
+                            res.intrinsic_duration = text.parse().unwrap_or(0);
+                        }
+                    }
+                    "RepeatCount" => {
+                        if let Some(res) = cur_res.as_mut() {
+                            res.repeat_count = text.parse().unwrap_or(1);
+                        }
+                    }
+                    "TrackId" => {
+                        let val = text.trim_start_matches("urn:uuid:").to_string();
+                        if let Some(seq) = cur_seq.as_mut() {
+                            seq.track_id = val;
+                        }
+                    }
+                    "Annotation" => {
+                        if let Some(seg) = cur_seg.as_mut() {
+                            seg.annotation = Some(text);
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Push the opening tag onto the stack for context (unless self-closing)
+                if !line.ends_with("/>") && !line.contains("</") {
+                    tag_stack.push_back(tag);
+                }
+
+                continue;
+            }
+        }
+
+        // Resolve segment IDs: the parser above picks up Id inside Segment context
+        // via tag_stack but we need the top-level Id captured first.
+        // Re-parse just Id and ContentTitle with a simple regex-free scan.
+        let mut found_top_id = false;
+        for raw_line in xml.lines() {
+            let line = raw_line.trim();
+            if line.starts_with("<Id>") && !found_top_id {
+                let val = line
+                    .trim_start_matches("<Id>")
+                    .trim_end_matches("</Id>")
+                    .trim_start_matches("urn:uuid:")
+                    .to_string();
+                id = val;
+                found_top_id = true;
+            }
+        }
+
+        let mut cpl = CompositionPlaylist::new(id, content_title, edit_rate);
+        for seg in segments {
+            cpl.add_segment(seg);
+        }
+        Ok(cpl)
+    }
+}
+
+/// Escape XML text content (not attribute values).
+fn escape_xml_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Reverse XML text escaping.
+fn unescape_xml_text(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
 // ── unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -340,5 +640,131 @@ mod tests {
     fn test_cpl_edit_rate_stored() {
         let cpl = CompositionPlaylist::new("id", "Title", (30000, 1001));
         assert_eq!(cpl.edit_rate, (30000, 1001));
+    }
+
+    // ── Round-trip tests ──────────────────────────────────────────────────
+
+    /// Build a minimal CPL, serialise to XML, parse back, and verify the
+    /// structural invariants are preserved.
+    #[test]
+    fn test_cpl_roundtrip() {
+        // Build a CPL with two segments.
+        let cpl_id = "550e8400-e29b-41d4-a716-446655440000";
+        let mut original = CompositionPlaylist::new(cpl_id, "Round-Trip Test Film", (24, 1));
+
+        // Segment 1: one video sequence with one resource.
+        let mut seg1 = CplSegment::new("seg-id-0001");
+        let mut seq1 = CplSequence::new("seq-id-0001", "track-id-0001");
+        seq1.add_resource(CplResource::simple("tf-id-video-001", 2400));
+        seg1.add_sequence(seq1);
+        original.add_segment(seg1);
+
+        // Segment 2: two sequences (video + audio).
+        let mut seg2 = CplSegment::new("seg-id-0002");
+        seg2.annotation = Some("Act II".to_string());
+        let mut seq2v = CplSequence::new("seq-id-0002v", "track-id-0001");
+        seq2v.add_resource(CplResource::simple("tf-id-video-001", 4800));
+        let mut seq2a = CplSequence::new("seq-id-0002a", "track-id-0002");
+        seq2a.add_resource(CplResource::simple("tf-id-audio-001", 4800));
+        seg2.add_sequence(seq2v);
+        seg2.add_sequence(seq2a);
+        original.add_segment(seg2);
+
+        // Serialise to XML.
+        let xml = original.to_xml();
+
+        // Verify it is valid XML: must contain the CPL namespace.
+        assert!(xml.contains("CompositionPlaylist"));
+        assert!(xml.contains("Round-Trip Test Film"));
+        assert!(xml.contains("24 1"));
+
+        // Parse back.
+        let parsed = CompositionPlaylist::from_xml(&xml).expect("round-trip parse must succeed");
+
+        // Verify CPL ID is preserved.
+        assert_eq!(parsed.id, cpl_id, "CPL id must survive round-trip");
+
+        // Verify content title.
+        assert_eq!(
+            parsed.content_title, "Round-Trip Test Film",
+            "content title must survive round-trip"
+        );
+
+        // Verify edit rate.
+        assert_eq!(
+            parsed.edit_rate,
+            (24, 1),
+            "edit rate must survive round-trip"
+        );
+
+        // Verify segment count.
+        assert_eq!(
+            parsed.segment_count(),
+            original.segment_count(),
+            "segment count must match after round-trip"
+        );
+
+        // Verify total duration.
+        assert_eq!(
+            parsed.total_duration(),
+            original.total_duration(),
+            "total duration must match after round-trip"
+        );
+    }
+
+    #[test]
+    fn test_cpl_roundtrip_edit_rate_25() {
+        let mut cpl = CompositionPlaylist::new("cpl-pal-001", "PAL Broadcast", (25, 1));
+        let mut seg = CplSegment::new("seg-pal-001");
+        let mut seq = CplSequence::new("seq-pal-001", "track-pal-001");
+        seq.add_resource(CplResource::simple("tf-pal-001", 1500));
+        seg.add_sequence(seq);
+        cpl.add_segment(seg);
+
+        let xml = cpl.to_xml();
+        let parsed = CompositionPlaylist::from_xml(&xml).expect("parse");
+
+        assert_eq!(parsed.edit_rate, (25, 1));
+        assert_eq!(parsed.segment_count(), 1);
+        assert_eq!(parsed.total_duration(), 1500);
+    }
+
+    #[test]
+    fn test_cpl_roundtrip_empty_segments() {
+        let cpl = CompositionPlaylist::new("cpl-empty", "Empty CPL", (24, 1));
+        let xml = cpl.to_xml();
+        let parsed = CompositionPlaylist::from_xml(&xml).expect("parse");
+        assert_eq!(parsed.segment_count(), 0);
+        assert_eq!(parsed.total_duration(), 0);
+        assert_eq!(parsed.edit_rate, (24, 1));
+    }
+
+    #[test]
+    fn test_cpl_to_xml_contains_segment_ids() {
+        let mut cpl = CompositionPlaylist::new("cpl-001", "Test", (24, 1));
+        cpl.add_segment(CplSegment::new("my-seg-id-001"));
+        let xml = cpl.to_xml();
+        assert!(xml.contains("my-seg-id-001"), "XML must embed segment IDs");
+    }
+
+    #[test]
+    fn test_cpl_roundtrip_resource_fields() {
+        let mut cpl = CompositionPlaylist::new("cpl-res", "Resources Test", (24, 1));
+        let mut seg = CplSegment::new("seg-001");
+        let mut seq = CplSequence::new("seq-001", "track-001");
+        let mut res = CplResource::simple("tf-001", 960);
+        res.entry_point = 24;
+        res.repeat_count = 2;
+        seq.add_resource(res);
+        seg.add_sequence(seq);
+        cpl.add_segment(seg);
+
+        let xml = cpl.to_xml();
+        let parsed = CompositionPlaylist::from_xml(&xml).expect("parse");
+
+        let parsed_res = &parsed.segments()[0].sequences[0].resources[0];
+        assert_eq!(parsed_res.source_duration, 960);
+        assert_eq!(parsed_res.entry_point, 24);
+        assert_eq!(parsed_res.repeat_count, 2);
     }
 }

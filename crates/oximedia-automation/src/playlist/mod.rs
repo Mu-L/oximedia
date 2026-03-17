@@ -3,3 +3,4 @@
 pub mod event;
 pub mod executor;
 pub mod preroll;
+pub mod scte35;

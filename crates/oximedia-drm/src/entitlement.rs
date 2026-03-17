@@ -235,9 +235,9 @@ mod tests {
             "u1",
             "a1",
             EntitlementType::Rental,
-            Duration::from_secs(3600),
+            Duration::from_hours(1),
         );
-        let soon = SystemTime::now() + Duration::from_secs(60);
+        let soon = SystemTime::now() + Duration::from_mins(1);
         assert!(e.is_valid_at(soon));
     }
 

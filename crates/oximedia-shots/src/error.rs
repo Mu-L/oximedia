@@ -59,6 +59,14 @@ pub enum ShotError {
     /// Serialization error.
     #[error("Serialization error: {0}")]
     SerializationError(String),
+
+    /// Invalid metadata value or key.
+    #[error("Invalid metadata: {0}")]
+    InvalidMetadata(String),
+
+    /// Item not found.
+    #[error("Not found: {0}")]
+    NotFound(String),
 }
 
 impl From<oximedia_cv::error::CvError> for ShotError {

@@ -2,6 +2,7 @@
 name = "oximedia-multicam"
 description = "Multi-camera editing and synchronization tools"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -20,9 +21,9 @@ oximedia-align = { workspace = true }
 oximedia-analysis = { workspace = true }
 oximedia-cv = { workspace = true }
 oximedia-image = { workspace = true }
+oxifft = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 rayon = { workspace = true }
-ndarray = { workspace = true }
 
 [dev-dependencies]

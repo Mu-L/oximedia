@@ -39,7 +39,9 @@ mod util;
 pub mod vorbis;
 pub mod writer;
 
-pub use editor::{MetadataEditor, MetadataFormat};
+#[cfg(not(target_arch = "wasm32"))]
+pub use editor::MetadataEditor;
+pub use editor::{BatchMetadataEditor, BatchTagOperation, MetadataFormat, MetadataOp, TagDiff};
 pub use reader::MetadataReader;
 pub use tags::{StandardTag, TagMap, TagValue};
 pub use writer::MetadataWriter;

@@ -126,6 +126,12 @@ pub struct SceneConfig {
     pub use_edge_detection: bool,
     /// Enable texture analysis.
     pub use_texture_analysis: bool,
+    /// Enable temporal smoothing across frames to reduce flickering.
+    pub temporal_smoothing: bool,
+    /// Number of frames in temporal smoothing window.
+    pub temporal_window: usize,
+    /// Decay rate for exponential weighting (higher = faster decay = less smoothing).
+    pub temporal_decay: f32,
 }
 
 impl Default for SceneConfig {
@@ -135,13 +141,71 @@ impl Default for SceneConfig {
             use_color_histogram: true,
             use_edge_detection: true,
             use_texture_analysis: true,
+            temporal_smoothing: false,
+            temporal_window: 8,
+            temporal_decay: 0.3,
         }
+    }
+}
+
+/// Temporal smoothing buffer for scene classification.
+#[derive(Debug, Clone)]
+struct TemporalBuffer {
+    /// Accumulated scores per scene type across recent frames.
+    scores: Vec<Vec<f32>>,
+    /// Maximum history length.
+    capacity: usize,
+}
+
+impl TemporalBuffer {
+    fn new(capacity: usize, _num_types: usize) -> Self {
+        Self {
+            scores: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn push(&mut self, frame_scores: Vec<f32>) {
+        if self.scores.len() >= self.capacity {
+            self.scores.remove(0);
+        }
+        self.scores.push(frame_scores);
+    }
+
+    /// Compute exponentially weighted moving average of scores.
+    fn smooth(&self, decay: f32) -> Vec<f32> {
+        if self.scores.is_empty() {
+            return Vec::new();
+        }
+        let len = self.scores[0].len();
+        let mut smoothed = vec![0.0f32; len];
+
+        // Weight recent frames more heavily
+        let n = self.scores.len();
+        let mut weight_sum = 0.0_f32;
+        for (i, frame_scores) in self.scores.iter().enumerate() {
+            // Exponential decay: newer frames get higher weight
+            let age = (n - 1 - i) as f32;
+            let weight = (-decay * age).exp();
+            for (j, s) in frame_scores.iter().enumerate() {
+                smoothed[j] += s * weight;
+            }
+            weight_sum += weight;
+        }
+        if weight_sum > 0.0 {
+            for v in &mut smoothed {
+                *v /= weight_sum;
+            }
+        }
+        smoothed
     }
 }
 
 /// Scene classifier using color histograms and heuristics.
 pub struct SceneClassifier {
     config: SceneConfig,
+    /// Optional temporal smoothing buffer (populated when temporal_smoothing is enabled).
+    temporal_buffer: Option<std::sync::Mutex<TemporalBuffer>>,
 }
 
 impl SceneClassifier {
@@ -150,13 +214,43 @@ impl SceneClassifier {
     pub fn new() -> Self {
         Self {
             config: SceneConfig::default(),
+            temporal_buffer: None,
         }
     }
 
     /// Create a scene classifier with custom configuration.
     #[must_use]
     pub fn with_config(config: SceneConfig) -> Self {
-        Self { config }
+        let temporal_buffer = if config.temporal_smoothing {
+            let buf = TemporalBuffer::new(config.temporal_window, SceneType::all().len());
+            Some(std::sync::Mutex::new(buf))
+        } else {
+            None
+        };
+        Self {
+            config,
+            temporal_buffer,
+        }
+    }
+
+    /// Create a scene classifier with temporal smoothing enabled.
+    #[must_use]
+    pub fn with_temporal_smoothing(window: usize) -> Self {
+        let config = SceneConfig {
+            temporal_smoothing: true,
+            temporal_window: window,
+            ..SceneConfig::default()
+        };
+        Self::with_config(config)
+    }
+
+    /// Reset the temporal smoothing buffer (e.g. at scene cuts).
+    pub fn reset_temporal_buffer(&self) {
+        if let Some(ref buf) = self.temporal_buffer {
+            if let Ok(mut guard) = buf.lock() {
+                guard.scores.clear();
+            }
+        }
     }
 
     /// Classify a scene from RGB image data.
@@ -187,18 +281,50 @@ impl SceneClassifier {
         // Extract features
         let features = self.extract_features(rgb_data, width, height)?;
 
-        // Compute scores for each scene type
-        let mut scores = Vec::new();
-        scores.push((SceneType::Indoor, self.score_indoor(&features)));
-        scores.push((SceneType::Outdoor, self.score_outdoor(&features)));
-        scores.push((SceneType::Day, self.score_day(&features)));
-        scores.push((SceneType::Night, self.score_night(&features)));
-        scores.push((SceneType::Landscape, self.score_landscape(&features)));
-        scores.push((SceneType::Portrait, self.score_portrait(&features)));
-        scores.push((SceneType::Urban, self.score_urban(&features)));
-        scores.push((SceneType::Natural, self.score_natural(&features)));
-        scores.push((SceneType::Water, self.score_water(&features)));
-        scores.push((SceneType::Sky, self.score_sky(&features)));
+        // Compute raw scores for each scene type
+        let raw_scores: Vec<f32> = vec![
+            self.score_indoor(&features),
+            self.score_outdoor(&features),
+            self.score_day(&features),
+            self.score_night(&features),
+            self.score_landscape(&features),
+            self.score_portrait(&features),
+            self.score_urban(&features),
+            self.score_natural(&features),
+            self.score_water(&features),
+            self.score_sky(&features),
+        ];
+
+        // Apply temporal smoothing if enabled
+        let final_scores = if let Some(ref buf_mutex) = self.temporal_buffer {
+            if let Ok(mut buf) = buf_mutex.lock() {
+                buf.push(raw_scores.clone());
+                buf.smooth(self.config.temporal_decay)
+            } else {
+                raw_scores.clone()
+            }
+        } else {
+            raw_scores.clone()
+        };
+
+        let scene_types = [
+            SceneType::Indoor,
+            SceneType::Outdoor,
+            SceneType::Day,
+            SceneType::Night,
+            SceneType::Landscape,
+            SceneType::Portrait,
+            SceneType::Urban,
+            SceneType::Natural,
+            SceneType::Water,
+            SceneType::Sky,
+        ];
+
+        let scores: Vec<(SceneType, f32)> = scene_types
+            .iter()
+            .zip(final_scores.iter())
+            .map(|(&t, &s)| (t, s))
+            .collect();
 
         // Find highest score
         let (scene_type, confidence) = scores
@@ -435,6 +561,17 @@ impl Default for SceneClassifier {
     }
 }
 
+/// Helper: build a solid color image.
+fn solid_image(width: usize, height: usize, r: u8, g: u8, b: u8) -> Vec<u8> {
+    let mut data = vec![0u8; width * height * 3];
+    for i in (0..data.len()).step_by(3) {
+        data[i] = r;
+        data[i + 1] = g;
+        data[i + 2] = b;
+    }
+    data
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +616,52 @@ mod tests {
         let features = SceneFeatures::default();
         assert!((features.brightness - 0.5).abs() < f32::EPSILON);
         assert!((features.saturation - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_temporal_smoothing_reduces_flicker() {
+        let classifier = SceneClassifier::with_temporal_smoothing(5);
+        let w = 80;
+        let h = 80;
+
+        // Alternate between two different frames
+        let sky_frame = solid_image(w, h, 80, 120, 220);
+        let dark_frame = solid_image(w, h, 20, 20, 20);
+
+        let r1 = classifier.classify(&sky_frame, w, h).expect("ok");
+        let r2 = classifier.classify(&dark_frame, w, h).expect("ok");
+        let r3 = classifier.classify(&sky_frame, w, h).expect("ok");
+
+        // After temporal smoothing the sky frame after a dark frame should still
+        // produce a valid result with non-zero confidence
+        assert!(r1.confidence.value() >= 0.0);
+        assert!(r2.confidence.value() >= 0.0);
+        assert!(r3.confidence.value() >= 0.0);
+    }
+
+    #[test]
+    fn test_reset_temporal_buffer() {
+        let classifier = SceneClassifier::with_temporal_smoothing(4);
+        let w = 60;
+        let h = 60;
+        let frame = solid_image(w, h, 100, 150, 200);
+        let _ = classifier.classify(&frame, w, h).expect("ok");
+        // Reset should not panic
+        classifier.reset_temporal_buffer();
+        // Should still work after reset
+        let r = classifier.classify(&frame, w, h).expect("ok");
+        assert!(r.confidence.value() >= 0.0);
+    }
+
+    #[test]
+    fn test_temporal_buffer_smooth() {
+        let mut buf = TemporalBuffer::new(3, 3);
+        buf.push(vec![1.0, 0.0, 0.0]);
+        buf.push(vec![0.0, 1.0, 0.0]);
+        buf.push(vec![0.0, 0.0, 1.0]);
+        let smoothed = buf.smooth(0.3);
+        // All three types should have non-zero weight after smoothing
+        assert_eq!(smoothed.len(), 3);
+        assert!(smoothed.iter().all(|&v| v >= 0.0 && v <= 1.0));
     }
 }

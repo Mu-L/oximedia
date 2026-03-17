@@ -146,4 +146,43 @@ mod tests {
         let (_, ts) = srt_timestamp("00:01:30,500").expect("timestamp parsing should succeed");
         assert_eq!(ts.as_hmsm(), (0, 1, 30, 500));
     }
+
+    /// Round-trip test: write an SRT track then parse it back and verify the
+    /// key fields are preserved.
+    #[test]
+    fn test_srt_roundtrip() {
+        let mut original = CaptionTrack::new(Language::english());
+        original
+            .add_caption(Caption::new(
+                Timestamp::from_hmsm(0, 0, 1, 0),
+                Timestamp::from_hmsm(0, 0, 3, 500),
+                "Hello, world!".to_string(),
+            ))
+            .expect("add_caption should succeed");
+        original
+            .add_caption(Caption::new(
+                Timestamp::from_hmsm(0, 0, 5, 250),
+                Timestamp::from_hmsm(0, 0, 8, 0),
+                "Second caption line".to_string(),
+            ))
+            .expect("add_caption should succeed");
+
+        // Serialize to SRT bytes
+        let bytes = SrtWriter.write(&original).expect("write should succeed");
+
+        // Deserialize back to a track
+        let parsed = SrtParser.parse(&bytes).expect("parse should succeed");
+
+        assert_eq!(
+            parsed.captions.len(),
+            original.captions.len(),
+            "caption count must match after round-trip"
+        );
+
+        for (orig, rt) in original.captions.iter().zip(parsed.captions.iter()) {
+            assert_eq!(orig.start, rt.start, "start timestamp mismatch");
+            assert_eq!(orig.end, rt.end, "end timestamp mismatch");
+            assert_eq!(orig.text, rt.text, "text content mismatch");
+        }
+    }
 }

@@ -11,6 +11,7 @@ use crate::archivepro_cmd;
 use crate::audio_cmd;
 use crate::audiopost_cmd;
 use crate::auto_cmd;
+use crate::batch_cmd;
 use crate::calibrate_cmd;
 use crate::clips_cmd;
 use crate::cloud_cmd;
@@ -28,12 +29,14 @@ use crate::gaming_cmd;
 use crate::graphics_cmd;
 use crate::image_cmd;
 use crate::imf_cmd;
+use crate::loudness_cmd;
 use crate::lut_cmd;
 use crate::mam_cmd;
 use crate::mir_cmd;
 use crate::mixer_cmd;
 use crate::multicam_cmd;
 use crate::ndi_cmd;
+use crate::normalize_cmd;
 use crate::optimize_cmd;
 use crate::playlist_cmd;
 use crate::playout_cmd;
@@ -41,6 +44,7 @@ use crate::plugin_cmd;
 use crate::profiler_cmd;
 use crate::proxy_cmd;
 use crate::qc_cmd;
+use crate::quality_cmd;
 use crate::recommend_cmd;
 use crate::renderfarm_cmd;
 use crate::repair_cmd;
@@ -87,10 +91,25 @@ pub(crate) enum Commands {
         /// Quick quality snapshot (no-reference metrics)
         #[arg(long)]
         quality_snapshot: bool,
+
+        /// Output format: text, json, csv
+        #[arg(long, default_value = "text")]
+        format: String,
+
+        /// List chapter information
+        #[arg(long)]
+        chapters: bool,
+
+        /// Dump all metadata key/value pairs
+        #[arg(long)]
+        metadata: bool,
     },
 
     /// Show supported formats and codecs
     Info,
+
+    /// Show OxiMedia version, build info, and feature set
+    Version,
 
     /// Transcode media file
     #[command(alias = "convert")]
@@ -1009,6 +1028,31 @@ pub(crate) enum Commands {
     Auto {
         #[command(subcommand)]
         command: auto_cmd::AutoCommand,
+    },
+
+    /// Audio loudness: analyze, check, standards, info
+    Loudness {
+        #[command(subcommand)]
+        command: loudness_cmd::LoudnessCommand,
+    },
+
+    /// Video/image quality assessment: compare, analyze, list, explain
+    Quality {
+        #[command(subcommand)]
+        command: quality_cmd::QualityCommand,
+    },
+
+    /// Audio loudness normalization: analyze, process, check, targets
+    Normalize {
+        #[command(subcommand)]
+        command: normalize_cmd::NormalizeCommand,
+    },
+
+    /// Batch engine: submit, status, list, cancel, report (SQLite-backed)
+    #[command(name = "batch-engine")]
+    BatchEngine {
+        #[command(subcommand)]
+        command: batch_cmd::BatchEngineCommand,
     },
 }
 

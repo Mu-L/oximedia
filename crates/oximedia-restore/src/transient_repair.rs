@@ -82,10 +82,8 @@ impl TransientRepairer {
     #[allow(clippy::cast_precision_loss)]
     pub fn new(config: TransientRepairConfig, sample_rate: u32) -> Self {
         let sr = sample_rate as f64;
-        let attack_coeff =
-            ((-1.0_f64) / (config.attack_ms as f64 * 0.001 * sr)).exp() as f32;
-        let release_coeff =
-            ((-1.0_f64) / (config.release_ms as f64 * 0.001 * sr)).exp() as f32;
+        let attack_coeff = ((-1.0_f64) / (config.attack_ms as f64 * 0.001 * sr)).exp() as f32;
+        let release_coeff = ((-1.0_f64) / (config.release_ms as f64 * 0.001 * sr)).exp() as f32;
         Self {
             config,
             attack_coeff,
@@ -128,11 +126,8 @@ impl TransientRepairer {
                 .map(|v| v * v)
                 .sum::<f32>()
                 / win as f32;
-            let cur_energy: f32 = envelope[i..i + win]
-                .iter()
-                .map(|v| v * v)
-                .sum::<f32>()
-                / win as f32;
+            let cur_energy: f32 =
+                envelope[i..i + win].iter().map(|v| v * v).sum::<f32>() / win as f32;
 
             let pre_rms = pre_energy.sqrt();
             let cur_rms = cur_energy.sqrt();
@@ -213,7 +208,11 @@ impl TransientRepairer {
             return;
         }
         let val_before = output[start.saturating_sub(1)];
-        let val_after = if end < output.len() { output[end] } else { val_before };
+        let val_after = if end < output.len() {
+            output[end]
+        } else {
+            val_before
+        };
         let len = end - start;
         for i in 0..len {
             #[allow(clippy::cast_precision_loss)]
@@ -260,10 +259,8 @@ impl TransientRepairer {
     #[allow(clippy::cast_precision_loss)]
     pub fn set_config(&mut self, config: TransientRepairConfig, sample_rate: u32) {
         let sr = sample_rate as f64;
-        self.attack_coeff =
-            ((-1.0_f64) / (config.attack_ms as f64 * 0.001 * sr)).exp() as f32;
-        self.release_coeff =
-            ((-1.0_f64) / (config.release_ms as f64 * 0.001 * sr)).exp() as f32;
+        self.attack_coeff = ((-1.0_f64) / (config.attack_ms as f64 * 0.001 * sr)).exp() as f32;
+        self.release_coeff = ((-1.0_f64) / (config.release_ms as f64 * 0.001 * sr)).exp() as f32;
         self.config = config;
     }
 }

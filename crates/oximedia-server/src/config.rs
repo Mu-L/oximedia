@@ -174,7 +174,7 @@ impl Config {
 
     /// Generates a random secret key.
     fn generate_secret() -> String {
-        use rand::RngCore;
+        use rand::Rng;
         let mut key = [0u8; 64];
         rand::rng().fill_bytes(&mut key);
         hex::encode(key)

@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_playback_controller_play_and_advance() {
-        let mut ctrl = PlaybackController::new(Duration::from_secs(60));
+        let mut ctrl = PlaybackController::new(Duration::from_mins(1));
         ctrl.play();
         assert_eq!(ctrl.state(), PlaybackState::Playing);
         ctrl.advance(Duration::from_secs(10));
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_playback_controller_pause() {
-        let mut ctrl = PlaybackController::new(Duration::from_secs(60));
+        let mut ctrl = PlaybackController::new(Duration::from_mins(1));
         ctrl.play();
         ctrl.pause();
         ctrl.advance(Duration::from_secs(5));
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn test_playback_controller_stop_resets() {
-        let mut ctrl = PlaybackController::new(Duration::from_secs(60));
+        let mut ctrl = PlaybackController::new(Duration::from_mins(1));
         ctrl.play();
         ctrl.advance(Duration::from_secs(20));
         ctrl.stop();
@@ -410,21 +410,21 @@ mod tests {
 
     #[test]
     fn test_playback_controller_seek() {
-        let mut ctrl = PlaybackController::new(Duration::from_secs(60));
+        let mut ctrl = PlaybackController::new(Duration::from_mins(1));
         ctrl.seek(Duration::from_secs(30));
         assert_eq!(ctrl.position(), Duration::from_secs(30));
     }
 
     #[test]
     fn test_playback_controller_seek_clamps_to_end() {
-        let mut ctrl = PlaybackController::new(Duration::from_secs(60));
+        let mut ctrl = PlaybackController::new(Duration::from_mins(1));
         ctrl.seek(Duration::from_secs(100));
-        assert_eq!(ctrl.position(), Duration::from_secs(60));
+        assert_eq!(ctrl.position(), Duration::from_mins(1));
     }
 
     #[test]
     fn test_playback_controller_fast_forward() {
-        let mut ctrl = PlaybackController::new(Duration::from_secs(60));
+        let mut ctrl = PlaybackController::new(Duration::from_mins(1));
         ctrl.fast_forward(2.0);
         ctrl.advance(Duration::from_secs(5));
         // 5s * 2x speed = 10s
@@ -433,7 +433,7 @@ mod tests {
 
     #[test]
     fn test_playback_controller_rewind() {
-        let mut ctrl = PlaybackController::new(Duration::from_secs(60));
+        let mut ctrl = PlaybackController::new(Duration::from_mins(1));
         ctrl.seek(Duration::from_secs(30));
         ctrl.rewind(2.0);
         ctrl.advance(Duration::from_secs(5));
@@ -467,9 +467,9 @@ mod tests {
             min_gap: Duration::from_secs(30),
         });
         // Kill (0.7) should trigger a highlight
-        detector.record_event(Duration::from_secs(60), EventCategory::Kill, "epic kill");
+        detector.record_event(Duration::from_mins(1), EventCategory::Kill, "epic kill");
         // Death (0.3) should not trigger a highlight
-        detector.record_event(Duration::from_secs(120), EventCategory::Death, "death");
+        detector.record_event(Duration::from_mins(2), EventCategory::Death, "death");
         let clips = detector.detect_highlights();
         assert_eq!(clips.len(), 1);
         assert_eq!(clips[0].trigger_event.category, EventCategory::Kill);

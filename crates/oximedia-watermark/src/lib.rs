@@ -64,6 +64,8 @@
 
 pub mod attacks;
 pub mod audio_watermark;
+/// Bark scale psychoacoustic masking with critical band analysis.
+pub mod bark_masking;
 /// Batch watermark embedding for processing multiple audio segments.
 pub mod batch_embed;
 pub mod bit_packing;
@@ -76,6 +78,8 @@ pub mod error;
 pub mod forensic;
 pub mod forensic_watermark;
 pub mod fragile;
+/// Gold code sequence generator for spread spectrum watermarking.
+pub mod gold_code;
 /// Invisible watermark embedding using frequency-domain manipulation.
 pub mod invisible_wm;
 /// Cryptographic key scheduling and rotation for watermark keys.
@@ -84,6 +88,8 @@ pub mod lsb;
 /// Unified media watermarking coordinating audio and video watermark pipelines.
 pub mod media_watermark;
 pub mod metrics;
+/// Multi-channel watermarking (stereo, 5.1, 7.1) with multiple embedding strategies.
+pub mod multichannel;
 pub mod patchwork;
 pub mod payload;
 pub mod payload_encoder;
@@ -95,10 +101,14 @@ pub mod qim;
 pub mod qr_watermark;
 pub mod robust;
 pub mod robustness;
+/// Comprehensive robustness testing suite for watermark survival analysis.
+pub mod robustness_suite;
 pub mod spatial_watermark;
 pub mod spread_spectrum;
 pub mod ss_audio_wm;
 pub mod steganography;
+/// Frame-level video watermark embedding and detection.
+pub mod video_watermark;
 pub mod visible;
 pub mod visible_watermark;
 pub mod watermark_database;
@@ -110,9 +120,16 @@ pub mod wm_strength;
 
 // Re-exports
 pub use attacks::RobustnessTest;
+pub use bark_masking::BarkMaskingModel;
 pub use detector::{BlindDetector, DetectionResult, NonBlindDetector};
 pub use error::{WatermarkError, WatermarkResult};
+pub use gold_code::{generate_gold_sequence, GoldCodeGenerator};
 pub use metrics::{calculate_metrics, QualityMetrics};
+pub use multichannel::{ChannelLayout, EmbedStrategy, MultiChannelDetector, MultiChannelEmbedder};
+pub use robustness_suite::{RobustnessReport, RobustnessSuite};
+pub use video_watermark::{
+    VideoFrame, VideoWatermarkConfig, VideoWatermarkDetector, VideoWatermarkEmbedder,
+};
 
 /// Watermarking algorithm type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

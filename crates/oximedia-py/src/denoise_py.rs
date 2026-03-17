@@ -157,6 +157,7 @@ impl PyDenoiseConfig {
             temporal_window: self.temporal_window as usize,
             preserve_edges: self.preserve_edges,
             preserve_grain: self.preserve_grain,
+            ..Default::default()
         };
         config
             .validate()
@@ -185,8 +186,10 @@ impl PyDenoiser {
     #[new]
     fn new(config: &PyDenoiseConfig) -> PyResult<Self> {
         let internal = config.to_internal()?;
+        let denoiser = Denoiser::new(internal)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))?;
         Ok(Self {
-            inner: Denoiser::new(internal),
+            inner: denoiser,
             config_snapshot: config.clone(),
         })
     }
@@ -325,6 +328,7 @@ pub fn denoise_image(
         temporal_window: 5,
         preserve_edges: true,
         preserve_grain: mode_enum == DenoiseMode::GrainAware,
+        ..Default::default()
     };
     config
         .validate()

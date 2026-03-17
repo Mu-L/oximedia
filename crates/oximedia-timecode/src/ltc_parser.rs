@@ -212,19 +212,14 @@ impl LtcParser {
             user_bits |= nibval << (idx * 2);
         }
 
-        let frame_rate_info = FrameRateInfo {
+        let _frame_rate_info = FrameRateInfo {
             fps: self.fps,
             drop_frame,
         };
 
-        let timecode = Timecode {
-            hours,
-            minutes,
-            seconds,
-            frames,
-            frame_rate: frame_rate_info,
-            user_bits,
-        };
+        let timecode = Timecode::from_raw_fields(
+            hours, minutes, seconds, frames, self.fps, drop_frame, user_bits,
+        );
 
         Ok(LtcFrame {
             timecode,
@@ -315,15 +310,7 @@ pub fn build_ltc_word(
     drop_frame: bool,
     fps: u8,
 ) -> Vec<LtcBit> {
-    use crate::FrameRateInfo;
-    let tc = Timecode {
-        hours,
-        minutes,
-        seconds,
-        frames,
-        frame_rate: FrameRateInfo { fps, drop_frame },
-        user_bits: 0,
-    };
+    let tc = Timecode::from_raw_fields(hours, minutes, seconds, frames, fps, drop_frame, 0);
     let parser = LtcParser::new(fps, drop_frame);
     parser.encode_frame(&tc)
 }
@@ -381,17 +368,7 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip_simple() {
         let parser = make_parser();
-        let tc = Timecode {
-            hours: 1,
-            minutes: 2,
-            seconds: 3,
-            frames: 4,
-            frame_rate: crate::FrameRateInfo {
-                fps: 25,
-                drop_frame: false,
-            },
-            user_bits: 0,
-        };
+        let tc = Timecode::from_raw_fields(1, 2, 3, 4, 25, false, 0);
         let encoded = parser.encode_frame(&tc);
         assert_eq!(encoded.len(), 80);
         let decoded = parser
@@ -406,17 +383,7 @@ mod tests {
     #[test]
     fn test_encode_decode_midnight() {
         let parser = make_parser();
-        let tc = Timecode {
-            hours: 0,
-            minutes: 0,
-            seconds: 0,
-            frames: 0,
-            frame_rate: crate::FrameRateInfo {
-                fps: 25,
-                drop_frame: false,
-            },
-            user_bits: 0,
-        };
+        let tc = Timecode::from_raw_fields(0, 0, 0, 0, 25, false, 0);
         let encoded = parser.encode_frame(&tc);
         let decoded = parser
             .decode_frame(&encoded, 0)
@@ -428,17 +395,7 @@ mod tests {
     #[test]
     fn test_decode_bits_finds_one_frame() {
         let parser = make_parser();
-        let tc = Timecode {
-            hours: 0,
-            minutes: 1,
-            seconds: 2,
-            frames: 3,
-            frame_rate: crate::FrameRateInfo {
-                fps: 25,
-                drop_frame: false,
-            },
-            user_bits: 0,
-        };
+        let tc = Timecode::from_raw_fields(0, 1, 2, 3, 25, false, 0);
         let bits = parser.encode_frame(&tc);
         let frames = parser.decode_bits(&bits);
         assert_eq!(frames.len(), 1);
@@ -465,17 +422,7 @@ mod tests {
     #[test]
     fn test_decode_drop_frame_flag() {
         let parser = LtcParser::new(30, true);
-        let tc = Timecode {
-            hours: 0,
-            minutes: 0,
-            seconds: 5,
-            frames: 0,
-            frame_rate: crate::FrameRateInfo {
-                fps: 30,
-                drop_frame: true,
-            },
-            user_bits: 0,
-        };
+        let tc = Timecode::from_raw_fields(0, 0, 5, 0, 30, true, 0);
         let encoded = parser.encode_frame(&tc);
         let decoded = parser
             .decode_frame(&encoded, 0)
@@ -492,17 +439,7 @@ mod tests {
     #[test]
     fn test_decode_frame_bit_offset() {
         let parser = make_parser();
-        let tc = Timecode {
-            hours: 0,
-            minutes: 0,
-            seconds: 0,
-            frames: 0,
-            frame_rate: crate::FrameRateInfo {
-                fps: 25,
-                drop_frame: false,
-            },
-            user_bits: 0,
-        };
+        let tc = Timecode::from_raw_fields(0, 0, 0, 0, 25, false, 0);
         let bits = parser.encode_frame(&tc);
         let decoded = parser
             .decode_frame(&bits, 0)
@@ -513,17 +450,7 @@ mod tests {
     #[test]
     fn test_ltcframe_color_frame_default_false() {
         let parser = make_parser();
-        let tc = Timecode {
-            hours: 0,
-            minutes: 0,
-            seconds: 0,
-            frames: 0,
-            frame_rate: crate::FrameRateInfo {
-                fps: 25,
-                drop_frame: false,
-            },
-            user_bits: 0,
-        };
+        let tc = Timecode::from_raw_fields(0, 0, 0, 0, 25, false, 0);
         let encoded = parser.encode_frame(&tc);
         let decoded = parser
             .decode_frame(&encoded, 0)

@@ -339,7 +339,9 @@ mod tests {
     #[test]
     fn test_path_to_endpoint() {
         let chain = build_simple_chain();
-        let path = chain.path_to(&ChainNodeId::new("OC-1")).expect("should succeed in test");
+        let path = chain
+            .path_to(&ChainNodeId::new("OC-1"))
+            .expect("should succeed in test");
         assert_eq!(path.len(), 3);
         assert_eq!(path[0].as_str(), "GM-1");
         assert_eq!(path[1].as_str(), "BC-1");
@@ -349,7 +351,9 @@ mod tests {
     #[test]
     fn test_path_to_grandmaster() {
         let chain = build_simple_chain();
-        let path = chain.path_to(&ChainNodeId::new("GM-1")).expect("should succeed in test");
+        let path = chain
+            .path_to(&ChainNodeId::new("GM-1"))
+            .expect("should succeed in test");
         assert_eq!(path.len(), 1);
         assert_eq!(path[0].as_str(), "GM-1");
     }

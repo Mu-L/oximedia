@@ -5,6 +5,7 @@ use crate::clip::Clip;
 use crate::logging::Rating;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// A smart collection that auto-updates based on rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +24,18 @@ pub struct SmartCollection {
 
     /// Last update timestamp.
     pub last_updated: DateTime<Utc>,
+
+    /// Polling interval for auto-refresh in seconds. `None` means no polling.
+    #[serde(default)]
+    pub poll_interval_secs: Option<u64>,
+
+    /// Cached result: clip IDs that currently match the rules.
+    #[serde(default)]
+    pub cached_clip_ids: Vec<crate::clip::ClipId>,
+
+    /// Whether the cache is considered valid.
+    #[serde(default)]
+    pub cache_valid: bool,
 }
 
 /// Rule match mode.
@@ -135,6 +148,67 @@ impl SmartCollection {
             match_mode,
             auto_update: true,
             last_updated: Utc::now(),
+            poll_interval_secs: None,
+            cached_clip_ids: Vec::new(),
+            cache_valid: false,
+        }
+    }
+
+    /// Sets the polling interval for auto-refresh.
+    ///
+    /// When set, `needs_refresh()` will return `true` if more than `interval`
+    /// has elapsed since the last update.
+    pub fn set_poll_interval(&mut self, interval: Duration) {
+        self.poll_interval_secs = Some(interval.as_secs().max(1));
+    }
+
+    /// Clears the polling interval (disables timed auto-refresh).
+    pub fn clear_poll_interval(&mut self) {
+        self.poll_interval_secs = None;
+    }
+
+    /// Returns the configured poll interval, if any.
+    #[must_use]
+    pub fn poll_interval(&self) -> Option<Duration> {
+        self.poll_interval_secs.map(Duration::from_secs)
+    }
+
+    /// Returns `true` if the collection should be refreshed.
+    ///
+    /// Criteria:
+    /// - `auto_update` is enabled, AND
+    /// - either the cache is marked invalid, OR the poll interval has elapsed.
+    #[must_use]
+    pub fn needs_refresh(&self) -> bool {
+        if !self.auto_update {
+            return false;
+        }
+        if !self.cache_valid {
+            return true;
+        }
+        if let Some(interval_secs) = self.poll_interval_secs {
+            let elapsed = Utc::now()
+                .signed_duration_since(self.last_updated)
+                .num_seconds();
+            return elapsed >= interval_secs as i64;
+        }
+        false
+    }
+
+    /// Invalidates the cached results, forcing the next call to `needs_refresh`
+    /// (when `auto_update` is enabled) to return `true`.
+    pub fn invalidate_cache(&mut self) {
+        self.cache_valid = false;
+        self.cached_clip_ids.clear();
+    }
+
+    /// Returns the cached clip IDs if the cache is valid.
+    #[must_use]
+    pub fn cached_clip_ids(&self) -> Option<&[crate::clip::ClipId]> {
+        if self.cache_valid {
+            Some(&self.cached_clip_ids)
+        } else {
+            None
         }
     }
 
@@ -158,16 +232,34 @@ impl SmartCollection {
     }
 
     /// Updates the collection by evaluating all clips.
+    ///
+    /// Also refreshes the internal cache so that `cached_clip_ids()` returns
+    /// the up-to-date list.
     pub fn update(&mut self, clips: &[Clip]) {
         self.collection.clear();
+        self.cached_clip_ids.clear();
 
         for clip in clips {
             if self.matches(clip) {
                 self.collection.add_clip(clip.id);
+                self.cached_clip_ids.push(clip.id);
             }
         }
 
         self.last_updated = Utc::now();
+        self.cache_valid = true;
+    }
+
+    /// Updates the collection only if `needs_refresh()` returns `true`.
+    ///
+    /// Returns `true` if a refresh was performed.
+    pub fn refresh_if_needed(&mut self, clips: &[Clip]) -> bool {
+        if self.needs_refresh() {
+            self.update(clips);
+            true
+        } else {
+            false
+        }
     }
 
     /// Adds a rule.
@@ -324,5 +416,104 @@ mod tests {
 
         // Now matches ALL
         assert!(smart_all.matches(&clip));
+    }
+
+    #[test]
+    fn test_smart_collection_auto_refresh_needs_refresh_when_cache_invalid() {
+        let rule = SmartRule::Keyword {
+            keyword: "interview".to_string(),
+        };
+        let mut smart = SmartCollection::new("Interviews", vec![rule], MatchMode::All);
+
+        // Fresh collection with no cache should need refresh (cache_valid = false).
+        assert!(smart.needs_refresh());
+
+        // After update the cache is valid, no polling interval set → no refresh needed.
+        let clips: Vec<Clip> = Vec::new();
+        smart.update(&clips);
+        assert!(!smart.needs_refresh());
+    }
+
+    #[test]
+    fn test_smart_collection_invalidate_cache() {
+        let rule = SmartRule::Keyword {
+            keyword: "outdoor".to_string(),
+        };
+        let mut smart = SmartCollection::new("Outdoor", vec![rule], MatchMode::All);
+
+        let clips: Vec<Clip> = Vec::new();
+        smart.update(&clips);
+        assert!(!smart.needs_refresh());
+
+        // Invalidate the cache explicitly.
+        smart.invalidate_cache();
+        assert!(smart.needs_refresh());
+        assert!(smart.cached_clip_ids().is_none());
+    }
+
+    #[test]
+    fn test_smart_collection_poll_interval_accessors() {
+        let rule = SmartRule::HasMarkers;
+        let mut smart = SmartCollection::new("Marked", vec![rule], MatchMode::All);
+
+        assert!(smart.poll_interval().is_none());
+
+        smart.set_poll_interval(Duration::from_secs(60));
+        assert_eq!(smart.poll_interval(), Some(Duration::from_secs(60)));
+
+        smart.clear_poll_interval();
+        assert!(smart.poll_interval().is_none());
+    }
+
+    #[test]
+    fn test_smart_collection_cache_populated_after_update() {
+        let rule = SmartRule::Keyword {
+            keyword: "interview".to_string(),
+        };
+        let mut smart = SmartCollection::new("Interviews", vec![rule], MatchMode::All);
+
+        let mut clip = Clip::new(PathBuf::from("/test.mov"));
+        clip.add_keyword("interview");
+
+        smart.update(&[clip.clone()]);
+
+        let cached = smart.cached_clip_ids().expect("cache should be valid");
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0], clip.id);
+    }
+
+    #[test]
+    fn test_smart_collection_auto_update_new_clips() {
+        let rule = SmartRule::Keyword {
+            keyword: "broll".to_string(),
+        };
+        let mut smart = SmartCollection::new("B-Roll", vec![rule], MatchMode::All);
+
+        // No clips initially.
+        smart.update(&[]);
+        assert_eq!(smart.collection.count(), 0);
+
+        // Add a matching clip and re-update.
+        let mut clip = Clip::new(PathBuf::from("/broll.mov"));
+        clip.add_keyword("broll");
+        smart.update(&[clip]);
+        assert_eq!(smart.collection.count(), 1);
+    }
+
+    #[test]
+    fn test_refresh_if_needed_skips_when_not_needed() {
+        let rule = SmartRule::Keyword {
+            keyword: "action".to_string(),
+        };
+        let mut smart = SmartCollection::new("Action", vec![rule], MatchMode::All);
+        let clips: Vec<Clip> = Vec::new();
+
+        // First refresh always runs (cache invalid).
+        let refreshed = smart.refresh_if_needed(&clips);
+        assert!(refreshed);
+
+        // Second call: cache is valid, no polling interval → skip.
+        let refreshed = smart.refresh_if_needed(&clips);
+        assert!(!refreshed);
     }
 }

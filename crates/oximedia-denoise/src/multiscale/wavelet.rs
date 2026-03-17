@@ -8,6 +8,7 @@
 use crate::spatial::wavelet::{wavelet_denoise, ThresholdMethod};
 use crate::DenoiseResult;
 use oximedia_codec::VideoFrame;
+use rayon::prelude::*;
 
 /// Multi-scale wavelet denoising configuration.
 pub struct MultiscaleWaveletConfig {
@@ -61,6 +62,173 @@ pub fn adaptive_multiscale_wavelet(frame: &VideoFrame, strength: f32) -> Denoise
     };
 
     multiscale_wavelet_denoise(frame, &config)
+}
+
+/// Row-parallel wavelet denoising using rayon.
+///
+/// Applies Haar wavelet denoising to each plane, where the row-wise
+/// forward and inverse transforms are parallelised with `rayon::par_iter_mut`.
+/// This provides significant throughput improvements on multi-core systems
+/// for high-resolution frames.
+///
+/// # Arguments
+/// * `frame`    - Input video frame
+/// * `strength` - Denoising strength (0.0 – 1.0)
+/// * `method`   - Wavelet threshold method
+///
+/// # Returns
+/// Denoised frame
+pub fn parallel_wavelet_denoise(
+    frame: &VideoFrame,
+    strength: f32,
+    method: ThresholdMethod,
+) -> DenoiseResult<VideoFrame> {
+    if frame.planes.is_empty() {
+        return Err(crate::DenoiseError::ProcessingError(
+            "Frame has no planes".to_string(),
+        ));
+    }
+
+    let mut output = frame.clone();
+
+    // Process each plane; use rayon over rows inside each plane.
+    output
+        .planes
+        .iter_mut()
+        .enumerate()
+        .try_for_each(|(plane_idx, plane)| {
+            let input_plane = &frame.planes[plane_idx];
+            let (width, height) = frame.plane_dimensions(plane_idx);
+            let w = width as usize;
+            let h = height as usize;
+            let stride = plane.stride;
+
+            // --- Forward Haar transform rows (parallel) ---
+            // Convert the entire plane to f32 first (row-major, no stride padding).
+            let mut coeffs: Vec<f32> = (0..h)
+                .flat_map(|y| (0..w).map(move |x| f32::from(input_plane.data[y * stride + x])))
+                .collect();
+
+            // Row-parallel forward Haar
+            coeffs
+                .par_chunks_mut(w)
+                .take(h)
+                .for_each(|row| parallel_haar_1d(row));
+
+            // Column-wise forward Haar (sequential – columns are non-contiguous)
+            let mut col_buf = vec![0.0f32; h];
+            for x in 0..w {
+                for y in 0..h {
+                    col_buf[y] = coeffs[y * w + x];
+                }
+                parallel_haar_1d(&mut col_buf);
+                for y in 0..h {
+                    coeffs[y * w + x] = col_buf[y];
+                }
+            }
+
+            // Threshold
+            let sigma = {
+                let mut abs_coeffs: Vec<f32> = coeffs.iter().map(|&v| v.abs()).collect();
+                abs_coeffs
+                    .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let median = abs_coeffs.get(abs_coeffs.len() / 2).copied().unwrap_or(0.0);
+                median / 0.6745
+            };
+            let n = coeffs.len() as f32;
+            let threshold = sigma * (2.0 * n.ln()).sqrt() * strength;
+
+            coeffs.par_iter_mut().for_each(|c| {
+                *c = apply_threshold_fn(*c, threshold, method);
+            });
+
+            // --- Inverse Haar: column-wise (sequential) ---
+            for x in 0..w {
+                for y in 0..h {
+                    col_buf[y] = coeffs[y * w + x];
+                }
+                parallel_inv_haar_1d(&mut col_buf);
+                for y in 0..h {
+                    coeffs[y * w + x] = col_buf[y];
+                }
+            }
+
+            // Row-parallel inverse Haar
+            coeffs
+                .par_chunks_mut(w)
+                .take(h)
+                .for_each(|row| parallel_inv_haar_1d(row));
+
+            // Write back to plane
+            for y in 0..h {
+                for x in 0..w {
+                    plane.data[y * stride + x] = coeffs[y * w + x].round().clamp(0.0, 255.0) as u8;
+                }
+            }
+
+            Ok::<(), crate::DenoiseError>(())
+        })?;
+
+    Ok(output)
+}
+
+/// In-place 1-D Haar forward transform (used by parallel wavelet).
+fn parallel_haar_1d(data: &mut [f32]) {
+    let n = data.len();
+    if n < 2 {
+        return;
+    }
+    let half = n / 2;
+    let mut temp = vec![0.0f32; n];
+    let inv_sqrt2 = 1.0_f32 / 2.0_f32.sqrt();
+    for i in 0..half {
+        temp[i] = (data[2 * i] + data[2 * i + 1]) * inv_sqrt2;
+        temp[half + i] = (data[2 * i] - data[2 * i + 1]) * inv_sqrt2;
+    }
+    data[..n].copy_from_slice(&temp);
+}
+
+/// In-place 1-D Haar inverse transform (used by parallel wavelet).
+fn parallel_inv_haar_1d(data: &mut [f32]) {
+    let n = data.len();
+    if n < 2 {
+        return;
+    }
+    let half = n / 2;
+    let mut temp = vec![0.0f32; n];
+    let inv_sqrt2 = 1.0_f32 / 2.0_f32.sqrt();
+    for i in 0..half {
+        temp[2 * i] = (data[i] + data[half + i]) * inv_sqrt2;
+        temp[2 * i + 1] = (data[i] - data[half + i]) * inv_sqrt2;
+    }
+    data[..n].copy_from_slice(&temp);
+}
+
+/// Threshold function used by the parallel wavelet denoiser.
+fn apply_threshold_fn(x: f32, threshold: f32, method: ThresholdMethod) -> f32 {
+    match method {
+        ThresholdMethod::Hard => {
+            if x.abs() > threshold {
+                x
+            } else {
+                0.0
+            }
+        }
+        ThresholdMethod::Soft => {
+            if x.abs() > threshold {
+                x.signum() * (x.abs() - threshold)
+            } else {
+                0.0
+            }
+        }
+        ThresholdMethod::Garrote => {
+            if x.abs() > threshold {
+                x - (threshold * threshold / x)
+            } else {
+                0.0
+            }
+        }
+    }
 }
 
 /// Apply wavelet denoising with different thresholds per level.
@@ -117,6 +285,60 @@ mod tests {
         let config = MultiscaleWaveletConfig::default();
         assert_eq!(config.num_levels, 3);
         assert!(matches!(config.method, ThresholdMethod::Soft));
+    }
+
+    // -------------------------------------------------------------------
+    // Parallel wavelet tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_parallel_wavelet_denoise_basic() {
+        let mut frame = VideoFrame::new(PixelFormat::Yuv420p, 32, 32);
+        frame.allocate();
+        let result = parallel_wavelet_denoise(&frame, 0.5, ThresholdMethod::Soft);
+        assert!(result.is_ok());
+        let f = result.expect("parallel wavelet should succeed");
+        assert_eq!(f.width, 32);
+        assert_eq!(f.height, 32);
+    }
+
+    #[test]
+    fn test_parallel_wavelet_all_threshold_methods() {
+        let mut frame = VideoFrame::new(PixelFormat::Yuv420p, 16, 16);
+        frame.allocate();
+        for method in [
+            ThresholdMethod::Hard,
+            ThresholdMethod::Soft,
+            ThresholdMethod::Garrote,
+        ] {
+            let result = parallel_wavelet_denoise(&frame, 0.5, method);
+            assert!(result.is_ok(), "method {method:?} should succeed");
+        }
+    }
+
+    #[test]
+    fn test_parallel_wavelet_uniform_preserves_values() {
+        let mut frame = VideoFrame::new(PixelFormat::Yuv420p, 16, 16);
+        frame.allocate();
+        // Set luma to a constant 120
+        let stride = frame.planes[0].stride;
+        for y in 0..16usize {
+            for x in 0..16usize {
+                frame.planes[0].data[y * stride + x] = 120;
+            }
+        }
+        let out =
+            parallel_wavelet_denoise(&frame, 0.5, ThresholdMethod::Soft).expect("should succeed");
+        let out_stride = out.planes[0].stride;
+        for y in 0..16usize {
+            for x in 0..16usize {
+                let v = out.planes[0].data[y * out_stride + x];
+                assert!(
+                    (v as i32 - 120).abs() <= 2,
+                    "uniform frame value drifted at ({x},{y}): {v}"
+                );
+            }
+        }
     }
 }
 

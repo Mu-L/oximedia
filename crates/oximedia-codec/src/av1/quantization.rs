@@ -518,6 +518,92 @@ pub fn qp_to_qindex(qp: f32) -> u8 {
 }
 
 // =============================================================================
+// Adaptive Quantization Matrix Selection by Content Type
+// =============================================================================
+
+/// Content type classification for adaptive QM level selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QmContentType {
+    /// Flat/smooth regions — prefer low QM level.
+    Flat,
+    /// Natural texture — prefer medium QM level.
+    Texture,
+    /// High-frequency detail — prefer high QM level.
+    Detail,
+    /// Screen content — prefer very low QM level.
+    Screen,
+}
+
+/// Result of adaptive QM level selection.
+#[derive(Clone, Debug)]
+pub struct AdaptiveQmSelection {
+    /// Luma QM level 0-15, or `None` to disable.
+    pub qm_y: Option<u8>,
+    /// Cb QM level, or `None`.
+    pub qm_u: Option<u8>,
+    /// Cr QM level, or `None`.
+    pub qm_v: Option<u8>,
+    /// Content type used for selection.
+    pub content_type: QmContentType,
+    /// Base Q index used.
+    pub base_q_idx: u8,
+}
+
+/// Select adaptive QM levels based on content type and base Q index.
+///
+/// QM is disabled below Q=64 (high quality). Above that threshold the QM
+/// level scales with Q and is adjusted by content type.
+#[must_use]
+pub fn select_adaptive_qm(content_type: QmContentType, base_q_idx: u8) -> AdaptiveQmSelection {
+    if base_q_idx < 64 {
+        return AdaptiveQmSelection {
+            qm_y: None,
+            qm_u: None,
+            qm_v: None,
+            content_type,
+            base_q_idx,
+        };
+    }
+    let base_qm: u8 = match base_q_idx {
+        64..=127 => 4 + (u16::from(base_q_idx - 64) * 4 / 63) as u8,
+        128..=191 => 8 + (u16::from(base_q_idx - 128) * 4 / 63) as u8,
+        _ => (12 + (u16::from(base_q_idx - 192) * 3 / 63)).min(15) as u8,
+    };
+    let (y_adj, uv_adj): (i8, i8) = match content_type {
+        QmContentType::Flat => (-2, -1),
+        QmContentType::Texture => (0, 0),
+        QmContentType::Detail => (2, 1),
+        QmContentType::Screen => (-3, -2),
+    };
+    let c = |b: u8, a: i8| Some((i16::from(b) + i16::from(a)).clamp(0, 15) as u8);
+    AdaptiveQmSelection {
+        qm_y: c(base_qm, y_adj),
+        qm_u: c(base_qm, uv_adj),
+        qm_v: c(base_qm, uv_adj),
+        content_type,
+        base_q_idx,
+    }
+}
+
+/// Apply an `AdaptiveQmSelection` to `QuantizationParams`.
+pub fn apply_adaptive_qm(qp: &mut QuantizationParams, sel: &AdaptiveQmSelection) {
+    match (sel.qm_y, sel.qm_u, sel.qm_v) {
+        (None, None, None) => {
+            qp.using_qmatrix = false;
+            qp.qm_y = 0;
+            qp.qm_u = 0;
+            qp.qm_v = 0;
+        }
+        _ => {
+            qp.using_qmatrix = true;
+            qp.qm_y = sel.qm_y.unwrap_or(0);
+            qp.qm_u = sel.qm_u.unwrap_or(0);
+            qp.qm_v = sel.qm_v.unwrap_or(0);
+        }
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -730,5 +816,124 @@ mod tests {
             assert!(DC_QLOOKUP[i] >= DC_QLOOKUP[i - 1]);
             assert!(AC_QLOOKUP[i] >= AC_QLOOKUP[i - 1]);
         }
+    }
+
+    // =========================================================================
+    // Adaptive quantization matrix selection tests (Task 4)
+    // =========================================================================
+
+    #[test]
+    fn test_adaptive_qm_disabled_below_q64() {
+        for q in [0u8, 32, 63] {
+            let sel = select_adaptive_qm(QmContentType::Texture, q);
+            assert!(sel.qm_y.is_none(), "QM must be disabled for q_idx={q}");
+            assert!(sel.qm_u.is_none());
+            assert!(sel.qm_v.is_none());
+        }
+    }
+
+    #[test]
+    fn test_adaptive_qm_enabled_above_q64() {
+        for q in [64u8, 128, 191, 255] {
+            let sel = select_adaptive_qm(QmContentType::Texture, q);
+            assert!(sel.qm_y.is_some(), "QM must be enabled for q_idx={q}");
+        }
+    }
+
+    #[test]
+    fn test_adaptive_qm_flat_uses_lower_level_than_detail() {
+        let q = 128u8;
+        let flat = select_adaptive_qm(QmContentType::Flat, q);
+        let detail = select_adaptive_qm(QmContentType::Detail, q);
+        let flat_y = flat.qm_y.unwrap_or(0);
+        let detail_y = detail.qm_y.unwrap_or(0);
+        assert!(
+            flat_y < detail_y || flat_y == detail_y,
+            "Flat should use QM level <= Detail: flat={flat_y}, detail={detail_y}"
+        );
+    }
+
+    #[test]
+    fn test_adaptive_qm_screen_content_low_level() {
+        // Screen content should prefer the lowest QM level (sharpest matrix)
+        let q = 128u8;
+        let screen = select_adaptive_qm(QmContentType::Screen, q);
+        let texture = select_adaptive_qm(QmContentType::Texture, q);
+        let screen_y = screen.qm_y.unwrap_or(0);
+        let texture_y = texture.qm_y.unwrap_or(0);
+        assert!(
+            screen_y <= texture_y,
+            "Screen content must use QM level <= Texture: screen={screen_y}, texture={texture_y}"
+        );
+    }
+
+    #[test]
+    fn test_adaptive_qm_levels_in_valid_range() {
+        for q in [64u8, 96, 128, 160, 192, 220, 255] {
+            for ct in [
+                QmContentType::Flat,
+                QmContentType::Texture,
+                QmContentType::Detail,
+                QmContentType::Screen,
+            ] {
+                let sel = select_adaptive_qm(ct, q);
+                if let Some(y) = sel.qm_y {
+                    assert!(y <= 15, "qm_y={y} must be in [0,15]");
+                }
+                if let Some(u) = sel.qm_u {
+                    assert!(u <= 15, "qm_u={u} must be in [0,15]");
+                }
+                if let Some(v) = sel.qm_v {
+                    assert!(v <= 15, "qm_v={v} must be in [0,15]");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_apply_adaptive_qm_enables_matrix() {
+        let mut qp = QuantizationParams::default();
+        let sel = select_adaptive_qm(QmContentType::Texture, 128);
+        apply_adaptive_qm(&mut qp, &sel);
+        assert!(
+            qp.using_qmatrix,
+            "apply_adaptive_qm must set using_qmatrix=true for q>=64"
+        );
+    }
+
+    #[test]
+    fn test_apply_adaptive_qm_disables_for_low_q() {
+        let mut qp = QuantizationParams::default();
+        let sel = select_adaptive_qm(QmContentType::Flat, 32);
+        apply_adaptive_qm(&mut qp, &sel);
+        assert!(
+            !qp.using_qmatrix,
+            "apply_adaptive_qm must set using_qmatrix=false for q<64"
+        );
+    }
+
+    #[test]
+    fn test_adaptive_qm_content_type_preserved() {
+        let ct = QmContentType::Screen;
+        let sel = select_adaptive_qm(ct, 200);
+        assert_eq!(
+            sel.content_type, ct,
+            "Content type must be preserved in selection result"
+        );
+        assert_eq!(sel.base_q_idx, 200);
+    }
+
+    #[test]
+    fn test_adaptive_qm_monotone_with_q() {
+        // Higher Q index should produce equal or higher QM level
+        let ct = QmContentType::Texture;
+        let low_q = select_adaptive_qm(ct, 80);
+        let high_q = select_adaptive_qm(ct, 240);
+        let low_y = low_q.qm_y.unwrap_or(0);
+        let high_y = high_q.qm_y.unwrap_or(0);
+        assert!(
+            high_y >= low_y,
+            "Higher Q should give >= QM level: q=80 → {low_y}, q=240 → {high_y}"
+        );
     }
 }

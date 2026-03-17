@@ -153,12 +153,51 @@ impl SubtitleIndex {
     }
 
     /// Return all entries whose time range intersects `[from_ms, to_ms)`.
+    ///
+    /// Uses binary search to locate the starting candidate, then scans
+    /// forward, giving O(log n + k) performance where k is the number
+    /// of results.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if [`build`](Self::build) has not been called
+    /// after the last [`push`](Self::push).
     #[must_use]
     pub fn range_query(&self, from_ms: i64, to_ms: i64) -> Vec<&IndexEntry> {
-        self.entries
-            .iter()
-            .filter(|e| e.start_ms < to_ms && e.end_ms > from_ms)
-            .collect()
+        debug_assert!(self.is_built, "call build() before querying");
+
+        if self.entries.is_empty() || from_ms >= to_ms {
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
+
+        // We need entries where: start_ms < to_ms AND end_ms > from_ms.
+        //
+        // Because entries are sorted by start_ms, any entry with
+        // start_ms >= to_ms cannot satisfy start_ms < to_ms, so we only
+        // need to scan entries with start_ms < to_ms.
+        //
+        // Additionally, entries with start_ms so small that their end_ms
+        // could never reach from_ms are irrelevant, but since end_ms is
+        // not monotonically related to start_ms, we must scan from the
+        // beginning of the candidate region.
+        //
+        // Use partition_point to find the first entry with start_ms >= to_ms.
+        let upper = self.entries.partition_point(|e| e.start_ms < to_ms);
+
+        // Scan [0..upper) and check end_ms > from_ms.
+        // For a further optimisation, we could skip entries whose end_ms
+        // can't overlap, but overlapping cues make a tighter bound impossible
+        // without a secondary index. The binary search on start_ms already
+        // eliminates all entries starting at or after to_ms.
+        for entry in &self.entries[..upper] {
+            if entry.end_ms > from_ms {
+                results.push(entry);
+            }
+        }
+
+        results
     }
 
     /// Return the entry with the earliest `start_ms`, or `None` if empty.
@@ -317,5 +356,91 @@ mod tests {
         let mut idx2 = idx;
         idx2.build();
         assert!(idx2.active_at(0).is_empty());
+    }
+
+    // ── Binary-search range_query tests ──────────────────────────────
+
+    #[test]
+    fn test_range_query_binary_search_empty_index() {
+        let mut idx = SubtitleIndex::new();
+        idx.build();
+        assert!(idx.range_query(0, 10000).is_empty());
+    }
+
+    #[test]
+    fn test_range_query_inverted_range() {
+        let idx = sample_index();
+        // from >= to should return empty
+        assert!(idx.range_query(5000, 5000).is_empty());
+        assert!(idx.range_query(5000, 3000).is_empty());
+    }
+
+    #[test]
+    fn test_range_query_single_match() {
+        let idx = SubtitleIndex::from_ranges(&[(1000, 3000)]);
+        let hits = idx.range_query(2000, 2500);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].cue_index, 0);
+    }
+
+    #[test]
+    fn test_range_query_all_entries() {
+        let idx = sample_index();
+        // Query that spans entire track
+        let hits = idx.range_query(0, 20000);
+        assert_eq!(hits.len(), 5);
+    }
+
+    #[test]
+    fn test_range_query_tight_window() {
+        let idx = sample_index();
+        // Tight window around a boundary
+        let hits = idx.range_query(1999, 2001);
+        // Should hit cue 0 (0-2000, end_ms > 1999) and cue 1 (2000-4000, start_ms < 2001)
+        let indices: Vec<usize> = hits.iter().map(|e| e.cue_index).collect();
+        assert!(indices.contains(&0), "indices={indices:?}");
+        assert!(indices.contains(&1), "indices={indices:?}");
+    }
+
+    #[test]
+    fn test_range_query_before_all() {
+        let idx = SubtitleIndex::from_ranges(&[(5000, 8000)]);
+        let hits = idx.range_query(0, 4000);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn test_range_query_after_all() {
+        let idx = SubtitleIndex::from_ranges(&[(1000, 3000)]);
+        let hits = idx.range_query(5000, 8000);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn test_range_query_partial_overlap_start() {
+        let idx = SubtitleIndex::from_ranges(&[(1000, 5000)]);
+        let hits = idx.range_query(0, 2000);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn test_range_query_partial_overlap_end() {
+        let idx = SubtitleIndex::from_ranges(&[(1000, 5000)]);
+        let hits = idx.range_query(4000, 8000);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn test_range_query_large_index_perf() {
+        // Build a large index and verify binary search still works
+        let ranges: Vec<(i64, i64)> = (0..10000).map(|i| (i * 100, i * 100 + 200)).collect();
+        let idx = SubtitleIndex::from_ranges(&ranges);
+        // Query middle range
+        let hits = idx.range_query(500000, 500200);
+        assert!(!hits.is_empty());
+        for h in &hits {
+            assert!(h.start_ms < 500200);
+            assert!(h.end_ms > 500000);
+        }
     }
 }

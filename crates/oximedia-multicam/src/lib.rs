@@ -148,6 +148,8 @@ pub mod edit;
 pub mod edit_decision;
 pub mod error;
 pub mod genlock_master;
+pub mod highlight;
+pub mod highlight_detect;
 pub mod iso_file_sync;
 pub mod iso_record;
 pub mod iso_recording;
@@ -302,5 +304,81 @@ mod tests {
         };
         assert_eq!(pos.y, 1.5);
         assert_eq!(pos.tilt, -10.0);
+    }
+
+    // ── Required integration tests ────────────────────────────────────────────
+
+    /// FFT cross-correlation must recover a 100-sample offset.
+    #[test]
+    fn test_fft_cross_correlate_offset() {
+        use std::f32::consts::PI;
+        use sync::cross_correlate::{fft_cross_correlate, find_sync_offset};
+
+        let sample_rate = 48_000_u32;
+        let n = 4_096_usize;
+        let offset = 100_usize;
+
+        // Non-periodic AM signal for a unique cross-correlation peak.
+        let a: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sample_rate as f32;
+                let env = 0.5 + 0.5 * (2.0 * PI * 50.0 * t).sin();
+                env * (2.0 * PI * 1_000.0 * t).sin() + 0.3 * (2.0 * PI * 1_337.0 * t).sin()
+            })
+            .collect();
+
+        // Build b = a delayed by `offset` samples.
+        let mut b = vec![0.0_f32; n];
+        b[offset..].copy_from_slice(&a[..n - offset]);
+
+        // Verify that the correlation vector is non-empty.
+        let xcorr = fft_cross_correlate(&a, &b);
+        assert!(
+            !xcorr.is_empty(),
+            "fft_cross_correlate returned empty vector"
+        );
+
+        // find_sync_offset should recover ~100 samples.
+        let detected = find_sync_offset(&a, &b, sample_rate);
+        assert!(
+            (detected - offset as i64).abs() <= 20,
+            "Expected offset ≈ {offset}, got {detected}"
+        );
+    }
+
+    /// dissolve_blend at alpha=0.5 must average both frames.
+    #[test]
+    fn test_dissolve_blend_midpoint() {
+        use edit::transition::dissolve_blend;
+
+        // Two 4-pixel RGBA frames (16 bytes each).
+        let a = vec![0u8; 16];
+        let b = vec![200u8; 16];
+
+        let blended = dissolve_blend(&a, &b, 0.5);
+        assert_eq!(blended.len(), 16, "Output length mismatch");
+        for &px in &blended {
+            // 0.5*0 + 0.5*200 = 100
+            assert!((px as i32 - 100).abs() <= 1, "Expected ~100, got {px}");
+        }
+    }
+
+    /// A uniform grayscale frame should score approximately 0.5 for rule of thirds.
+    #[test]
+    fn test_rule_of_thirds_uniform() {
+        use angle_score::score_rule_of_thirds;
+
+        let width = 64_u32;
+        let height = 64_u32;
+        // Uniform frame: every pixel = 128 → no gradient anywhere.
+        let frame = vec![128u8; (width * height) as usize];
+
+        let score = score_rule_of_thirds(&frame, width, height);
+        // A featureless frame has no gradient at intersections OR anywhere
+        // → the function returns the neutral 0.5.
+        assert!(
+            (score - 0.5).abs() <= 0.1,
+            "Expected score ≈ 0.5 for uniform frame, got {score}"
+        );
     }
 }

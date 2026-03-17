@@ -196,6 +196,155 @@ impl DedupReport {
     }
 }
 
+// ── Per-group disk space savings estimation ──────────────────────────────────
+
+/// Estimated disk-space savings for a single duplicate group.
+#[derive(Debug, Clone)]
+pub struct GroupSavings {
+    /// Total bytes across all files in the group.
+    pub total_bytes: u64,
+    /// Size of the largest file (the one to keep).
+    pub largest_file_bytes: u64,
+    /// Bytes recoverable by removing all but the largest file.
+    pub recoverable_bytes: u64,
+    /// Number of files in the group.
+    pub file_count: usize,
+    /// Human-readable summary (e.g., "3 files, 15.2 MB recoverable").
+    pub description: String,
+}
+
+/// Disk-space savings summary across all duplicate groups.
+#[derive(Debug, Clone)]
+pub struct SavingsSummary {
+    /// Per-group savings details.
+    pub groups: Vec<GroupSavings>,
+    /// Grand total of recoverable bytes across all groups.
+    pub total_recoverable_bytes: u64,
+    /// Grand total bytes of all files involved in duplicate groups.
+    pub total_bytes_in_duplicates: u64,
+    /// Total number of duplicate files (files that would be removed).
+    pub total_removable_files: usize,
+}
+
+impl SavingsSummary {
+    /// Human-readable summary string.
+    #[must_use]
+    pub fn description(&self) -> String {
+        format!(
+            "{} duplicate groups, {} removable files, {} recoverable out of {} total",
+            self.groups.len(),
+            self.total_removable_files,
+            format_bytes_compact(self.total_recoverable_bytes),
+            format_bytes_compact(self.total_bytes_in_duplicates),
+        )
+    }
+
+    /// Fraction of total duplicate bytes that are recoverable (0.0 - 1.0).
+    #[must_use]
+    pub fn recovery_ratio(&self) -> f64 {
+        if self.total_bytes_in_duplicates == 0 {
+            return 0.0;
+        }
+        self.total_recoverable_bytes as f64 / self.total_bytes_in_duplicates as f64
+    }
+}
+
+/// Estimate disk-space savings for a list of duplicate groups.
+///
+/// Each group is a list of file paths. The function reads file sizes from
+/// the filesystem. Files that cannot be stat'd are assumed to have 0 bytes.
+///
+/// # Arguments
+/// * `groups` - Duplicate groups, each a slice of file path strings.
+#[must_use]
+pub fn estimate_savings(groups: &[Vec<String>]) -> SavingsSummary {
+    let mut group_savings = Vec::with_capacity(groups.len());
+    let mut grand_total_recoverable = 0u64;
+    let mut grand_total_bytes = 0u64;
+    let mut grand_removable = 0usize;
+
+    for file_paths in groups {
+        if file_paths.len() < 2 {
+            continue;
+        }
+
+        let sizes: Vec<u64> = file_paths
+            .iter()
+            .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .collect();
+
+        let total: u64 = sizes.iter().sum();
+        let largest = sizes.iter().copied().max().unwrap_or(0);
+        let recoverable = total.saturating_sub(largest);
+        let removable = file_paths.len() - 1;
+
+        let desc = format!(
+            "{} files, {} recoverable",
+            file_paths.len(),
+            format_bytes_compact(recoverable),
+        );
+
+        group_savings.push(GroupSavings {
+            total_bytes: total,
+            largest_file_bytes: largest,
+            recoverable_bytes: recoverable,
+            file_count: file_paths.len(),
+            description: desc,
+        });
+
+        grand_total_recoverable += recoverable;
+        grand_total_bytes += total;
+        grand_removable += removable;
+    }
+
+    SavingsSummary {
+        groups: group_savings,
+        total_recoverable_bytes: grand_total_recoverable,
+        total_bytes_in_duplicates: grand_total_bytes,
+        total_removable_files: grand_removable,
+    }
+}
+
+/// Estimate savings from a `DedupSummary`.
+///
+/// Computes recovery ratio and total recoverable bytes from the summary stats.
+#[must_use]
+pub fn estimate_savings_from_summary(summary: &DedupSummary) -> GroupSavings {
+    GroupSavings {
+        total_bytes: summary.total_bytes,
+        largest_file_bytes: summary
+            .total_bytes
+            .saturating_sub(summary.reclaimable_bytes),
+        recoverable_bytes: summary.reclaimable_bytes,
+        file_count: summary.total_files as usize,
+        description: format!(
+            "{} total files, {} recoverable",
+            summary.total_files,
+            format_bytes_compact(summary.reclaimable_bytes),
+        ),
+    }
+}
+
+/// Format bytes in a compact human-readable form.
+fn format_bytes_compact(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    const TB: u64 = 1024 * GB;
+
+    if bytes >= TB {
+        format!("{:.1} TB", bytes as f64 / TB as f64)
+    } else if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -330,5 +479,170 @@ mod tests {
         let desc = s.description();
         assert!(desc.contains('%'));
         assert!(desc.contains("200"));
+    }
+
+    // ---- GroupSavings / SavingsSummary tests ----
+
+    #[test]
+    fn test_estimate_savings_empty() {
+        let summary = estimate_savings(&[]);
+        assert!(summary.groups.is_empty());
+        assert_eq!(summary.total_recoverable_bytes, 0);
+        assert_eq!(summary.total_removable_files, 0);
+    }
+
+    #[test]
+    fn test_estimate_savings_single_file_group_skipped() {
+        let groups = vec![vec!["only_one.mp4".to_string()]];
+        let summary = estimate_savings(&groups);
+        assert!(summary.groups.is_empty());
+    }
+
+    #[test]
+    fn test_estimate_savings_nonexistent_files() {
+        let groups = vec![vec![
+            "/nonexistent/a.mp4".to_string(),
+            "/nonexistent/b.mp4".to_string(),
+        ]];
+        let summary = estimate_savings(&groups);
+        assert_eq!(summary.groups.len(), 1);
+        // All sizes are 0 since files don't exist
+        assert_eq!(summary.groups[0].total_bytes, 0);
+        assert_eq!(summary.groups[0].recoverable_bytes, 0);
+    }
+
+    #[test]
+    fn test_estimate_savings_with_temp_files() {
+        let dir = std::env::temp_dir().join("oximedia_dedup_savings_test");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let file_a = dir.join("dup_a.bin");
+        let file_b = dir.join("dup_b.bin");
+        let file_c = dir.join("dup_c.bin");
+
+        // Write files of known sizes
+        std::fs::write(&file_a, &[0u8; 1000]).expect("write a");
+        std::fs::write(&file_b, &[0u8; 2000]).expect("write b");
+        std::fs::write(&file_c, &[0u8; 500]).expect("write c");
+
+        let groups = vec![vec![
+            file_a.to_string_lossy().to_string(),
+            file_b.to_string_lossy().to_string(),
+            file_c.to_string_lossy().to_string(),
+        ]];
+
+        let summary = estimate_savings(&groups);
+        assert_eq!(summary.groups.len(), 1);
+        assert_eq!(summary.groups[0].total_bytes, 3500);
+        assert_eq!(summary.groups[0].largest_file_bytes, 2000);
+        assert_eq!(summary.groups[0].recoverable_bytes, 1500);
+        assert_eq!(summary.groups[0].file_count, 3);
+        assert_eq!(summary.total_recoverable_bytes, 1500);
+        assert_eq!(summary.total_removable_files, 2);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_savings_summary_recovery_ratio() {
+        let summary = SavingsSummary {
+            groups: Vec::new(),
+            total_recoverable_bytes: 500,
+            total_bytes_in_duplicates: 1000,
+            total_removable_files: 3,
+        };
+        assert!((summary.recovery_ratio() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_savings_summary_recovery_ratio_zero() {
+        let summary = SavingsSummary {
+            groups: Vec::new(),
+            total_recoverable_bytes: 0,
+            total_bytes_in_duplicates: 0,
+            total_removable_files: 0,
+        };
+        assert_eq!(summary.recovery_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_savings_summary_description() {
+        let summary = SavingsSummary {
+            groups: vec![GroupSavings {
+                total_bytes: 3000,
+                largest_file_bytes: 2000,
+                recoverable_bytes: 1000,
+                file_count: 3,
+                description: "3 files, 1000 B recoverable".to_string(),
+            }],
+            total_recoverable_bytes: 1000,
+            total_bytes_in_duplicates: 3000,
+            total_removable_files: 2,
+        };
+        let desc = summary.description();
+        assert!(desc.contains("1 duplicate groups"));
+        assert!(desc.contains("2 removable files"));
+    }
+
+    #[test]
+    fn test_estimate_savings_from_summary() {
+        let summary = DedupSummary {
+            total_files: 100,
+            unique_files: 60,
+            duplicate_files: 40,
+            total_bytes: 10_000,
+            reclaimable_bytes: 4_000,
+        };
+        let gs = estimate_savings_from_summary(&summary);
+        assert_eq!(gs.recoverable_bytes, 4_000);
+        assert_eq!(gs.total_bytes, 10_000);
+        assert_eq!(gs.file_count, 100);
+    }
+
+    #[test]
+    fn test_format_bytes_compact() {
+        assert_eq!(format_bytes_compact(500), "500 B");
+        assert_eq!(format_bytes_compact(1024), "1.0 KB");
+        assert_eq!(format_bytes_compact(1024 * 1024), "1.0 MB");
+        assert_eq!(format_bytes_compact(1024 * 1024 * 1024), "1.0 GB");
+    }
+
+    #[test]
+    fn test_multiple_groups_savings() {
+        let dir = std::env::temp_dir().join("oximedia_dedup_multi_savings");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let a1 = dir.join("group1_a.bin");
+        let a2 = dir.join("group1_b.bin");
+        let b1 = dir.join("group2_a.bin");
+        let b2 = dir.join("group2_b.bin");
+
+        std::fs::write(&a1, &[0u8; 100]).expect("write");
+        std::fs::write(&a2, &[0u8; 200]).expect("write");
+        std::fs::write(&b1, &[0u8; 500]).expect("write");
+        std::fs::write(&b2, &[0u8; 300]).expect("write");
+
+        let groups = vec![
+            vec![
+                a1.to_string_lossy().to_string(),
+                a2.to_string_lossy().to_string(),
+            ],
+            vec![
+                b1.to_string_lossy().to_string(),
+                b2.to_string_lossy().to_string(),
+            ],
+        ];
+
+        let summary = estimate_savings(&groups);
+        assert_eq!(summary.groups.len(), 2);
+        // Group 1: keep 200, save 100
+        assert_eq!(summary.groups[0].recoverable_bytes, 100);
+        // Group 2: keep 500, save 300
+        assert_eq!(summary.groups[1].recoverable_bytes, 300);
+        assert_eq!(summary.total_recoverable_bytes, 400);
+        assert_eq!(summary.total_removable_files, 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

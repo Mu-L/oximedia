@@ -62,11 +62,7 @@ impl TileRegion {
 
 impl fmt::Display for TileRegion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "({}, {}) {}x{}",
-            self.x, self.y, self.width, self.height
-        )
+        write!(f, "({}, {}) {}x{}", self.x, self.y, self.width, self.height)
     }
 }
 
@@ -168,7 +164,12 @@ impl RenderPass {
 /// Both `base` and `blend` are in `[R, G, B, A]` format, normalised 0..1.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
-pub fn blend_pixels(base: [f32; 4], blend_val: [f32; 4], mode: PassBlendMode, opacity: f32) -> [f32; 4] {
+pub fn blend_pixels(
+    base: [f32; 4],
+    blend_val: [f32; 4],
+    mode: PassBlendMode,
+    opacity: f32,
+) -> [f32; 4] {
     let op = opacity.clamp(0.0, 1.0);
     let mut result = [0.0f32; 4];
     match mode {
@@ -203,8 +204,7 @@ pub fn blend_pixels(base: [f32; 4], blend_val: [f32; 4], mode: PassBlendMode, op
             let out_a = src_a + dst_a * (1.0 - src_a);
             if out_a > 1e-6 {
                 for i in 0..3 {
-                    result[i] =
-                        (blend_val[i] * src_a + base[i] * dst_a * (1.0 - src_a)) / out_a;
+                    result[i] = (blend_val[i] * src_a + base[i] * dst_a * (1.0 - src_a)) / out_a;
                 }
             }
             result[3] = out_a;
@@ -408,7 +408,10 @@ mod tests {
         // columns = ceil(300/128) = 3, rows = ceil(200/128) = 2 => 6 tiles
         assert_eq!(tiles.len(), 6);
         // Last column tiles should be narrower
-        let last_col_tile = tiles.iter().find(|t| t.x == 256).expect("should succeed in test");
+        let last_col_tile = tiles
+            .iter()
+            .find(|t| t.x == 256)
+            .expect("should succeed in test");
         assert_eq!(last_col_tile.width, 44); // 300 - 256
     }
 

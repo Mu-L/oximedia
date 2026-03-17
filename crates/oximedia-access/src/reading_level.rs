@@ -342,7 +342,7 @@ mod tests {
         let analyzer = ReadabilityAnalyzer::new();
         let stats = analyzer.analyze_text("Hello world. How are you? I am fine!");
         assert_eq!(stats.sentence_count, 3);
-        assert_eq!(stats.word_count, 7);
+        assert_eq!(stats.word_count, 8);
     }
 
     #[test]
@@ -366,7 +366,10 @@ mod tests {
         let stats = analyzer.analyze_text("The cat sat. The dog ran. The bird flew.");
         let grade = analyzer.flesch_kincaid_grade(&stats);
         // Simple text should have a low grade level
-        assert!(grade < 10.0, "Grade {grade} should be below 10 for simple text");
+        assert!(
+            grade < 10.0,
+            "Grade {grade} should be below 10 for simple text"
+        );
     }
 
     #[test]
@@ -375,7 +378,10 @@ mod tests {
         let stats = analyzer.analyze_text("The cat sat. The dog ran.");
         let ease = analyzer.flesch_reading_ease(&stats);
         // Simple text should have high readability ease
-        assert!(ease > 50.0, "Ease score {ease} should be above 50 for simple text");
+        assert!(
+            ease > 50.0,
+            "Ease score {ease} should be above 50 for simple text"
+        );
     }
 
     #[test]
@@ -387,13 +393,34 @@ mod tests {
 
     #[test]
     fn test_grade_to_level_mapping() {
-        assert_eq!(ReadabilityAnalyzer::grade_to_level(3.0), ReadabilityLevel::VeryEasy);
-        assert_eq!(ReadabilityAnalyzer::grade_to_level(7.0), ReadabilityLevel::Easy);
-        assert_eq!(ReadabilityAnalyzer::grade_to_level(9.0), ReadabilityLevel::FairlyEasy);
-        assert_eq!(ReadabilityAnalyzer::grade_to_level(11.0), ReadabilityLevel::Standard);
-        assert_eq!(ReadabilityAnalyzer::grade_to_level(13.0), ReadabilityLevel::FairlyDifficult);
-        assert_eq!(ReadabilityAnalyzer::grade_to_level(15.0), ReadabilityLevel::Difficult);
-        assert_eq!(ReadabilityAnalyzer::grade_to_level(20.0), ReadabilityLevel::VeryDifficult);
+        assert_eq!(
+            ReadabilityAnalyzer::grade_to_level(3.0),
+            ReadabilityLevel::VeryEasy
+        );
+        assert_eq!(
+            ReadabilityAnalyzer::grade_to_level(7.0),
+            ReadabilityLevel::Easy
+        );
+        assert_eq!(
+            ReadabilityAnalyzer::grade_to_level(9.0),
+            ReadabilityLevel::FairlyEasy
+        );
+        assert_eq!(
+            ReadabilityAnalyzer::grade_to_level(11.0),
+            ReadabilityLevel::Standard
+        );
+        assert_eq!(
+            ReadabilityAnalyzer::grade_to_level(13.0),
+            ReadabilityLevel::FairlyDifficult
+        );
+        assert_eq!(
+            ReadabilityAnalyzer::grade_to_level(15.0),
+            ReadabilityLevel::Difficult
+        );
+        assert_eq!(
+            ReadabilityAnalyzer::grade_to_level(20.0),
+            ReadabilityLevel::VeryDifficult
+        );
     }
 
     #[test]
@@ -415,7 +442,10 @@ mod tests {
     fn test_readability_level_display() {
         assert_eq!(format!("{}", ReadabilityLevel::VeryEasy), "Very Easy");
         assert_eq!(format!("{}", ReadabilityLevel::Standard), "Standard");
-        assert_eq!(format!("{}", ReadabilityLevel::VeryDifficult), "Very Difficult");
+        assert_eq!(
+            format!("{}", ReadabilityLevel::VeryDifficult),
+            "Very Difficult"
+        );
     }
 
     #[test]

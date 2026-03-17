@@ -11,17 +11,76 @@ pub enum CommentStatus {
     Acknowledged,
     /// Comment has been resolved — no further action required.
     Resolved,
+    /// Comment has been marked won't-fix — deliberately not actioned.
+    WontFix,
     /// Comment has been dismissed as not applicable.
     Dismissed,
     /// Comment is blocked on an external dependency.
     Blocked,
 }
 
+// ── Thread-level resolution state ─────────────────────────────────────────
+
+/// High-level resolution state of an entire `CommentThread`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadResolutionState {
+    /// Thread is open: at least one comment needs action.
+    Open,
+    /// Thread has been resolved — all comments actioned.
+    Resolved,
+    /// Thread was explicitly marked won't-fix at the thread level.
+    WontFix,
+}
+
+impl ThreadResolutionState {
+    /// Returns `true` for closed states (Resolved or WontFix).
+    #[must_use]
+    pub fn is_closed(self) -> bool {
+        matches!(self, Self::Resolved | Self::WontFix)
+    }
+}
+
+/// A single entry in the thread audit trail.
+#[derive(Debug, Clone)]
+pub struct AuditEntry {
+    /// Wall-clock timestamp in milliseconds since UNIX epoch.
+    pub timestamp_ms: u64,
+    /// Identifier of the user who performed the action.
+    pub actor: String,
+    /// What happened.
+    pub action: AuditAction,
+}
+
+/// The type of action recorded in an `AuditEntry`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuditAction {
+    /// A new comment was added (carries the comment ID).
+    CommentAdded(u64),
+    /// A comment's status was changed.
+    CommentStatusChanged {
+        /// Comment that was changed.
+        comment_id: u64,
+        /// Previous status.
+        from: CommentStatus,
+        /// New status.
+        to: CommentStatus,
+    },
+    /// The thread-level resolution state was changed.
+    ThreadStateChanged {
+        /// Previous thread state.
+        from: ThreadResolutionState,
+        /// New thread state.
+        to: ThreadResolutionState,
+        /// Optional free-text reason.
+        reason: Option<String>,
+    },
+}
+
 impl CommentStatus {
     /// Returns `true` if this status represents a resolved/closed comment.
     #[must_use]
     pub fn is_resolved(&self) -> bool {
-        matches!(self, Self::Resolved | Self::Dismissed)
+        matches!(self, Self::Resolved | Self::Dismissed | Self::WontFix)
     }
 
     /// Returns `true` if this status requires attention.
@@ -37,6 +96,7 @@ impl CommentStatus {
             Self::Open => "Open",
             Self::Acknowledged => "Acknowledged",
             Self::Resolved => "Resolved",
+            Self::WontFix => "Won't Fix",
             Self::Dismissed => "Dismissed",
             Self::Blocked => "Blocked",
         }
@@ -110,6 +170,11 @@ impl ReviewComment {
         self.status = CommentStatus::Resolved;
     }
 
+    /// Mark this comment as won't-fix (deliberately not actioned).
+    pub fn mark_wont_fix(&mut self) {
+        self.status = CommentStatus::WontFix;
+    }
+
     /// Dismiss the comment as not applicable.
     pub fn dismiss(&mut self) {
         self.status = CommentStatus::Dismissed;
@@ -131,6 +196,10 @@ pub struct CommentThread {
     pub subject: String,
     /// Ordered list of comments in this thread.
     comments: Vec<ReviewComment>,
+    /// High-level resolution state of the whole thread.
+    pub resolution_state: ThreadResolutionState,
+    /// Chronological audit trail of all state changes.
+    audit_trail: Vec<AuditEntry>,
 }
 
 impl CommentThread {
@@ -141,15 +210,118 @@ impl CommentThread {
             id,
             subject: subject.into(),
             comments: Vec::new(),
+            resolution_state: ThreadResolutionState::Open,
+            audit_trail: Vec::new(),
         }
     }
 
-    /// Add a comment to the thread.
+    /// Add a comment to the thread, recording an audit entry.
+    pub fn add_comment_audited(&mut self, comment: ReviewComment, actor: &str, now_ms: u64) {
+        let comment_id = comment.id;
+        self.comments.push(comment);
+        self.audit_trail.push(AuditEntry {
+            timestamp_ms: now_ms,
+            actor: actor.to_string(),
+            action: AuditAction::CommentAdded(comment_id),
+        });
+    }
+
+    /// Add a comment to the thread (no audit entry — kept for backward compat).
     pub fn add_comment(&mut self, comment: ReviewComment) {
         self.comments.push(comment);
     }
 
-    /// Resolve all comments in the thread.
+    /// Change a single comment's status and record an audit entry.
+    ///
+    /// Returns `false` if no comment with `id` was found.
+    pub fn set_comment_status(
+        &mut self,
+        id: u64,
+        new_status: CommentStatus,
+        actor: &str,
+        now_ms: u64,
+    ) -> bool {
+        if let Some(c) = self.comments.iter_mut().find(|c| c.id == id) {
+            let old = c.status;
+            c.status = new_status;
+            self.audit_trail.push(AuditEntry {
+                timestamp_ms: now_ms,
+                actor: actor.to_string(),
+                action: AuditAction::CommentStatusChanged {
+                    comment_id: id,
+                    from: old,
+                    to: new_status,
+                },
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Mark the thread as resolved, recording an audit entry.
+    pub fn mark_resolved(&mut self, actor: &str, reason: Option<String>, now_ms: u64) {
+        let old = self.resolution_state;
+        self.resolution_state = ThreadResolutionState::Resolved;
+        // Also resolve all open comments.
+        for c in &mut self.comments {
+            if !c.is_resolved() {
+                c.status = CommentStatus::Resolved;
+            }
+        }
+        self.audit_trail.push(AuditEntry {
+            timestamp_ms: now_ms,
+            actor: actor.to_string(),
+            action: AuditAction::ThreadStateChanged {
+                from: old,
+                to: ThreadResolutionState::Resolved,
+                reason,
+            },
+        });
+    }
+
+    /// Mark the thread as won't-fix, recording an audit entry.
+    pub fn mark_wont_fix(&mut self, actor: &str, reason: Option<String>, now_ms: u64) {
+        let old = self.resolution_state;
+        self.resolution_state = ThreadResolutionState::WontFix;
+        for c in &mut self.comments {
+            if !c.is_resolved() {
+                c.status = CommentStatus::WontFix;
+            }
+        }
+        self.audit_trail.push(AuditEntry {
+            timestamp_ms: now_ms,
+            actor: actor.to_string(),
+            action: AuditAction::ThreadStateChanged {
+                from: old,
+                to: ThreadResolutionState::WontFix,
+                reason,
+            },
+        });
+    }
+
+    /// Re-open the thread (e.g., after incorrect resolution).
+    pub fn reopen(&mut self, actor: &str, reason: Option<String>, now_ms: u64) {
+        let old = self.resolution_state;
+        self.resolution_state = ThreadResolutionState::Open;
+        self.audit_trail.push(AuditEntry {
+            timestamp_ms: now_ms,
+            actor: actor.to_string(),
+            action: AuditAction::ThreadStateChanged {
+                from: old,
+                to: ThreadResolutionState::Open,
+                reason,
+            },
+        });
+    }
+
+    /// Return the full audit trail (oldest first).
+    #[must_use]
+    pub fn audit_trail(&self) -> &[AuditEntry] {
+        &self.audit_trail
+    }
+
+    /// Resolve all comments in the thread (no audit — kept for backward compat).
     pub fn resolve(&mut self) {
         for c in &mut self.comments {
             c.resolve();
@@ -336,5 +508,116 @@ mod tests {
         t.add_comment(open_comment(20));
         let ids: Vec<u64> = t.comments().iter().map(|c| c.id).collect();
         assert_eq!(ids, vec![10, 20]);
+    }
+
+    // ── Resolution tracking & audit trail ────────────────────────────────────
+
+    #[test]
+    fn test_wont_fix_status_is_resolved() {
+        assert!(CommentStatus::WontFix.is_resolved());
+        assert_eq!(CommentStatus::WontFix.label(), "Won't Fix");
+    }
+
+    #[test]
+    fn test_thread_default_state_is_open() {
+        let t = thread();
+        assert_eq!(t.resolution_state, ThreadResolutionState::Open);
+    }
+
+    #[test]
+    fn test_mark_resolved_sets_state_and_audits() {
+        let mut t = thread();
+        t.add_comment(open_comment(1));
+        t.mark_resolved("alice", Some("All done".into()), 5000);
+        assert_eq!(t.resolution_state, ThreadResolutionState::Resolved);
+        assert!(t.is_fully_resolved());
+        let trail = t.audit_trail();
+        assert_eq!(trail.len(), 1);
+        assert_eq!(trail[0].actor, "alice");
+        assert!(matches!(
+            trail[0].action,
+            AuditAction::ThreadStateChanged {
+                to: ThreadResolutionState::Resolved,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_mark_wont_fix_sets_state_and_audits() {
+        let mut t = thread();
+        t.add_comment(open_comment(1));
+        t.mark_wont_fix("bob", Some("By design".into()), 6000);
+        assert_eq!(t.resolution_state, ThreadResolutionState::WontFix);
+        assert!(t.is_fully_resolved());
+        let trail = t.audit_trail();
+        assert!(matches!(
+            trail[0].action,
+            AuditAction::ThreadStateChanged {
+                to: ThreadResolutionState::WontFix,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_reopen_thread() {
+        let mut t = thread();
+        t.mark_resolved("alice", None, 1000);
+        t.reopen("bob", Some("Needs more work".into()), 2000);
+        assert_eq!(t.resolution_state, ThreadResolutionState::Open);
+        assert_eq!(t.audit_trail().len(), 2);
+    }
+
+    #[test]
+    fn test_thread_state_is_closed() {
+        assert!(ThreadResolutionState::Resolved.is_closed());
+        assert!(ThreadResolutionState::WontFix.is_closed());
+        assert!(!ThreadResolutionState::Open.is_closed());
+    }
+
+    #[test]
+    fn test_add_comment_audited() {
+        let mut t = thread();
+        t.add_comment_audited(open_comment(1), "alice", 100);
+        assert_eq!(t.total_count(), 1);
+        assert_eq!(t.audit_trail().len(), 1);
+        assert!(matches!(
+            t.audit_trail()[0].action,
+            AuditAction::CommentAdded(1)
+        ));
+    }
+
+    #[test]
+    fn test_set_comment_status_audits() {
+        let mut t = thread();
+        t.add_comment(open_comment(42));
+        let changed = t.set_comment_status(42, CommentStatus::Resolved, "carol", 9000);
+        assert!(changed);
+        assert_eq!(t.unresolved_count(), 0);
+        let trail = t.audit_trail();
+        assert_eq!(trail.len(), 1);
+        assert!(matches!(
+            trail[0].action,
+            AuditAction::CommentStatusChanged {
+                comment_id: 42,
+                from: CommentStatus::Open,
+                to: CommentStatus::Resolved,
+            }
+        ));
+    }
+
+    #[test]
+    fn test_set_comment_status_returns_false_for_missing() {
+        let mut t = thread();
+        assert!(!t.set_comment_status(999, CommentStatus::Resolved, "alice", 0));
+    }
+
+    #[test]
+    fn test_comment_mark_wont_fix() {
+        let mut c = open_comment(1);
+        c.mark_wont_fix();
+        assert!(c.is_resolved());
+        assert_eq!(c.status, CommentStatus::WontFix);
     }
 }

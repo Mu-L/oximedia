@@ -124,6 +124,7 @@ pub mod cqp;
 pub mod crf;
 pub mod lookahead;
 pub mod quantizer;
+pub mod simple_rc;
 pub mod types;
 pub mod vbr;
 
@@ -138,8 +139,14 @@ pub use cbr::CbrController;
 pub use complexity::{ComplexityEstimator, ComplexityResult, MotionAnalyzer, MotionResult};
 pub use cqp::CqpController;
 pub use crf::{CrfController, QualityPreset};
-pub use lookahead::{Lookahead, LookaheadFrame, MiniGopInfo, SceneChangeDetector};
+pub use lookahead::{
+    AdaptiveAllocation, ContentAdaptiveAllocator, ContentMetrics, Lookahead, LookaheadFrame,
+    MiniGopInfo, SceneChangeDetector, SceneContentType,
+};
 pub use quantizer::{BlockQpMap, QpResult, QpSelector, QpStrategy};
+pub use simple_rc::{
+    SimpleRateControlConfig, SimpleRateControlMode, SimpleRateControlStats, SimpleRateController,
+};
 pub use types::{
     FrameStats, GopStats, RateControlMode, RcConfig, RcConfigError, RcOutput, RcState,
 };

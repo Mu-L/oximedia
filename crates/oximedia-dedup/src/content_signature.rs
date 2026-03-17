@@ -2,8 +2,24 @@
 //!
 //! Provides `SignatureType`, `ContentSignature`, and `SignatureDatabase`
 //! for storing and matching content signatures across a media library.
+//!
+//! # Robust Signatures
+//!
+//! The [`RobustSignature`] type combines multiple format-agnostic signals
+//! into a single composite fingerprint that survives common transformations:
+//!
+//! - **Transcoding** (codec/container changes)
+//! - **Cropping** (letterboxing, aspect ratio changes)
+//! - **Watermarking** (overlaid logos, text)
+//! - **Colour grading** (brightness, contrast, saturation shifts)
+//! - **Scaling** (resolution changes)
+//!
+//! This is achieved by fusing perceptual hashes (rotation-invariant DCT
+//! domain), radial variance profiles, temporal rhythm signatures, and
+//! audio spectral peaks into a single matchable descriptor.
 
 #![allow(dead_code)]
+#![allow(clippy::cast_precision_loss)]
 
 use std::collections::HashMap;
 
@@ -301,5 +317,680 @@ mod tests {
         let removed = db.remove_asset("x");
         assert_eq!(removed.len(), 1);
         assert_eq!(db.asset_count(), 0);
+    }
+}
+
+// ===========================================================================
+// Robust Content Signatures
+// ===========================================================================
+
+/// Number of radial zones for the radial variance profile.
+const RADIAL_ZONES: usize = 8;
+
+/// Number of temporal bins for the rhythm signature.
+const TEMPORAL_BINS: usize = 16;
+
+/// Number of spectral peaks stored in the audio peak constellation.
+const SPECTRAL_PEAKS: usize = 32;
+
+// ---------------------------------------------------------------------------
+// RadialVariance
+// ---------------------------------------------------------------------------
+
+/// Radial variance profile of an image — invariant to translation, robust to
+/// cropping and scaling.
+///
+/// Divides a centred circle into concentric annular zones and computes the
+/// variance of luminance within each zone.  Because the measurement is
+/// relative to the image centre and averaged over angular position, mild
+/// cropping or letterbox changes only affect the outermost zone.
+#[derive(Debug, Clone)]
+pub struct RadialVarianceProfile {
+    /// Variance per zone (inner to outer).
+    pub zones: [f64; RADIAL_ZONES],
+}
+
+impl RadialVarianceProfile {
+    /// Compute from a grayscale image (flat row-major `u8` data).
+    #[must_use]
+    pub fn compute(width: usize, height: usize, data: &[u8]) -> Self {
+        let cx = width as f64 / 2.0;
+        let cy = height as f64 / 2.0;
+        let max_r = cx.min(cy).max(1.0);
+
+        let mut sums = [0.0f64; RADIAL_ZONES];
+        let mut sq_sums = [0.0f64; RADIAL_ZONES];
+        let mut counts = [0usize; RADIAL_ZONES];
+
+        for y in 0..height {
+            for x in 0..width {
+                let dx = x as f64 - cx;
+                let dy = y as f64 - cy;
+                let r = (dx * dx + dy * dy).sqrt();
+                let zone_idx = ((r / max_r) * RADIAL_ZONES as f64) as usize;
+                let zone_idx = zone_idx.min(RADIAL_ZONES - 1);
+
+                let idx = y * width + x;
+                if idx < data.len() {
+                    let val = f64::from(data[idx]);
+                    sums[zone_idx] += val;
+                    sq_sums[zone_idx] += val * val;
+                    counts[zone_idx] += 1;
+                }
+            }
+        }
+
+        let mut zones = [0.0f64; RADIAL_ZONES];
+        for i in 0..RADIAL_ZONES {
+            if counts[i] > 1 {
+                let mean = sums[i] / counts[i] as f64;
+                let variance = sq_sums[i] / counts[i] as f64 - mean * mean;
+                zones[i] = variance.max(0.0);
+            }
+        }
+
+        Self { zones }
+    }
+
+    /// Cosine similarity to another profile (0.0 - 1.0).
+    #[must_use]
+    pub fn similarity(&self, other: &Self) -> f64 {
+        let dot: f64 = self
+            .zones
+            .iter()
+            .zip(other.zones.iter())
+            .map(|(a, b)| a * b)
+            .sum();
+        let mag_a: f64 = self.zones.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let mag_b: f64 = other.zones.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if mag_a < f64::EPSILON || mag_b < f64::EPSILON {
+            return 0.0;
+        }
+        (dot / (mag_a * mag_b)).clamp(0.0, 1.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TemporalRhythm
+// ---------------------------------------------------------------------------
+
+/// Temporal rhythm signature — captures the temporal structure of visual
+/// changes across a video.
+///
+/// Computed by measuring the average frame-to-frame luminance change over
+/// `TEMPORAL_BINS` equal time segments.  This signature is invariant to
+/// codec and resolution, and robust to colour grading and watermarking.
+#[derive(Debug, Clone)]
+pub struct TemporalRhythm {
+    /// Normalised change intensity per temporal bin (0.0 - 1.0).
+    pub bins: [f64; TEMPORAL_BINS],
+}
+
+impl TemporalRhythm {
+    /// Construct from a series of per-frame luminance change values.
+    ///
+    /// `frame_changes` should contain one value per inter-frame transition
+    /// (i.e., `num_frames - 1` entries), each representing the mean absolute
+    /// pixel difference between consecutive frames.
+    #[must_use]
+    pub fn from_frame_changes(frame_changes: &[f64]) -> Self {
+        let mut bins = [0.0f64; TEMPORAL_BINS];
+        if frame_changes.is_empty() {
+            return Self { bins };
+        }
+
+        let n = frame_changes.len();
+        let bin_size = (n as f64 / TEMPORAL_BINS as f64).max(1.0);
+
+        for (i, &val) in frame_changes.iter().enumerate() {
+            let bin_idx = (i as f64 / bin_size) as usize;
+            let bin_idx = bin_idx.min(TEMPORAL_BINS - 1);
+            bins[bin_idx] += val;
+        }
+
+        // Count entries per bin for averaging.
+        let mut counts = [0usize; TEMPORAL_BINS];
+        for i in 0..n {
+            let bin_idx = ((i as f64 / bin_size) as usize).min(TEMPORAL_BINS - 1);
+            counts[bin_idx] += 1;
+        }
+        for i in 0..TEMPORAL_BINS {
+            if counts[i] > 0 {
+                bins[i] /= counts[i] as f64;
+            }
+        }
+
+        // Normalise to [0, 1].
+        let max_val = bins.iter().cloned().fold(0.0f64, f64::max);
+        if max_val > f64::EPSILON {
+            for b in &mut bins {
+                *b /= max_val;
+            }
+        }
+
+        Self { bins }
+    }
+
+    /// Cosine similarity to another rhythm signature.
+    #[must_use]
+    pub fn similarity(&self, other: &Self) -> f64 {
+        let dot: f64 = self
+            .bins
+            .iter()
+            .zip(other.bins.iter())
+            .map(|(a, b)| a * b)
+            .sum();
+        let mag_a: f64 = self.bins.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let mag_b: f64 = other.bins.iter().map(|x| x * x).sum::<f64>().sqrt();
+        if mag_a < f64::EPSILON || mag_b < f64::EPSILON {
+            return 0.0;
+        }
+        (dot / (mag_a * mag_b)).clamp(0.0, 1.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SpectralPeakConstellation
+// ---------------------------------------------------------------------------
+
+/// Audio spectral peak constellation — a set of (time_bin, freq_bin) pairs
+/// representing the strongest spectral peaks in the audio.
+///
+/// This is the core primitive behind audio fingerprinting systems like
+/// Shazam.  Because peaks are identified by relative position in the
+/// time-frequency plane, the signature is robust to transcoding, volume
+/// changes, and mild noise.
+#[derive(Debug, Clone)]
+pub struct SpectralPeakConstellation {
+    /// Sorted list of (time_bin, frequency_bin) peak positions.
+    pub peaks: Vec<(u32, u32)>,
+}
+
+impl SpectralPeakConstellation {
+    /// Create from raw peak positions.
+    #[must_use]
+    pub fn new(mut peaks: Vec<(u32, u32)>) -> Self {
+        peaks.sort();
+        if peaks.len() > SPECTRAL_PEAKS {
+            peaks.truncate(SPECTRAL_PEAKS);
+        }
+        Self { peaks }
+    }
+
+    /// Jaccard similarity to another constellation (0.0 - 1.0).
+    #[must_use]
+    pub fn similarity(&self, other: &Self) -> f64 {
+        if self.peaks.is_empty() && other.peaks.is_empty() {
+            return 1.0;
+        }
+        if self.peaks.is_empty() || other.peaks.is_empty() {
+            return 0.0;
+        }
+
+        // Count matching peaks (allowing ±1 tolerance in each dimension).
+        let mut matched = 0usize;
+        for &(t1, f1) in &self.peaks {
+            for &(t2, f2) in &other.peaks {
+                let dt = (t1 as i64 - t2 as i64).unsigned_abs();
+                let df = (f1 as i64 - f2 as i64).unsigned_abs();
+                if dt <= 1 && df <= 1 {
+                    matched += 1;
+                    break;
+                }
+            }
+        }
+
+        let union = self.peaks.len() + other.peaks.len() - matched;
+        if union == 0 {
+            return 0.0;
+        }
+        matched as f64 / union as f64
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RobustSignature
+// ---------------------------------------------------------------------------
+
+/// A robust multi-signal content signature that survives transcoding,
+/// cropping, watermarking, colour grading, and resolution changes.
+///
+/// Combines:
+/// - **Perceptual hash** (64-bit DCT pHash — invariant to scale/compression)
+/// - **Radial variance profile** (robust to cropping/letterboxing)
+/// - **Temporal rhythm** (robust to codec/colour grading)
+/// - **Spectral peaks** (robust to audio transcoding/noise)
+#[derive(Debug, Clone)]
+pub struct RobustSignature {
+    /// Asset identifier.
+    pub asset_id: String,
+    /// 64-bit perceptual hash (visual).
+    pub phash: Option<u64>,
+    /// Radial variance profile (visual).
+    pub radial: Option<RadialVarianceProfile>,
+    /// Temporal rhythm (video).
+    pub temporal: Option<TemporalRhythm>,
+    /// Spectral peak constellation (audio).
+    pub spectral: Option<SpectralPeakConstellation>,
+    /// Duration in seconds.
+    pub duration_secs: Option<f64>,
+}
+
+impl RobustSignature {
+    /// Create a new signature with only an asset ID.
+    #[must_use]
+    pub fn new(asset_id: impl Into<String>) -> Self {
+        Self {
+            asset_id: asset_id.into(),
+            phash: None,
+            radial: None,
+            temporal: None,
+            spectral: None,
+            duration_secs: None,
+        }
+    }
+
+    /// Builder: set perceptual hash.
+    #[must_use]
+    pub fn with_phash(mut self, hash: u64) -> Self {
+        self.phash = Some(hash);
+        self
+    }
+
+    /// Builder: set radial variance profile.
+    #[must_use]
+    pub fn with_radial(mut self, profile: RadialVarianceProfile) -> Self {
+        self.radial = Some(profile);
+        self
+    }
+
+    /// Builder: set temporal rhythm.
+    #[must_use]
+    pub fn with_temporal(mut self, rhythm: TemporalRhythm) -> Self {
+        self.temporal = Some(rhythm);
+        self
+    }
+
+    /// Builder: set spectral peaks.
+    #[must_use]
+    pub fn with_spectral(mut self, peaks: SpectralPeakConstellation) -> Self {
+        self.spectral = Some(peaks);
+        self
+    }
+
+    /// Builder: set duration.
+    #[must_use]
+    pub fn with_duration(mut self, secs: f64) -> Self {
+        self.duration_secs = Some(secs);
+        self
+    }
+
+    /// Number of signal components present.
+    #[must_use]
+    pub fn signal_count(&self) -> usize {
+        let mut count = 0;
+        if self.phash.is_some() {
+            count += 1;
+        }
+        if self.radial.is_some() {
+            count += 1;
+        }
+        if self.temporal.is_some() {
+            count += 1;
+        }
+        if self.spectral.is_some() {
+            count += 1;
+        }
+        count
+    }
+
+    /// Compute weighted similarity to another robust signature.
+    ///
+    /// Returns `(overall_score, RobustMatchDetail)`.
+    #[must_use]
+    pub fn compare(&self, other: &Self) -> RobustMatchResult {
+        let mut total_weight = 0.0f64;
+        let mut weighted_sum = 0.0f64;
+
+        // Duration pre-check: if both have duration and they differ by more
+        // than 2 seconds, early-reject.
+        let duration_ok = match (self.duration_secs, other.duration_secs) {
+            (Some(a), Some(b)) => (a - b).abs() <= 2.0,
+            _ => true,
+        };
+
+        if !duration_ok {
+            return RobustMatchResult {
+                overall_score: 0.0,
+                phash_score: None,
+                radial_score: None,
+                temporal_score: None,
+                spectral_score: None,
+            };
+        }
+
+        // pHash comparison (weight = 0.35)
+        let phash_score = match (self.phash, other.phash) {
+            (Some(a), Some(b)) => {
+                let dist = (a ^ b).count_ones();
+                let sim = 1.0 - dist as f64 / 64.0;
+                total_weight += 0.35;
+                weighted_sum += sim * 0.35;
+                Some(sim)
+            }
+            _ => None,
+        };
+
+        // Radial variance (weight = 0.20)
+        let radial_score = match (&self.radial, &other.radial) {
+            (Some(a), Some(b)) => {
+                let sim = a.similarity(b);
+                total_weight += 0.20;
+                weighted_sum += sim * 0.20;
+                Some(sim)
+            }
+            _ => None,
+        };
+
+        // Temporal rhythm (weight = 0.25)
+        let temporal_score = match (&self.temporal, &other.temporal) {
+            (Some(a), Some(b)) => {
+                let sim = a.similarity(b);
+                total_weight += 0.25;
+                weighted_sum += sim * 0.25;
+                Some(sim)
+            }
+            _ => None,
+        };
+
+        // Spectral peaks (weight = 0.20)
+        let spectral_score = match (&self.spectral, &other.spectral) {
+            (Some(a), Some(b)) => {
+                let sim = a.similarity(b);
+                total_weight += 0.20;
+                weighted_sum += sim * 0.20;
+                Some(sim)
+            }
+            _ => None,
+        };
+
+        let overall = if total_weight > f64::EPSILON {
+            weighted_sum / total_weight
+        } else {
+            0.0
+        };
+
+        RobustMatchResult {
+            overall_score: overall,
+            phash_score,
+            radial_score,
+            temporal_score,
+            spectral_score,
+        }
+    }
+}
+
+/// Result of comparing two `RobustSignature` instances.
+#[derive(Debug, Clone)]
+pub struct RobustMatchResult {
+    /// Weighted overall score (0.0 - 1.0).
+    pub overall_score: f64,
+    /// Per-signal scores.
+    pub phash_score: Option<f64>,
+    /// Radial variance similarity.
+    pub radial_score: Option<f64>,
+    /// Temporal rhythm similarity.
+    pub temporal_score: Option<f64>,
+    /// Spectral peak similarity.
+    pub spectral_score: Option<f64>,
+}
+
+impl RobustMatchResult {
+    /// Returns `true` if the overall score is above `threshold`.
+    #[must_use]
+    pub fn is_match(&self, threshold: f64) -> bool {
+        self.overall_score >= threshold
+    }
+
+    /// Number of signals that contributed to the score.
+    #[must_use]
+    pub fn contributing_signals(&self) -> usize {
+        let mut count = 0;
+        if self.phash_score.is_some() {
+            count += 1;
+        }
+        if self.radial_score.is_some() {
+            count += 1;
+        }
+        if self.temporal_score.is_some() {
+            count += 1;
+        }
+        if self.spectral_score.is_some() {
+            count += 1;
+        }
+        count
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RobustSignature tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod robust_tests {
+    use super::*;
+
+    #[test]
+    fn test_radial_variance_uniform_image() {
+        // Uniform image: all pixels = 128, variance should be ~0.
+        let data = vec![128u8; 64 * 64];
+        let profile = RadialVarianceProfile::compute(64, 64, &data);
+        for &v in &profile.zones {
+            assert!(
+                v < 1e-6,
+                "uniform image should have near-zero variance: {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_radial_variance_self_similarity() {
+        let data: Vec<u8> = (0..64 * 64).map(|i| (i % 256) as u8).collect();
+        let profile = RadialVarianceProfile::compute(64, 64, &data);
+        let sim = profile.similarity(&profile);
+        assert!((sim - 1.0).abs() < 1e-10, "self-similarity should be 1.0");
+    }
+
+    #[test]
+    fn test_radial_variance_different_images() {
+        let data_a = vec![100u8; 64 * 64];
+        let data_b: Vec<u8> = (0..64 * 64).map(|i| ((i * 7) % 256) as u8).collect();
+        let pa = RadialVarianceProfile::compute(64, 64, &data_a);
+        let pb = RadialVarianceProfile::compute(64, 64, &data_b);
+        let sim = pa.similarity(&pb);
+        // Uniform vs noisy: should be low similarity.
+        assert!(
+            sim < 0.5,
+            "different images should have low radial similarity: {sim}"
+        );
+    }
+
+    #[test]
+    fn test_temporal_rhythm_constant() {
+        let changes = vec![5.0; 100];
+        let rhythm = TemporalRhythm::from_frame_changes(&changes);
+        // All bins should be 1.0 (constant normalised to max).
+        for &b in &rhythm.bins {
+            assert!((b - 1.0).abs() < 1e-6, "constant changes -> all bins = 1.0");
+        }
+    }
+
+    #[test]
+    fn test_temporal_rhythm_empty() {
+        let rhythm = TemporalRhythm::from_frame_changes(&[]);
+        for &b in &rhythm.bins {
+            assert_eq!(b, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_temporal_rhythm_self_similarity() {
+        let changes: Vec<f64> = (0..200)
+            .map(|i| (i as f64 * 0.1).sin().abs() * 10.0)
+            .collect();
+        let rhythm = TemporalRhythm::from_frame_changes(&changes);
+        let sim = rhythm.similarity(&rhythm);
+        assert!((sim - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_spectral_peaks_identical() {
+        let peaks = vec![(1, 10), (2, 20), (5, 50)];
+        let a = SpectralPeakConstellation::new(peaks.clone());
+        let b = SpectralPeakConstellation::new(peaks);
+        let sim = a.similarity(&b);
+        assert!((sim - 1.0).abs() < 1e-10, "identical peaks should be 1.0");
+    }
+
+    #[test]
+    fn test_spectral_peaks_no_overlap() {
+        let a = SpectralPeakConstellation::new(vec![(0, 0), (1, 1)]);
+        let b = SpectralPeakConstellation::new(vec![(100, 100), (200, 200)]);
+        let sim = a.similarity(&b);
+        assert_eq!(sim, 0.0);
+    }
+
+    #[test]
+    fn test_spectral_peaks_tolerance() {
+        // Peaks differ by ±1 in each dimension — should still match.
+        let a = SpectralPeakConstellation::new(vec![(10, 20)]);
+        let b = SpectralPeakConstellation::new(vec![(11, 21)]);
+        let sim = a.similarity(&b);
+        assert!(sim > 0.0, "peaks within tolerance should match");
+    }
+
+    #[test]
+    fn test_spectral_peaks_empty() {
+        let a = SpectralPeakConstellation::new(vec![]);
+        let b = SpectralPeakConstellation::new(vec![]);
+        assert_eq!(a.similarity(&b), 1.0);
+    }
+
+    #[test]
+    fn test_spectral_peaks_truncation() {
+        let many: Vec<(u32, u32)> = (0..100).map(|i| (i, i * 2)).collect();
+        let constellation = SpectralPeakConstellation::new(many);
+        assert!(constellation.peaks.len() <= SPECTRAL_PEAKS);
+    }
+
+    #[test]
+    fn test_robust_signature_identical() {
+        let peaks = vec![(1, 10), (5, 50)];
+        let radial_data: Vec<u8> = (0..32 * 32).map(|i| (i % 256) as u8).collect();
+        let changes: Vec<f64> = (0..100).map(|i| (i as f64).sin().abs() * 20.0).collect();
+
+        let sig_a = RobustSignature::new("asset_a")
+            .with_phash(0xDEAD_BEEF_CAFE_BABE)
+            .with_radial(RadialVarianceProfile::compute(32, 32, &radial_data))
+            .with_temporal(TemporalRhythm::from_frame_changes(&changes))
+            .with_spectral(SpectralPeakConstellation::new(peaks.clone()))
+            .with_duration(120.0);
+
+        let sig_b = RobustSignature::new("asset_b")
+            .with_phash(0xDEAD_BEEF_CAFE_BABE)
+            .with_radial(RadialVarianceProfile::compute(32, 32, &radial_data))
+            .with_temporal(TemporalRhythm::from_frame_changes(&changes))
+            .with_spectral(SpectralPeakConstellation::new(peaks))
+            .with_duration(120.0);
+
+        let result = sig_a.compare(&sig_b);
+        assert!(
+            result.overall_score > 0.99,
+            "identical sigs should match: {}",
+            result.overall_score
+        );
+        assert!(result.is_match(0.95));
+        assert_eq!(result.contributing_signals(), 4);
+    }
+
+    #[test]
+    fn test_robust_signature_different() {
+        let sig_a = RobustSignature::new("a")
+            .with_phash(0x0000_0000_0000_0000)
+            .with_duration(120.0);
+        let sig_b = RobustSignature::new("b")
+            .with_phash(0xFFFF_FFFF_FFFF_FFFF)
+            .with_duration(120.0);
+
+        let result = sig_a.compare(&sig_b);
+        assert!(
+            result.overall_score < 0.1,
+            "very different sigs: {}",
+            result.overall_score
+        );
+    }
+
+    #[test]
+    fn test_robust_signature_duration_reject() {
+        let sig_a = RobustSignature::new("a")
+            .with_phash(0xDEAD_BEEF)
+            .with_duration(60.0);
+        let sig_b = RobustSignature::new("b")
+            .with_phash(0xDEAD_BEEF)
+            .with_duration(120.0);
+
+        let result = sig_a.compare(&sig_b);
+        assert_eq!(result.overall_score, 0.0, "duration mismatch should reject");
+    }
+
+    #[test]
+    fn test_robust_signature_partial_signals() {
+        // Only phash available on both.
+        let sig_a = RobustSignature::new("a").with_phash(0xAAAA);
+        let sig_b = RobustSignature::new("b").with_phash(0xAAAA);
+
+        let result = sig_a.compare(&sig_b);
+        assert!(result.overall_score > 0.99);
+        assert_eq!(result.contributing_signals(), 1);
+    }
+
+    #[test]
+    fn test_robust_signature_no_signals() {
+        let sig_a = RobustSignature::new("a");
+        let sig_b = RobustSignature::new("b");
+        let result = sig_a.compare(&sig_b);
+        assert_eq!(result.overall_score, 0.0);
+        assert_eq!(result.contributing_signals(), 0);
+    }
+
+    #[test]
+    fn test_robust_signature_signal_count() {
+        let sig = RobustSignature::new("a")
+            .with_phash(0x1234)
+            .with_spectral(SpectralPeakConstellation::new(vec![(1, 2)]));
+        assert_eq!(sig.signal_count(), 2);
+    }
+
+    #[test]
+    fn test_robust_signature_watermark_resilience() {
+        // Simulating watermark: same base image with a few pixel changes.
+        // The radial variance should remain similar because the global
+        // structure is unchanged.
+        let base: Vec<u8> = (0..64 * 64).map(|i| (i % 256) as u8).collect();
+        let mut watermarked = base.clone();
+        // Add a "watermark" in the corner (change 100 pixels).
+        for i in 0..100 {
+            if i < watermarked.len() {
+                watermarked[i] = 255;
+            }
+        }
+
+        let pa = RadialVarianceProfile::compute(64, 64, &base);
+        let pb = RadialVarianceProfile::compute(64, 64, &watermarked);
+        let sim = pa.similarity(&pb);
+        assert!(
+            sim > 0.8,
+            "watermarked image should still be similar: {sim}"
+        );
     }
 }

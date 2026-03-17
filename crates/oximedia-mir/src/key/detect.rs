@@ -96,7 +96,7 @@ impl KeyDetector {
 
     /// Convert FFT frame to 12-bin chroma vector.
     #[allow(clippy::cast_precision_loss)]
-    fn frame_to_chroma(&self, frame: &[rustfft::num_complex::Complex<f32>]) -> [f32; 12] {
+    fn frame_to_chroma(&self, frame: &[oxifft::Complex<f32>]) -> [f32; 12] {
         let mut chroma = [0.0; 12];
         let num_bins = frame.len() / 2;
 

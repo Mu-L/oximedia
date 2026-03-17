@@ -62,6 +62,7 @@
 
 mod client;
 pub mod live;
+pub mod ll_dash;
 mod mpd;
 mod segment;
 

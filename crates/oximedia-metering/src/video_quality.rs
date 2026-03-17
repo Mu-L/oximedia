@@ -7,7 +7,75 @@
 //! - Blockiness detection
 
 use crate::{MeteringError, MeteringResult};
-use ndarray::Array2;
+
+/// A 2D frame of f64 values stored as a flat Vec with explicit dimensions.
+#[derive(Debug, Clone)]
+pub struct Frame2D {
+    /// Pixel data in row-major order.
+    pub data: Vec<f64>,
+    /// Frame width.
+    pub width: usize,
+    /// Frame height.
+    pub height: usize,
+}
+
+impl Frame2D {
+    /// Create a frame filled with a constant value.
+    #[must_use]
+    pub fn from_elem(height: usize, width: usize, value: f64) -> Self {
+        Self {
+            data: vec![value; height * width],
+            width,
+            height,
+        }
+    }
+
+    /// Create a zero-filled frame.
+    #[must_use]
+    pub fn zeros(height: usize, width: usize) -> Self {
+        Self::from_elem(height, width, 0.0)
+    }
+
+    /// Create from a shape function.
+    #[must_use]
+    pub fn from_shape_fn(height: usize, width: usize, f: impl Fn(usize, usize) -> f64) -> Self {
+        let mut data = Vec::with_capacity(height * width);
+        for y in 0..height {
+            for x in 0..width {
+                data.push(f(y, x));
+            }
+        }
+        Self {
+            data,
+            width,
+            height,
+        }
+    }
+
+    /// Get a reference to the value at (y, x).
+    #[inline]
+    #[must_use]
+    pub fn get(&self, y: usize, x: usize) -> f64 {
+        self.data[y * self.width + x]
+    }
+
+    /// Get a mutable reference to the value at (y, x).
+    #[inline]
+    pub fn set(&mut self, y: usize, x: usize, value: f64) {
+        self.data[y * self.width + x] = value;
+    }
+
+    /// Get dimensions (height, width).
+    #[must_use]
+    pub fn dim(&self) -> (usize, usize) {
+        (self.height, self.width)
+    }
+
+    /// Iterate over all values.
+    pub fn iter(&self) -> impl Iterator<Item = &f64> {
+        self.data.iter()
+    }
+}
 
 /// PSNR (Peak Signal-to-Noise Ratio) calculator.
 pub struct PsnrCalculator {
@@ -39,20 +107,7 @@ impl PsnrCalculator {
     }
 
     /// Calculate PSNR between reference and distorted frames.
-    ///
-    /// # Arguments
-    ///
-    /// * `reference` - Reference frame
-    /// * `distorted` - Distorted frame
-    ///
-    /// # Returns
-    ///
-    /// PSNR in dB
-    pub fn calculate(
-        &self,
-        reference: &Array2<f64>,
-        distorted: &Array2<f64>,
-    ) -> MeteringResult<f64> {
+    pub fn calculate(&self, reference: &Frame2D, distorted: &Frame2D) -> MeteringResult<f64> {
         let (ref_h, ref_w) = reference.dim();
         let (dist_h, dist_w) = distorted.dim();
 
@@ -68,21 +123,19 @@ impl PsnrCalculator {
             ));
         }
 
-        // Calculate MSE
         let mse = self.calculate_mse(reference, distorted);
 
-        // Calculate PSNR
         let psnr = if mse > 0.0 {
             20.0 * (self.max_value / mse.sqrt()).log10()
         } else {
-            f64::INFINITY // Perfect match
+            f64::INFINITY
         };
 
         Ok(psnr)
     }
 
     /// Calculate MSE (Mean Squared Error).
-    pub fn calculate_mse(&self, reference: &Array2<f64>, distorted: &Array2<f64>) -> f64 {
+    pub fn calculate_mse(&self, reference: &Frame2D, distorted: &Frame2D) -> f64 {
         let mut sum = 0.0;
 
         for (ref_val, dist_val) in reference.iter().zip(distorted.iter()) {
@@ -105,12 +158,6 @@ pub struct SsimCalculator {
 
 impl SsimCalculator {
     /// Create a new SSIM calculator.
-    ///
-    /// # Arguments
-    ///
-    /// * `width` - Frame width
-    /// * `height` - Frame height
-    /// * `max_value` - Maximum possible pixel value
     pub fn new(width: usize, height: usize, max_value: f64) -> MeteringResult<Self> {
         if width == 0 || height == 0 {
             return Err(MeteringError::InvalidConfig(
@@ -128,18 +175,7 @@ impl SsimCalculator {
     }
 
     /// Calculate SSIM between reference and distorted frames.
-    ///
-    /// This is a simplified implementation that calculates global SSIM.
-    /// A full implementation would use a sliding window approach.
-    ///
-    /// # Returns
-    ///
-    /// SSIM value (0.0 to 1.0, where 1.0 is perfect similarity)
-    pub fn calculate(
-        &self,
-        reference: &Array2<f64>,
-        distorted: &Array2<f64>,
-    ) -> MeteringResult<f64> {
+    pub fn calculate(&self, reference: &Frame2D, distorted: &Frame2D) -> MeteringResult<f64> {
         let (ref_h, ref_w) = reference.dim();
         let (dist_h, dist_w) = distorted.dim();
 
@@ -155,11 +191,9 @@ impl SsimCalculator {
             ));
         }
 
-        // Calculate means
         let mean_x: f64 = reference.iter().sum::<f64>() / (self.width * self.height) as f64;
         let mean_y: f64 = distorted.iter().sum::<f64>() / (self.width * self.height) as f64;
 
-        // Calculate variances and covariance
         let mut var_x = 0.0;
         let mut var_y = 0.0;
         let mut cov_xy = 0.0;
@@ -178,7 +212,6 @@ impl SsimCalculator {
         var_y /= n - 1.0;
         cov_xy /= n - 1.0;
 
-        // SSIM formula
         let c1 = (self.k1 * self.max_value).powi(2);
         let c2 = (self.k2 * self.max_value).powi(2);
 
@@ -204,12 +237,6 @@ pub struct BlockinessDetector {
 
 impl BlockinessDetector {
     /// Create a new blockiness detector.
-    ///
-    /// # Arguments
-    ///
-    /// * `width` - Frame width
-    /// * `height` - Frame height
-    /// * `block_size` - Block size to detect (typically 8 for DCT-based codecs)
     pub fn new(width: usize, height: usize, block_size: usize) -> MeteringResult<Self> {
         if width == 0 || height == 0 {
             return Err(MeteringError::InvalidConfig(
@@ -231,15 +258,7 @@ impl BlockinessDetector {
     }
 
     /// Detect blockiness in a frame.
-    ///
-    /// # Arguments
-    ///
-    /// * `frame` - Frame to analyze
-    ///
-    /// # Returns
-    ///
-    /// Blockiness score (higher values indicate more blocking artifacts)
-    pub fn detect(&self, frame: &Array2<f64>) -> MeteringResult<f64> {
+    pub fn detect(&self, frame: &Frame2D) -> MeteringResult<f64> {
         let (height, width) = frame.dim();
 
         if width != self.width || height != self.height {
@@ -253,29 +272,26 @@ impl BlockinessDetector {
         let mut h_count = 0;
         let mut v_count = 0;
 
-        // Detect horizontal block boundaries
         for y in (self.block_size..height).step_by(self.block_size) {
             for x in 0..width {
                 if y > 0 && y < height {
-                    let diff = (frame[[y, x]] - frame[[y - 1, x]]).abs();
+                    let diff = (frame.get(y, x) - frame.get(y - 1, x)).abs();
                     horizontal_edges += diff;
                     h_count += 1;
                 }
             }
         }
 
-        // Detect vertical block boundaries
         for y in 0..height {
             for x in (self.block_size..width).step_by(self.block_size) {
                 if x > 0 && x < width {
-                    let diff = (frame[[y, x]] - frame[[y, x - 1]]).abs();
+                    let diff = (frame.get(y, x) - frame.get(y, x - 1)).abs();
                     vertical_edges += diff;
                     v_count += 1;
                 }
             }
         }
 
-        // Average edge strength at block boundaries
         let avg_h = if h_count > 0 {
             horizontal_edges / f64::from(h_count)
         } else {
@@ -288,7 +304,6 @@ impl BlockinessDetector {
             0.0
         };
 
-        // Blockiness score
         let blockiness = (avg_h + avg_v) / 2.0;
 
         Ok(blockiness)
@@ -319,8 +334,8 @@ impl QualityAnalyzer {
     /// Analyze quality metrics.
     pub fn analyze(
         &self,
-        reference: &Array2<f64>,
-        distorted: &Array2<f64>,
+        reference: &Frame2D,
+        distorted: &Frame2D,
     ) -> MeteringResult<QualityMetrics> {
         let psnr = self.psnr_calc.calculate(reference, distorted)?;
         let ssim = self.ssim_calc.calculate(reference, distorted)?;
@@ -387,8 +402,8 @@ mod tests {
     fn test_psnr_identical_frames() {
         let calc = PsnrCalculator::new(100, 100, 1.0).expect("calc should be valid");
 
-        let frame1 = Array2::from_elem((100, 100), 0.5);
-        let frame2 = Array2::from_elem((100, 100), 0.5);
+        let frame1 = Frame2D::from_elem(100, 100, 0.5);
+        let frame2 = Frame2D::from_elem(100, 100, 0.5);
 
         let psnr = calc
             .calculate(&frame1, &frame2)
@@ -401,8 +416,8 @@ mod tests {
     fn test_psnr_different_frames() {
         let calc = PsnrCalculator::new(100, 100, 1.0).expect("calc should be valid");
 
-        let frame1 = Array2::from_elem((100, 100), 0.5);
-        let frame2 = Array2::from_elem((100, 100), 0.6);
+        let frame1 = Frame2D::from_elem(100, 100, 0.5);
+        let frame2 = Frame2D::from_elem(100, 100, 0.6);
 
         let psnr = calc
             .calculate(&frame1, &frame2)
@@ -416,8 +431,8 @@ mod tests {
     fn test_mse() {
         let calc = PsnrCalculator::new(100, 100, 1.0).expect("calc should be valid");
 
-        let frame1 = Array2::from_elem((100, 100), 0.5);
-        let frame2 = Array2::from_elem((100, 100), 0.6);
+        let frame1 = Frame2D::from_elem(100, 100, 0.5);
+        let frame2 = Frame2D::from_elem(100, 100, 0.6);
 
         let mse = calc.calculate_mse(&frame1, &frame2);
 
@@ -429,8 +444,8 @@ mod tests {
     fn test_ssim_identical_frames() {
         let calc = SsimCalculator::new(100, 100, 1.0).expect("calc should be valid");
 
-        let frame1 = Array2::from_elem((100, 100), 0.5);
-        let frame2 = Array2::from_elem((100, 100), 0.5);
+        let frame1 = Frame2D::from_elem(100, 100, 0.5);
+        let frame2 = Frame2D::from_elem(100, 100, 0.5);
 
         let ssim = calc
             .calculate(&frame1, &frame2)
@@ -443,7 +458,7 @@ mod tests {
     fn test_blockiness_detector() {
         let detector = BlockinessDetector::new(64, 64, 8).expect("detector should be valid");
 
-        let frame = Array2::from_elem((64, 64), 0.5);
+        let frame = Frame2D::from_elem(64, 64, 0.5);
 
         let blockiness = detector.detect(&frame).expect("blockiness should be valid");
 
@@ -454,8 +469,8 @@ mod tests {
     fn test_quality_analyzer() {
         let analyzer = QualityAnalyzer::new(100, 100, 1.0).expect("analyzer should be valid");
 
-        let reference = Array2::from_elem((100, 100), 0.5);
-        let distorted = Array2::from_elem((100, 100), 0.52);
+        let reference = Frame2D::from_elem(100, 100, 0.5);
+        let distorted = Frame2D::from_elem(100, 100, 0.52);
 
         let metrics = analyzer
             .analyze(&reference, &distorted)

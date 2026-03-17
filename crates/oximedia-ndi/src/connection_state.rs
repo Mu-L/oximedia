@@ -3,6 +3,63 @@
 
 use std::time::{Duration, Instant};
 
+// ---------------------------------------------------------------------------
+// ReconnectPolicy — exponential backoff parameters
+// ---------------------------------------------------------------------------
+
+/// Policy controlling automatic reconnection behaviour after a disconnect.
+///
+/// The delay for attempt `n` (0-indexed) is:
+///
+/// ```text
+/// delay = min(base_delay_ms * 2^n, max_delay_ms)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconnectPolicy {
+    /// Maximum number of reconnection attempts before giving up.
+    /// `0` means reconnection is disabled.
+    pub max_attempts: u32,
+    /// Base delay in milliseconds for the first reconnect attempt.
+    pub base_delay_ms: u64,
+    /// Maximum delay cap in milliseconds.
+    pub max_delay_ms: u64,
+}
+
+impl ReconnectPolicy {
+    /// Create a new reconnect policy.
+    pub fn new(max_attempts: u32, base_delay_ms: u64, max_delay_ms: u64) -> Self {
+        Self {
+            max_attempts,
+            base_delay_ms,
+            max_delay_ms,
+        }
+    }
+
+    /// Compute the delay (in milliseconds) for reconnect attempt `n` (0-indexed).
+    ///
+    /// Returns `min(base_delay_ms * 2^n, max_delay_ms)`.  Uses saturating
+    /// arithmetic to avoid overflow on large `n`.
+    pub fn delay_for_attempt(&self, n: u32) -> u64 {
+        // 2^n saturates at u64::MAX when n >= 64; saturating_mul protects us.
+        let shift = n.min(63);
+        let multiplier: u64 = 1u64 << shift;
+        let delay = self.base_delay_ms.saturating_mul(multiplier);
+        delay.min(self.max_delay_ms)
+    }
+
+    /// Whether a reconnect attempt `n` (0-indexed) should still be made.
+    pub fn should_attempt(&self, n: u32) -> bool {
+        self.max_attempts > 0 && n < self.max_attempts
+    }
+}
+
+impl Default for ReconnectPolicy {
+    fn default() -> Self {
+        // 5 attempts, starting at 250 ms, capped at 30 s.
+        Self::new(5, 250, 30_000)
+    }
+}
+
 /// Events that can occur during the lifecycle of an NDI connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionEvent {
@@ -61,6 +118,8 @@ pub enum NdiConnectionState {
     Paused,
     /// A recoverable error occurred; reconnect will be attempted.
     Recovering,
+    /// Actively attempting to reconnect; carries the attempt number (0-indexed).
+    Reconnecting(u32),
     /// Terminal failure — no further reconnect attempts.
     Failed,
     /// The connection was gracefully closed.
@@ -82,6 +141,19 @@ impl NdiConnectionState {
             self,
             NdiConnectionState::Failed | NdiConnectionState::Closed
         )
+    }
+
+    /// Returns `true` if the state represents an in-progress reconnect attempt.
+    pub fn is_reconnecting(&self) -> bool {
+        matches!(self, NdiConnectionState::Reconnecting(_))
+    }
+
+    /// If reconnecting, returns the current attempt number; otherwise `None`.
+    pub fn reconnect_attempt(&self) -> Option<u32> {
+        match self {
+            NdiConnectionState::Reconnecting(n) => Some(*n),
+            _ => None,
+        }
     }
 }
 
@@ -161,6 +233,10 @@ impl ConnectionStateTracker {
     }
 
     /// Apply a `ConnectionEvent` and automatically transition to the appropriate state.
+    ///
+    /// When a `Disconnected` or error event arrives while a `ReconnectPolicy`
+    /// is active (see `ConnectionStateMachine`), the state machine enters
+    /// `Reconnecting(0)` instead of `Closed`.
     pub fn apply_event(&mut self, event: &ConnectionEvent) {
         let next = match event {
             ConnectionEvent::Connected | ConnectionEvent::Authenticated => {
@@ -174,6 +250,51 @@ impl ConnectionStateTracker {
             ConnectionEvent::AuthFailed(_) => NdiConnectionState::Failed,
         };
         self.transition(next);
+    }
+
+    /// Apply a `ConnectionEvent` using the supplied `ReconnectPolicy`.
+    ///
+    /// On `Disconnected` or `Error`/`Timeout` events the tracker enters the
+    /// `Reconnecting(attempt)` state rather than `Closed`/`Recovering`,
+    /// incrementing the attempt counter each time.  Once
+    /// `policy.max_attempts` is exhausted the tracker moves to `Failed`.
+    pub fn apply_event_with_policy(&mut self, event: &ConnectionEvent, policy: &ReconnectPolicy) {
+        let current = self.state();
+        let next = match event {
+            ConnectionEvent::Connected | ConnectionEvent::Authenticated => {
+                NdiConnectionState::Connecting
+            }
+            ConnectionEvent::Paused => NdiConnectionState::Paused,
+            ConnectionEvent::Resumed => NdiConnectionState::Streaming,
+            ConnectionEvent::AuthFailed(_) => NdiConnectionState::Failed,
+            // Disconnected / errors enter Reconnecting state machine.
+            ConnectionEvent::Disconnected
+            | ConnectionEvent::Error(_)
+            | ConnectionEvent::Timeout => {
+                // Determine the next attempt number.
+                let attempt = match current {
+                    NdiConnectionState::Reconnecting(n) => n + 1,
+                    _ => 0,
+                };
+                if policy.should_attempt(attempt) {
+                    NdiConnectionState::Reconnecting(attempt)
+                } else {
+                    NdiConnectionState::Failed
+                }
+            }
+        };
+        self.transition(next);
+    }
+
+    /// Transition from `Reconnecting` to `Streaming` on successful reconnect.
+    ///
+    /// Should be called by the reconnect logic after a connection is
+    /// re-established.  Has no effect if the current state is not
+    /// `Reconnecting`.
+    pub fn on_reconnect_success(&mut self) {
+        if self.current.state.is_reconnecting() {
+            self.transition(NdiConnectionState::Streaming);
+        }
     }
 
     /// Returns `true` if the current state is healthy.
@@ -315,5 +436,102 @@ mod tests {
             tracker.transition(NdiConnectionState::Streaming);
         }
         assert!(tracker.transition_count() <= 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // ReconnectPolicy tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_reconnect_backoff_doubling() {
+        let policy = ReconnectPolicy::new(10, 100, 60_000);
+        // Attempt 0: 100 * 2^0 = 100 ms
+        assert_eq!(policy.delay_for_attempt(0), 100);
+        // Attempt 1: 100 * 2^1 = 200 ms
+        assert_eq!(policy.delay_for_attempt(1), 200);
+        // Attempt 2: 100 * 2^2 = 400 ms
+        assert_eq!(policy.delay_for_attempt(2), 400);
+        // Attempt 3: 100 * 2^3 = 800 ms
+        assert_eq!(policy.delay_for_attempt(3), 800);
+        // Attempt 4: 100 * 2^4 = 1600 ms
+        assert_eq!(policy.delay_for_attempt(4), 1600);
+    }
+
+    #[test]
+    fn test_reconnect_backoff_capped() {
+        let policy = ReconnectPolicy::new(10, 1000, 5000);
+        // After a few doublings it should be capped at max_delay_ms.
+        assert_eq!(policy.delay_for_attempt(10), 5000);
+        assert_eq!(policy.delay_for_attempt(100), 5000);
+    }
+
+    #[test]
+    fn test_reconnect_policy_should_attempt() {
+        let policy = ReconnectPolicy::new(3, 100, 10_000);
+        assert!(policy.should_attempt(0));
+        assert!(policy.should_attempt(1));
+        assert!(policy.should_attempt(2));
+        assert!(!policy.should_attempt(3)); // exhausted
+    }
+
+    #[test]
+    fn test_reconnect_policy_disabled() {
+        let policy = ReconnectPolicy::new(0, 100, 10_000);
+        assert!(!policy.should_attempt(0));
+    }
+
+    #[test]
+    fn test_connection_state_reconnecting_variant() {
+        let state = NdiConnectionState::Reconnecting(2);
+        assert!(state.is_reconnecting());
+        assert_eq!(state.reconnect_attempt(), Some(2));
+        assert!(!state.is_healthy());
+        assert!(!state.is_terminal());
+    }
+
+    #[test]
+    fn test_apply_event_with_policy_enters_reconnecting() {
+        let mut tracker = ConnectionStateTracker::new();
+        tracker.transition(NdiConnectionState::Streaming);
+        let policy = ReconnectPolicy::new(5, 100, 30_000);
+        tracker.apply_event_with_policy(&ConnectionEvent::Disconnected, &policy);
+        assert_eq!(tracker.state(), NdiConnectionState::Reconnecting(0));
+    }
+
+    #[test]
+    fn test_apply_event_with_policy_increments_attempt() {
+        let mut tracker = ConnectionStateTracker::new();
+        tracker.transition(NdiConnectionState::Streaming);
+        let policy = ReconnectPolicy::new(5, 100, 30_000);
+        // First disconnect → Reconnecting(0)
+        tracker.apply_event_with_policy(&ConnectionEvent::Disconnected, &policy);
+        assert_eq!(tracker.state(), NdiConnectionState::Reconnecting(0));
+        // Another failure while reconnecting → Reconnecting(1)
+        tracker.apply_event_with_policy(&ConnectionEvent::Error("timeout".into()), &policy);
+        assert_eq!(tracker.state(), NdiConnectionState::Reconnecting(1));
+    }
+
+    #[test]
+    fn test_apply_event_with_policy_exceeds_max_goes_failed() {
+        let mut tracker = ConnectionStateTracker::new();
+        tracker.transition(NdiConnectionState::Streaming);
+        let policy = ReconnectPolicy::new(2, 100, 30_000);
+        // Attempt 0
+        tracker.apply_event_with_policy(&ConnectionEvent::Disconnected, &policy);
+        assert_eq!(tracker.state(), NdiConnectionState::Reconnecting(0));
+        // Attempt 1
+        tracker.apply_event_with_policy(&ConnectionEvent::Disconnected, &policy);
+        assert_eq!(tracker.state(), NdiConnectionState::Reconnecting(1));
+        // Attempt 2 — exceeds max_attempts (2), should go Failed
+        tracker.apply_event_with_policy(&ConnectionEvent::Disconnected, &policy);
+        assert_eq!(tracker.state(), NdiConnectionState::Failed);
+    }
+
+    #[test]
+    fn test_on_reconnect_success() {
+        let mut tracker = ConnectionStateTracker::new();
+        tracker.transition(NdiConnectionState::Reconnecting(1));
+        tracker.on_reconnect_success();
+        assert_eq!(tracker.state(), NdiConnectionState::Streaming);
     }
 }

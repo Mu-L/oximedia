@@ -301,6 +301,12 @@ impl TimelineRange {
     }
 }
 
+impl fmt::Display for TimelineRange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}..{})", self.start, self.end())
+    }
+}
+
 /// Greatest common divisor
 fn gcd(a: i32, b: i32) -> i32 {
     if b == 0 {

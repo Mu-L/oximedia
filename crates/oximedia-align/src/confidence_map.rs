@@ -150,11 +150,7 @@ impl ConfidenceMap {
         }
         let n = self.data.len() as f64;
         let min = self.data.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max = self
-            .data
-            .iter()
-            .cloned()
-            .fold(f64::NEG_INFINITY, f64::max);
+        let max = self.data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let mean = self.data.iter().sum::<f64>() / n;
         let variance = self.data.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
         let std_dev = variance.sqrt();

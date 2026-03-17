@@ -43,27 +43,39 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub mod api;
 pub mod approval_gate;
 pub mod audit_log;
+pub mod batch_status;
 pub mod builder;
+pub mod checkpoint;
+pub mod circuit_breaker;
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub mod cli;
 pub mod cost_tracking;
 pub mod dag;
 pub mod error;
+pub mod event_bus;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod executor;
 pub mod monitoring;
 pub mod notification_system;
+pub mod parallel_steps;
 pub mod patterns;
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub mod persistence;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod queue;
 pub mod resource_pool;
 pub mod retry_policy;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod scheduler;
 pub mod sla;
 pub mod sla_tracking;
 pub mod state_machine;
 pub mod step_condition;
+pub mod step_conditions;
 pub mod step_result;
 pub mod task;
 pub mod task_dependency;
@@ -74,38 +86,68 @@ pub mod templates;
 pub mod triggers;
 pub mod utils;
 pub mod validation;
+pub mod webhook;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod websocket;
 pub mod workflow;
 pub mod workflow_audit;
 pub mod workflow_checkpoint;
+pub mod workflow_compose;
+pub mod workflow_diff;
+pub mod workflow_health_check;
+pub mod workflow_import_export;
 pub mod workflow_log;
 pub mod workflow_metrics;
+pub mod workflow_migration;
+pub mod workflow_simulation;
 pub mod workflow_snapshot;
+pub mod workflow_template;
 pub mod workflow_throttle;
 pub mod workflow_version;
 
 // Re-exports for convenience
+pub use batch_status::{BatchStatusWriter, FlushResult, StatusUpdate};
 pub use builder::{
     QcTaskBuilder, TaskBuilder, TranscodeTaskBuilder, TransferTaskBuilder, WorkflowBuilder,
 };
+pub use circuit_breaker::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerMetrics, CircuitBreakerRegistry,
+    CircuitBreakerSummary, CircuitDecision, CircuitState,
+};
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub use cli::Cli;
 pub use dag::{
-    audio_normalize, ingest_transcode, subtitle_burn, DagError, DagRunStatus, DagWorkflowEngine,
-    NodeId, NodeStatus, WorkflowDag, WorkflowEdge, WorkflowNode, WorkflowTemplate,
+    audio_normalize, ingest_transcode, subtitle_burn, BranchEvaluator, BranchNode, BranchType,
+    DagError, DagRunStatus, DagWorkflowEngine, NodeId, NodeStatus, WorkflowDag, WorkflowEdge,
+    WorkflowNode, WorkflowTemplate,
 };
 pub use error::{Result, WorkflowError};
+pub use event_bus::{
+    BusEvent, EventBus, EventBusConfig, EventBusStats, EventFilter, SubscriptionId,
+};
+#[cfg(not(target_arch = "wasm32"))]
 pub use executor::{
-    parse_condition, DefaultTaskExecutor, ExecutionContext, TaskExecutor, WorkflowExecutor,
+    parse_condition, DefaultTaskExecutor, ExecutionContext, TaskExecutor, WorkflowControl,
+    WorkflowExecutor,
 };
 pub use monitoring::{MonitoringService, SystemStatistics, TaskMetrics, WorkflowMetrics};
+pub use parallel_steps::{
+    execute_step, ParallelStepError, ParallelSteps, StepResult, StepType, WorkflowStage,
+    WorkflowStep,
+};
 pub use patterns::*;
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub use persistence::PersistenceManager;
+#[cfg(not(target_arch = "wasm32"))]
 pub use queue::{QueueStatistics, TaskQueue};
+pub use retry_policy::{ExponentialRetryPolicy, RetryDecision, RetryPolicyState};
+#[cfg(not(target_arch = "wasm32"))]
 pub use scheduler::{FileWatcher, ScheduledWorkflow, Trigger, WorkflowScheduler};
 pub use task::{
     AnalysisType, HttpMethod, NotificationChannel, RetryPolicy, Task, TaskId, TaskPriority,
     TaskResult, TaskState, TaskType, TransferProtocol,
 };
+pub use task_priority_queue::{PriorityEntry, PriorityLevel, TaskPriorityQueue};
 pub use utils::{
     calculate_parallelism, clone_workflow, estimate_workflow_duration, expand_env_vars,
     expand_template, find_critical_path, format_duration, generate_task_name,
@@ -116,10 +158,24 @@ pub use validation::{
     ComplexityAnalyzer, ComplexityLevel, ComplexityMetrics, TaskValidator, ValidationReport,
     ValidationRule, WorkflowValidator,
 };
+pub use webhook::{WebhookConfig, WebhookEvent, WebhookNotifier, WorkflowContext};
+#[cfg(not(target_arch = "wasm32"))]
 pub use websocket::{WebSocketManager, WebSocketState, WorkflowEvent};
 pub use workflow::{Edge, Workflow, WorkflowConfig, WorkflowId, WorkflowState};
+pub use workflow_import_export::{
+    deserialize_bundle, export_workflow, import_workflow, serialize_bundle, BundleFormat,
+    DagBundle, WorkflowBundle, WorkflowDefinition,
+};
+pub use workflow_migration::{
+    FieldChange, MigrationError, MigrationRegistry, MigrationStep, SchemaVersion,
+};
+pub use workflow_simulation::{
+    quick_simulate, ConditionSource, EvaluatedCondition, SimulatedOutcome, SimulationConfig,
+    SimulationResult, SimulationSummary, WorkflowSimulator,
+};
 
 /// Workflow engine - main entry point for the orchestration system.
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub struct WorkflowEngine {
     persistence: std::sync::Arc<PersistenceManager>,
     scheduler: std::sync::Arc<WorkflowScheduler>,
@@ -127,6 +183,7 @@ pub struct WorkflowEngine {
     executor: std::sync::Arc<dyn TaskExecutor>,
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 impl WorkflowEngine {
     /// Create a new workflow engine with the specified database path.
     ///
@@ -310,7 +367,7 @@ impl WorkflowEngine {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use super::*;
     use std::time::Duration;

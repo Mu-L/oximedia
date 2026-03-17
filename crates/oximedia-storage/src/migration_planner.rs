@@ -46,7 +46,7 @@ pub struct MigrationItem {
 }
 
 /// State of a single migration item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MigrationItemState {
     /// Pending transfer.
     Pending,
@@ -454,7 +454,8 @@ mod tests {
             sample_endpoint("gcs", "b"),
         );
         plan.add_item("f.mp4", 1000);
-        plan.fail_item(0, "network timeout").expect("fail item should succeed");
+        plan.fail_item(0, "network timeout")
+            .expect("fail item should succeed");
         let prog = plan.progress();
         assert_eq!(prog.failed, 1);
     }

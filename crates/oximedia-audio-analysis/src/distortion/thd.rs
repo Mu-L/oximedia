@@ -1,6 +1,6 @@
 //! Total harmonic distortion (THD) measurement.
 
-use rustfft::{num_complex::Complex, FftPlanner};
+use oxifft::Complex;
 
 /// Compute total harmonic distortion (THD).
 ///
@@ -19,21 +19,22 @@ pub fn total_harmonic_distortion(samples: &[f32], _sample_rate: f32) -> f32 {
     }
 
     let fft_size = samples.len().next_power_of_two();
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(fft_size);
 
     // Prepare FFT input
-    let mut buffer: Vec<Complex<f32>> = samples
+    let buffer: Vec<Complex<f64>> = samples
         .iter()
-        .map(|&s| Complex::new(s, 0.0))
+        .map(|&s| Complex::new(f64::from(s), 0.0))
         .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
         .take(fft_size)
         .collect();
 
-    fft.process(&mut buffer);
+    let buffer = oxifft::fft(&buffer);
 
     // Compute magnitude spectrum
-    let magnitude: Vec<f32> = buffer[..fft_size / 2].iter().map(|c| c.norm()).collect();
+    let magnitude: Vec<f32> = buffer[..fft_size / 2]
+        .iter()
+        .map(|c| c.norm() as f32)
+        .collect();
 
     // Find fundamental frequency peak
     let fundamental_bin = magnitude
@@ -72,19 +73,20 @@ pub fn thd_plus_noise(samples: &[f32], _sample_rate: f32) -> f32 {
     }
 
     let fft_size = samples.len().next_power_of_two();
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(fft_size);
 
-    let mut buffer: Vec<Complex<f32>> = samples
+    let buffer: Vec<Complex<f64>> = samples
         .iter()
-        .map(|&s| Complex::new(s, 0.0))
+        .map(|&s| Complex::new(f64::from(s), 0.0))
         .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
         .take(fft_size)
         .collect();
 
-    fft.process(&mut buffer);
+    let buffer = oxifft::fft(&buffer);
 
-    let magnitude: Vec<f32> = buffer[..fft_size / 2].iter().map(|c| c.norm()).collect();
+    let magnitude: Vec<f32> = buffer[..fft_size / 2]
+        .iter()
+        .map(|c| c.norm() as f32)
+        .collect();
 
     let fundamental_bin = magnitude
         .iter()

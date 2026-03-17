@@ -1,9 +1,8 @@
 //! FFT implementation and window functions.
 
-use rustfft::num_complex::Complex;
-use rustfft::{Fft, FftPlanner};
+use oxifft::api::{Direction, Flags, Plan};
+use oxifft::Complex;
 use std::f64::consts::PI;
-use std::sync::Arc;
 
 /// Window function type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -289,22 +288,15 @@ impl WindowFunction {
 pub struct FftProcessor {
     fft_size: usize,
     window: Vec<f64>,
-    fft: Arc<dyn Fft<f64>>,
-    scratch_buffer: Vec<Complex<f64>>,
 }
 
 impl FftProcessor {
     /// Create a new FFT processor.
     #[must_use]
     pub fn new(fft_size: usize, window_fn: WindowFunction) -> Self {
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(fft_size);
-
         Self {
             fft_size,
             window: window_fn.generate(fft_size),
-            fft,
-            scratch_buffer: vec![Complex::new(0.0, 0.0); fft_size],
         }
     }
 
@@ -320,7 +312,7 @@ impl FftProcessor {
         let input_size = samples.len().min(self.fft_size);
 
         // Apply window and convert to complex
-        let mut buffer: Vec<Complex<f64>> = (0..self.fft_size)
+        let buffer: Vec<Complex<f64>> = (0..self.fft_size)
             .map(|i| {
                 if i < input_size {
                     Complex::new(samples[i] * self.window[i], 0.0)
@@ -330,10 +322,13 @@ impl FftProcessor {
             })
             .collect();
 
-        // Perform FFT
-        self.fft.process(&mut buffer);
+        // Perform FFT using OxiFFT plan API
+        let mut output = vec![Complex::zero(); self.fft_size];
+        if let Some(plan) = Plan::dft_1d(self.fft_size, Direction::Forward, Flags::ESTIMATE) {
+            plan.execute(&buffer, &mut output);
+        }
 
-        buffer
+        output
     }
 
     /// Process and return magnitude spectrum.

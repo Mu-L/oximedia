@@ -26,7 +26,7 @@
 //! - [`transform`]: Geometric transformations (affine, perspective)
 //! - [`enhance`]: Image enhancement (super-resolution, denoising)
 //! - `ml`: Machine learning and ONNX Runtime integration
-//! - [`tracking`]: Video tracking and optical flow
+//! - [`tracking`]: Video tracking and optical flow (incl. enhanced SORT with [`tracking::SortTrackerV2`] / [`tracking::LkTracker`])
 //! - [`stabilize`]: Video stabilization with motion smoothing
 //! - [`scene`]: Video scene detection and shot boundary detection
 //! - [`quality`]: Video quality metrics (PSNR, SSIM, VMAF, temporal)
@@ -75,10 +75,12 @@
 #![allow(unused_imports, unused_variables)]
 #![allow(unused_mut)]
 
+pub mod background_subtraction;
 pub mod bounding_box;
 pub mod chroma_key;
 pub mod color_cluster;
 pub mod contour;
+pub mod deep_sort;
 pub mod depth_estimation;
 pub mod detect;
 pub mod enhance;

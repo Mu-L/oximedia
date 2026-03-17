@@ -504,17 +504,53 @@ impl ScoringConfig {
     }
 }
 
+/// Configuration for temporal context scoring.
+#[derive(Debug, Clone)]
+pub struct TemporalContextConfig {
+    /// Enable temporal context adjustment.
+    pub enabled: bool,
+    /// Number of neighboring scenes to consider on each side.
+    pub neighbor_radius: usize,
+    /// Weight of the neighbor average score in the final adjustment (0.0-1.0).
+    pub neighbor_weight: f64,
+    /// Bonus multiplier for scenes that are significantly above their neighbors.
+    pub relative_boost: f64,
+}
+
+impl Default for TemporalContextConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            neighbor_radius: 2,
+            neighbor_weight: 0.15,
+            relative_boost: 1.2,
+        }
+    }
+}
+
 /// Scene scorer for importance analysis.
 pub struct SceneScorer {
     /// Configuration.
     config: ScoringConfig,
+    /// Temporal context configuration.
+    pub temporal_context: TemporalContextConfig,
 }
 
 impl SceneScorer {
     /// Create a new scene scorer.
     #[must_use]
     pub fn new(config: ScoringConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            temporal_context: TemporalContextConfig::default(),
+        }
+    }
+
+    /// Create a scene scorer with a custom temporal context configuration.
+    #[must_use]
+    pub fn with_temporal_context(mut self, ctx: TemporalContextConfig) -> Self {
+        self.temporal_context = ctx;
+        self
     }
 
     /// Create a scene scorer with default configuration.
@@ -563,6 +599,41 @@ impl SceneScorer {
         scene.features = features;
         scene.suggested_title = suggested_title;
 
+        Ok(scene)
+    }
+
+    /// Score a scene with temporal context — the score is adjusted relative to
+    /// its neighbors so that scenes that stand out from their surroundings
+    /// receive a boost while unremarkable scenes in a uniformly high-scoring
+    /// region are penalised slightly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying scene scoring fails.
+    pub fn score_scene_with_context(
+        &self,
+        start: Timestamp,
+        end: Timestamp,
+        features: SceneFeatures,
+        neighbor_scores: &[f64],
+    ) -> AutoResult<ScoredScene> {
+        let mut scene = self.score_scene(start, end, features)?;
+
+        if !self.temporal_context.enabled || neighbor_scores.is_empty() {
+            return Ok(scene);
+        }
+
+        let neighbor_avg = neighbor_scores.iter().sum::<f64>() / neighbor_scores.len() as f64;
+        let relative = scene.score - neighbor_avg;
+
+        // Boost scenes that are notably above their neighbors
+        let context_adjustment = if relative > 0.1 {
+            relative * self.temporal_context.relative_boost
+        } else {
+            relative * self.temporal_context.neighbor_weight
+        };
+
+        scene.score = (scene.score + context_adjustment).clamp(0.0, 1.0);
         Ok(scene)
     }
 
@@ -707,15 +778,47 @@ impl Default for SceneScorer {
 }
 
 /// Batch score multiple scenes.
+///
+/// When `scorer.temporal_context.enabled` is true, each scene's final score
+/// is adjusted relative to its `neighbor_radius` neighbors.
 #[allow(dead_code)]
 pub fn batch_score_scenes(
     scorer: &SceneScorer,
     scene_data: &[(Timestamp, Timestamp, SceneFeatures)],
 ) -> AutoResult<Vec<ScoredScene>> {
-    scene_data
+    // First pass: compute raw scores
+    let raw: Vec<ScoredScene> = scene_data
         .iter()
         .map(|(start, end, features)| scorer.score_scene(*start, *end, features.clone()))
-        .collect()
+        .collect::<AutoResult<Vec<_>>>()?;
+
+    if !scorer.temporal_context.enabled {
+        return Ok(raw);
+    }
+
+    let radius = scorer.temporal_context.neighbor_radius.max(1);
+    let raw_scores: Vec<f64> = raw.iter().map(|s| s.score).collect();
+
+    // Second pass: apply temporal context
+    let mut adjusted = Vec::with_capacity(raw.len());
+    for (i, (scene, (start, end, features))) in raw.iter().zip(scene_data.iter()).enumerate() {
+        let lo = i.saturating_sub(radius);
+        let hi = (i + radius + 1).min(raw_scores.len());
+        let neighbors: Vec<f64> = raw_scores[lo..hi]
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| lo + j != i)
+            .map(|(_, &s)| s)
+            .collect();
+
+        let mut adj_scene =
+            scorer.score_scene_with_context(*start, *end, features.clone(), &neighbors)?;
+        // Preserve the suggested title from the raw scene
+        adj_scene.suggested_title = scene.suggested_title.clone();
+        adjusted.push(adj_scene);
+    }
+
+    Ok(adjusted)
 }
 
 /// Compute normalized importance scores across all scenes.

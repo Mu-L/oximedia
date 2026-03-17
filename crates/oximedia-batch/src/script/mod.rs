@@ -19,7 +19,7 @@ impl ScriptExecutor {
         let lua = Lua::new();
 
         // Load standard libraries
-        lua.load_from_std_lib(mlua::StdLib::ALL_SAFE)
+        lua.load_std_libs(mlua::StdLib::ALL_SAFE)
             .map_err(|e| BatchError::ScriptError(e.to_string()))?;
 
         Ok(Self { lua })
@@ -34,7 +34,7 @@ impl ScriptExecutor {
     /// # Errors
     ///
     /// Returns an error if execution fails
-    pub fn execute_file(&self, path: &Path) -> Result<Value<'_>> {
+    pub fn execute_file(&self, path: &Path) -> Result<Value> {
         let script = std::fs::read_to_string(path)?;
         self.execute(&script)
     }
@@ -48,7 +48,7 @@ impl ScriptExecutor {
     /// # Errors
     ///
     /// Returns an error if execution fails
-    pub fn execute(&self, script: &str) -> Result<Value<'_>> {
+    pub fn execute(&self, script: &str) -> Result<Value> {
         self.lua
             .load(script)
             .eval()
@@ -101,7 +101,7 @@ impl ScriptExecutor {
     /// # Errors
     ///
     /// Returns an error if getting fails
-    pub fn get_global(&self, name: &str) -> Result<Value<'_>> {
+    pub fn get_global(&self, name: &str) -> Result<Value> {
         self.lua
             .globals()
             .get(name)
@@ -118,7 +118,7 @@ impl ScriptExecutor {
     /// # Errors
     ///
     /// Returns an error if calling fails
-    pub fn call_function<'a>(&'a self, func_name: &str, args: &[Value<'a>]) -> Result<Value<'a>> {
+    pub fn call_function(&self, func_name: &str, args: &[Value]) -> Result<Value> {
         let globals = self.lua.globals();
         let func: mlua::Function = globals
             .get(func_name)
@@ -136,7 +136,7 @@ impl ScriptExecutor {
                 for (i, arg) in args.iter().enumerate() {
                     table.set(i + 1, arg.clone())?;
                 }
-                func.call::<_, Value>(table)
+                func.call::<Value>(mlua::Value::Table(table))
                     .map_err(|e| BatchError::ScriptError(e.to_string()))
             }
         }
@@ -147,7 +147,7 @@ impl ScriptExecutor {
     /// # Errors
     ///
     /// Returns an error if creation fails
-    pub fn create_context(&self) -> Result<Table<'_>> {
+    pub fn create_context(&self) -> Result<Table> {
         self.lua
             .create_table()
             .map_err(|e| BatchError::ScriptError(e.to_string()))

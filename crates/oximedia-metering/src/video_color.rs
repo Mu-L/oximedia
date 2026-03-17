@@ -2,8 +2,8 @@
 //!
 //! Implements color gamut and saturation analysis for video signals.
 
+use crate::video_quality::Frame2D;
 use crate::{MeteringError, MeteringResult};
-use ndarray::Array2;
 
 /// Color gamut standard.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -131,9 +131,9 @@ impl GamutMeter {
     /// * `b_channel` - Blue channel (0.0 to 1.0)
     pub fn process(
         &mut self,
-        r_channel: &Array2<f64>,
-        g_channel: &Array2<f64>,
-        b_channel: &Array2<f64>,
+        r_channel: &Frame2D,
+        g_channel: &Frame2D,
+        b_channel: &Frame2D,
     ) -> MeteringResult<()> {
         let (height, width) = r_channel.dim();
 
@@ -150,7 +150,11 @@ impl GamutMeter {
 
         for y in 0..height {
             for x in 0..width {
-                let rgb = RgbColor::new(r_channel[[y, x]], g_channel[[y, x]], b_channel[[y, x]]);
+                let rgb = RgbColor::new(
+                    r_channel.get(y, x),
+                    g_channel.get(y, x),
+                    b_channel.get(y, x),
+                );
 
                 // Check if in gamut
                 if self.is_in_gamut(&rgb) {
@@ -258,9 +262,9 @@ impl SaturationMeter {
     /// Process RGB frame data.
     pub fn process(
         &mut self,
-        r_channel: &Array2<f64>,
-        g_channel: &Array2<f64>,
-        b_channel: &Array2<f64>,
+        r_channel: &Frame2D,
+        g_channel: &Frame2D,
+        b_channel: &Frame2D,
     ) -> MeteringResult<()> {
         let (height, width) = r_channel.dim();
 
@@ -276,7 +280,11 @@ impl SaturationMeter {
 
         for y in 0..height {
             for x in 0..width {
-                let rgb = RgbColor::new(r_channel[[y, x]], g_channel[[y, x]], b_channel[[y, x]]);
+                let rgb = RgbColor::new(
+                    r_channel.get(y, x),
+                    g_channel.get(y, x),
+                    b_channel.get(y, x),
+                );
                 let hsv = rgb.to_hsv();
 
                 if hsv.s > self.max_saturation {
@@ -351,9 +359,9 @@ impl ColorTemperatureMeter {
     /// Process RGB frame data.
     pub fn process(
         &mut self,
-        r_channel: &Array2<f64>,
-        g_channel: &Array2<f64>,
-        b_channel: &Array2<f64>,
+        r_channel: &Frame2D,
+        g_channel: &Frame2D,
+        b_channel: &Frame2D,
     ) -> MeteringResult<()> {
         let (height, width) = r_channel.dim();
 
@@ -436,9 +444,9 @@ mod tests {
         let mut meter =
             GamutMeter::new(100, 100, ColorGamut::Rec709).expect("test expectation failed");
 
-        let r = Array2::from_elem((100, 100), 0.5);
-        let g = Array2::from_elem((100, 100), 0.5);
-        let b = Array2::from_elem((100, 100), 0.5);
+        let r = Frame2D::from_elem(100, 100, 0.5);
+        let g = Frame2D::from_elem(100, 100, 0.5);
+        let b = Frame2D::from_elem(100, 100, 0.5);
 
         meter.process(&r, &g, &b).expect("process should succeed");
 
@@ -450,9 +458,9 @@ mod tests {
         let mut meter = SaturationMeter::new(100, 100, 256).expect("test expectation failed");
 
         // Create highly saturated frame (pure red)
-        let r = Array2::from_elem((100, 100), 1.0);
-        let g = Array2::from_elem((100, 100), 0.0);
-        let b = Array2::from_elem((100, 100), 0.0);
+        let r = Frame2D::from_elem(100, 100, 1.0);
+        let g = Frame2D::from_elem(100, 100, 0.0);
+        let b = Frame2D::from_elem(100, 100, 0.0);
 
         meter.process(&r, &g, &b).expect("process should succeed");
 
@@ -465,9 +473,9 @@ mod tests {
         let mut meter = SaturationMeter::new(100, 100, 256).expect("test expectation failed");
 
         // Create grayscale frame
-        let r = Array2::from_elem((100, 100), 0.5);
-        let g = Array2::from_elem((100, 100), 0.5);
-        let b = Array2::from_elem((100, 100), 0.5);
+        let r = Frame2D::from_elem(100, 100, 0.5);
+        let g = Frame2D::from_elem(100, 100, 0.5);
+        let b = Frame2D::from_elem(100, 100, 0.5);
 
         meter.process(&r, &g, &b).expect("process should succeed");
 
@@ -479,9 +487,9 @@ mod tests {
         let mut meter = ColorTemperatureMeter::new(100, 100).expect("test expectation failed");
 
         // Warm frame (much more red than blue)
-        let r = Array2::from_elem((100, 100), 0.9);
-        let g = Array2::from_elem((100, 100), 0.5);
-        let b = Array2::from_elem((100, 100), 0.2);
+        let r = Frame2D::from_elem(100, 100, 0.9);
+        let g = Frame2D::from_elem(100, 100, 0.5);
+        let b = Frame2D::from_elem(100, 100, 0.2);
 
         meter.process(&r, &g, &b).expect("process should succeed");
 

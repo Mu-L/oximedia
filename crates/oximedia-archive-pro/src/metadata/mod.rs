@@ -3,17 +3,22 @@
 //! Supports multiple metadata standards:
 //! - PREMIS: Preservation Metadata Implementation Strategies
 //! - METS: Metadata Encoding and Transmission Standard
-//! - Dublin Core: Basic descriptive metadata
+//! - Dublin Core: Basic descriptive metadata (ISO 15836)
 
+pub mod dublin_core;
 pub mod embed;
 pub mod extract;
 pub mod mets;
 pub mod premis;
 
+pub use dublin_core::DublinCoreRecord;
 pub use embed::MetadataEmbedder;
 pub use extract::MetadataExtractor;
 pub use mets::{MetsBuilder, MetsDocument};
-pub use premis::{PremisEvent, PremisMetadata, PremisObject};
+pub use premis::{
+    CopyrightStatus, PremisEvent, PremisMetadata, PremisMetadataWithRights, PremisObject,
+    PremisRights, RightsBasis,
+};
 
 use serde::{Deserialize, Serialize};
 

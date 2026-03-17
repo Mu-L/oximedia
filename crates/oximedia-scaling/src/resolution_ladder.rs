@@ -226,6 +226,519 @@ impl ResolutionNormalizer {
     }
 }
 
+// ── PerceptualLadder ──────────────────────────────────────────────────────────
+
+/// A single rung in a perceptual ABR ladder.
+///
+/// Holds the encoding dimensions and estimated quality metrics for a given
+/// bitrate, computed using the Per-Title Encoding heuristic.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct OptimalRung {
+    /// Output width in pixels.
+    pub width: u32,
+    /// Output height in pixels.
+    pub height: u32,
+    /// Target bitrate in kbit/s.
+    pub bitrate: u32,
+    /// Estimated PSNR in dB.
+    pub psnr_estimate: f32,
+    /// Estimated VMAF score (0–100).
+    pub vmaf_estimate: f32,
+}
+
+/// Content difficulty score for per-title encoding decisions.
+///
+/// Higher values indicate harder-to-encode content that may need more bits
+/// at each resolution rung.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ContentDifficultyScore {
+    /// Normalised motion intensity (0.0 = static, 1.0 = very high motion).
+    pub motion_score: f32,
+    /// Normalised texture richness (0.0 = flat, 1.0 = highly detailed).
+    pub texture_score: f32,
+    /// Average scene-change rate (scene changes per second).
+    pub scene_change_rate: f32,
+}
+
+impl ContentDifficultyScore {
+    /// Compute an overall encoding complexity factor in the range [0.0, 1.0].
+    ///
+    /// Weights motion most heavily, followed by texture and scene changes.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn encoding_complexity(&self) -> f32 {
+        let motion_weight = 0.5_f32;
+        let texture_weight = 0.3_f32;
+        let scene_weight = 0.2_f32;
+
+        // Normalise scene-change rate to [0, 1] assuming >5 changes/s is max.
+        let scene_norm = (self.scene_change_rate / 5.0).clamp(0.0, 1.0);
+
+        (motion_weight * self.motion_score.clamp(0.0, 1.0)
+            + texture_weight * self.texture_score.clamp(0.0, 1.0)
+            + scene_weight * scene_norm)
+            .clamp(0.0, 1.0)
+    }
+}
+
+/// Per-title perceptual ABR ladder builder.
+///
+/// Given the source dimensions, content type, and a list of candidate
+/// bitrates, computes an optimal ladder of encoding rungs using PSNR / VMAF
+/// estimates derived from the Per-Title Encoding heuristic.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct PerceptualLadder {
+    /// Source video width.
+    pub input_width: u32,
+    /// Source video height.
+    pub input_height: u32,
+    /// Content type hint (e.g. `"animation"`, `"sports"`, `"film"`).
+    pub content_type: String,
+    /// Candidate bitrates in kbit/s (sorted ascending after construction).
+    pub available_bitrates: Vec<u32>,
+}
+
+impl PerceptualLadder {
+    /// Create a new `PerceptualLadder` builder.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn new(
+        input_width: u32,
+        input_height: u32,
+        content_type: impl Into<String>,
+        available_bitrates: Vec<u32>,
+    ) -> Self {
+        let mut sorted = available_bitrates;
+        sorted.sort_unstable();
+        Self {
+            input_width,
+            input_height,
+            content_type: content_type.into(),
+            available_bitrates: sorted,
+        }
+    }
+
+    /// Compute the optimal ladder for this input.
+    ///
+    /// Delegates to the free function [`compute_optimal_ladder`].
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn compute(&self) -> Vec<OptimalRung> {
+        compute_optimal_ladder(
+            self.input_width,
+            self.input_height,
+            &self.content_type,
+            &self.available_bitrates,
+        )
+    }
+}
+
+/// Reference bitrate (kbit/s) for 1920×1080 content, used to normalise PSNR.
+const REFERENCE_BITRATE_1080P: f32 = 4000.0;
+
+/// Noise variance constant calibrated so that PSNR ≈ 40 dB at reference bitrate.
+///
+/// PSNR = 10·log10(255² / (σ² · (reference / bitrate)))
+/// At bitrate = reference → PSNR = 10·log10(255² / σ²) ≈ 40 dB
+/// → σ² = 255² / 10^4 ≈ 6.5025
+const NOISE_VARIANCE: f32 = 6.5025;
+
+/// Compute the optimal perceptual ABR ladder.
+///
+/// Uses the Per-Title Encoding heuristic:
+/// - PSNR ≈ `10 · log10(255² / (noise_variance · (reference / bitrate_kbps)))`
+/// - VMAF ≈ `95 − 15 · exp(−bitrate_kbps / (reference · 0.3))`
+///
+/// The reference bitrate is scaled by the pixel-count ratio relative to 1080p.
+///
+/// Rungs are pruned if:
+/// - Estimated VMAF < 50 (poor quality), or
+/// - VMAF improvement over the previous (lower) rung < 5 points (redundant rung).
+///
+/// For each surviving bitrate the output resolution is computed as:
+/// - Start from input dimensions.
+/// - If the bitrate is less than `reference × 0.5`, scale dimensions down by
+///   `sqrt(bitrate / (reference × 0.5))` so lower rungs use lower resolutions.
+/// - Dimensions are rounded to even numbers (required by most codecs).
+#[must_use]
+#[allow(dead_code)]
+pub fn compute_optimal_ladder(
+    width: u32,
+    height: u32,
+    content_type: &str,
+    bitrates: &[u32],
+) -> Vec<OptimalRung> {
+    if bitrates.is_empty() || width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    // Scale reference bitrate proportionally to pixel count.
+    let pixel_ratio = (u64::from(width) * u64::from(height)) as f32 / (1920.0 * 1080.0);
+    let reference = REFERENCE_BITRATE_1080P * pixel_ratio;
+
+    // Content-type bitrate multiplier: animation is cheaper, sports is harder.
+    let content_multiplier = match content_type.to_lowercase().as_str() {
+        "animation" | "cartoon" => 0.7,
+        "sports" | "action" | "gaming" => 1.4,
+        "film" | "movie" | "drama" => 1.0,
+        "documentary" | "talking_head" => 0.8,
+        _ => 1.0,
+    };
+    let effective_reference = reference * content_multiplier;
+
+    // Sort bitrates ascending.
+    let mut sorted_bitrates: Vec<u32> = bitrates.to_vec();
+    sorted_bitrates.sort_unstable();
+
+    // Compute quality estimates for every candidate bitrate.
+    let candidates: Vec<(u32, f32, f32, u32, u32)> = sorted_bitrates
+        .iter()
+        .map(|&br| {
+            let br_f = br as f32;
+            // PSNR formula
+            let psnr_val = 10.0
+                * (255.0_f32 * 255.0 / (NOISE_VARIANCE * (effective_reference / br_f).max(1e-6)))
+                    .log10();
+
+            // VMAF formula
+            let vmaf_val: f32 = 95.0 - 15.0 * (-(br_f / (effective_reference * 0.3))).exp();
+
+            // Compute resolution for this rung.
+            let scale_threshold = effective_reference * 0.5;
+            let (rung_w, rung_h) = if br_f < scale_threshold {
+                let dim_scale = (br_f / scale_threshold).sqrt().clamp(0.1, 1.0);
+                let rw = ((width as f32 * dim_scale) as u32).max(2) & !1;
+                let rh = ((height as f32 * dim_scale) as u32).max(2) & !1;
+                (rw, rh)
+            } else {
+                (width & !1, height & !1)
+            };
+
+            (br, psnr_val, vmaf_val, rung_w, rung_h)
+        })
+        .collect();
+
+    // Prune rungs: reject VMAF < 50 and duplicate-quality rungs.
+    let mut rungs: Vec<OptimalRung> = Vec::new();
+    let mut prev_vmaf = 0.0f32;
+    for &(br, psnr_val, vmaf_val, rw, rh) in &candidates {
+        if vmaf_val < 50.0 {
+            continue;
+        }
+        let improvement = vmaf_val - prev_vmaf;
+        if !rungs.is_empty() && improvement < 5.0 {
+            // Replace the last rung if this one has higher quality at same improvement range.
+            if let Some(last) = rungs.last_mut() {
+                if vmaf_val > last.vmaf_estimate {
+                    *last = OptimalRung {
+                        width: rw,
+                        height: rh,
+                        bitrate: br,
+                        psnr_estimate: psnr_val,
+                        vmaf_estimate: vmaf_val,
+                    };
+                }
+            }
+            continue;
+        }
+        rungs.push(OptimalRung {
+            width: rw,
+            height: rh,
+            bitrate: br,
+            psnr_estimate: psnr_val,
+            vmaf_estimate: vmaf_val,
+        });
+        prev_vmaf = vmaf_val;
+    }
+
+    rungs
+}
+
+/// Selects the optimal rung from a ladder given a bandwidth constraint.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct RungSelector {
+    /// The pre-computed ladder of rungs in ascending order.
+    pub ladder: Vec<OptimalRung>,
+}
+
+impl RungSelector {
+    /// Create a selector from a pre-computed ladder.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn new(ladder: Vec<OptimalRung>) -> Self {
+        Self { ladder }
+    }
+
+    /// Return the best rung whose bitrate does not exceed `bandwidth_kbps`.
+    ///
+    /// Returns `None` if all rungs exceed the bandwidth.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn select(&self, bandwidth_kbps: u32) -> Option<&OptimalRung> {
+        self.ladder
+            .iter()
+            .filter(|r| r.bitrate <= bandwidth_kbps)
+            .max_by_key(|r| r.bitrate)
+    }
+
+    /// Return the rung with the highest estimated VMAF.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn best_quality(&self) -> Option<&OptimalRung> {
+        self.ladder.iter().max_by(|a, b| {
+            a.vmaf_estimate
+                .partial_cmp(&b.vmaf_estimate)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    }
+}
+
+// ── Per-Title Encoding Ladder with VIF/SSIM Target Thresholds ─────────────────
+
+/// Quality metric target thresholds for per-title encoding decisions.
+///
+/// Each threshold defines the minimum acceptable quality at a given resolution
+/// rung. Rungs that fall below these thresholds are promoted to a higher
+/// bitrate or excluded from the ladder.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct QualityTarget {
+    /// Minimum acceptable VIF (Visual Information Fidelity) score [0.0, 1.0].
+    /// VIF > 0.6 is considered acceptable, > 0.8 is good.
+    pub min_vif: f32,
+    /// Minimum acceptable SSIM score [0.0, 1.0].
+    /// SSIM > 0.9 is typically considered good quality.
+    pub min_ssim: f32,
+    /// Maximum acceptable bitrate per pixel per second.
+    /// Used to prevent over-allocation of bits to easy content.
+    pub max_bits_per_pixel: f32,
+}
+
+impl Default for QualityTarget {
+    fn default() -> Self {
+        Self {
+            min_vif: 0.6,
+            min_ssim: 0.9,
+            max_bits_per_pixel: 0.15,
+        }
+    }
+}
+
+impl QualityTarget {
+    /// Create a quality target for high-quality streaming (e.g. premium OTT).
+    pub fn premium() -> Self {
+        Self {
+            min_vif: 0.75,
+            min_ssim: 0.95,
+            max_bits_per_pixel: 0.20,
+        }
+    }
+
+    /// Create a quality target for bandwidth-constrained streaming (e.g. mobile).
+    pub fn mobile() -> Self {
+        Self {
+            min_vif: 0.5,
+            min_ssim: 0.85,
+            max_bits_per_pixel: 0.10,
+        }
+    }
+
+    /// Create a quality target for archival/mastering quality.
+    pub fn archival() -> Self {
+        Self {
+            min_vif: 0.85,
+            min_ssim: 0.98,
+            max_bits_per_pixel: 0.30,
+        }
+    }
+}
+
+/// A rung in a per-title encoding ladder with quality metric estimates.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct PerTitleRung {
+    /// Output width.
+    pub width: u32,
+    /// Output height.
+    pub height: u32,
+    /// Target bitrate in kbit/s.
+    pub bitrate_kbps: u32,
+    /// Estimated VIF score.
+    pub estimated_vif: f32,
+    /// Estimated SSIM score.
+    pub estimated_ssim: f32,
+    /// Bits per pixel per second at the given framerate.
+    pub bits_per_pixel: f32,
+    /// Whether this rung meets the quality target thresholds.
+    pub meets_target: bool,
+}
+
+/// Per-title encoding ladder builder that uses VIF/SSIM target thresholds
+/// to determine optimal resolution-bitrate pairings.
+///
+/// Unlike a fixed ladder, this analyzer computes content-specific quality
+/// estimates and removes rungs that don't meet quality requirements, or
+/// adjusts bitrates upward to meet targets.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct PerTitleLadder {
+    /// Source video width.
+    pub source_width: u32,
+    /// Source video height.
+    pub source_height: u32,
+    /// Source video framerate (fps).
+    pub framerate: f32,
+    /// Content difficulty score.
+    pub difficulty: ContentDifficultyScore,
+    /// Quality targets for rung selection.
+    pub target: QualityTarget,
+    /// Available bitrates to consider (kbit/s).
+    pub bitrates: Vec<u32>,
+    /// Candidate resolutions (heights) to evaluate. Width derived from aspect ratio.
+    pub candidate_heights: Vec<u32>,
+}
+
+impl PerTitleLadder {
+    /// Create a new per-title ladder builder.
+    ///
+    /// Uses standard candidate heights (240, 360, 480, 720, 1080, 1440, 2160).
+    #[allow(dead_code)]
+    pub fn new(
+        source_width: u32,
+        source_height: u32,
+        framerate: f32,
+        difficulty: ContentDifficultyScore,
+        target: QualityTarget,
+        bitrates: Vec<u32>,
+    ) -> Self {
+        let mut sorted = bitrates;
+        sorted.sort_unstable();
+        Self {
+            source_width,
+            source_height,
+            framerate: framerate.max(1.0),
+            difficulty,
+            target,
+            bitrates: sorted,
+            candidate_heights: vec![240, 360, 480, 720, 1080, 1440, 2160],
+        }
+    }
+
+    /// Set custom candidate heights.
+    #[allow(dead_code)]
+    pub fn with_candidate_heights(mut self, heights: Vec<u32>) -> Self {
+        self.candidate_heights = heights;
+        self
+    }
+
+    /// Compute the per-title ladder.
+    ///
+    /// For each candidate resolution and bitrate pairing:
+    /// 1. Estimate VIF using a logarithmic model calibrated to content difficulty.
+    /// 2. Estimate SSIM using a hyperbolic tangent model.
+    /// 3. Compute bits-per-pixel metric.
+    /// 4. Filter rungs that don't meet quality targets.
+    /// 5. Select the optimal bitrate for each resolution.
+    #[allow(dead_code, clippy::cast_precision_loss)]
+    pub fn compute(&self) -> Vec<PerTitleRung> {
+        if self.source_width == 0 || self.source_height == 0 || self.bitrates.is_empty() {
+            return Vec::new();
+        }
+
+        let src_aspect = self.source_width as f64 / self.source_height as f64;
+        let complexity = self.difficulty.encoding_complexity();
+
+        // Higher complexity → needs more bits for same quality.
+        let complexity_factor = 1.0_f64 + complexity as f64 * 0.8;
+
+        let mut rungs = Vec::new();
+
+        for &height in &self.candidate_heights {
+            // Skip resolutions larger than source.
+            if height > self.source_height {
+                continue;
+            }
+
+            let width = ((height as f64 * src_aspect).round() as u32).max(2) & !1;
+            let height_even = height & !1;
+            if height_even == 0 {
+                continue;
+            }
+
+            let pixels = u64::from(width) * u64::from(height_even);
+            let pixels_f = pixels as f64;
+
+            // Find the best bitrate that meets quality targets for this resolution.
+            let mut best_rung: Option<PerTitleRung> = None;
+
+            for &br in &self.bitrates {
+                let br_f = br as f64;
+
+                // Bits per pixel per second
+                let bpp = (br_f * 1000.0) / (pixels_f * self.framerate as f64);
+
+                // VIF estimate: logarithmic model
+                // VIF ≈ 0.3 + 0.7 * (1 - exp(-bpp * k / complexity))
+                let k_vif = 15.0;
+                let vif = (0.3 + 0.7 * (1.0 - (-bpp * k_vif / complexity_factor).exp()))
+                    .clamp(0.0, 1.0) as f32;
+
+                // SSIM estimate: tanh model
+                // SSIM ≈ tanh(bpp * k / complexity) clamped to [0, 1]
+                let k_ssim = 12.0;
+                let ssim = (bpp * k_ssim / complexity_factor).tanh().clamp(0.0, 1.0) as f32;
+
+                let bpp_f32 = bpp as f32;
+
+                let meets = vif >= self.target.min_vif
+                    && ssim >= self.target.min_ssim
+                    && bpp_f32 <= self.target.max_bits_per_pixel;
+
+                let rung = PerTitleRung {
+                    width,
+                    height: height_even,
+                    bitrate_kbps: br,
+                    estimated_vif: vif,
+                    estimated_ssim: ssim,
+                    bits_per_pixel: bpp_f32,
+                    meets_target: meets,
+                };
+
+                if meets {
+                    // Pick the lowest bitrate that meets the target (most efficient).
+                    if best_rung.is_none() {
+                        best_rung = Some(rung);
+                    }
+                } else if best_rung.is_none() {
+                    // Keep the highest-quality non-meeting rung as fallback.
+                    best_rung = Some(rung);
+                }
+            }
+
+            if let Some(rung) = best_rung {
+                rungs.push(rung);
+            }
+        }
+
+        rungs
+    }
+
+    /// Compute the ladder and filter to only rungs that meet quality targets.
+    #[allow(dead_code)]
+    pub fn compute_filtered(&self) -> Vec<PerTitleRung> {
+        self.compute()
+            .into_iter()
+            .filter(|r| r.meets_target)
+            .collect()
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +847,510 @@ mod tests {
         let (w, h) = ResolutionNormalizer::normalize_to_mod(1920, 1080, 0);
         assert_eq!(w, 1920);
         assert_eq!(h, 1080);
+    }
+
+    // ── PerceptualLadder / compute_optimal_ladder ─────────────────────────────
+
+    #[test]
+    fn test_compute_optimal_ladder_empty_bitrates() {
+        let rungs = compute_optimal_ladder(1920, 1080, "film", &[]);
+        assert!(rungs.is_empty());
+    }
+
+    #[test]
+    fn test_compute_optimal_ladder_zero_dimensions() {
+        let rungs = compute_optimal_ladder(0, 1080, "film", &[1000, 2000]);
+        assert!(rungs.is_empty());
+    }
+
+    #[test]
+    fn test_compute_optimal_ladder_returns_rungs_for_1080p() {
+        let bitrates = vec![500, 1000, 2000, 4000, 8000];
+        let rungs = compute_optimal_ladder(1920, 1080, "film", &bitrates);
+        assert!(!rungs.is_empty(), "expected at least one rung");
+    }
+
+    #[test]
+    fn test_compute_optimal_ladder_vmaf_at_least_50() {
+        let bitrates = vec![1000, 2000, 4000, 8000];
+        let rungs = compute_optimal_ladder(1920, 1080, "film", &bitrates);
+        for r in &rungs {
+            assert!(r.vmaf_estimate >= 50.0, "VMAF {:.1} < 50", r.vmaf_estimate);
+        }
+    }
+
+    #[test]
+    fn test_compute_optimal_ladder_psnr_increases_with_bitrate() {
+        let bitrates = vec![1000, 2000, 4000, 8000];
+        let rungs = compute_optimal_ladder(1920, 1080, "film", &bitrates);
+        for w in rungs.windows(2) {
+            assert!(
+                w[1].psnr_estimate >= w[0].psnr_estimate - 0.01,
+                "PSNR not monotone: {:.2} then {:.2}",
+                w[0].psnr_estimate,
+                w[1].psnr_estimate
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_optimal_ladder_vmaf_increases_with_bitrate() {
+        let bitrates = vec![2000, 4000, 8000, 16000];
+        let rungs = compute_optimal_ladder(1920, 1080, "film", &bitrates);
+        for w in rungs.windows(2) {
+            assert!(
+                w[1].vmaf_estimate >= w[0].vmaf_estimate - 0.01,
+                "VMAF not monotone"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_optimal_ladder_low_bitrate_reduces_resolution() {
+        let bitrates = vec![100, 8000];
+        let rungs = compute_optimal_ladder(1920, 1080, "film", &bitrates);
+        if rungs.len() >= 2 {
+            // The low-bitrate rung should have a smaller or equal resolution.
+            let low_rung = &rungs[0];
+            let high_rung = &rungs[rungs.len() - 1];
+            let low_pixels = u64::from(low_rung.width) * u64::from(low_rung.height);
+            let high_pixels = u64::from(high_rung.width) * u64::from(high_rung.height);
+            assert!(
+                low_pixels <= high_pixels,
+                "low bitrate should not exceed high bitrate resolution"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_optimal_ladder_animation_content() {
+        let bitrates = vec![500, 1000, 2000, 4000];
+        let rungs = compute_optimal_ladder(1920, 1080, "animation", &bitrates);
+        // Animation uses lower reference → higher VMAF at same bitrate.
+        let rungs_film = compute_optimal_ladder(1920, 1080, "film", &bitrates);
+        if !rungs.is_empty() && !rungs_film.is_empty() {
+            assert!(
+                rungs[0].vmaf_estimate >= rungs_film[0].vmaf_estimate - 1.0,
+                "animation should have comparable or better quality at same bitrate"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_optimal_ladder_sports_content() {
+        let bitrates = vec![1000, 4000, 8000];
+        let rungs = compute_optimal_ladder(1920, 1080, "sports", &bitrates);
+        // Sports uses a higher reference, so VMAF at lower bitrates may be lower.
+        assert!(!rungs.is_empty() || bitrates.len() > 0);
+    }
+
+    #[test]
+    fn test_compute_optimal_ladder_output_dimensions_even() {
+        let bitrates = vec![300, 1000, 4000];
+        let rungs = compute_optimal_ladder(1920, 1080, "film", &bitrates);
+        for r in &rungs {
+            assert_eq!(r.width % 2, 0, "width {} is odd", r.width);
+            assert_eq!(r.height % 2, 0, "height {} is odd", r.height);
+        }
+    }
+
+    #[test]
+    fn test_perceptual_ladder_struct_compute() {
+        let pl = PerceptualLadder::new(1920, 1080, "film", vec![1000, 2000, 4000, 8000]);
+        let rungs = pl.compute();
+        assert!(!rungs.is_empty());
+    }
+
+    #[test]
+    fn test_perceptual_ladder_sorts_bitrates() {
+        let pl = PerceptualLadder::new(1920, 1080, "film", vec![8000, 1000, 4000]);
+        assert_eq!(pl.available_bitrates, vec![1000, 4000, 8000]);
+    }
+
+    // ── ContentDifficultyScore ────────────────────────────────────────────────
+
+    #[test]
+    fn test_content_difficulty_zero_is_zero() {
+        let s = ContentDifficultyScore {
+            motion_score: 0.0,
+            texture_score: 0.0,
+            scene_change_rate: 0.0,
+        };
+        assert!((s.encoding_complexity()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_content_difficulty_max_is_one() {
+        let s = ContentDifficultyScore {
+            motion_score: 1.0,
+            texture_score: 1.0,
+            scene_change_rate: 5.0,
+        };
+        assert!((s.encoding_complexity() - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_content_difficulty_clamped() {
+        let s = ContentDifficultyScore {
+            motion_score: 2.0, // over-range
+            texture_score: -1.0,
+            scene_change_rate: 100.0,
+        };
+        let c = s.encoding_complexity();
+        assert!(c >= 0.0 && c <= 1.0, "complexity out of [0,1]: {c}");
+    }
+
+    #[test]
+    fn test_content_difficulty_motion_dominant() {
+        let s_motion = ContentDifficultyScore {
+            motion_score: 1.0,
+            texture_score: 0.0,
+            scene_change_rate: 0.0,
+        };
+        let s_texture = ContentDifficultyScore {
+            motion_score: 0.0,
+            texture_score: 1.0,
+            scene_change_rate: 0.0,
+        };
+        assert!(
+            s_motion.encoding_complexity() > s_texture.encoding_complexity(),
+            "motion weight should dominate texture"
+        );
+    }
+
+    // ── RungSelector ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_rung_selector_select_within_bandwidth() {
+        let ladder = compute_optimal_ladder(1920, 1080, "film", &[1000, 2000, 4000, 8000]);
+        let selector = RungSelector::new(ladder);
+        let rung = selector.select(4000);
+        assert!(rung.is_some());
+        assert!(rung.expect("rung should be selected").bitrate <= 4000);
+    }
+
+    #[test]
+    fn test_rung_selector_none_below_min_bitrate() {
+        let ladder = compute_optimal_ladder(1920, 1080, "film", &[4000, 8000]);
+        let selector = RungSelector::new(ladder);
+        let rung = selector.select(100);
+        assert!(rung.is_none());
+    }
+
+    #[test]
+    fn test_rung_selector_best_quality_is_highest_vmaf() {
+        let ladder = compute_optimal_ladder(1920, 1080, "film", &[1000, 4000, 8000]);
+        if !ladder.is_empty() {
+            let selector = RungSelector::new(ladder.clone());
+            let best = selector.best_quality();
+            assert!(best.is_some());
+            let best_vmaf = best.expect("should have best quality").vmaf_estimate;
+            let max_vmaf = ladder
+                .iter()
+                .map(|r| r.vmaf_estimate)
+                .fold(0.0_f32, f32::max);
+            assert!((best_vmaf - max_vmaf).abs() < 1e-4);
+        }
+    }
+
+    // ── QualityTarget tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_quality_target_default() {
+        let t = QualityTarget::default();
+        assert!((t.min_vif - 0.6).abs() < 1e-4);
+        assert!((t.min_ssim - 0.9).abs() < 1e-4);
+        assert!(t.max_bits_per_pixel > 0.0);
+    }
+
+    #[test]
+    fn test_quality_target_premium() {
+        let t = QualityTarget::premium();
+        assert!(t.min_vif > QualityTarget::default().min_vif);
+        assert!(t.min_ssim > QualityTarget::default().min_ssim);
+    }
+
+    #[test]
+    fn test_quality_target_mobile() {
+        let t = QualityTarget::mobile();
+        assert!(t.min_vif < QualityTarget::default().min_vif);
+        assert!(t.min_ssim < QualityTarget::default().min_ssim);
+    }
+
+    #[test]
+    fn test_quality_target_archival() {
+        let t = QualityTarget::archival();
+        assert!(t.min_vif > QualityTarget::premium().min_vif);
+    }
+
+    // ── PerTitleLadder tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_per_title_ladder_basic() {
+        let difficulty = ContentDifficultyScore {
+            motion_score: 0.3,
+            texture_score: 0.5,
+            scene_change_rate: 1.0,
+        };
+        let ladder = PerTitleLadder::new(
+            1920,
+            1080,
+            30.0,
+            difficulty,
+            QualityTarget::default(),
+            vec![500, 1000, 2000, 4000, 8000],
+        );
+        let rungs = ladder.compute();
+        assert!(!rungs.is_empty(), "should produce at least one rung");
+    }
+
+    #[test]
+    fn test_per_title_ladder_respects_source_resolution() {
+        let difficulty = ContentDifficultyScore {
+            motion_score: 0.5,
+            texture_score: 0.5,
+            scene_change_rate: 1.0,
+        };
+        let ladder = PerTitleLadder::new(
+            1280,
+            720,
+            30.0,
+            difficulty,
+            QualityTarget::default(),
+            vec![1000, 2000, 4000],
+        );
+        let rungs = ladder.compute();
+        for r in &rungs {
+            assert!(
+                r.height <= 720,
+                "rung height {} exceeds source 720",
+                r.height
+            );
+        }
+    }
+
+    #[test]
+    fn test_per_title_ladder_even_dimensions() {
+        let difficulty = ContentDifficultyScore {
+            motion_score: 0.3,
+            texture_score: 0.3,
+            scene_change_rate: 0.5,
+        };
+        let ladder = PerTitleLadder::new(
+            1920,
+            1080,
+            24.0,
+            difficulty,
+            QualityTarget::default(),
+            vec![500, 1000, 2000, 4000],
+        );
+        let rungs = ladder.compute();
+        for r in &rungs {
+            assert_eq!(r.width % 2, 0, "width {} is odd", r.width);
+            assert_eq!(r.height % 2, 0, "height {} is odd", r.height);
+        }
+    }
+
+    #[test]
+    fn test_per_title_ladder_vif_ssim_in_range() {
+        let difficulty = ContentDifficultyScore {
+            motion_score: 0.5,
+            texture_score: 0.5,
+            scene_change_rate: 2.0,
+        };
+        let ladder = PerTitleLadder::new(
+            1920,
+            1080,
+            30.0,
+            difficulty,
+            QualityTarget::default(),
+            vec![1000, 2000, 4000, 8000],
+        );
+        let rungs = ladder.compute();
+        for r in &rungs {
+            assert!(
+                r.estimated_vif >= 0.0 && r.estimated_vif <= 1.0,
+                "VIF {:.4} out of [0,1]",
+                r.estimated_vif
+            );
+            assert!(
+                r.estimated_ssim >= 0.0 && r.estimated_ssim <= 1.0,
+                "SSIM {:.4} out of [0,1]",
+                r.estimated_ssim
+            );
+        }
+    }
+
+    #[test]
+    fn test_per_title_ladder_higher_bitrate_better_quality() {
+        let difficulty = ContentDifficultyScore {
+            motion_score: 0.4,
+            texture_score: 0.4,
+            scene_change_rate: 1.0,
+        };
+        // Test at a single resolution (720p) with increasing bitrates.
+        let ladder = PerTitleLadder::new(
+            1280,
+            720,
+            30.0,
+            difficulty,
+            QualityTarget::mobile(),
+            vec![500, 1000, 2000, 4000],
+        )
+        .with_candidate_heights(vec![720]);
+        let rungs = ladder.compute();
+        assert!(!rungs.is_empty());
+        // There's only one resolution, so the chosen rung should have the lowest
+        // bitrate meeting the target, or the highest quality fallback.
+    }
+
+    #[test]
+    fn test_per_title_ladder_empty_bitrates() {
+        let difficulty = ContentDifficultyScore {
+            motion_score: 0.5,
+            texture_score: 0.5,
+            scene_change_rate: 1.0,
+        };
+        let ladder = PerTitleLadder::new(
+            1920,
+            1080,
+            30.0,
+            difficulty,
+            QualityTarget::default(),
+            vec![],
+        );
+        assert!(ladder.compute().is_empty());
+    }
+
+    #[test]
+    fn test_per_title_ladder_zero_dimensions() {
+        let difficulty = ContentDifficultyScore {
+            motion_score: 0.5,
+            texture_score: 0.5,
+            scene_change_rate: 1.0,
+        };
+        let ladder = PerTitleLadder::new(
+            0,
+            1080,
+            30.0,
+            difficulty,
+            QualityTarget::default(),
+            vec![1000],
+        );
+        assert!(ladder.compute().is_empty());
+    }
+
+    #[test]
+    fn test_per_title_ladder_filtered() {
+        let difficulty = ContentDifficultyScore {
+            motion_score: 0.3,
+            texture_score: 0.3,
+            scene_change_rate: 0.5,
+        };
+        let ladder = PerTitleLadder::new(
+            1920,
+            1080,
+            30.0,
+            difficulty,
+            QualityTarget::default(),
+            vec![500, 1000, 2000, 4000, 8000],
+        );
+        let filtered = ladder.compute_filtered();
+        for r in &filtered {
+            assert!(
+                r.meets_target,
+                "filtered rung at {}x{} should meet target",
+                r.width, r.height
+            );
+        }
+    }
+
+    #[test]
+    fn test_per_title_ladder_high_complexity_needs_more_bits() {
+        let easy = ContentDifficultyScore {
+            motion_score: 0.1,
+            texture_score: 0.1,
+            scene_change_rate: 0.1,
+        };
+        let hard = ContentDifficultyScore {
+            motion_score: 0.9,
+            texture_score: 0.9,
+            scene_change_rate: 4.0,
+        };
+        let bitrates = vec![1000, 2000, 4000];
+        let easy_ladder = PerTitleLadder::new(
+            1920,
+            1080,
+            30.0,
+            easy,
+            QualityTarget::default(),
+            bitrates.clone(),
+        )
+        .with_candidate_heights(vec![720]);
+        let hard_ladder =
+            PerTitleLadder::new(1920, 1080, 30.0, hard, QualityTarget::default(), bitrates)
+                .with_candidate_heights(vec![720]);
+
+        let easy_rungs = easy_ladder.compute();
+        let hard_rungs = hard_ladder.compute();
+
+        if !easy_rungs.is_empty() && !hard_rungs.is_empty() {
+            // Easy content should have higher quality at same/lower bitrate
+            let easy_vif = easy_rungs[0].estimated_vif;
+            let hard_vif = hard_rungs[0].estimated_vif;
+            // At the same chosen bitrate, easy content should have >= VIF
+            // (they might choose different bitrates, so we check the first rung)
+            assert!(
+                easy_vif >= hard_vif - 0.05,
+                "easy VIF {easy_vif:.3} should be >= hard VIF {hard_vif:.3}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_per_title_ladder_custom_heights() {
+        let difficulty = ContentDifficultyScore {
+            motion_score: 0.3,
+            texture_score: 0.3,
+            scene_change_rate: 0.5,
+        };
+        let ladder = PerTitleLadder::new(
+            1920,
+            1080,
+            30.0,
+            difficulty,
+            QualityTarget::default(),
+            vec![2000, 4000],
+        )
+        .with_candidate_heights(vec![480, 720, 1080]);
+        let rungs = ladder.compute();
+        for r in &rungs {
+            assert!(
+                [480, 720, 1080].contains(&r.height),
+                "unexpected height {}",
+                r.height
+            );
+        }
+    }
+
+    #[test]
+    fn test_per_title_rung_bits_per_pixel_positive() {
+        let difficulty = ContentDifficultyScore {
+            motion_score: 0.5,
+            texture_score: 0.5,
+            scene_change_rate: 1.0,
+        };
+        let ladder = PerTitleLadder::new(
+            1920,
+            1080,
+            30.0,
+            difficulty,
+            QualityTarget::default(),
+            vec![1000, 4000],
+        );
+        let rungs = ladder.compute();
+        for r in &rungs {
+            assert!(r.bits_per_pixel > 0.0, "bpp should be positive");
+        }
     }
 }

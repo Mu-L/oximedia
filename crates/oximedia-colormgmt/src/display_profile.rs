@@ -279,6 +279,334 @@ impl DisplayProfile {
     }
 }
 
+// ── Automatic color space detection from ICC profile ─────────────────────────
+
+/// Known colour space detected from an ICC profile's primary chromaticities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DetectedColorSpace {
+    /// sRGB IEC 61966-2-1.
+    Srgb,
+    /// Adobe RGB (1998).
+    AdobeRgb,
+    /// Display P3 (DCI-P3 with D65).
+    DisplayP3,
+    /// Rec.2020 / BT.2020.
+    Rec2020,
+    /// ProPhoto RGB (ROMM RGB).
+    ProPhoto,
+    /// DCI-P3 (theatre white point).
+    DciP3Theatre,
+    /// Unknown colour space.
+    Unknown,
+}
+
+impl DetectedColorSpace {
+    /// Human-readable name.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Srgb => "sRGB IEC 61966-2-1",
+            Self::AdobeRgb => "Adobe RGB (1998)",
+            Self::DisplayP3 => "Display P3",
+            Self::Rec2020 => "Rec.2020 / BT.2020",
+            Self::ProPhoto => "ProPhoto RGB (ROMM)",
+            Self::DciP3Theatre => "DCI-P3 (Theatre)",
+            Self::Unknown => "Unknown",
+        }
+    }
+}
+
+/// Reference primary chromaticities for well-known colour spaces.
+///
+/// Each entry is `[[rx, ry], [gx, gy], [bx, by], [wx, wy]]`.
+const KNOWN_PRIMARIES: &[(DetectedColorSpace, [[f64; 2]; 4])] = &[
+    (
+        DetectedColorSpace::Srgb,
+        [
+            [0.6400, 0.3300],
+            [0.3000, 0.6000],
+            [0.1500, 0.0600],
+            [0.3127, 0.3290], // D65
+        ],
+    ),
+    (
+        DetectedColorSpace::AdobeRgb,
+        [
+            [0.6400, 0.3300],
+            [0.2100, 0.7100],
+            [0.1500, 0.0600],
+            [0.3127, 0.3290], // D65
+        ],
+    ),
+    (
+        DetectedColorSpace::DisplayP3,
+        [
+            [0.6800, 0.3200],
+            [0.2650, 0.6900],
+            [0.1500, 0.0600],
+            [0.3127, 0.3290], // D65
+        ],
+    ),
+    (
+        DetectedColorSpace::Rec2020,
+        [
+            [0.7080, 0.2920],
+            [0.1700, 0.7970],
+            [0.1310, 0.0460],
+            [0.3127, 0.3290], // D65
+        ],
+    ),
+    (
+        DetectedColorSpace::ProPhoto,
+        [
+            [0.7347, 0.2653],
+            [0.1596, 0.8404],
+            [0.0366, 0.0001],
+            [0.3457, 0.3585], // D50
+        ],
+    ),
+    (
+        DetectedColorSpace::DciP3Theatre,
+        [
+            [0.6800, 0.3200],
+            [0.2650, 0.6900],
+            [0.1500, 0.0600],
+            [0.3140, 0.3510], // DCI white
+        ],
+    ),
+];
+
+/// Tolerance for primary chromaticity matching (CIE xy units).
+const PRIMARY_MATCH_TOLERANCE: f64 = 0.002;
+
+/// Detect the colour space from ICC profile primary chromaticities.
+///
+/// Given measured or parsed red/green/blue and white-point chromaticities,
+/// this function identifies which well-known colour space they correspond to
+/// by comparing against a table of known standards.
+///
+/// # Arguments
+///
+/// * `red_xy` - Red primary CIE xy chromaticity.
+/// * `green_xy` - Green primary CIE xy chromaticity.
+/// * `blue_xy` - Blue primary CIE xy chromaticity.
+/// * `white_xy` - White point CIE xy chromaticity.
+///
+/// # Returns
+///
+/// The best matching [`DetectedColorSpace`], or [`DetectedColorSpace::Unknown`].
+#[must_use]
+pub fn detect_color_space_from_primaries(
+    red_xy: [f64; 2],
+    green_xy: [f64; 2],
+    blue_xy: [f64; 2],
+    white_xy: [f64; 2],
+) -> DetectedColorSpace {
+    let primaries = [red_xy, green_xy, blue_xy, white_xy];
+
+    let mut best_match = DetectedColorSpace::Unknown;
+    let mut best_distance = f64::MAX;
+
+    for &(cs, ref ref_primaries) in KNOWN_PRIMARIES {
+        let mut total_distance = 0.0;
+        for i in 0..4 {
+            let dx = primaries[i][0] - ref_primaries[i][0];
+            let dy = primaries[i][1] - ref_primaries[i][1];
+            total_distance += (dx * dx + dy * dy).sqrt();
+        }
+        let avg_distance = total_distance / 4.0;
+
+        if avg_distance < best_distance && avg_distance < PRIMARY_MATCH_TOLERANCE {
+            best_distance = avg_distance;
+            best_match = cs;
+        }
+    }
+
+    best_match
+}
+
+/// Display characterisation and profiling utilities.
+///
+/// Provides the ability to characterise a display by measuring patches and
+/// fitting a display model. Supports both additive (RGB LCD/OLED) and
+/// projector characterisation.
+#[derive(Debug, Clone)]
+pub struct DisplayCharacterizer {
+    /// Measured black point in XYZ.
+    pub black_xyz: [f64; 3],
+    /// Measured white point in XYZ.
+    pub white_xyz: [f64; 3],
+    /// Measured red primary in XYZ (at 100% R, 0% G, 0% B).
+    pub red_xyz: [f64; 3],
+    /// Measured green primary in XYZ.
+    pub green_xyz: [f64; 3],
+    /// Measured blue primary in XYZ.
+    pub blue_xyz: [f64; 3],
+    /// Tone response curve samples for each channel (R, G, B).
+    pub trc_samples: [Vec<f64>; 3],
+}
+
+impl DisplayCharacterizer {
+    /// Create a new display characterizer with measured data.
+    ///
+    /// All XYZ values should be in absolute cd/m² units.
+    #[must_use]
+    pub fn new(
+        black_xyz: [f64; 3],
+        white_xyz: [f64; 3],
+        red_xyz: [f64; 3],
+        green_xyz: [f64; 3],
+        blue_xyz: [f64; 3],
+    ) -> Self {
+        Self {
+            black_xyz,
+            white_xyz,
+            red_xyz,
+            green_xyz,
+            blue_xyz,
+            trc_samples: [Vec::new(), Vec::new(), Vec::new()],
+        }
+    }
+
+    /// Add tone response curve samples for a channel.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - 0=R, 1=G, 2=B
+    /// * `samples` - Y (luminance) values at evenly-spaced code value steps
+    pub fn set_trc_samples(&mut self, channel: usize, samples: Vec<f64>) {
+        if channel < 3 {
+            self.trc_samples[channel] = samples;
+        }
+    }
+
+    /// Returns the estimated display gamut from the measured primaries.
+    ///
+    /// Converts measured XYZ primaries to CIE xy chromaticity for the
+    /// detected gamut.
+    #[must_use]
+    pub fn measured_gamut(&self) -> DisplayGamut {
+        DisplayGamut {
+            red: xyz_to_xy(self.red_xyz),
+            green: xyz_to_xy(self.green_xyz),
+            blue: xyz_to_xy(self.blue_xyz),
+            white: xyz_to_xy(self.white_xyz),
+        }
+    }
+
+    /// Returns the detected colour space from measured primaries.
+    #[must_use]
+    pub fn detected_color_space(&self) -> DetectedColorSpace {
+        let gamut = self.measured_gamut();
+        detect_color_space_from_primaries(gamut.red, gamut.green, gamut.blue, gamut.white)
+    }
+
+    /// Returns the peak luminance (white point Y in cd/m²).
+    #[must_use]
+    pub fn peak_luminance_nits(&self) -> f64 {
+        self.white_xyz[1]
+    }
+
+    /// Returns the black level (black point Y in cd/m²).
+    #[must_use]
+    pub fn black_level_nits(&self) -> f64 {
+        self.black_xyz[1]
+    }
+
+    /// Returns the static contrast ratio (peak/black).
+    ///
+    /// Returns `None` if the black level is zero.
+    #[must_use]
+    pub fn static_contrast_ratio(&self) -> Option<f64> {
+        if self.black_xyz[1] <= 0.0 {
+            None
+        } else {
+            Some(self.white_xyz[1] / self.black_xyz[1])
+        }
+    }
+
+    /// Fit a power-law (gamma) model to the TRC samples for a given channel.
+    ///
+    /// Uses the least-squares log-log regression to estimate gamma.
+    ///
+    /// # Arguments
+    ///
+    /// * `channel` - 0=R, 1=G, 2=B
+    ///
+    /// # Returns
+    ///
+    /// Estimated gamma exponent, or `None` if insufficient samples.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn fit_gamma(&self, channel: usize) -> Option<f64> {
+        if channel >= 3 {
+            return None;
+        }
+        let samples = &self.trc_samples[channel];
+        if samples.len() < 4 {
+            return None;
+        }
+
+        let _n = samples.len() as f64;
+        let y_max = *samples.last().unwrap_or(&1.0);
+        if y_max <= 0.0 {
+            return None;
+        }
+
+        // Log-log regression: log(Y) = gamma * log(x) + offset
+        let mut sum_xx = 0.0;
+        let mut sum_xy = 0.0;
+        let mut sum_x = 0.0;
+        let mut count = 0.0;
+
+        for (i, &y_abs) in samples.iter().enumerate() {
+            let x = i as f64 / (samples.len() - 1) as f64;
+            let y = y_abs / y_max;
+            if x > 0.01 && y > 0.001 {
+                let lx = x.ln();
+                let ly = y.ln();
+                sum_xx += lx * lx;
+                sum_xy += lx * ly;
+                sum_x += lx;
+                count += 1.0;
+            }
+        }
+
+        if count < 4.0 || (sum_xx - sum_x * sum_x / count).abs() < f64::EPSILON {
+            return None;
+        }
+
+        let gamma = (sum_xy - sum_x * (sum_xy / sum_xx)) / (sum_xx - sum_x * sum_x / count);
+        Some(gamma.abs().clamp(1.0, 4.0))
+    }
+
+    /// Generate a `DisplayProfile` from the characterisation data.
+    #[must_use]
+    pub fn build_profile(&self, name: &str) -> DisplayProfile {
+        let gamut = self.measured_gamut();
+        let gamma = self.fit_gamma(1).unwrap_or(2.2); // Use green channel
+
+        DisplayProfile {
+            name: name.to_string(),
+            gamut,
+            trc: ToneResponseCurve::Gamma(gamma),
+            peak_luminance: self.peak_luminance_nits(),
+            black_level: self.black_level_nits(),
+            calibration: CalibrationState::Calibrated,
+            hdr_capable: self.peak_luminance_nits() > 200.0,
+        }
+    }
+}
+
+/// Convert XYZ to CIE xy chromaticity.
+fn xyz_to_xy(xyz: [f64; 3]) -> [f64; 2] {
+    let sum = xyz[0] + xyz[1] + xyz[2];
+    if sum < f64::EPSILON {
+        return [0.0, 0.0];
+    }
+    [xyz[0] / sum, xyz[1] / sum]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

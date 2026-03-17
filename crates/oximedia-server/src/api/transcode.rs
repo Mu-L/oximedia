@@ -128,10 +128,7 @@ pub async fn submit_job(
 
     // Enqueue job for processing
     {
-        let mut queue = state
-            .job_queue
-            .lock()
-            .map_err(|e| ServerError::Internal(format!("Failed to lock job queue: {e}")))?;
+        let mut queue = state.job_queue.write().await;
         queue.enqueue(job.id.clone());
     }
     tracing::info!("Enqueued transcode job {}", job.id);
@@ -211,10 +208,7 @@ pub async fn cancel_job(
     // Send cancellation signal to worker: remove from pending queue or
     // mark as cancelled so any in-progress worker will stop.
     {
-        let mut queue = state
-            .job_queue
-            .lock()
-            .map_err(|e| ServerError::Internal(format!("Failed to lock job queue: {e}")))?;
+        let mut queue = state.job_queue.write().await;
         queue.cancel(&job_id);
     }
     tracing::info!("Cancelled transcode job {}", job_id);

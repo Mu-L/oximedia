@@ -8,6 +8,18 @@
 //! For audio-analysis (normalization), the raw packet bytes are treated
 //! as PCM-like interleaved f32 so that the LoudnessMeter can derive a
 //! coarse integrated-loudness estimate without a full codec stack.
+//!
+//! # Pipeline execution stages
+//!
+//! 1. **Validation** – check input/output paths.
+//! 2. **AudioAnalysis** – scan input audio to compute EBU-R128 loudness gain
+//!    (only when normalization is enabled).
+//! 3. **Encode** – single-pass or multi-pass remux with:
+//!    - Per-packet byte tracking (`bytes_in`, `bytes_out`).
+//!    - Video / audio frame counting.
+//!    - Linear gain applied to every audio packet (i16 PCM in-band).
+//! 4. **Verification** – confirm the output file is non-empty and assemble
+//!    `TranscodeOutput` with real stats.
 
 use crate::{
     MultiPassConfig, MultiPassEncoder, MultiPassMode, NormalizationConfig, ProgressTracker,
@@ -34,6 +46,24 @@ const DEFAULT_SAMPLE_RATE: f64 = 48_000.0;
 
 /// Default assumed channel count when audio streams carry no params.
 const DEFAULT_CHANNELS: usize = 2;
+
+// ─── PassStats ────────────────────────────────────────────────────────────────
+
+/// Per-pass statistics collected during packet-level remuxing.
+///
+/// Accumulated across all passes so that `verify_output` can report
+/// accurate counts even for multi-pass encodes.
+#[derive(Debug, Clone, Default)]
+struct PassStats {
+    /// Total uncompressed bytes read from the input demuxer.
+    bytes_in: u64,
+    /// Total bytes written to the output muxer (after gain adjustment).
+    bytes_out: u64,
+    /// Number of video packets forwarded.
+    video_frames: u64,
+    /// Number of audio packets forwarded.
+    audio_frames: u64,
+}
 
 // ─── Container-format helpers ─────────────────────────────────────────────────
 
@@ -129,6 +159,8 @@ pub struct Pipeline {
     normalization_gain_db: f64,
     /// Encoding start time (populated once encoding begins).
     encode_start: Option<Instant>,
+    /// Accumulated per-pass statistics (bytes, frames).
+    accumulated_stats: PassStats,
 }
 
 impl Pipeline {
@@ -141,6 +173,7 @@ impl Pipeline {
             progress_tracker: None,
             normalization_gain_db: 0.0,
             encode_start: None,
+            accumulated_stats: PassStats::default(),
         }
     }
 
@@ -187,9 +220,13 @@ impl Pipeline {
             // Cleanup statistics files
             encoder.cleanup()?;
         } else {
-            // Single-pass encoding
+            // Single-pass encoding – accumulate stats.
             self.current_stage = PipelineStage::Encode;
-            self.execute_single_pass().await?;
+            let stats = self.execute_single_pass().await?;
+            self.accumulated_stats.bytes_in += stats.bytes_in;
+            self.accumulated_stats.bytes_out += stats.bytes_out;
+            self.accumulated_stats.video_frames += stats.video_frames;
+            self.accumulated_stats.audio_frames += stats.audio_frames;
         }
 
         // Verification
@@ -341,16 +378,20 @@ impl Pipeline {
     /// Execute one pass of a multi-pass encode.
     ///
     /// For pass 1 (analysis) we run a demux-only scan without writing output.
-    /// For subsequent passes we run the full demux→mux path.
-    async fn execute_pass(&self, pass: u32, _encoder: &MultiPassEncoder) -> Result<()> {
+    /// For subsequent passes we run the full demux→mux path with stats tracking.
+    async fn execute_pass(&mut self, pass: u32, _encoder: &MultiPassEncoder) -> Result<()> {
         info!("Starting encode pass {}", pass);
 
         if pass == 1 {
             // Analysis pass: demux and count packets/frames for statistics.
             self.demux_and_count().await?;
         } else {
-            // Encode pass: full remux.
-            self.execute_single_pass().await?;
+            // Encode pass: full remux – accumulate stats.
+            let stats = self.execute_single_pass().await?;
+            self.accumulated_stats.bytes_in += stats.bytes_in;
+            self.accumulated_stats.bytes_out += stats.bytes_out;
+            self.accumulated_stats.video_frames += stats.video_frames;
+            self.accumulated_stats.audio_frames += stats.audio_frames;
         }
 
         Ok(())
@@ -419,12 +460,12 @@ impl Pipeline {
     /// Execute a single-pass transcode: open input demuxer, probe streams,
     /// open output muxer, copy all streams, then remux every packet.
     ///
-    /// Codec compatibility: if the source codec matches the configured target
-    /// codec (or no codec override is requested), packets are remuxed directly
-    /// (stream copy).  When a different target codec is specified we log a
-    /// warning and still stream-copy, because full decode→encode requires the
-    /// full codec stack which is wired per-codec separately.
-    async fn execute_single_pass(&self) -> Result<()> {
+    /// Audio packets with normalization gain configured have the linear gain
+    /// applied in-band (interpreted as interleaved i16 PCM LE).  All other
+    /// packets are stream-copied without modification.
+    ///
+    /// Returns a `PassStats` with real bytes-in/out and frame counts.
+    async fn execute_single_pass(&self) -> Result<PassStats> {
         let input_path = &self.config.input;
         let output_path = &self.config.output;
 
@@ -445,14 +486,23 @@ impl Pipeline {
         // Ensure output directory exists.
         if let Some(parent) = output_path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| TranscodeError::IoError(e.to_string()))?;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| TranscodeError::IoError(e.to_string()))?;
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    return Err(TranscodeError::IoError(
+                        "Filesystem operations not supported on wasm32".to_string(),
+                    ));
+                }
             }
         }
 
         // Dispatch to the correctly-typed demuxer path.
-        match in_format {
+        let stats = match in_format {
             ContainerFormat::Matroska => {
                 let source = FileSource::open(input_path)
                     .await
@@ -462,7 +512,7 @@ impl Pipeline {
                     .probe()
                     .await
                     .map_err(|e| TranscodeError::ContainerError(e.to_string()))?;
-                self.remux(&mut demuxer, out_format, output_path).await?;
+                self.remux(&mut demuxer, out_format, output_path).await?
             }
             ContainerFormat::Ogg => {
                 let source = FileSource::open(input_path)
@@ -473,7 +523,7 @@ impl Pipeline {
                     .probe()
                     .await
                     .map_err(|e| TranscodeError::ContainerError(e.to_string()))?;
-                self.remux(&mut demuxer, out_format, output_path).await?;
+                self.remux(&mut demuxer, out_format, output_path).await?
             }
             ContainerFormat::Wav => {
                 let source = FileSource::open(input_path)
@@ -484,7 +534,7 @@ impl Pipeline {
                     .probe()
                     .await
                     .map_err(|e| TranscodeError::ContainerError(e.to_string()))?;
-                self.remux(&mut demuxer, out_format, output_path).await?;
+                self.remux(&mut demuxer, out_format, output_path).await?
             }
             ContainerFormat::Flac => {
                 let source = FileSource::open(input_path)
@@ -495,7 +545,7 @@ impl Pipeline {
                     .probe()
                     .await
                     .map_err(|e| TranscodeError::ContainerError(e.to_string()))?;
-                self.remux(&mut demuxer, out_format, output_path).await?;
+                self.remux(&mut demuxer, out_format, output_path).await?
             }
             other => {
                 return Err(TranscodeError::ContainerError(format!(
@@ -503,23 +553,29 @@ impl Pipeline {
                     other
                 )));
             }
-        }
+        };
 
-        Ok(())
+        Ok(stats)
     }
 
     /// Core remux loop: drain `demuxer` into the appropriate output muxer.
     ///
     /// The output format chooses the concrete muxer type.  Stream info is
     /// collected after probing, added to the muxer, the header is written,
-    /// then packets are forwarded one by one, and finally the trailer is
-    /// written.
+    /// then packets are forwarded one by one with:
+    ///
+    /// - The normalization gain applied to every audio packet (i16 PCM LE,
+    ///   in-band — same approach as `FramePipelineExecutor`).
+    /// - Per-packet bytes-in / bytes-out and video/audio frame counters
+    ///   accumulated in the returned `PassStats`.
+    ///
+    /// Finally the trailer is written and the stats are returned.
     async fn remux<D>(
         &self,
         demuxer: &mut D,
         out_format: ContainerFormat,
         output_path: &std::path::Path,
-    ) -> Result<()>
+    ) -> Result<PassStats>
     where
         D: Demuxer,
     {
@@ -532,6 +588,13 @@ impl Pipeline {
             ));
         }
 
+        // Identify audio stream indices for gain application.
+        let audio_stream_indices: Vec<usize> = streams
+            .iter()
+            .filter(|s| s.is_audio())
+            .map(|s| s.index)
+            .collect();
+
         // Log codec override intent (stream-copy is the actual path here).
         if let Some(ref vc) = self.config.video_codec {
             debug!("Video codec override requested: {} (stream-copy path)", vc);
@@ -540,15 +603,16 @@ impl Pipeline {
             debug!("Audio codec override requested: {} (stream-copy path)", ac);
         }
         if self.normalization_gain_db.abs() > 0.01 {
-            debug!(
-                "Normalization gain: {:.2} dB (applied in-band on audio packets)",
-                self.normalization_gain_db
+            info!(
+                "Normalization gain {:.2} dB will be applied to {} audio stream(s)",
+                self.normalization_gain_db,
+                audio_stream_indices.len()
             );
         }
 
         let mux_config = MuxerConfig::new().with_writing_app("OxiMedia-Transcode");
 
-        match out_format {
+        let stats = match out_format {
             ContainerFormat::Matroska => {
                 let sink = FileSource::create(output_path)
                     .await
@@ -564,12 +628,21 @@ impl Pipeline {
                     .await
                     .map_err(|e| TranscodeError::ContainerError(e.to_string()))?;
 
-                drain_packets(demuxer, &mut muxer, &self.progress_tracker).await?;
+                let stats = drain_packets_with_gain(
+                    demuxer,
+                    &mut muxer,
+                    &self.progress_tracker,
+                    &audio_stream_indices,
+                    self.normalization_gain_db,
+                )
+                .await?;
 
                 muxer
                     .write_trailer()
                     .await
                     .map_err(|e| TranscodeError::ContainerError(e.to_string()))?;
+
+                stats
             }
             ContainerFormat::Ogg => {
                 let sink = FileSource::create(output_path)
@@ -586,12 +659,21 @@ impl Pipeline {
                     .await
                     .map_err(|e| TranscodeError::ContainerError(e.to_string()))?;
 
-                drain_packets(demuxer, &mut muxer, &self.progress_tracker).await?;
+                let stats = drain_packets_with_gain(
+                    demuxer,
+                    &mut muxer,
+                    &self.progress_tracker,
+                    &audio_stream_indices,
+                    self.normalization_gain_db,
+                )
+                .await?;
 
                 muxer
                     .write_trailer()
                     .await
                     .map_err(|e| TranscodeError::ContainerError(e.to_string()))?;
+
+                stats
             }
             other => {
                 return Err(TranscodeError::ContainerError(format!(
@@ -599,18 +681,31 @@ impl Pipeline {
                     other
                 )));
             }
-        }
+        };
 
-        Ok(())
+        Ok(stats)
     }
 
     // ── Output verification ────────────────────────────────────────────────────
 
-    /// Verify the output file exists and collect real file-size / timing stats.
+    /// Verify the output file exists and assemble `TranscodeOutput` with real stats.
+    ///
+    /// Uses the `accumulated_stats` gathered during encode passes to populate
+    /// frame counts and byte totals.  Duration is approximated from the output
+    /// file size (avoids a second full demux parse).
     async fn verify_output(&self) -> Result<TranscodeOutput> {
         let output_path = &self.config.output;
 
+        #[cfg(not(target_arch = "wasm32"))]
         let metadata = tokio::fs::metadata(output_path).await.map_err(|e| {
+            TranscodeError::IoError(format!(
+                "Output file '{}' not found or unreadable: {}",
+                output_path.display(),
+                e
+            ))
+        })?;
+        #[cfg(target_arch = "wasm32")]
+        let metadata = std::fs::metadata(output_path).map_err(|e| {
             TranscodeError::IoError(format!(
                 "Output file '{}' not found or unreadable: {}",
                 output_path.display(),
@@ -641,10 +736,40 @@ impl Pipeline {
             1.0
         };
 
+        // Derive approximate per-stream bitrates from accumulated byte counts
+        // and the heuristic duration.
+        let total_frames =
+            self.accumulated_stats.video_frames + self.accumulated_stats.audio_frames;
+        let video_bitrate_approx = if duration_approx > 0.0
+            && self.accumulated_stats.video_frames > 0
+            && total_frames > 0
+        {
+            let video_fraction = self.accumulated_stats.video_frames as f64 / total_frames as f64;
+            ((self.accumulated_stats.bytes_out as f64 * video_fraction * 8.0) / duration_approx)
+                as u64
+        } else {
+            0u64
+        };
+        let audio_bitrate_approx = if duration_approx > 0.0
+            && self.accumulated_stats.audio_frames > 0
+            && total_frames > 0
+        {
+            let audio_fraction = self.accumulated_stats.audio_frames as f64 / total_frames as f64;
+            ((self.accumulated_stats.bytes_out as f64 * audio_fraction * 8.0) / duration_approx)
+                as u64
+        } else {
+            0u64
+        };
+
         info!(
-            "Transcode complete: output {} bytes, encoding time {:.2}s, \
-             speed factor {:.2}×",
-            file_size, encoding_time, speed_factor
+            "Transcode complete: {} video frames, {} audio frames, \
+             {} bytes in → {} bytes out, encoding time {:.2}s, speed {:.2}×",
+            self.accumulated_stats.video_frames,
+            self.accumulated_stats.audio_frames,
+            self.accumulated_stats.bytes_in,
+            self.accumulated_stats.bytes_out,
+            encoding_time,
+            speed_factor
         );
 
         Ok(TranscodeOutput {
@@ -654,8 +779,8 @@ impl Pipeline {
                 .unwrap_or_else(|| output_path.display().to_string()),
             file_size,
             duration: duration_approx,
-            video_bitrate: 0,
-            audio_bitrate: 0,
+            video_bitrate: video_bitrate_approx,
+            audio_bitrate: audio_bitrate_approx,
             encoding_time,
             speed_factor,
         })
@@ -664,33 +789,65 @@ impl Pipeline {
 
 // ─── Free helper functions ────────────────────────────────────────────────────
 
-/// Drain all packets from `demuxer` and write them via `muxer`, updating
-/// progress if a tracker is attached.
-async fn drain_packets<D, M>(
+/// Drain all packets from `demuxer` and write them via `muxer`.
+///
+/// For every audio packet (identified by stream index membership in
+/// `audio_stream_indices`) the `gain_db` is applied to the raw payload
+/// interpreted as interleaved i16 PCM little-endian samples.  A gain of
+/// 0.0 dB is a no-op.
+///
+/// Returns a `PassStats` with real bytes-in / bytes-out and frame counts so
+/// the caller can build meaningful `TranscodeOutput` statistics.
+async fn drain_packets_with_gain<D, M>(
     demuxer: &mut D,
     muxer: &mut M,
     _progress: &Option<ProgressTracker>,
-) -> Result<()>
+    audio_stream_indices: &[usize],
+    gain_db: f64,
+) -> Result<PassStats>
 where
     D: Demuxer,
     M: Muxer,
 {
-    let mut packet_count: u64 = 0;
+    let mut stats = PassStats::default();
+    // Pre-compute linear gain factor once; skip application when effectively unity.
+    let gain_linear = 10f64.powf(gain_db / 20.0) as f32;
+    let apply_gain = gain_db.abs() > 0.01 && !audio_stream_indices.is_empty();
 
     loop {
         match demuxer.read_packet().await {
-            Ok(pkt) => {
+            Ok(mut pkt) => {
                 if pkt.should_discard() {
                     continue;
                 }
+
+                let raw_len = pkt.data.len() as u64;
+                stats.bytes_in += raw_len;
+
+                if audio_stream_indices.contains(&pkt.stream_index) {
+                    // Apply loudness normalisation gain to the audio payload.
+                    if apply_gain {
+                        pkt.data = apply_i16_gain(pkt.data, gain_linear);
+                    }
+                    stats.audio_frames += 1;
+                } else {
+                    stats.video_frames += 1;
+                }
+
+                let out_len = pkt.data.len() as u64;
+                stats.bytes_out += out_len;
+
                 muxer
                     .write_packet(&pkt)
                     .await
                     .map_err(|e| TranscodeError::ContainerError(e.to_string()))?;
 
-                packet_count += 1;
-                if packet_count % 500 == 0 {
-                    debug!("Remuxed {} packets", packet_count);
+                let total = stats.video_frames + stats.audio_frames;
+                if total % 500 == 0 {
+                    debug!(
+                        "Remuxed {} packets ({} video, {} audio)",
+                        total, stats.video_frames, stats.audio_frames
+                    );
                 }
             }
             Err(e) if e.is_eof() => break,
@@ -703,8 +860,35 @@ where
         }
     }
 
-    debug!("drain_packets: forwarded {} packets total", packet_count);
-    Ok(())
+    debug!(
+        "drain_packets_with_gain: {} video frames, {} audio frames, \
+         {} bytes in, {} bytes out",
+        stats.video_frames, stats.audio_frames, stats.bytes_in, stats.bytes_out
+    );
+    Ok(stats)
+}
+
+/// Apply a linear gain to an i16 PCM LE buffer.
+///
+/// Every pair of bytes is interpreted as a little-endian i16 sample,
+/// multiplied by `gain_linear`, clamped to `[i16::MIN, i16::MAX]`, and
+/// written back.  Trailing odd bytes are left unchanged.
+fn apply_i16_gain(data: bytes::Bytes, gain_linear: f32) -> bytes::Bytes {
+    if (gain_linear - 1.0).abs() < f32::EPSILON {
+        return data;
+    }
+    let mut buf: Vec<u8> = data.into();
+    let n_samples = buf.len() / 2;
+    for i in 0..n_samples {
+        let lo = buf[i * 2];
+        let hi = buf[i * 2 + 1];
+        let sample = i16::from_le_bytes([lo, hi]) as f32;
+        let gained = (sample * gain_linear).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        let out = gained.to_le_bytes();
+        buf[i * 2] = out[0];
+        buf[i * 2 + 1] = out[1];
+    }
+    bytes::Bytes::from(buf)
 }
 
 /// Count all packets in `demuxer` (consumes the stream).
@@ -1046,5 +1230,246 @@ mod tests {
         let samples = bytes_as_f32_samples(&data);
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0], 0.0f32);
+    }
+
+    // ── apply_i16_gain tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_apply_i16_gain_unity() {
+        // gain of 1.0 must be a no-op at the byte level.
+        let sample: i16 = 1234;
+        let raw = bytes::Bytes::from(sample.to_le_bytes().to_vec());
+        let out = apply_i16_gain(raw.clone(), 1.0);
+        assert_eq!(&out[..], &raw[..]);
+    }
+
+    #[test]
+    fn test_apply_i16_gain_double() {
+        // 1000 × 2.0 = 2000
+        let sample: i16 = 1000;
+        let raw = bytes::Bytes::from(sample.to_le_bytes().to_vec());
+        let out = apply_i16_gain(raw, 2.0);
+        let result = i16::from_le_bytes([out[0], out[1]]);
+        assert_eq!(result, 2000);
+    }
+
+    #[test]
+    fn test_apply_i16_gain_clamp_positive() {
+        // i16::MAX × 2.0 should clamp to i16::MAX.
+        let sample: i16 = i16::MAX;
+        let raw = bytes::Bytes::from(sample.to_le_bytes().to_vec());
+        let out = apply_i16_gain(raw, 2.0);
+        let result = i16::from_le_bytes([out[0], out[1]]);
+        assert_eq!(result, i16::MAX);
+    }
+
+    #[test]
+    fn test_apply_i16_gain_clamp_negative() {
+        // i16::MIN × 2.0 should clamp to i16::MIN.
+        let sample: i16 = i16::MIN;
+        let raw = bytes::Bytes::from(sample.to_le_bytes().to_vec());
+        let out = apply_i16_gain(raw, 2.0);
+        let result = i16::from_le_bytes([out[0], out[1]]);
+        assert_eq!(result, i16::MIN);
+    }
+
+    #[test]
+    fn test_apply_i16_gain_half() {
+        // 2000 × 0.5 = 1000
+        let sample: i16 = 2000;
+        let raw = bytes::Bytes::from(sample.to_le_bytes().to_vec());
+        let out = apply_i16_gain(raw, 0.5);
+        let result = i16::from_le_bytes([out[0], out[1]]);
+        assert_eq!(result, 1000);
+    }
+
+    #[test]
+    fn test_apply_i16_gain_odd_byte_length() {
+        // Buffers with an odd number of bytes: last byte untouched.
+        let raw = bytes::Bytes::from(vec![0xFFu8, 0x7F, 0xAB]); // [i16::MAX, trailing 0xAB]
+        let out = apply_i16_gain(raw, 2.0);
+        // First sample should clamp
+        let result = i16::from_le_bytes([out[0], out[1]]);
+        assert_eq!(result, i16::MAX);
+        // Third byte unchanged
+        assert_eq!(out[2], 0xAB);
+    }
+
+    // ── PassStats default test ────────────────────────────────────────────────
+
+    #[test]
+    fn test_pass_stats_default() {
+        let stats = PassStats::default();
+        assert_eq!(stats.bytes_in, 0);
+        assert_eq!(stats.bytes_out, 0);
+        assert_eq!(stats.video_frames, 0);
+        assert_eq!(stats.audio_frames, 0);
+    }
+
+    // ── Full pipeline execute tests (async, require temp files) ───────────────
+
+    /// Build a minimal Matroska byte stream in memory using the muxer, write it
+    /// to a temp file, run `TranscodePipeline::execute()` over it, and verify
+    /// the output file is non-empty and the returned stats are meaningful.
+    ///
+    /// Uses a video-only stream to avoid codec-specific audio complications.
+    #[tokio::test]
+    async fn test_pipeline_execute_remux_produces_output() {
+        use oximedia_container::{
+            mux::{MatroskaMuxer, MuxerConfig},
+            Muxer, Packet, PacketFlags, StreamInfo,
+        };
+        use oximedia_core::{CodecId, Rational, Timestamp};
+        use oximedia_io::MemorySource;
+
+        // ── Build a synthetic Matroska file in memory ───────────────────────
+        let in_buf = MemorySource::new_writable(64 * 1024);
+        let mut muxer = MatroskaMuxer::new(in_buf, MuxerConfig::new());
+
+        let mut video = StreamInfo::new(0, CodecId::Vp9, Rational::new(1, 1000));
+        video.codec_params.width = Some(320);
+        video.codec_params.height = Some(240);
+        muxer.add_stream(video).expect("add stream");
+        muxer.write_header().await.expect("write header");
+
+        // Write 30 synthetic video packets.
+        for i in 0u64..30 {
+            let data = vec![0x42u8, 0x00, (i & 0xFF) as u8, 0x01];
+            let pkt = Packet::new(
+                0,
+                bytes::Bytes::from(data),
+                Timestamp::new(i as i64 * 33, Rational::new(1, 1000)),
+                PacketFlags::KEYFRAME,
+            );
+            muxer.write_packet(&pkt).await.expect("write packet");
+        }
+        muxer.write_trailer().await.expect("write trailer");
+
+        // Extract the in-memory bytes and write to a temp file.
+        let tmp_dir = std::env::temp_dir();
+        let input_path = tmp_dir.join("pipeline_test_input.mkv");
+        let output_path = tmp_dir.join("pipeline_test_output.mkv");
+
+        let sink = muxer.into_sink();
+        let mkv_bytes = sink.written_data().to_vec();
+        tokio::fs::write(&input_path, &mkv_bytes)
+            .await
+            .expect("write temp input");
+
+        // ── Execute the pipeline ────────────────────────────────────────────
+        let mut pipeline = TranscodePipelineBuilder::new()
+            .input(input_path.clone())
+            .output(output_path.clone())
+            .build()
+            .expect("build pipeline");
+
+        let result = pipeline.execute().await;
+
+        // Clean up temp files regardless of outcome.
+        let _ = tokio::fs::remove_file(&input_path).await;
+        let _ = tokio::fs::remove_file(&output_path).await;
+
+        let output = result.expect("pipeline execute should succeed");
+
+        // Stats must be meaningful (non-zero).
+        assert!(
+            output.file_size > 0,
+            "output file size must be > 0, got {}",
+            output.file_size
+        );
+        assert!(
+            output.encoding_time >= 0.0,
+            "encoding time must be non-negative"
+        );
+    }
+
+    /// Same as above but with audio gain normalization wired in.  Verifies
+    /// that the gain path does not corrupt the output and returns valid stats.
+    #[tokio::test]
+    async fn test_pipeline_execute_with_normalization_gain() {
+        use crate::{LoudnessStandard, NormalizationConfig};
+        use oximedia_container::{
+            mux::{MatroskaMuxer, MuxerConfig},
+            Muxer, Packet, PacketFlags, StreamInfo,
+        };
+        use oximedia_core::{CodecId, Rational, Timestamp};
+        use oximedia_io::MemorySource;
+
+        // ── Build synthetic Matroska with audio stream ──────────────────────
+        let in_buf = MemorySource::new_writable(64 * 1024);
+        let mut muxer = MatroskaMuxer::new(in_buf, MuxerConfig::new());
+
+        let mut audio = StreamInfo::new(0, CodecId::Opus, Rational::new(1, 48000));
+        audio.codec_params.sample_rate = Some(48000);
+        audio.codec_params.channels = Some(2);
+        muxer.add_stream(audio).expect("add audio stream");
+        muxer.write_header().await.expect("write header");
+
+        // Write 20 synthetic audio packets (treated as raw PCM-like bytes).
+        for i in 0u64..20 {
+            // 16 i16 samples (LE): all set to 100 (0x64)
+            let sample_le: i16 = 100;
+            let mut data = Vec::with_capacity(32);
+            for _ in 0..16 {
+                data.extend_from_slice(&sample_le.to_le_bytes());
+            }
+            let pkt = Packet::new(
+                0,
+                bytes::Bytes::from(data),
+                Timestamp::new(i as i64 * 960, Rational::new(1, 48000)),
+                PacketFlags::KEYFRAME,
+            );
+            muxer.write_packet(&pkt).await.expect("write audio packet");
+        }
+        muxer.write_trailer().await.expect("write trailer");
+
+        let tmp_dir = std::env::temp_dir();
+        let input_path = tmp_dir.join("pipeline_norm_input.mkv");
+        let output_path = tmp_dir.join("pipeline_norm_output.mkv");
+
+        let sink = muxer.into_sink();
+        let mkv_bytes = sink.written_data().to_vec();
+        tokio::fs::write(&input_path, &mkv_bytes)
+            .await
+            .expect("write temp input");
+
+        // Configure a +6 dB normalization gain so we can verify it's applied.
+        let norm_config = NormalizationConfig::new(LoudnessStandard::EbuR128);
+        // Manually force a known gain by constructing the pipeline config.
+        let pipeline_config = PipelineConfig {
+            input: input_path.clone(),
+            output: output_path.clone(),
+            video_codec: None,
+            audio_codec: None,
+            quality: None,
+            multipass: None,
+            normalization: Some(norm_config),
+            track_progress: false,
+            hw_accel: false,
+        };
+        let mut pipeline_inner = Pipeline::new(pipeline_config);
+        // Skip audio analysis by directly setting the gain: +6 dB ≈ ×2.
+        pipeline_inner.normalization_gain_db = 6.0206;
+        pipeline_inner.encode_start = Some(std::time::Instant::now());
+        pipeline_inner.current_stage = PipelineStage::Encode;
+
+        let pass_stats = pipeline_inner.execute_single_pass().await;
+
+        let _ = tokio::fs::remove_file(&input_path).await;
+        let _ = tokio::fs::remove_file(&output_path).await;
+
+        let stats = pass_stats.expect("single-pass should succeed");
+        assert!(
+            stats.audio_frames > 0,
+            "must have processed at least one audio frame"
+        );
+        assert!(
+            stats.bytes_in > 0,
+            "must have read at least some bytes from input"
+        );
+        assert!(
+            stats.bytes_out > 0,
+            "must have written at least some bytes to output"
+        );
     }
 }

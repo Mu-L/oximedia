@@ -41,6 +41,7 @@ pub fn atsc_1_0_720p() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -71,6 +72,7 @@ pub fn atsc_1_0_1080i() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -101,6 +103,7 @@ pub fn atsc_1_0_1080p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -132,6 +135,7 @@ pub fn atsc_3_0_1080p() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -164,6 +168,7 @@ pub fn atsc_3_0_4k() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

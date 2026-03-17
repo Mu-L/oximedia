@@ -1,6 +1,8 @@
 //! Emergency Alert System (EAS) alert handling.
 
-use crate::Result;
+use crate::{AutomationError, Result};
+use quick_xml::events::Event;
+use quick_xml::Reader as XmlReader;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -220,6 +222,137 @@ impl EasManager {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CAP (Common Alerting Protocol) XML parsing
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A parsed CAP (Common Alerting Protocol) alert message.
+///
+/// Follows the OASIS CAP 1.2 standard structure.  Fields correspond to the
+/// top-level `<alert>` element and the first `<info>` sub-element.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapAlert {
+    /// Unique identifier of this alert message.
+    pub identifier: String,
+    /// Identifier of the originator of this alert.
+    pub sender: String,
+    /// Time and date of the origination (ISO 8601 string as-received).
+    pub sent: String,
+    /// The appropriate handling of the alert (e.g. "Actual", "Test").
+    pub status: String,
+    /// The nature of the alert (e.g. "Alert", "Cancel", "Update").
+    pub msg_type: String,
+    /// Urgency of the subject event (e.g. "Immediate", "Expected").
+    pub urgency: String,
+    /// Severity of the subject event (e.g. "Extreme", "Severe").
+    pub severity: String,
+    /// Certainty of the subject event (e.g. "Observed", "Likely").
+    pub certainty: String,
+    /// Human-readable description of the event.
+    pub description: String,
+}
+
+impl CapAlert {
+    /// Create a new blank `CapAlert` with all fields empty.
+    pub fn empty() -> Self {
+        Self {
+            identifier: String::new(),
+            sender: String::new(),
+            sent: String::new(),
+            status: String::new(),
+            msg_type: String::new(),
+            urgency: String::new(),
+            severity: String::new(),
+            certainty: String::new(),
+            description: String::new(),
+        }
+    }
+}
+
+/// Parse a CAP 1.2 XML document and return a [`CapAlert`].
+///
+/// Extracts the first `<info>` block's `urgency`, `severity`, `certainty`, and
+/// `description` fields together with the top-level alert metadata.
+///
+/// # Errors
+///
+/// Returns [`AutomationError::Eas`] if the XML is malformed or a required field
+/// is absent.
+pub fn parse_cap_xml(xml: &str) -> Result<CapAlert> {
+    let mut reader = XmlReader::from_str(xml);
+    reader.config_mut().trim_text(true);
+
+    let mut alert = CapAlert::empty();
+    // Track which element we are currently collecting text for.
+    let mut current_tag: Option<String> = None;
+
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                let tag = std::str::from_utf8(e.local_name().as_ref())
+                    .map_err(|err| AutomationError::Eas(format!("Invalid XML tag UTF-8: {err}")))?
+                    .to_owned();
+                current_tag = Some(tag);
+            }
+            Ok(Event::Text(ref e)) => {
+                let text = reader
+                    .decoder()
+                    .decode(e.as_ref())
+                    .map_err(|err| AutomationError::Eas(format!("XML decode error: {err}")))?
+                    .into_owned();
+                if let Some(ref tag) = current_tag {
+                    match tag.as_str() {
+                        "identifier" => alert.identifier = text,
+                        "sender" => alert.sender = text,
+                        "sent" => alert.sent = text,
+                        "status" => alert.status = text,
+                        "msgType" => alert.msg_type = text,
+                        "urgency" => {
+                            if alert.urgency.is_empty() {
+                                alert.urgency = text;
+                            }
+                        }
+                        "severity" => {
+                            if alert.severity.is_empty() {
+                                alert.severity = text;
+                            }
+                        }
+                        "certainty" => {
+                            if alert.certainty.is_empty() {
+                                alert.certainty = text;
+                            }
+                        }
+                        "description" => {
+                            if alert.description.is_empty() {
+                                alert.description = text;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Event::End(_)) => {
+                current_tag = None;
+            }
+            Ok(Event::Eof) => break,
+            Err(err) => {
+                return Err(AutomationError::Eas(format!("CAP XML parse error: {err}")));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    if alert.identifier.is_empty() {
+        return Err(AutomationError::Eas(
+            "CAP XML missing required <identifier> element".to_string(),
+        ));
+    }
+
+    Ok(alert)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +404,63 @@ mod tests {
 
         let active = manager.get_active_alerts().await;
         assert_eq!(active.len(), 1);
+    }
+
+    #[test]
+    fn test_cap_xml_parse() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+    <identifier>WXUS55-KPHI-202403011200</identifier>
+    <sender>nws-alerts@noaa.gov</sender>
+    <sent>2024-03-01T12:00:00-05:00</sent>
+    <status>Actual</status>
+    <msgType>Alert</msgType>
+    <info>
+        <urgency>Immediate</urgency>
+        <severity>Extreme</severity>
+        <certainty>Observed</certainty>
+        <description>A tornado has been spotted in the area. Take shelter immediately.</description>
+    </info>
+</alert>"#;
+
+        let cap = parse_cap_xml(xml).expect("CAP XML should parse successfully");
+        assert_eq!(cap.identifier, "WXUS55-KPHI-202403011200");
+        assert_eq!(cap.sender, "nws-alerts@noaa.gov");
+        assert_eq!(cap.sent, "2024-03-01T12:00:00-05:00");
+        assert_eq!(cap.status, "Actual");
+        assert_eq!(cap.msg_type, "Alert");
+        assert_eq!(cap.urgency, "Immediate");
+        assert_eq!(cap.severity, "Extreme");
+        assert_eq!(cap.certainty, "Observed");
+        assert!(!cap.description.is_empty());
+    }
+
+    #[test]
+    fn test_cap_xml_parse_missing_identifier() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<alert xmlns="urn:oasis:names:tc:emergency:cap:1.2">
+    <sender>test@example.com</sender>
+    <sent>2024-01-01T00:00:00Z</sent>
+    <status>Test</status>
+    <msgType>Alert</msgType>
+    <info>
+        <urgency>Minor</urgency>
+        <severity>Minor</severity>
+        <certainty>Unlikely</certainty>
+        <description>Test alert with no identifier</description>
+    </info>
+</alert>"#;
+
+        let result = parse_cap_xml(xml);
+        assert!(result.is_err(), "Should fail when identifier is missing");
+    }
+
+    #[test]
+    fn test_cap_xml_parse_malformed() {
+        let xml = "this is not xml at all <<<";
+        // quick-xml may or may not fail on this as an error; either way,
+        // the identifier will be absent and we should get an error.
+        let result = parse_cap_xml(xml);
+        assert!(result.is_err(), "Malformed XML should produce an error");
     }
 }

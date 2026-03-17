@@ -1,22 +1,82 @@
 //! Workflow execution engine.
+//!
+//! # Parallel Fan-out / Fan-in
+//!
+//! [`WorkflowExecutor::execute`] automatically discovers *independent* groups
+//! of tasks — tasks whose dependencies are all satisfied at the same time —
+//! and launches them concurrently. When all tasks in a fan-out group complete
+//! the join point (fan-in) tasks are unblocked. This happens naturally through
+//! the dependency-tracking loop; no explicit graph analysis is required.
+//!
+//! # Pause / Resume
+//!
+//! Call [`WorkflowExecutor::pause`] to signal the executor to stop launching
+//! new tasks after the current wave completes. The checkpoint is serialised to
+//! a JSON string containing the completed task IDs and execution context
+//! variables. Pass that string to [`WorkflowExecutor::resume_from_checkpoint`]
+//! to reconstruct the state and continue.
 
 use crate::error::{Result, WorkflowError};
 use crate::task::{Task, TaskId, TaskResult, TaskState};
 use crate::workflow::{Workflow, WorkflowId, WorkflowState};
 use async_trait::async_trait;
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock, Semaphore};
+use tokio::sync::{mpsc, watch, RwLock, Semaphore};
 use tokio::time::timeout;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Task executor trait.
 #[async_trait]
 pub trait TaskExecutor: Send + Sync {
     /// Execute a task and return the result.
     async fn execute(&self, task: &Task) -> Result<TaskResult>;
+}
+
+// ---------------------------------------------------------------------------
+// Pause / Resume support
+// ---------------------------------------------------------------------------
+
+/// Serializable checkpoint for pause/resume of workflow execution.
+///
+/// This struct captures the minimal state needed to resume a paused workflow:
+/// the set of already-completed task IDs and the current execution context
+/// variables.  It can be persisted to disk, a database, or transferred over
+/// the network, then passed back to
+/// [`WorkflowExecutor::resume_from_checkpoint`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionCheckpoint {
+    /// Workflow identifier.
+    pub workflow_id: WorkflowId,
+    /// Task IDs that had completed at the time the checkpoint was taken.
+    pub completed_task_ids: Vec<TaskId>,
+    /// Execution context variables at checkpoint time.
+    pub variables: HashMap<String, serde_json::Value>,
+    /// Unix timestamp (seconds) when the checkpoint was captured.
+    pub timestamp_secs: u64,
+}
+
+impl ExecutionCheckpoint {
+    /// Serialize the checkpoint to a compact JSON string.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `WorkflowError` if JSON serialization fails.
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string(self).map_err(WorkflowError::Serialization)
+    }
+
+    /// Deserialize a checkpoint from a JSON string.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `WorkflowError` if JSON parsing fails.
+    pub fn from_json(json: &str) -> Result<Self> {
+        serde_json::from_str(json).map_err(WorkflowError::Serialization)
+    }
 }
 
 /// Execution context shared across task executions.
@@ -64,6 +124,29 @@ impl ExecutionContext {
     }
 }
 
+// ---------------------------------------------------------------------------
+// WorkflowControl
+// ---------------------------------------------------------------------------
+
+/// High-level control signal for a running [`WorkflowExecutor`].
+///
+/// Sent via [`WorkflowExecutor::send_control`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowControl {
+    /// Pause after current in-flight tasks complete.
+    ///
+    /// The executor serialises a checkpoint and returns with
+    /// [`WorkflowState::Paused`].
+    Pause,
+    /// Resume a previously paused executor.
+    Resume,
+    /// Request immediate cancellation of the workflow.
+    ///
+    /// In-flight tasks are allowed to finish; then the executor returns an
+    /// error with `"cancelled"`.
+    Cancel,
+}
+
 /// Workflow executor.
 pub struct WorkflowExecutor {
     /// Task executor implementation.
@@ -72,16 +155,38 @@ pub struct WorkflowExecutor {
     max_concurrent: usize,
     /// Execution timeout.
     timeout: Option<Duration>,
+    /// Pause signal sender.  When `true` is sent the executor stops launching
+    /// new tasks after the current in-flight set completes.
+    pause_tx: watch::Sender<bool>,
+    /// Pause signal receiver (cloned into each execution).
+    pause_rx: watch::Receiver<bool>,
+    /// Cancel signal sender.  When `true` is sent the executor aborts after
+    /// the current wave finishes.
+    cancel_tx: watch::Sender<bool>,
+    /// Cancel signal receiver (cloned into each execution).
+    cancel_rx: watch::Receiver<bool>,
+    /// Completed tasks from a prior checkpoint (used for resume).
+    resume_completed: HashSet<TaskId>,
+    /// Variables from a prior checkpoint (used for resume).
+    resume_variables: HashMap<String, serde_json::Value>,
 }
 
 impl WorkflowExecutor {
     /// Create a new workflow executor.
     #[must_use]
     pub fn new(task_executor: Arc<dyn TaskExecutor>) -> Self {
+        let (pause_tx, pause_rx) = watch::channel(false);
+        let (cancel_tx, cancel_rx) = watch::channel(false);
         Self {
             task_executor,
             max_concurrent: 4,
             timeout: None,
+            pause_tx,
+            pause_rx,
+            cancel_tx,
+            cancel_rx,
+            resume_completed: HashSet::new(),
+            resume_variables: HashMap::new(),
         }
     }
 
@@ -99,7 +204,96 @@ impl WorkflowExecutor {
         self
     }
 
+    /// Signal the executor to pause after the current in-flight tasks finish.
+    ///
+    /// The executor stops launching new tasks as soon as it receives the
+    /// signal, but any already-running tasks are allowed to complete.
+    pub fn pause(&self) {
+        if let Err(e) = self.pause_tx.send(true) {
+            warn!("Failed to send pause signal: {e}");
+        }
+    }
+
+    /// Resume a previously paused executor (un-pause).
+    pub fn resume(&self) {
+        if let Err(e) = self.pause_tx.send(false) {
+            warn!("Failed to send resume signal: {e}");
+        }
+    }
+
+    /// Send a [`WorkflowControl`] signal to the executor.
+    ///
+    /// - [`WorkflowControl::Pause`]  — equivalent to [`Self::pause`].
+    /// - [`WorkflowControl::Resume`] — equivalent to [`Self::resume`].
+    /// - [`WorkflowControl::Cancel`] — signals the executor to abort after the
+    ///   current task wave finishes and return a cancellation error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkflowError`] if the underlying channel is closed (i.e. the
+    /// executor has already been dropped).
+    pub fn send_control(&self, control: WorkflowControl) -> Result<()> {
+        match control {
+            WorkflowControl::Pause => {
+                self.pause_tx
+                    .send(true)
+                    .map_err(|e| WorkflowError::generic(format!("pause send failed: {e}")))?;
+            }
+            WorkflowControl::Resume => {
+                self.pause_tx
+                    .send(false)
+                    .map_err(|e| WorkflowError::generic(format!("resume send failed: {e}")))?;
+            }
+            WorkflowControl::Cancel => {
+                self.cancel_tx
+                    .send(true)
+                    .map_err(|e| WorkflowError::generic(format!("cancel send failed: {e}")))?;
+                // Also set pause so the loop checks after current wave
+                let _ = self.pause_tx.send(true);
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns `true` when the executor is currently in a paused state.
+    ///
+    /// This reflects the latest value sent via [`Self::pause`] /
+    /// [`Self::send_control`].  It does **not** guarantee that execution has
+    /// actually stopped; in-flight tasks may still be running.
+    #[must_use]
+    pub fn is_paused(&self) -> bool {
+        *self.pause_rx.borrow()
+    }
+
+    /// Load a prior `ExecutionCheckpoint` so that already-completed tasks are
+    /// skipped when [`Self::execute`] is called next.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checkpoint JSON is invalid.
+    pub fn resume_from_checkpoint(&mut self, checkpoint_json: &str) -> Result<()> {
+        let cp = ExecutionCheckpoint::from_json(checkpoint_json)?;
+        self.resume_completed = cp.completed_task_ids.into_iter().collect();
+        self.resume_variables = cp.variables;
+        info!(
+            "Loaded checkpoint with {} completed tasks",
+            self.resume_completed.len()
+        );
+        Ok(())
+    }
+
     /// Execute a workflow.
+    ///
+    /// Tasks whose dependencies are all satisfied at the same time are launched
+    /// concurrently (fan-out). The executor waits for all of them before
+    /// considering their successors (fan-in), bounded by `max_concurrent`.
+    ///
+    /// If a checkpoint was loaded via [`Self::resume_from_checkpoint`] the
+    /// corresponding tasks are pre-marked as completed and skipped.
+    ///
+    /// The executor checks the pause signal between task waves; when paused it
+    /// drains the current in-flight tasks, serialises a checkpoint, and returns
+    /// `WorkflowState::Paused` in the `ExecutionResult`.
     pub async fn execute(&self, workflow: &mut Workflow) -> Result<ExecutionResult> {
         info!("Starting workflow execution: {}", workflow.name);
 
@@ -117,11 +311,17 @@ impl WorkflowExecutor {
             context.set_variable(key.clone(), value.clone());
         }
 
+        // Apply resume variables (override config-level variables)
+        for (key, value) in &self.resume_variables {
+            context.set_variable(key.clone(), value.clone());
+        }
+
         // Get topological order
         let task_order = workflow.topological_sort()?;
 
-        // Track completed tasks
-        let completed_tasks: Arc<RwLock<HashSet<TaskId>>> = Arc::new(RwLock::new(HashSet::new()));
+        // Track completed tasks — pre-populate from checkpoint if resuming
+        let completed_tasks: Arc<RwLock<HashSet<TaskId>>> =
+            Arc::new(RwLock::new(self.resume_completed.clone()));
         let failed_tasks: Arc<RwLock<HashSet<TaskId>>> = Arc::new(RwLock::new(HashSet::new()));
 
         // Semaphore for limiting concurrent tasks
@@ -134,6 +334,11 @@ impl WorkflowExecutor {
 
         // Channel for task completion notifications
         let (tx, mut rx) = mpsc::channel(100);
+
+        // Pause signal receiver (clone so we can poll it)
+        let pause_rx = self.pause_rx.clone();
+        // Cancel signal receiver (clone so we can poll it)
+        let cancel_rx = self.cancel_rx.clone();
 
         // Execute tasks in dependency order
         let mut active_tasks = 0;
@@ -148,6 +353,53 @@ impl WorkflowExecutor {
                 }
             }
 
+            // Check cancel signal between task waves (only when no tasks are active)
+            if active_tasks == 0 && *cancel_rx.borrow() {
+                workflow.state = WorkflowState::Failed;
+                return Err(WorkflowError::generic("Workflow cancelled"));
+            }
+
+            // Check pause signal between task waves (only when no tasks are active)
+            if active_tasks == 0 && *pause_rx.borrow() {
+                // Drain in-flight tasks first (none here since active_tasks == 0)
+                // Capture checkpoint
+                let completed = completed_tasks.read().await;
+                let variables: HashMap<String, serde_json::Value> = context
+                    .variables
+                    .iter()
+                    .map(|e| (e.key().clone(), e.value().clone()))
+                    .collect();
+                let checkpoint = ExecutionCheckpoint {
+                    workflow_id: workflow.id,
+                    completed_task_ids: completed.iter().copied().collect(),
+                    variables,
+                    timestamp_secs: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+                drop(completed);
+
+                let checkpoint_json = checkpoint.to_json()?;
+                info!(
+                    "Workflow paused; checkpoint: {} bytes",
+                    checkpoint_json.len()
+                );
+
+                workflow.state = WorkflowState::Paused;
+                return Ok(ExecutionResult {
+                    workflow_id: workflow.id,
+                    state: WorkflowState::Paused,
+                    duration: start_time.elapsed(),
+                    task_results: context
+                        .results
+                        .iter()
+                        .map(|entry| (*entry.key(), entry.value().clone()))
+                        .collect(),
+                    checkpoint: Some(checkpoint_json),
+                });
+            }
+
             // Start new tasks if possible
             while active_tasks < task_order.len() {
                 let Some(&task_id) = task_iter.next() else {
@@ -159,11 +411,34 @@ impl WorkflowExecutor {
                 let completed = completed_tasks.read().await;
                 let failed = failed_tasks.read().await;
 
+                // Skip tasks that were already completed in a prior checkpoint
+                let already_done = completed.contains(&task_id);
                 let deps_satisfied = deps.iter().all(|dep| completed.contains(dep));
                 let deps_failed = deps.iter().any(|dep| failed.contains(dep));
 
                 drop(completed);
                 drop(failed);
+
+                // Task was completed in a prior run: count it but skip execution
+                if already_done {
+                    active_tasks += 1;
+                    // Notify completion immediately via a synthetic result
+                    let result = TaskResult {
+                        task_id,
+                        status: TaskState::Completed,
+                        data: None,
+                        error: None,
+                        duration: Duration::ZERO,
+                        outputs: Vec::new(),
+                    };
+                    let tx2 = tx.clone();
+                    let completed2 = completed_tasks.clone();
+                    tokio::spawn(async move {
+                        completed2.write().await.insert(task_id);
+                        let _ = tx2.send((task_id, result)).await;
+                    });
+                    continue;
+                }
 
                 if deps_failed {
                     if workflow.config.fail_fast {
@@ -281,6 +556,7 @@ impl WorkflowExecutor {
                 .iter()
                 .map(|entry| (*entry.key(), entry.value().clone()))
                 .collect(),
+            checkpoint: None,
         })
     }
 
@@ -633,6 +909,9 @@ pub struct ExecutionResult {
     pub duration: Duration,
     /// Results for all tasks.
     pub task_results: HashMap<TaskId, TaskResult>,
+    /// Serialized checkpoint JSON when the workflow was paused mid-execution.
+    /// `None` when the workflow ran to completion or failure.
+    pub checkpoint: Option<String>,
 }
 
 /// Default task executor implementation.

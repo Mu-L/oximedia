@@ -368,6 +368,333 @@ impl ReadinessProbe {
     }
 }
 
+// ── Deep Health Checks ───────────────────────────────────────────────────────
+
+/// Category of a deep health check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CheckCategory {
+    /// Database connectivity and query latency.
+    Database,
+    /// Filesystem / media storage availability.
+    Storage,
+    /// Transcoding worker availability.
+    TranscodeWorker,
+    /// External dependency (CDN, cloud storage, etc.).
+    ExternalService,
+    /// Memory / resource utilization.
+    Resources,
+}
+
+impl CheckCategory {
+    /// Returns the display label for this category.
+    pub fn label(&self) -> &'static str {
+        match self {
+            CheckCategory::Database => "database",
+            CheckCategory::Storage => "storage",
+            CheckCategory::TranscodeWorker => "transcode_worker",
+            CheckCategory::ExternalService => "external_service",
+            CheckCategory::Resources => "resources",
+        }
+    }
+}
+
+/// Configuration for a deep health check probe.
+#[derive(Debug, Clone)]
+pub struct DeepCheckConfig {
+    /// The check category.
+    pub category: CheckCategory,
+    /// Human-readable name.
+    pub name: String,
+    /// Maximum acceptable latency before marking as degraded.
+    pub degraded_threshold: Duration,
+    /// Maximum acceptable latency before marking as unhealthy (timeout).
+    pub unhealthy_threshold: Duration,
+    /// Whether this check is critical (affects overall readiness).
+    pub critical: bool,
+}
+
+impl DeepCheckConfig {
+    /// Creates a new deep check config.
+    pub fn new(category: CheckCategory, name: impl Into<String>) -> Self {
+        Self {
+            category,
+            name: name.into(),
+            degraded_threshold: Duration::from_millis(500),
+            unhealthy_threshold: Duration::from_secs(5),
+            critical: true,
+        }
+    }
+
+    /// Sets the degraded latency threshold.
+    #[must_use]
+    pub fn with_degraded_threshold(mut self, threshold: Duration) -> Self {
+        self.degraded_threshold = threshold;
+        self
+    }
+
+    /// Sets the unhealthy latency threshold.
+    #[must_use]
+    pub fn with_unhealthy_threshold(mut self, threshold: Duration) -> Self {
+        self.unhealthy_threshold = threshold;
+        self
+    }
+
+    /// Marks this check as non-critical (will not affect overall readiness).
+    #[must_use]
+    pub fn non_critical(mut self) -> Self {
+        self.critical = false;
+        self
+    }
+}
+
+/// Simulated deep health check that evaluates latency and availability.
+#[derive(Debug, Clone)]
+pub struct DeepHealthCheck {
+    /// Configuration for this check.
+    config: DeepCheckConfig,
+    /// Whether this check's target is currently reachable.
+    reachable: bool,
+    /// Simulated latency for the check.
+    latency: Duration,
+    /// Optional error message when unreachable.
+    error_message: Option<String>,
+}
+
+impl DeepHealthCheck {
+    /// Creates a new deep health check.
+    pub fn new(config: DeepCheckConfig) -> Self {
+        Self {
+            config,
+            reachable: true,
+            latency: Duration::from_millis(1),
+            error_message: None,
+        }
+    }
+
+    /// Simulates setting the check result (for testing / offline evaluation).
+    pub fn set_state(&mut self, reachable: bool, latency: Duration, error: Option<String>) {
+        self.reachable = reachable;
+        self.latency = latency;
+        self.error_message = error;
+    }
+
+    /// Runs the check and returns a `CheckResult`.
+    pub fn run(&self) -> CheckResult {
+        if !self.reachable {
+            return CheckResult::unhealthy(
+                &self.config.name,
+                self.latency,
+                self.error_message
+                    .clone()
+                    .unwrap_or_else(|| "unreachable".to_string()),
+            )
+            .with_metadata("category", self.config.category.label())
+            .with_metadata(
+                "critical",
+                if self.config.critical {
+                    "true"
+                } else {
+                    "false"
+                },
+            );
+        }
+
+        if self.latency >= self.config.unhealthy_threshold {
+            CheckResult::unhealthy(
+                &self.config.name,
+                self.latency,
+                format!(
+                    "latency {}ms exceeds unhealthy threshold {}ms",
+                    self.latency.as_millis(),
+                    self.config.unhealthy_threshold.as_millis()
+                ),
+            )
+            .with_metadata("category", self.config.category.label())
+        } else if self.latency >= self.config.degraded_threshold {
+            CheckResult::degraded(
+                &self.config.name,
+                self.latency,
+                format!(
+                    "latency {}ms exceeds degraded threshold {}ms",
+                    self.latency.as_millis(),
+                    self.config.degraded_threshold.as_millis()
+                ),
+            )
+            .with_metadata("category", self.config.category.label())
+        } else {
+            CheckResult::healthy(&self.config.name, self.latency)
+                .with_metadata("category", self.config.category.label())
+                .with_metadata("latency_ms", format!("{}", self.latency.as_millis()))
+        }
+    }
+
+    /// Returns the check category.
+    pub fn category(&self) -> CheckCategory {
+        self.config.category
+    }
+
+    /// Returns whether this check is critical.
+    pub fn is_critical(&self) -> bool {
+        self.config.critical
+    }
+}
+
+/// A comprehensive deep health probe that runs multiple categorized checks
+/// and produces an aggregated result with separate readiness/liveness outcomes.
+pub struct DeepHealthProbe {
+    /// Server version string.
+    pub version: String,
+    /// Registered deep health checks.
+    checks: Vec<DeepHealthCheck>,
+}
+
+impl DeepHealthProbe {
+    /// Creates a new deep health probe.
+    pub fn new(version: impl Into<String>) -> Self {
+        Self {
+            version: version.into(),
+            checks: Vec::new(),
+        }
+    }
+
+    /// Registers a deep health check.
+    #[must_use]
+    pub fn add_check(mut self, check: DeepHealthCheck) -> Self {
+        self.checks.push(check);
+        self
+    }
+
+    /// Adds a mutable reference to a check.
+    pub fn add_check_mut(&mut self, check: DeepHealthCheck) {
+        self.checks.push(check);
+    }
+
+    /// Returns the number of registered checks.
+    pub fn check_count(&self) -> usize {
+        self.checks.len()
+    }
+
+    /// Runs all registered checks and returns an aggregated health response.
+    pub fn run_all(&self) -> DeepHealthResponse {
+        let start = Instant::now();
+        let results: Vec<CheckResult> = self.checks.iter().map(|c| c.run()).collect();
+        let total_latency = start.elapsed();
+
+        // Compute overall status considering criticality
+        let overall_status = self.compute_overall_status(&results);
+
+        // Compute readiness (only critical checks affect readiness)
+        let critical_results: Vec<&CheckResult> = self
+            .checks
+            .iter()
+            .zip(results.iter())
+            .filter(|(check, _)| check.is_critical())
+            .map(|(_, result)| result)
+            .collect();
+        let readiness_status = HealthResponse::aggregate_status_static(&critical_results);
+
+        DeepHealthResponse {
+            health: HealthResponse::new(&self.version, results, total_latency),
+            overall_status,
+            readiness_status,
+            liveness_status: CheckStatus::Healthy, // Always healthy if we're running
+        }
+    }
+
+    fn compute_overall_status(&self, results: &[CheckResult]) -> CheckStatus {
+        let critical_unhealthy = self
+            .checks
+            .iter()
+            .zip(results.iter())
+            .any(|(check, result)| {
+                check.is_critical()
+                    && matches!(result.status, CheckStatus::Unhealthy | CheckStatus::Timeout)
+            });
+        if critical_unhealthy {
+            return CheckStatus::Unhealthy;
+        }
+
+        let any_unhealthy = results
+            .iter()
+            .any(|r| matches!(r.status, CheckStatus::Unhealthy | CheckStatus::Timeout));
+        if any_unhealthy {
+            return CheckStatus::Degraded; // Non-critical unhealthy → degraded
+        }
+
+        let any_degraded = results.iter().any(|r| r.status == CheckStatus::Degraded);
+        if any_degraded {
+            return CheckStatus::Degraded;
+        }
+
+        CheckStatus::Healthy
+    }
+}
+
+impl HealthResponse {
+    /// Static version of aggregate_status that works with references.
+    fn aggregate_status_static(checks: &[&CheckResult]) -> CheckStatus {
+        let has_unhealthy = checks
+            .iter()
+            .any(|c| matches!(c.status, CheckStatus::Unhealthy | CheckStatus::Timeout));
+        if has_unhealthy {
+            return CheckStatus::Unhealthy;
+        }
+        let has_degraded = checks.iter().any(|c| c.status == CheckStatus::Degraded);
+        if has_degraded {
+            return CheckStatus::Degraded;
+        }
+        CheckStatus::Healthy
+    }
+}
+
+/// Extended health response with readiness and liveness decomposition.
+#[derive(Debug)]
+pub struct DeepHealthResponse {
+    /// The underlying health response with all check results.
+    pub health: HealthResponse,
+    /// Overall status (considering criticality weighting).
+    pub overall_status: CheckStatus,
+    /// Readiness status (only critical checks considered).
+    pub readiness_status: CheckStatus,
+    /// Liveness status (always healthy if the process is running).
+    pub liveness_status: CheckStatus,
+}
+
+impl DeepHealthResponse {
+    /// Returns `true` if the service is ready to accept traffic.
+    pub fn is_ready(&self) -> bool {
+        self.readiness_status.is_passing()
+    }
+
+    /// Returns `true` if the service is alive.
+    pub fn is_alive(&self) -> bool {
+        self.liveness_status.is_passing()
+    }
+
+    /// Returns the HTTP status code for the readiness probe.
+    pub fn readiness_http_status(&self) -> u16 {
+        self.readiness_status.http_status()
+    }
+
+    /// Returns checks that are unhealthy.
+    pub fn unhealthy_checks(&self) -> Vec<&CheckResult> {
+        self.health
+            .checks
+            .iter()
+            .filter(|c| matches!(c.status, CheckStatus::Unhealthy | CheckStatus::Timeout))
+            .collect()
+    }
+
+    /// Returns checks that are degraded.
+    pub fn degraded_checks(&self) -> Vec<&CheckResult> {
+        self.health
+            .checks
+            .iter()
+            .filter(|c| c.status == CheckStatus::Degraded)
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,7 +735,7 @@ mod tests {
 
     #[test]
     fn test_check_result_unhealthy() {
-        let r = CheckResult::unhealthy("redis", Duration::from_millis(3000), "connection refused");
+        let r = CheckResult::unhealthy("redis", Duration::from_secs(3), "connection refused");
         assert_eq!(r.status, CheckStatus::Unhealthy);
         assert_eq!(r.message.as_deref(), Some("connection refused"));
     }
@@ -464,7 +791,7 @@ mod tests {
     fn test_health_response_unhealthy() {
         let checks = vec![
             CheckResult::healthy("db", Duration::from_millis(2)),
-            CheckResult::unhealthy("queue", Duration::from_millis(5000), "timeout"),
+            CheckResult::unhealthy("queue", Duration::from_secs(5), "timeout"),
         ];
         let resp = HealthResponse::new("1.0.0", checks, Duration::from_millis(5002));
         assert_eq!(resp.status, CheckStatus::Unhealthy);
@@ -521,5 +848,253 @@ mod tests {
         let cfg = CheckConfig::optional("analytics").with_timeout(Duration::from_secs(2));
         assert!(!cfg.required);
         assert_eq!(cfg.timeout, Duration::from_secs(2));
+    }
+
+    // ── Deep Health Check Tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_check_category_labels() {
+        assert_eq!(CheckCategory::Database.label(), "database");
+        assert_eq!(CheckCategory::Storage.label(), "storage");
+        assert_eq!(CheckCategory::TranscodeWorker.label(), "transcode_worker");
+        assert_eq!(CheckCategory::ExternalService.label(), "external_service");
+        assert_eq!(CheckCategory::Resources.label(), "resources");
+    }
+
+    #[test]
+    fn test_deep_check_config_defaults() {
+        let cfg = DeepCheckConfig::new(CheckCategory::Database, "postgres");
+        assert!(cfg.critical);
+        assert_eq!(cfg.degraded_threshold, Duration::from_millis(500));
+        assert_eq!(cfg.unhealthy_threshold, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_deep_check_config_builder() {
+        let cfg = DeepCheckConfig::new(CheckCategory::Storage, "media-storage")
+            .with_degraded_threshold(Duration::from_millis(200))
+            .with_unhealthy_threshold(Duration::from_secs(2))
+            .non_critical();
+        assert!(!cfg.critical);
+        assert_eq!(cfg.degraded_threshold, Duration::from_millis(200));
+        assert_eq!(cfg.unhealthy_threshold, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_deep_health_check_healthy() {
+        let cfg = DeepCheckConfig::new(CheckCategory::Database, "sqlite");
+        let check = DeepHealthCheck::new(cfg);
+        let result = check.run();
+        assert_eq!(result.status, CheckStatus::Healthy);
+        assert_eq!(
+            result.metadata.get("category").map(String::as_str),
+            Some("database")
+        );
+    }
+
+    #[test]
+    fn test_deep_health_check_degraded_latency() {
+        let cfg = DeepCheckConfig::new(CheckCategory::Database, "sqlite")
+            .with_degraded_threshold(Duration::from_millis(100));
+        let mut check = DeepHealthCheck::new(cfg);
+        check.set_state(true, Duration::from_millis(200), None);
+        let result = check.run();
+        assert_eq!(result.status, CheckStatus::Degraded);
+        assert!(result.message.is_some());
+    }
+
+    #[test]
+    fn test_deep_health_check_unhealthy_latency() {
+        let cfg = DeepCheckConfig::new(CheckCategory::Database, "sqlite")
+            .with_unhealthy_threshold(Duration::from_secs(1));
+        let mut check = DeepHealthCheck::new(cfg);
+        check.set_state(true, Duration::from_secs(2), None);
+        let result = check.run();
+        assert_eq!(result.status, CheckStatus::Unhealthy);
+    }
+
+    #[test]
+    fn test_deep_health_check_unreachable() {
+        let cfg = DeepCheckConfig::new(CheckCategory::Storage, "s3");
+        let mut check = DeepHealthCheck::new(cfg);
+        check.set_state(
+            false,
+            Duration::from_millis(10),
+            Some("connection refused".to_string()),
+        );
+        let result = check.run();
+        assert_eq!(result.status, CheckStatus::Unhealthy);
+        assert_eq!(result.message.as_deref(), Some("connection refused"));
+        assert_eq!(
+            result.metadata.get("critical").map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn test_deep_health_check_non_critical_unreachable() {
+        let cfg = DeepCheckConfig::new(CheckCategory::ExternalService, "analytics").non_critical();
+        let mut check = DeepHealthCheck::new(cfg);
+        check.set_state(false, Duration::from_millis(5), None);
+        let result = check.run();
+        assert_eq!(result.status, CheckStatus::Unhealthy);
+        assert_eq!(
+            result.metadata.get("critical").map(String::as_str),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn test_deep_health_probe_all_healthy() {
+        let probe = DeepHealthProbe::new("1.0.0")
+            .add_check(DeepHealthCheck::new(DeepCheckConfig::new(
+                CheckCategory::Database,
+                "sqlite",
+            )))
+            .add_check(DeepHealthCheck::new(DeepCheckConfig::new(
+                CheckCategory::Storage,
+                "local-fs",
+            )));
+        let resp = probe.run_all();
+        assert_eq!(resp.overall_status, CheckStatus::Healthy);
+        assert_eq!(resp.readiness_status, CheckStatus::Healthy);
+        assert!(resp.is_ready());
+        assert!(resp.is_alive());
+        assert_eq!(resp.readiness_http_status(), 200);
+    }
+
+    #[test]
+    fn test_deep_health_probe_critical_unhealthy() {
+        let mut db_check =
+            DeepHealthCheck::new(DeepCheckConfig::new(CheckCategory::Database, "sqlite"));
+        db_check.set_state(false, Duration::from_millis(5), Some("db down".to_string()));
+
+        let probe =
+            DeepHealthProbe::new("1.0.0")
+                .add_check(db_check)
+                .add_check(DeepHealthCheck::new(DeepCheckConfig::new(
+                    CheckCategory::Storage,
+                    "local-fs",
+                )));
+        let resp = probe.run_all();
+        assert_eq!(resp.overall_status, CheckStatus::Unhealthy);
+        assert_eq!(resp.readiness_status, CheckStatus::Unhealthy);
+        assert!(!resp.is_ready());
+        assert_eq!(resp.readiness_http_status(), 503);
+        assert_eq!(resp.unhealthy_checks().len(), 1);
+    }
+
+    #[test]
+    fn test_deep_health_probe_non_critical_unhealthy_degrades() {
+        let mut analytics_check = DeepHealthCheck::new(
+            DeepCheckConfig::new(CheckCategory::ExternalService, "analytics").non_critical(),
+        );
+        analytics_check.set_state(false, Duration::from_millis(5), None);
+
+        let probe = DeepHealthProbe::new("1.0.0")
+            .add_check(DeepHealthCheck::new(DeepCheckConfig::new(
+                CheckCategory::Database,
+                "sqlite",
+            )))
+            .add_check(analytics_check);
+        let resp = probe.run_all();
+        // Non-critical unhealthy → overall degraded, but readiness still healthy
+        assert_eq!(resp.overall_status, CheckStatus::Degraded);
+        assert_eq!(resp.readiness_status, CheckStatus::Healthy);
+        assert!(resp.is_ready());
+    }
+
+    #[test]
+    fn test_deep_health_probe_degraded_checks() {
+        let mut slow_check = DeepHealthCheck::new(
+            DeepCheckConfig::new(CheckCategory::Database, "sqlite")
+                .with_degraded_threshold(Duration::from_millis(50)),
+        );
+        slow_check.set_state(true, Duration::from_millis(100), None);
+
+        let probe = DeepHealthProbe::new("1.0.0").add_check(slow_check);
+        let resp = probe.run_all();
+        assert_eq!(resp.overall_status, CheckStatus::Degraded);
+        assert_eq!(resp.degraded_checks().len(), 1);
+    }
+
+    #[test]
+    fn test_deep_health_probe_check_count() {
+        let probe = DeepHealthProbe::new("1.0.0")
+            .add_check(DeepHealthCheck::new(DeepCheckConfig::new(
+                CheckCategory::Database,
+                "db",
+            )))
+            .add_check(DeepHealthCheck::new(DeepCheckConfig::new(
+                CheckCategory::Storage,
+                "fs",
+            )))
+            .add_check(DeepHealthCheck::new(DeepCheckConfig::new(
+                CheckCategory::TranscodeWorker,
+                "workers",
+            )));
+        assert_eq!(probe.check_count(), 3);
+    }
+
+    #[test]
+    fn test_deep_health_probe_add_check_mut() {
+        let mut probe = DeepHealthProbe::new("1.0.0");
+        probe.add_check_mut(DeepHealthCheck::new(DeepCheckConfig::new(
+            CheckCategory::Database,
+            "db",
+        )));
+        assert_eq!(probe.check_count(), 1);
+    }
+
+    #[test]
+    fn test_deep_health_response_always_alive() {
+        // Even when everything is down, liveness should be healthy
+        let mut db_check =
+            DeepHealthCheck::new(DeepCheckConfig::new(CheckCategory::Database, "db"));
+        db_check.set_state(false, Duration::from_millis(5), None);
+        let probe = DeepHealthProbe::new("1.0.0").add_check(db_check);
+        let resp = probe.run_all();
+        assert!(resp.is_alive());
+        assert_eq!(resp.liveness_status, CheckStatus::Healthy);
+    }
+
+    #[test]
+    fn test_deep_health_check_category_accessors() {
+        let check = DeepHealthCheck::new(
+            DeepCheckConfig::new(CheckCategory::TranscodeWorker, "ffmpeg-pool").non_critical(),
+        );
+        assert_eq!(check.category(), CheckCategory::TranscodeWorker);
+        assert!(!check.is_critical());
+    }
+
+    #[test]
+    fn test_deep_health_probe_mixed_statuses() {
+        let mut db = DeepHealthCheck::new(DeepCheckConfig::new(CheckCategory::Database, "db"));
+        db.set_state(true, Duration::from_millis(1), None);
+
+        let mut storage = DeepHealthCheck::new(
+            DeepCheckConfig::new(CheckCategory::Storage, "storage")
+                .with_degraded_threshold(Duration::from_millis(10)),
+        );
+        storage.set_state(true, Duration::from_millis(50), None);
+
+        let mut cdn = DeepHealthCheck::new(
+            DeepCheckConfig::new(CheckCategory::ExternalService, "cdn").non_critical(),
+        );
+        cdn.set_state(false, Duration::from_millis(5), Some("timeout".to_string()));
+
+        let probe = DeepHealthProbe::new("1.0.0")
+            .add_check(db)
+            .add_check(storage)
+            .add_check(cdn);
+
+        let resp = probe.run_all();
+        // Critical storage degraded + non-critical CDN unhealthy → degraded overall
+        assert_eq!(resp.overall_status, CheckStatus::Degraded);
+        // Readiness: critical checks only → storage degraded → readiness degraded
+        assert_eq!(resp.readiness_status, CheckStatus::Degraded);
+        assert!(resp.is_ready()); // degraded is still passing
+        assert_eq!(resp.unhealthy_checks().len(), 1); // only CDN
+        assert_eq!(resp.degraded_checks().len(), 1); // only storage
     }
 }

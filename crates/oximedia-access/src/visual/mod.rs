@@ -5,7 +5,7 @@ pub mod contrast;
 pub mod size;
 
 pub use color::{ColorBlindnessAdapter, ColorBlindnessType};
-pub use contrast::ContrastEnhancer;
+pub use contrast::{ContrastEnhancer, DynamicRangeAnalysis, EnhancementLevel, EnhancementParams};
 pub use size::TextSizeAdjuster;
 
 use serde::{Deserialize, Serialize};

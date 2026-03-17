@@ -231,6 +231,241 @@ impl ConflictResolver {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Visual diff presentation for conflicting edits
+// ---------------------------------------------------------------------------
+
+/// A single field-level difference between two operations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldDiff {
+    /// Field name (e.g. "region.start_ms", "kind", "payload.volume").
+    pub field: String,
+    /// Value in the existing (accepted) operation, serialized as a string.
+    pub existing_value: String,
+    /// Value in the incoming (challenger) operation, serialized as a string.
+    pub incoming_value: String,
+    /// Severity of the difference.
+    pub severity: DiffSeverity,
+}
+
+/// How significant a field-level difference is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DiffSeverity {
+    /// Cosmetic / metadata change.
+    Info,
+    /// Timing or spatial shift.
+    Warning,
+    /// Structural change (kind mismatch, deletion vs modification).
+    Critical,
+}
+
+impl std::fmt::Display for DiffSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Info => write!(f, "info"),
+            Self::Warning => write!(f, "warning"),
+            Self::Critical => write!(f, "critical"),
+        }
+    }
+}
+
+/// A visual diff between two conflicting operations.
+#[derive(Debug, Clone)]
+pub struct ConflictDiff {
+    /// ID of the existing operation.
+    pub existing_id: EditId,
+    /// ID of the incoming operation.
+    pub incoming_id: EditId,
+    /// Per-field differences.
+    pub diffs: Vec<FieldDiff>,
+    /// Overall severity (the maximum of all field severities).
+    pub overall_severity: DiffSeverity,
+    /// Human-readable summary of the conflict.
+    pub summary: String,
+}
+
+impl ConflictDiff {
+    /// Whether this diff contains any critical differences.
+    #[must_use]
+    pub fn has_critical(&self) -> bool {
+        self.diffs
+            .iter()
+            .any(|d| d.severity == DiffSeverity::Critical)
+    }
+
+    /// Number of field-level differences.
+    #[must_use]
+    pub fn diff_count(&self) -> usize {
+        self.diffs.len()
+    }
+
+    /// Render the diff as a multi-line text report.
+    #[must_use]
+    pub fn render_text(&self) -> String {
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "Conflict: {} vs {} ({} differences)",
+            self.existing_id,
+            self.incoming_id,
+            self.diffs.len()
+        ));
+        lines.push(format!("Severity: {}", self.overall_severity));
+        lines.push(format!("Summary: {}", self.summary));
+        lines.push(String::new());
+        for diff in &self.diffs {
+            lines.push(format!(
+                "  [{severity}] {field}:",
+                severity = diff.severity,
+                field = diff.field,
+            ));
+            lines.push(format!("    existing: {}", diff.existing_value));
+            lines.push(format!("    incoming: {}", diff.incoming_value));
+        }
+        lines.join("\n")
+    }
+}
+
+/// Generate a visual diff for a conflict.
+pub fn diff_conflict(conflict: &Conflict) -> ConflictDiff {
+    let existing = &conflict.existing;
+    let incoming = &conflict.incoming;
+    let mut diffs = Vec::new();
+
+    // Compare kind
+    if existing.kind != incoming.kind {
+        diffs.push(FieldDiff {
+            field: "kind".to_string(),
+            existing_value: format!("{:?}", existing.kind),
+            incoming_value: format!("{:?}", incoming.kind),
+            severity: DiffSeverity::Critical,
+        });
+    }
+
+    // Compare region.track_id
+    if existing.region.track_id != incoming.region.track_id {
+        diffs.push(FieldDiff {
+            field: "region.track_id".to_string(),
+            existing_value: existing.region.track_id.clone(),
+            incoming_value: incoming.region.track_id.clone(),
+            severity: DiffSeverity::Warning,
+        });
+    }
+
+    // Compare region.start_ms
+    if existing.region.start_ms != incoming.region.start_ms {
+        diffs.push(FieldDiff {
+            field: "region.start_ms".to_string(),
+            existing_value: existing.region.start_ms.to_string(),
+            incoming_value: incoming.region.start_ms.to_string(),
+            severity: DiffSeverity::Warning,
+        });
+    }
+
+    // Compare region.end_ms
+    if existing.region.end_ms != incoming.region.end_ms {
+        diffs.push(FieldDiff {
+            field: "region.end_ms".to_string(),
+            existing_value: existing.region.end_ms.to_string(),
+            incoming_value: incoming.region.end_ms.to_string(),
+            severity: DiffSeverity::Warning,
+        });
+    }
+
+    // Compare clock
+    if existing.clock != incoming.clock {
+        diffs.push(FieldDiff {
+            field: "clock".to_string(),
+            existing_value: existing.clock.to_string(),
+            incoming_value: incoming.clock.to_string(),
+            severity: DiffSeverity::Info,
+        });
+    }
+
+    // Compare author
+    if existing.author != incoming.author {
+        diffs.push(FieldDiff {
+            field: "author".to_string(),
+            existing_value: existing.author.to_string(),
+            incoming_value: incoming.author.to_string(),
+            severity: DiffSeverity::Info,
+        });
+    }
+
+    // Compare payload (as JSON strings)
+    let existing_payload = existing.payload.to_string();
+    let incoming_payload = incoming.payload.to_string();
+    if existing_payload != incoming_payload {
+        diffs.push(FieldDiff {
+            field: "payload".to_string(),
+            existing_value: existing_payload,
+            incoming_value: incoming_payload,
+            severity: DiffSeverity::Warning,
+        });
+    }
+
+    let overall_severity = diffs
+        .iter()
+        .map(|d| d.severity)
+        .max()
+        .unwrap_or(DiffSeverity::Info);
+
+    let summary = build_conflict_summary(existing, incoming, &diffs);
+
+    ConflictDiff {
+        existing_id: existing.id,
+        incoming_id: incoming.id,
+        diffs,
+        overall_severity,
+        summary,
+    }
+}
+
+/// Build a human-readable summary of a conflict.
+fn build_conflict_summary(
+    existing: &EditOperation,
+    incoming: &EditOperation,
+    diffs: &[FieldDiff],
+) -> String {
+    let kind_conflict = diffs.iter().any(|d| d.field == "kind");
+    let timing_conflict = diffs
+        .iter()
+        .any(|d| d.field.starts_with("region.") && d.severity >= DiffSeverity::Warning);
+
+    if kind_conflict {
+        format!(
+            "Structural conflict: {:?} vs {:?} on {} [{}-{}ms]",
+            existing.kind,
+            incoming.kind,
+            existing.region.track_id,
+            existing.region.start_ms,
+            existing.region.end_ms,
+        )
+    } else if timing_conflict {
+        format!(
+            "Timing conflict on {}: [{}-{}ms] vs [{}-{}ms]",
+            existing.region.track_id,
+            existing.region.start_ms,
+            existing.region.end_ms,
+            incoming.region.start_ms,
+            incoming.region.end_ms,
+        )
+    } else {
+        format!(
+            "Parameter conflict on {} at [{}-{}ms] (clock {} vs {})",
+            existing.region.track_id,
+            existing.region.start_ms,
+            existing.region.end_ms,
+            existing.clock,
+            incoming.clock,
+        )
+    }
+}
+
+/// Batch-diff all conflicts from a resolver.
+pub fn diff_all_conflicts(conflicts: &[Conflict]) -> Vec<ConflictDiff> {
+    conflicts.iter().map(diff_conflict).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +648,179 @@ mod tests {
     fn test_region_duration() {
         let r = region(1000, 4000);
         assert_eq!(r.end_ms - r.start_ms, 3000);
+    }
+
+    // ---- Visual diff tests ----
+
+    #[test]
+    fn test_diff_severity_ordering() {
+        assert!(DiffSeverity::Critical > DiffSeverity::Warning);
+        assert!(DiffSeverity::Warning > DiffSeverity::Info);
+    }
+
+    #[test]
+    fn test_diff_severity_display() {
+        assert_eq!(DiffSeverity::Info.to_string(), "info");
+        assert_eq!(DiffSeverity::Warning.to_string(), "warning");
+        assert_eq!(DiffSeverity::Critical.to_string(), "critical");
+    }
+
+    #[test]
+    fn test_diff_identical_ops_only_clock_and_author_differ() {
+        let u1 = user();
+        let u2 = user();
+        let existing = op(u1, 1, region(0, 1000));
+        let incoming = op(u2, 2, region(0, 1000));
+        let conflict = Conflict {
+            existing,
+            incoming,
+            resolution: ResolutionStrategy::LastWriteWins,
+        };
+        let diff = diff_conflict(&conflict);
+        // clock and author differ
+        assert!(diff.diffs.iter().any(|d| d.field == "clock"));
+        assert!(diff.diffs.iter().any(|d| d.field == "author"));
+        assert_eq!(diff.overall_severity, DiffSeverity::Info);
+    }
+
+    #[test]
+    fn test_diff_different_kind_is_critical() {
+        let u = user();
+        let mut existing = op(u, 1, region(0, 1000));
+        existing.kind = EditKind::Insert;
+        let mut incoming = op(u, 2, region(0, 1000));
+        incoming.kind = EditKind::Delete;
+        let conflict = Conflict {
+            existing,
+            incoming,
+            resolution: ResolutionStrategy::KeepBoth,
+        };
+        let diff = diff_conflict(&conflict);
+        assert!(diff.has_critical());
+        assert_eq!(diff.overall_severity, DiffSeverity::Critical);
+    }
+
+    #[test]
+    fn test_diff_timing_conflict_is_warning() {
+        let u = user();
+        let existing = op(u, 1, region(0, 1000));
+        let incoming = op(u, 1, region(500, 1500));
+        let conflict = Conflict {
+            existing,
+            incoming,
+            resolution: ResolutionStrategy::LastWriteWins,
+        };
+        let diff = diff_conflict(&conflict);
+        let timing_diffs: Vec<_> = diff
+            .diffs
+            .iter()
+            .filter(|d| d.field.starts_with("region."))
+            .collect();
+        assert!(!timing_diffs.is_empty());
+        assert!(timing_diffs
+            .iter()
+            .all(|d| d.severity == DiffSeverity::Warning));
+    }
+
+    #[test]
+    fn test_diff_payload_difference() {
+        let u = user();
+        let mut existing = EditOperation::new(
+            u,
+            1,
+            region(0, 1000),
+            EditKind::Modify,
+            serde_json::json!({"volume": 0.5}),
+        );
+        let incoming = EditOperation::new(
+            u,
+            1,
+            region(0, 1000),
+            EditKind::Modify,
+            serde_json::json!({"volume": 0.8}),
+        );
+        // Make ids differ to avoid id equality
+        existing.id = Uuid::new_v4();
+        let conflict = Conflict {
+            existing,
+            incoming,
+            resolution: ResolutionStrategy::KeepBoth,
+        };
+        let diff = diff_conflict(&conflict);
+        assert!(diff.diffs.iter().any(|d| d.field == "payload"));
+    }
+
+    #[test]
+    fn test_diff_render_text_contains_fields() {
+        let u1 = user();
+        let u2 = user();
+        let existing = op(u1, 1, region(0, 1000));
+        let incoming = op(u2, 5, region(0, 1000));
+        let conflict = Conflict {
+            existing,
+            incoming,
+            resolution: ResolutionStrategy::LastWriteWins,
+        };
+        let diff = diff_conflict(&conflict);
+        let text = diff.render_text();
+        assert!(text.contains("clock"));
+        assert!(text.contains("existing:"));
+        assert!(text.contains("incoming:"));
+        assert!(text.contains("Severity:"));
+    }
+
+    #[test]
+    fn test_diff_count() {
+        let u = user();
+        let existing = op(u, 1, region(0, 1000));
+        let incoming = op(u, 5, region(500, 1500));
+        let conflict = Conflict {
+            existing,
+            incoming,
+            resolution: ResolutionStrategy::KeepBoth,
+        };
+        let diff = diff_conflict(&conflict);
+        assert!(diff.diff_count() >= 2); // at least clock + region changes
+    }
+
+    #[test]
+    fn test_diff_all_conflicts_batch() {
+        let mut resolver = ConflictResolver::new(ResolutionStrategy::KeepBoth);
+        let o1 = op(user(), 1, region(0, 1000));
+        resolver.apply(o1);
+        let o2 = op(user(), 2, region(500, 1500));
+        let conflicts = resolver.apply(o2);
+        let diffs = diff_all_conflicts(&conflicts);
+        assert_eq!(diffs.len(), conflicts.len());
+    }
+
+    #[test]
+    fn test_conflict_summary_structural() {
+        let u = user();
+        let mut existing = op(u, 1, region(0, 1000));
+        existing.kind = EditKind::Insert;
+        let mut incoming = op(u, 2, region(0, 1000));
+        incoming.kind = EditKind::Delete;
+        let conflict = Conflict {
+            existing,
+            incoming,
+            resolution: ResolutionStrategy::KeepBoth,
+        };
+        let diff = diff_conflict(&conflict);
+        assert!(diff.summary.contains("Structural conflict"));
+    }
+
+    #[test]
+    fn test_conflict_summary_timing() {
+        let u = user();
+        let existing = op(u, 1, region(0, 1000));
+        let incoming = op(u, 1, region(500, 1500));
+        let conflict = Conflict {
+            existing,
+            incoming,
+            resolution: ResolutionStrategy::KeepBoth,
+        };
+        let diff = diff_conflict(&conflict);
+        assert!(diff.summary.contains("Timing conflict"));
     }
 }

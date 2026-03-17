@@ -5,7 +5,8 @@
 
 use pyo3::prelude::*;
 
-use oximedia_edl::{parse_edl, Edl};
+use oximedia_edl::parse_edl;
+use oximedia_edl::Edl;
 
 // ---------------------------------------------------------------------------
 // Python-visible types

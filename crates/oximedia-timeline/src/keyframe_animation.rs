@@ -6,7 +6,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 /// Easing function type for keyframe interpolation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EasingType {
     /// Constant speed interpolation.
     Linear,
@@ -20,6 +20,22 @@ pub enum EasingType {
     Bounce,
     /// Spring oscillation effect.
     Spring,
+    /// Cubic bezier curve with two control points.
+    ///
+    /// The control points `(x1, y1)` and `(x2, y2)` define the shape of the
+    /// easing curve, following the CSS `cubic-bezier(x1, y1, x2, y2)` convention.
+    /// `x1` and `x2` must be in `[0, 1]`. `y1` and `y2` can exceed `[0, 1]`
+    /// to create overshoot effects.
+    CubicBezier {
+        /// X coordinate of the first control point (0.0-1.0).
+        x1: f32,
+        /// Y coordinate of the first control point.
+        y1: f32,
+        /// X coordinate of the second control point (0.0-1.0).
+        x2: f32,
+        /// Y coordinate of the second control point.
+        y2: f32,
+    },
 }
 
 impl EasingType {
@@ -58,8 +74,103 @@ impl EasingType {
                 let freq = 2.0 * std::f32::consts::PI;
                 1.0 - ((-6.0 * t).exp() * (freq * t).cos())
             }
+            Self::CubicBezier { x1, y1, x2, y2 } => cubic_bezier_evaluate(t, x1, y1, x2, y2),
         }
     }
+}
+
+/// Evaluates a cubic bezier curve at parameter `t`.
+///
+/// The curve is defined by four points:
+/// - P0 = (0, 0) (implicit start)
+/// - P1 = (x1, y1) (first control point)
+/// - P2 = (x2, y2) (second control point)
+/// - P3 = (1, 1) (implicit end)
+///
+/// Given an input `t` (time, 0-1), we need to find the parameter `u` such
+/// that `bezier_x(u) = t`, then return `bezier_y(u)`.
+///
+/// This uses Newton's method to solve for `u`, falling back to bisection
+/// for robustness.
+fn cubic_bezier_evaluate(t: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+
+    // Find u such that bezier_x(u) = t using Newton's method
+    let u = solve_bezier_t(t, x1, x2);
+
+    // Evaluate bezier_y(u)
+    bezier_component(u, y1, y2)
+}
+
+/// Computes one component (x or y) of a cubic bezier at parameter `u`.
+///
+/// B(u) = 3*(1-u)^2*u*c1 + 3*(1-u)*u^2*c2 + u^3
+///
+/// where c1 and c2 are the corresponding component of the control points.
+fn bezier_component(u: f32, c1: f32, c2: f32) -> f32 {
+    let u2 = u * u;
+    let u3 = u2 * u;
+    let inv = 1.0 - u;
+    let inv2 = inv * inv;
+
+    3.0 * inv2 * u * c1 + 3.0 * inv * u2 * c2 + u3
+}
+
+/// Computes the derivative of one bezier component with respect to `u`.
+///
+/// B'(u) = 3*(1-u)^2*c1 + 6*(1-u)*u*(c2-c1) + 3*u^2*(1-c2)
+fn bezier_component_derivative(u: f32, c1: f32, c2: f32) -> f32 {
+    let inv = 1.0 - u;
+    3.0 * inv * inv * c1 + 6.0 * inv * u * (c2 - c1) + 3.0 * u * u * (1.0 - c2)
+}
+
+/// Solves for the bezier parameter `u` such that `bezier_x(u) = target_x`.
+///
+/// Uses Newton's method with bisection fallback for robustness.
+fn solve_bezier_t(target_x: f32, x1: f32, x2: f32) -> f32 {
+    const EPSILON: f32 = 1e-6;
+    const MAX_ITERATIONS: u32 = 8;
+
+    // Initial guess: t itself is a reasonable starting point
+    let mut u = target_x;
+
+    // Newton's method
+    for _ in 0..MAX_ITERATIONS {
+        let x = bezier_component(u, x1, x2) - target_x;
+        if x.abs() < EPSILON {
+            return u;
+        }
+        let dx = bezier_component_derivative(u, x1, x2);
+        if dx.abs() < EPSILON {
+            break; // Derivative too small, fall back to bisection
+        }
+        u -= x / dx;
+        u = u.clamp(0.0, 1.0);
+    }
+
+    // Bisection fallback for robustness
+    let mut lo = 0.0_f32;
+    let mut hi = 1.0_f32;
+
+    for _ in 0..20 {
+        let mid = (lo + hi) * 0.5;
+        let x = bezier_component(mid, x1, x2);
+        if (x - target_x).abs() < EPSILON {
+            return mid;
+        }
+        if x < target_x {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+
+    (lo + hi) * 0.5
 }
 
 /// A single keyframe holding a value at a specific frame position.
@@ -133,7 +244,10 @@ impl KeyframeTrack {
         if time_frames <= self.keyframes[0].time_frames {
             return self.keyframes[0].value;
         }
-        let last = self.keyframes.last().expect("should succeed in test");
+        // SAFETY: we checked `self.keyframes.is_empty()` above, so `last()` is Some
+        let Some(last) = self.keyframes.last() else {
+            return 0.0;
+        };
         if time_frames >= last.time_frames {
             return last.value;
         }
@@ -368,5 +482,170 @@ mod tests {
     fn test_curve_default_is_empty() {
         let curve = AnimationCurve::default();
         assert_eq!(curve.track_count(), 0);
+    }
+
+    // --- CubicBezier easing tests ---
+
+    #[test]
+    fn test_cubic_bezier_linear() {
+        // CubicBezier(0.0, 0.0, 1.0, 1.0) should approximate linear
+        let easing = EasingType::CubicBezier {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 1.0,
+            y2: 1.0,
+        };
+        assert!((easing.evaluate(0.0) - 0.0).abs() < 1e-3);
+        assert!((easing.evaluate(0.5) - 0.5).abs() < 1e-2);
+        assert!((easing.evaluate(1.0) - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_cubic_bezier_ease() {
+        // CSS "ease": cubic-bezier(0.25, 0.1, 0.25, 1.0)
+        let easing = EasingType::CubicBezier {
+            x1: 0.25,
+            y1: 0.1,
+            x2: 0.25,
+            y2: 1.0,
+        };
+        let v0 = easing.evaluate(0.0);
+        let v_mid = easing.evaluate(0.5);
+        let v1 = easing.evaluate(1.0);
+        assert!((v0 - 0.0).abs() < 1e-3, "Start should be 0, got {v0}");
+        assert!((v1 - 1.0).abs() < 1e-3, "End should be 1, got {v1}");
+        // "ease" is slower at start, faster through middle
+        assert!(v_mid > 0.5, "At t=0.5, ease should be > 0.5, got {v_mid}");
+    }
+
+    #[test]
+    fn test_cubic_bezier_ease_in_out() {
+        // CSS "ease-in-out": cubic-bezier(0.42, 0.0, 0.58, 1.0)
+        let easing = EasingType::CubicBezier {
+            x1: 0.42,
+            y1: 0.0,
+            x2: 0.58,
+            y2: 1.0,
+        };
+        let v_mid = easing.evaluate(0.5);
+        // Should be close to 0.5 due to symmetry
+        assert!(
+            (v_mid - 0.5).abs() < 0.05,
+            "Midpoint should be ~0.5, got {v_mid}"
+        );
+    }
+
+    #[test]
+    fn test_cubic_bezier_endpoints() {
+        let easing = EasingType::CubicBezier {
+            x1: 0.42,
+            y1: 0.0,
+            x2: 0.58,
+            y2: 1.0,
+        };
+        assert!((easing.evaluate(0.0) - 0.0).abs() < 1e-6);
+        assert!((easing.evaluate(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cubic_bezier_clamping() {
+        let easing = EasingType::CubicBezier {
+            x1: 0.25,
+            y1: 0.1,
+            x2: 0.25,
+            y2: 1.0,
+        };
+        // Values outside [0,1] should be clamped
+        assert!((easing.evaluate(-1.0) - 0.0).abs() < 1e-3);
+        assert!((easing.evaluate(2.0) - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_cubic_bezier_monotonic_for_standard_curves() {
+        // Standard CSS ease should be monotonically increasing
+        let easing = EasingType::CubicBezier {
+            x1: 0.25,
+            y1: 0.1,
+            x2: 0.25,
+            y2: 1.0,
+        };
+        let mut prev = 0.0_f32;
+        for i in 0..=20 {
+            let t = i as f32 / 20.0;
+            let v = easing.evaluate(t);
+            assert!(
+                v >= prev - 1e-4,
+                "Should be monotonic: t={t}, v={v}, prev={prev}"
+            );
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn test_cubic_bezier_interpolation_in_track() {
+        let mut track = KeyframeTrack::new("opacity");
+        track.add(Keyframe::new(
+            0,
+            0.0,
+            EasingType::CubicBezier {
+                x1: 0.42,
+                y1: 0.0,
+                x2: 0.58,
+                y2: 1.0,
+            },
+        ));
+        track.add(Keyframe::new(100, 1.0, EasingType::Linear));
+        track.sort();
+
+        // At midpoint
+        let v = track.interpolate(50);
+        // With ease-in-out bezier, midpoint should be close to 0.5
+        assert!(
+            (v - 0.5).abs() < 0.1,
+            "Expected ~0.5 at midpoint with ease-in-out, got {v}"
+        );
+
+        // At endpoints
+        assert!((track.interpolate(0) - 0.0).abs() < 1e-6);
+        assert!((track.interpolate(100) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cubic_bezier_extreme_control_points() {
+        // Extreme ease-in: very slow start, fast end
+        let easing = EasingType::CubicBezier {
+            x1: 0.9,
+            y1: 0.0,
+            x2: 1.0,
+            y2: 1.0,
+        };
+        let v_quarter = easing.evaluate(0.25);
+        let v_three_quarter = easing.evaluate(0.75);
+        // Should be very slow at start
+        assert!(
+            v_quarter < 0.15,
+            "Extreme ease-in at 0.25 should be very small, got {v_quarter}"
+        );
+        // And catching up by 0.75
+        assert!(
+            v_three_quarter > 0.3,
+            "Extreme ease-in at 0.75 should be moderate, got {v_three_quarter}"
+        );
+    }
+
+    #[test]
+    fn test_bezier_component_at_boundaries() {
+        assert!((bezier_component(0.0, 0.25, 0.75) - 0.0).abs() < 1e-6);
+        assert!((bezier_component(1.0, 0.25, 0.75) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_solve_bezier_t_linear() {
+        // For a linear bezier (x1=0, x2=1), solve_bezier_t should return t
+        let u = solve_bezier_t(0.5, 0.0, 1.0);
+        assert!(
+            (u - 0.5).abs() < 1e-3,
+            "Linear bezier solve: expected 0.5, got {u}"
+        );
     }
 }

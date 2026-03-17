@@ -1,9 +1,14 @@
 #![allow(dead_code)]
 //! File system event watching utilities.
+//!
+//! Provides polling-based file and directory watching with:
+//! - Per-path change detection (create/modify/delete)
+//! - Recursive directory scanning
+//! - Debounce to suppress rapid repeated events for the same path
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 /// Events that can be reported for a watched file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +55,8 @@ pub struct WatchConfig {
     pub watch_delete: bool,
     /// Minimum interval between repeated events for the same path.
     pub debounce: Duration,
+    /// Whether to recursively scan subdirectories when watching a directory.
+    pub recursive: bool,
 }
 
 impl Default for WatchConfig {
@@ -60,6 +67,7 @@ impl Default for WatchConfig {
             watch_modify: true,
             watch_delete: true,
             debounce: Duration::from_millis(50),
+            recursive: false,
         }
     }
 }
@@ -84,13 +92,21 @@ impl WatchConfig {
 struct WatchEntry {
     last_modified: Option<SystemTime>,
     last_len: u64,
+    /// Wall-clock time at which the last event for this path was emitted.
+    last_event_at: Option<Instant>,
 }
 
 /// A polling-based file watcher that detects changes by comparing metadata.
+///
+/// Supports recursive directory watching and debouncing: rapid successive
+/// changes to a path are collapsed into a single event until `debounce`
+/// milliseconds have elapsed since the last emitted event.
 #[derive(Debug)]
 pub struct FileWatcher {
     config: WatchConfig,
     watched: HashMap<PathBuf, WatchEntry>,
+    /// Directories that should be recursively scanned on each poll tick.
+    watched_dirs: Vec<PathBuf>,
     pending_events: Vec<FileEvent>,
 }
 
@@ -101,6 +117,7 @@ impl FileWatcher {
         Self {
             config,
             watched: HashMap::new(),
+            watched_dirs: Vec::new(),
             pending_events: Vec::new(),
         }
     }
@@ -115,33 +132,107 @@ impl FileWatcher {
     ///
     /// If the path exists on disk its current metadata is recorded as a baseline.
     /// Paths that do not satisfy [`WatchConfig::should_watch`] are silently ignored.
+    ///
+    /// If `path` is a directory and `config.recursive` is `true`, all files
+    /// inside it (recursively) are also added, and the directory itself is
+    /// registered for new-file detection on subsequent [`check_events`](Self::check_events) calls.
     pub fn add_path(&mut self, path: impl Into<PathBuf>) {
         let path = path.into();
+
+        if path.is_dir() {
+            if self.config.recursive {
+                // Register the directory for new-file scanning
+                if !self.watched_dirs.contains(&path) {
+                    self.watched_dirs.push(path.clone());
+                }
+                // Add all current files in the directory tree
+                self.scan_directory_into_watched(&path);
+            }
+            return;
+        }
+
         if !self.config.should_watch(&path) {
             return;
         }
-        let entry = if let Ok(meta) = std::fs::metadata(&path) {
-            WatchEntry {
-                last_modified: meta.modified().ok(),
-                last_len: meta.len(),
-            }
-        } else {
-            WatchEntry {
-                last_modified: None,
-                last_len: 0,
-            }
-        };
+        let entry = build_watch_entry(&path);
         self.watched.insert(path, entry);
+    }
+
+    /// Recursively scan `dir` and add all files matching the filter.
+    fn scan_directory_into_watched(&mut self, dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child.is_dir() {
+                self.scan_directory_into_watched(&child);
+            } else if self.config.should_watch(&child) && !self.watched.contains_key(&child) {
+                let watch_entry = build_watch_entry(&child);
+                self.watched.insert(child, watch_entry);
+            }
+        }
+    }
+
+    /// Check for newly-created files in watched directories.
+    fn check_new_files_in_dirs(&mut self) {
+        let dirs: Vec<PathBuf> = self.watched_dirs.clone();
+        for dir in &dirs {
+            self.scan_new_files_in_dir(dir);
+        }
+    }
+
+    /// Scan one directory (recursively) and emit Created events for new files.
+    fn scan_new_files_in_dir(&mut self, dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child.is_dir() {
+                // Add to watched_dirs if not already there, then recurse
+                if !self.watched_dirs.contains(&child) {
+                    self.watched_dirs.push(child.clone());
+                }
+                self.scan_new_files_in_dir(&child);
+            } else if self.config.should_watch(&child) && !self.watched.contains_key(&child) {
+                // Brand-new file found
+                if self.config.watch_create && self.debounce_ok(&child) {
+                    self.pending_events.push(FileEvent::Created(child.clone()));
+                }
+                let watch_entry = build_watch_entry(&child);
+                self.watched.insert(child, watch_entry);
+            }
+        }
+    }
+
+    /// Return `true` if enough time has passed since the last event for `path`.
+    fn debounce_ok(&self, path: &Path) -> bool {
+        if let Some(entry) = self.watched.get(path) {
+            if let Some(last) = entry.last_event_at {
+                return last.elapsed() >= self.config.debounce;
+            }
+        }
+        true // no prior event — allow
     }
 
     /// Poll all watched paths for changes and update the internal event queue.
     ///
     /// Call [`event_count`](Self::event_count) or consume events afterwards.
     ///
+    /// If recursive watching is enabled, newly-created files inside watched
+    /// directories are also detected and emitted as `Created` events.
+    ///
     /// # Panics
     ///
     /// Panics if internal state is inconsistent (path registered but not in watched map).
     pub fn check_events(&mut self) {
+        // First scan for new files in watched directories (recursive mode)
+        if self.config.recursive {
+            self.check_new_files_in_dirs();
+        }
+
+        let now = Instant::now();
         let paths: Vec<PathBuf> = self.watched.keys().cloned().collect();
         for path in paths {
             if let Ok(meta) = std::fs::metadata(&path) {
@@ -153,7 +244,17 @@ impl FileWatcher {
                     .expect("invariant: path came from watched map");
                 let changed = entry.last_modified != new_modified || entry.last_len != new_len;
                 if changed && self.config.watch_modify {
-                    self.pending_events.push(FileEvent::Modified(path.clone()));
+                    // Apply debounce: only emit if enough time has passed
+                    let should_emit = entry
+                        .last_event_at
+                        .map_or(true, |t| t.elapsed() >= self.config.debounce);
+                    if should_emit {
+                        self.pending_events.push(FileEvent::Modified(path.clone()));
+                        // Record that an event was emitted now
+                        if let Some(e) = self.watched.get_mut(&path) {
+                            e.last_event_at = Some(now);
+                        }
+                    }
                 }
                 let entry = self
                     .watched
@@ -167,8 +268,15 @@ impl FileWatcher {
                     .watched
                     .get(&path)
                     .expect("invariant: path came from watched map");
-                if entry.last_modified.is_some() && self.config.watch_delete {
+                let was_present = entry.last_modified.is_some();
+                let should_emit = entry
+                    .last_event_at
+                    .map_or(true, |t| t.elapsed() >= self.config.debounce);
+                if was_present && self.config.watch_delete && should_emit {
                     self.pending_events.push(FileEvent::Deleted(path.clone()));
+                    if let Some(e) = self.watched.get_mut(&path) {
+                        e.last_event_at = Some(now);
+                    }
                 }
                 let entry = self
                     .watched
@@ -191,10 +299,36 @@ impl FileWatcher {
         std::mem::take(&mut self.pending_events)
     }
 
-    /// Return the number of paths currently being watched.
+    /// Return the number of individual file paths currently being watched.
     #[must_use]
     pub fn watched_count(&self) -> usize {
         self.watched.len()
+    }
+
+    /// Return the number of directories registered for recursive scanning.
+    #[must_use]
+    pub fn watched_dir_count(&self) -> usize {
+        self.watched_dirs.len()
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Private helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+fn build_watch_entry(path: &Path) -> WatchEntry {
+    if let Ok(meta) = std::fs::metadata(path) {
+        WatchEntry {
+            last_modified: meta.modified().ok(),
+            last_len: meta.len(),
+            last_event_at: None,
+        }
+    } else {
+        WatchEntry {
+            last_modified: None,
+            last_len: 0,
+            last_event_at: None,
+        }
     }
 }
 

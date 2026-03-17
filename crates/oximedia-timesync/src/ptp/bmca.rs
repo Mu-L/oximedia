@@ -6,6 +6,8 @@ use super::dataset::DefaultDataSet;
 use super::message::{AnnounceMessage, ClockQuality};
 use super::{ClockIdentity, PortIdentity};
 use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// Result of BMCA comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,9 +35,11 @@ pub fn compare_announce(local: &DefaultDataSet, announce: &AnnounceMessage) -> B
         announce.grandmaster_identity,
     );
 
+    // compare_dataset_quality returns Greater if A (local) is better than B (announce).
+    // BmcaResult describes whether the *announce message* represents a better or worse master.
     match ordering {
-        Ordering::Less => BmcaResult::WorseMaster,
-        Ordering::Greater => BmcaResult::BetterMaster,
+        Ordering::Less => BmcaResult::BetterMaster, // local is worse → announce is better
+        Ordering::Greater => BmcaResult::WorseMaster, // local is better → announce is worse
         Ordering::Equal => BmcaResult::SameMaster,
     }
 }
@@ -240,5 +244,429 @@ mod tests {
         // Same everything, lower clock identity wins
         let result = compare_dataset_quality(128, &quality, 128, id_a, 128, &quality, 128, id_b);
         assert_eq!(result, Ordering::Greater);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Announce timeout tracking and re-election support
+// ---------------------------------------------------------------------------
+
+/// Event fired when a master clock's announce messages stop arriving within
+/// the configured timeout window (announce_interval × announce_receipt_timeout).
+#[derive(Debug, Clone)]
+pub struct MasterLossEvent {
+    /// Identity of the master that stopped sending announces.
+    pub lost_master: PortIdentity,
+    /// Monotonic instant of the last observed announce from this master.
+    pub last_seen: Instant,
+    /// The timeout duration that was exceeded.
+    pub timeout: Duration,
+}
+
+/// Per-source state maintained by [`AnnounceTimeoutTracker`].
+#[derive(Debug, Clone)]
+struct AnnounceSourceState {
+    last_seen: Instant,
+}
+
+/// Tracks when announce messages were last received from each known master
+/// and reports [`MasterLossEvent`]s when a master has been silent for longer
+/// than the configured timeout.
+///
+/// Per IEEE 1588-2019 §9.2.6.11, a port transitions out of `Slave` when it
+/// has not received an `Announce` message within
+/// `announceReceiptTimeout × 2^logAnnounceInterval` seconds.
+#[derive(Debug)]
+pub struct AnnounceTimeoutTracker {
+    /// Per-source last-seen timestamps.
+    sources: HashMap<PortIdentity, AnnounceSourceState>,
+    /// Configured timeout duration applied to every tracked source.
+    timeout: Duration,
+}
+
+impl AnnounceTimeoutTracker {
+    /// Creates a tracker with the given timeout duration.
+    #[must_use]
+    pub fn new(timeout: Duration) -> Self {
+        Self {
+            sources: HashMap::new(),
+            timeout,
+        }
+    }
+
+    /// Records receipt of an announce message from `source` at `now`.
+    pub fn record_announce(&mut self, source: PortIdentity, now: Instant) {
+        self.sources
+            .insert(source, AnnounceSourceState { last_seen: now });
+    }
+
+    /// Checks all tracked sources against the timeout.
+    ///
+    /// Returns a [`MasterLossEvent`] for every source whose last announce was
+    /// received more than `timeout` ago relative to `now`.  The timed-out
+    /// sources are **not** removed automatically — call `remove_source` or
+    /// `record_announce` to update tracking.
+    #[must_use]
+    pub fn check_timeouts(&self, now: Instant) -> Vec<MasterLossEvent> {
+        self.sources
+            .iter()
+            .filter_map(|(id, state)| {
+                let elapsed = now.saturating_duration_since(state.last_seen);
+                if elapsed > self.timeout {
+                    Some(MasterLossEvent {
+                        lost_master: *id,
+                        last_seen: state.last_seen,
+                        timeout: self.timeout,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Removes tracking for `source` (e.g. after a loss event is handled).
+    pub fn remove_source(&mut self, source: &PortIdentity) {
+        self.sources.remove(source);
+    }
+
+    /// Returns the number of currently tracked sources.
+    #[must_use]
+    pub fn source_count(&self) -> usize {
+        self.sources.len()
+    }
+
+    /// Returns the configured timeout duration.
+    #[must_use]
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Foreign master record and re-election engine
+// ---------------------------------------------------------------------------
+
+/// A record of the most-recently-received `Announce` message from a remote
+/// master candidate, plus the monotonic instant it was received.
+#[derive(Debug, Clone)]
+pub struct ForeignMasterRecord {
+    /// Port identity of the foreign master.
+    pub identity: PortIdentity,
+    /// The most recent announce message received from this master.
+    pub last_announce: AnnounceMessage,
+    /// Monotonic instant when `last_announce` was recorded.
+    pub last_seen: Instant,
+}
+
+/// Manages the set of known foreign master candidates and implements BMCA
+/// re-election when the current master is lost.
+///
+/// Each received `Announce` message updates (or inserts) a
+/// [`ForeignMasterRecord`].  Stale records are pruned via `remove_expired`.
+/// `elect_best_master` runs the full BMCA dataset-comparison algorithm over
+/// all live foreign masters and returns the best candidate.
+#[derive(Debug)]
+pub struct ReElectionEngine {
+    /// All currently tracked foreign master candidates.
+    foreign_masters: HashMap<PortIdentity, ForeignMasterRecord>,
+    /// How long a foreign master record is considered fresh.
+    announce_timeout: Duration,
+}
+
+impl ReElectionEngine {
+    /// Creates a new re-election engine with the given announce-message timeout.
+    #[must_use]
+    pub fn new(announce_timeout: Duration) -> Self {
+        Self {
+            foreign_masters: HashMap::new(),
+            announce_timeout,
+        }
+    }
+
+    /// Records (or updates) the foreign master record for the sender of `ann`.
+    ///
+    /// If a record already exists for the same [`PortIdentity`] it is
+    /// replaced with the newer announce and updated timestamp.
+    pub fn update_foreign_master(&mut self, ann: AnnounceMessage, now: Instant) {
+        let identity = ann.header.source_port_identity;
+        self.foreign_masters.insert(
+            identity,
+            ForeignMasterRecord {
+                identity,
+                last_announce: ann,
+                last_seen: now,
+            },
+        );
+    }
+
+    /// Removes all foreign master records whose `last_seen` timestamp is
+    /// older than `announce_timeout` relative to `now`.
+    ///
+    /// Returns the [`PortIdentity`]s of every removed record so callers can
+    /// react (e.g. trigger a BMCA run if the current master was pruned).
+    pub fn remove_expired(&mut self, now: Instant) -> Vec<PortIdentity> {
+        let timeout = self.announce_timeout;
+        let mut expired = Vec::new();
+        self.foreign_masters.retain(|id, record| {
+            let elapsed = now.saturating_duration_since(record.last_seen);
+            if elapsed > timeout {
+                expired.push(*id);
+                false
+            } else {
+                true
+            }
+        });
+        expired
+    }
+
+    /// Runs BMCA over all currently tracked foreign master records and returns
+    /// a reference to the best candidate, or `None` if no foreign masters are
+    /// available (meaning the local clock should become grandmaster).
+    ///
+    /// The dataset-comparison algorithm follows IEEE 1588-2019 §9.3.4.
+    #[must_use]
+    pub fn elect_best_master(&self, local: &DefaultDataSet) -> Option<&ForeignMasterRecord> {
+        let mut best: Option<&ForeignMasterRecord> = None;
+
+        for record in self.foreign_masters.values() {
+            let ann = &record.last_announce;
+            match best {
+                None => {
+                    // First candidate: only accept if it beats the local clock.
+                    if compare_announce(local, ann) == BmcaResult::BetterMaster {
+                        best = Some(record);
+                    }
+                }
+                Some(current_best) => {
+                    // Compare the new candidate against the current best using
+                    // the full dataset-comparison algorithm.
+                    let ordering = compare_dataset_quality(
+                        ann.grandmaster_priority1,
+                        &ann.grandmaster_clock_quality,
+                        ann.grandmaster_priority2,
+                        ann.grandmaster_identity,
+                        current_best.last_announce.grandmaster_priority1,
+                        &current_best.last_announce.grandmaster_clock_quality,
+                        current_best.last_announce.grandmaster_priority2,
+                        current_best.last_announce.grandmaster_identity,
+                    );
+                    // `Ordering::Greater` means the new candidate is better.
+                    if ordering == Ordering::Greater {
+                        best = Some(record);
+                    }
+                }
+            }
+        }
+
+        best
+    }
+
+    /// Returns the number of currently tracked foreign master candidates.
+    #[must_use]
+    pub fn foreign_master_count(&self) -> usize {
+        self.foreign_masters.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Additional tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    use crate::ptp::message::{Flags, Header, MessageType};
+    use crate::ptp::{ClockIdentity, Domain, PortIdentity, PtpTimestamp};
+
+    fn make_port_id(byte: u8) -> PortIdentity {
+        PortIdentity::new(ClockIdentity([byte; 8]), 1)
+    }
+
+    fn make_announce(gm_priority1: u8, gm_id_byte: u8) -> AnnounceMessage {
+        use crate::ptp::message::ClockQuality;
+        let clock_id = ClockIdentity([gm_id_byte; 8]);
+        let port_id = PortIdentity::new(clock_id, 1);
+        let header = Header {
+            message_type: MessageType::Announce,
+            version: 2,
+            message_length: 64,
+            domain: Domain::DEFAULT,
+            flags: Flags::default(),
+            correction_field: 0,
+            source_port_identity: port_id,
+            sequence_id: 1,
+            control: 5,
+            log_message_interval: 1,
+        };
+        AnnounceMessage {
+            header,
+            origin_timestamp: PtpTimestamp::new(0, 0).expect("valid ts"),
+            current_utc_offset: 37,
+            grandmaster_priority1: gm_priority1,
+            grandmaster_clock_quality: ClockQuality {
+                clock_class: 135,
+                clock_accuracy: 0x20,
+                offset_scaled_log_variance: 0x4000,
+            },
+            grandmaster_priority2: 128,
+            grandmaster_identity: ClockIdentity([gm_id_byte; 8]),
+            steps_removed: 0,
+            time_source: 0x20,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // AnnounceTimeoutTracker tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tracker_no_timeout_within_window() {
+        let timeout = Duration::from_secs(3);
+        let mut tracker = AnnounceTimeoutTracker::new(timeout);
+        let now = Instant::now();
+        let port = make_port_id(1);
+        tracker.record_announce(port, now);
+        // Check immediately — no timeout yet.
+        let events = tracker.check_timeouts(now);
+        assert!(events.is_empty(), "no timeout within window");
+    }
+
+    #[test]
+    fn test_tracker_detects_timeout() {
+        let timeout = Duration::from_millis(10);
+        let mut tracker = AnnounceTimeoutTracker::new(timeout);
+        let past = Instant::now();
+        let port = make_port_id(2);
+        tracker.record_announce(port, past);
+        // Simulate time passing by using a future "now".
+        let future = past + Duration::from_millis(20);
+        let events = tracker.check_timeouts(future);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].lost_master, port);
+    }
+
+    #[test]
+    fn test_tracker_multiple_sources_partial_timeout() {
+        let timeout = Duration::from_millis(50);
+        let mut tracker = AnnounceTimeoutTracker::new(timeout);
+        let base = Instant::now();
+        let port_a = make_port_id(10);
+        let port_b = make_port_id(11);
+        tracker.record_announce(port_a, base);
+        // port_b received an announce recently.
+        tracker.record_announce(port_b, base + Duration::from_millis(40));
+        // Advance 60ms — only port_a should time out.
+        let future = base + Duration::from_millis(60);
+        let events = tracker.check_timeouts(future);
+        assert_eq!(events.len(), 1, "only port_a should time out");
+        assert_eq!(events[0].lost_master, port_a);
+    }
+
+    #[test]
+    fn test_tracker_remove_source() {
+        let timeout = Duration::from_millis(10);
+        let mut tracker = AnnounceTimeoutTracker::new(timeout);
+        let base = Instant::now();
+        let port = make_port_id(5);
+        tracker.record_announce(port, base);
+        assert_eq!(tracker.source_count(), 1);
+        tracker.remove_source(&port);
+        assert_eq!(tracker.source_count(), 0);
+        let events = tracker.check_timeouts(base + Duration::from_secs(10));
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_tracker_record_renews_timeout() {
+        let timeout = Duration::from_millis(20);
+        let mut tracker = AnnounceTimeoutTracker::new(timeout);
+        let base = Instant::now();
+        let port = make_port_id(7);
+        tracker.record_announce(port, base);
+        // Renew just before timeout.
+        let renewed = base + Duration::from_millis(15);
+        tracker.record_announce(port, renewed);
+        // At base+25ms the original would have expired but the renewal is still fresh.
+        let check_time = base + Duration::from_millis(25);
+        let events = tracker.check_timeouts(check_time);
+        assert!(events.is_empty(), "renewal should reset the timeout");
+    }
+
+    // -----------------------------------------------------------------------
+    // ReElectionEngine tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_engine_empty_returns_none() {
+        let local_id = ClockIdentity([0x01; 8]);
+        let local = crate::ptp::dataset::DefaultDataSet::new(local_id);
+        let engine = ReElectionEngine::new(Duration::from_secs(3));
+        assert!(engine.elect_best_master(&local).is_none());
+    }
+
+    #[test]
+    fn test_engine_single_better_candidate() {
+        let local_id = ClockIdentity([0xFF; 8]); // high (worse) identity
+        let local = crate::ptp::dataset::DefaultDataSet::new(local_id);
+        let engine_timeout = Duration::from_secs(3);
+        let mut engine = ReElectionEngine::new(engine_timeout);
+        // Foreign master with lower priority1 → better than local.
+        let ann = make_announce(100, 0x01);
+        engine.update_foreign_master(ann, Instant::now());
+        let best = engine.elect_best_master(&local);
+        assert!(best.is_some(), "better candidate should be elected");
+    }
+
+    #[test]
+    fn test_engine_selects_best_of_multiple() {
+        let local_id = ClockIdentity([0xFF; 8]);
+        let local = crate::ptp::dataset::DefaultDataSet::new(local_id);
+        let mut engine = ReElectionEngine::new(Duration::from_secs(3));
+        let now = Instant::now();
+        // Candidate A: priority1=150
+        engine.update_foreign_master(make_announce(150, 0x10), now);
+        // Candidate B: priority1=100 (better)
+        engine.update_foreign_master(make_announce(100, 0x20), now);
+        // Candidate C: priority1=200 (worse than A)
+        engine.update_foreign_master(make_announce(200, 0x30), now);
+
+        let best = engine.elect_best_master(&local).expect("should find best");
+        assert_eq!(
+            best.last_announce.grandmaster_priority1, 100,
+            "should elect lowest priority1"
+        );
+    }
+
+    #[test]
+    fn test_engine_remove_expired() {
+        let mut engine = ReElectionEngine::new(Duration::from_millis(10));
+        let base = Instant::now();
+        engine.update_foreign_master(make_announce(128, 0x01), base);
+        engine.update_foreign_master(make_announce(128, 0x02), base + Duration::from_millis(5));
+        assert_eq!(engine.foreign_master_count(), 2);
+
+        // Advance 15ms — first record expired, second still live.
+        let removed = engine.remove_expired(base + Duration::from_millis(15));
+        assert_eq!(removed.len(), 1);
+        assert_eq!(engine.foreign_master_count(), 1);
+    }
+
+    #[test]
+    fn test_engine_local_wins_against_worse_candidate() {
+        // local has priority1=100 (very good).
+        let local_id = ClockIdentity([0x01; 8]);
+        let mut local = crate::ptp::dataset::DefaultDataSet::new(local_id);
+        local.priority1 = 100;
+        local.clock_quality.clock_class = 6;
+        let mut engine = ReElectionEngine::new(Duration::from_secs(3));
+        // Foreign master with priority1=200 (worse than local).
+        engine.update_foreign_master(make_announce(200, 0x50), Instant::now());
+        // No candidate is better than local → elect_best_master returns None.
+        let best = engine.elect_best_master(&local);
+        assert!(
+            best.is_none(),
+            "local clock wins, no foreign master should be elected"
+        );
     }
 }

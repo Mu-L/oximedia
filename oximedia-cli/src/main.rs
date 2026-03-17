@@ -60,6 +60,7 @@ mod audio_cmd;
 mod audiopost_cmd;
 mod auto_cmd;
 mod batch;
+mod batch_cmd;
 mod benchmark;
 mod calibrate_cmd;
 mod captions_cmd;
@@ -86,6 +87,7 @@ mod graphics_cmd;
 mod handlers;
 mod image_cmd;
 mod imf_cmd;
+mod loudness_cmd;
 mod lut_cmd;
 mod mam_cmd;
 mod metadata;
@@ -94,6 +96,7 @@ mod mixer_cmd;
 mod monitor_cmd;
 mod multicam_cmd;
 mod ndi_cmd;
+mod normalize_cmd;
 mod optimize_cmd;
 mod package_cmd;
 mod playlist_cmd;
@@ -105,6 +108,7 @@ mod presets;
 mod progress;
 mod proxy_cmd;
 mod qc_cmd;
+mod quality_cmd;
 mod recommend_cmd;
 mod renderfarm_cmd;
 mod repair_cmd;
@@ -141,7 +145,7 @@ use colored::Colorize;
 use commands::Commands;
 use handlers::{
     handle_captions_command, handle_monitor_command, handle_preset_command, handle_restore_command,
-    init_logging, probe_file, show_info,
+    init_logging, probe_file, show_info, show_version,
 };
 
 /// Patent-free multimedia framework CLI
@@ -191,10 +195,18 @@ async fn main() -> Result<()> {
             streams,
             hash: _hash,
             quality_snapshot: _quality_snapshot,
-        } => probe_file(&input, verbose, streams).await,
+            format,
+            chapters,
+            metadata,
+        } => probe_file(&input, verbose, streams, &format, chapters, metadata).await,
 
         Commands::Info => {
             show_info();
+            Ok(())
+        }
+
+        Commands::Version => {
+            show_version();
             Ok(())
         }
 
@@ -744,6 +756,10 @@ async fn main() -> Result<()> {
         Commands::Access { command } => access_cmd::handle_access_command(command, cli.json).await,
         Commands::Rights { command } => rights_cmd::handle_rights_command(command, cli.json).await,
         Commands::Auto { command } => auto_cmd::handle_auto_command(command, cli.json).await,
+        Commands::Loudness { command } => loudness_cmd::run_loudness(command, cli.json).await,
+        Commands::Quality { command } => quality_cmd::run_quality(command, cli.json).await,
+        Commands::Normalize { command } => normalize_cmd::run_normalize(command, cli.json).await,
+        Commands::BatchEngine { command } => batch_cmd::run_batch_engine(command, cli.json).await,
     };
 
     // Handle errors with colored output

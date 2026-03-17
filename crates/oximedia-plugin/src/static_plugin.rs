@@ -7,7 +7,7 @@
 //! - Embedding plugins directly in the application binary
 //! - Creating adapter plugins for existing codec implementations
 //!
-//! Also provides the [`declare_plugin!`] macro for creating shared
+//! Also provides the `declare_plugin!` macro for creating shared
 //! library entry points.
 
 use crate::traits::{CodecPlugin, CodecPluginInfo, PluginCapability};

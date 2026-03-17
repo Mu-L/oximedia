@@ -103,10 +103,10 @@ use crate::AudioResult;
 pub use filter::{KWeightFilter, KWeightFilterBank};
 pub use gate::{BlockAccumulator, GatingProcessor};
 pub use normalize::{
-    BatchNormalizer, FileNormalizationStats, LoudnessNormalizer, NormalizationConfig,
-    NormalizationMode, NormalizationParams, StreamingNormalizer,
+    AutoGainConfig, AutoGainProcessor, BatchNormalizer, FileNormalizationStats, LoudnessNormalizer,
+    NormalizationConfig, NormalizationMode, NormalizationParams, StreamingNormalizer,
 };
-pub use peak::{SamplePeakDetector, TruePeakDetector};
+pub use peak::{SamplePeakDetector, TruePeakDetector, TruePeakLimiter, TruePeakLimiterConfig};
 pub use r128::{AtscA85Ext, AtscA85Meter, ComplianceStatus, R128Compliance, R128Meter};
 pub use report::{
     AtscA85Compliance, EbuR128Compliance, LoudnessHistory, LoudnessReport, LoudnessStatistics,

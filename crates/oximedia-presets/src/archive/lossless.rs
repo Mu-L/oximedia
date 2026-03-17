@@ -41,6 +41,7 @@ pub fn ffv1_sd() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mkv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -71,6 +72,7 @@ pub fn ffv1_hd() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mkv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -102,6 +104,7 @@ pub fn ffv1_uhd() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mkv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -132,6 +135,7 @@ pub fn utvideo_hd() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mkv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -163,6 +167,7 @@ pub fn utvideo_uhd() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mkv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -193,6 +198,7 @@ pub fn lossless_h264_hd() -> Preset {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mkv".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

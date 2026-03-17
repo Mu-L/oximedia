@@ -328,6 +328,205 @@ impl fmt::Display for QcReport {
     }
 }
 
+/// Exports the QC report as a self-contained HTML document.
+///
+/// The generated page includes:
+/// - A header with the file path, timestamp, and overall pass/fail badge.
+/// - A summary table with check counts broken down by severity.
+/// - A detailed findings table showing each failed check with severity,
+///   rule name, message, and optional recommendation.
+/// - A pass-all notice when no failures were detected.
+///
+/// All styling is embedded inline; no external resources are required.
+///
+/// # Errors
+///
+/// Currently infallible (`Ok` is always returned); the signature uses
+/// `Result<String, HtmlExportError>` for forward compatibility.
+pub fn report_to_html(report: &QcReport) -> Result<String, HtmlExportError> {
+    let status_color = if report.overall_passed {
+        "#2e7d32"
+    } else {
+        "#c62828"
+    };
+    let status_text = if report.overall_passed {
+        "PASS"
+    } else {
+        "FAIL"
+    };
+
+    let critical_count = report.critical_errors().len();
+    let error_count = report.errors().len();
+    let warning_count = report.warnings().len();
+    let info_count = report.info_messages().len();
+
+    // ── Findings rows ────────────────────────────────────────────────────────
+    let mut rows = String::new();
+    for result in &report.results {
+        if result.passed {
+            continue;
+        }
+        let (sev_color, sev_bg) = match result.severity {
+            Severity::Critical => ("#b71c1c", "#ffebee"),
+            Severity::Error => ("#e65100", "#fff3e0"),
+            Severity::Warning => ("#f57f17", "#fffde7"),
+            Severity::Info => ("#1565c0", "#e3f2fd"),
+        };
+
+        let stream_cell = result
+            .stream_index
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let ts_cell = result
+            .timestamp
+            .map(|t| format!("{t:.2}s"))
+            .unwrap_or_default();
+        let rec_cell = result.recommendation.as_deref().unwrap_or("").to_string();
+
+        rows.push_str(&format!(
+            "<tr style=\"background:{sev_bg}\">\
+             <td style=\"color:{sev_color};font-weight:bold;padding:6px 8px\">{}</td>\
+             <td style=\"padding:6px 8px;font-family:monospace\">{}</td>\
+             <td style=\"padding:6px 8px\">{}</td>\
+             <td style=\"padding:6px 8px;color:#555\">{stream_cell}</td>\
+             <td style=\"padding:6px 8px;color:#555\">{ts_cell}</td>\
+             <td style=\"padding:6px 8px;color:#37474f;font-style:italic\">{rec_cell}</td>\
+             </tr>",
+            html_escape(&result.severity.to_string()),
+            html_escape(&result.rule_name),
+            html_escape(&result.message),
+        ));
+    }
+
+    let findings_section = if report.failed_checks == 0 {
+        "<p style=\"color:#2e7d32;font-weight:bold\">✓ All checks passed.</p>".to_string()
+    } else {
+        format!(
+            "<table style=\"width:100%;border-collapse:collapse;font-size:0.9em\">\
+             <thead><tr style=\"background:#eceff1\">\
+             <th style=\"padding:8px;text-align:left\">Severity</th>\
+             <th style=\"padding:8px;text-align:left\">Rule</th>\
+             <th style=\"padding:8px;text-align:left\">Message</th>\
+             <th style=\"padding:8px;text-align:left\">Stream</th>\
+             <th style=\"padding:8px;text-align:left\">Timestamp</th>\
+             <th style=\"padding:8px;text-align:left\">Recommendation</th>\
+             </tr></thead>\
+             <tbody>{rows}</tbody>\
+             </table>"
+        )
+    };
+
+    let duration_row = report
+        .validation_duration
+        .map(|d| {
+            format!(
+                "<tr><td style=\"padding:4px 8px;color:#555\">Validation Duration</td>\
+             <td style=\"padding:4px 8px\">{d:.3}s</td></tr>"
+            )
+        })
+        .unwrap_or_default();
+
+    let html = format!(
+        "<!DOCTYPE html>\n\
+         <html lang=\"en\">\n\
+         <head>\n\
+         <meta charset=\"UTF-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n\
+         <title>QC Report — {file}</title>\n\
+         <style>\
+         body{{font-family:system-ui,sans-serif;margin:0;padding:24px;background:#fafafa;color:#212121}}\
+         h1{{font-size:1.4em;margin:0 0 4px}}\
+         .badge{{display:inline-block;padding:4px 14px;border-radius:4px;\
+                 color:#fff;font-weight:bold;font-size:1em;background:{status_color}}}\
+         table{{border-collapse:collapse}}td,th{{border-bottom:1px solid #e0e0e0}}\
+         </style>\n\
+         </head>\n\
+         <body>\n\
+         <h1>QC Report</h1>\n\
+         <p><strong>File:</strong> {file}</p>\n\
+         <p><strong>Generated:</strong> {ts}</p>\n\
+         <p><strong>Status:</strong> <span class=\"badge\">{status_text}</span></p>\n\
+         <h2>Summary</h2>\n\
+         <table>\n\
+         <tr><td style=\"padding:4px 8px;color:#555\">Total Checks</td>\
+             <td style=\"padding:4px 8px\">{total}</td></tr>\n\
+         <tr><td style=\"padding:4px 8px;color:#2e7d32\">Passed</td>\
+             <td style=\"padding:4px 8px\">{passed}</td></tr>\n\
+         <tr><td style=\"padding:4px 8px;color:#b71c1c\">Critical</td>\
+             <td style=\"padding:4px 8px\">{critical}</td></tr>\n\
+         <tr><td style=\"padding:4px 8px;color:#e65100\">Errors</td>\
+             <td style=\"padding:4px 8px\">{errors}</td></tr>\n\
+         <tr><td style=\"padding:4px 8px;color:#f57f17\">Warnings</td>\
+             <td style=\"padding:4px 8px\">{warnings}</td></tr>\n\
+         <tr><td style=\"padding:4px 8px;color:#1565c0\">Info</td>\
+             <td style=\"padding:4px 8px\">{info}</td></tr>\n\
+         {duration_row}\
+         </table>\n\
+         <h2>Findings</h2>\n\
+         {findings_section}\n\
+         </body>\n\
+         </html>\n",
+        file = html_escape(&report.file_path),
+        ts = html_escape(&report.timestamp),
+        total = report.total_checks,
+        passed = report.passed_checks,
+        critical = critical_count,
+        errors = error_count,
+        warnings = warning_count,
+        info = info_count,
+    );
+
+    Ok(html)
+}
+
+/// Error type for HTML export operations.
+#[derive(Debug)]
+pub enum HtmlExportError {
+    /// IO error during write.
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for HtmlExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "HTML export IO error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for HtmlExportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+        }
+    }
+}
+
+/// Escapes special HTML characters to prevent injection.
+fn html_escape(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            '&' => "&amp;".chars().collect::<Vec<_>>(),
+            '<' => "&lt;".chars().collect(),
+            '>' => "&gt;".chars().collect(),
+            '"' => "&quot;".chars().collect(),
+            '\'' => "&#39;".chars().collect(),
+            other => vec![other],
+        })
+        .collect()
+}
+
+impl QcReport {
+    /// Exports the report as a self-contained HTML document.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`HtmlExportError`] if HTML generation fails (currently infallible).
+    pub fn to_html(&self) -> Result<String, HtmlExportError> {
+        report_to_html(self)
+    }
+}
+
 /// Report format for export.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReportFormat {
@@ -339,6 +538,8 @@ pub enum ReportFormat {
     JsonCompact,
     /// XML format.
     Xml,
+    /// Self-contained HTML document.
+    Html,
 }
 
 impl ReportFormat {
@@ -349,7 +550,113 @@ impl ReportFormat {
             Self::Text => "txt",
             Self::Json | Self::JsonCompact => "json",
             Self::Xml => "xml",
+            Self::Html => "html",
         }
+    }
+}
+
+#[cfg(test)]
+mod report_html_tests {
+    use super::*;
+    use crate::rules::{CheckResult, Severity};
+
+    fn make_report(pass: bool) -> QcReport {
+        let mut r = QcReport::new("test_file.mkv");
+        if pass {
+            r.add_result(CheckResult::pass("dummy_rule"));
+        } else {
+            r.add_result(
+                CheckResult::fail("codec_check", Severity::Error, "Bad codec")
+                    .with_recommendation("Use AV1"),
+            );
+            r.add_result(CheckResult::fail(
+                "loudness",
+                Severity::Critical,
+                "Too loud",
+            ));
+            r.add_result(CheckResult::fail(
+                "frame_rate",
+                Severity::Warning,
+                "Non-standard fps",
+            ));
+        }
+        r
+    }
+
+    #[test]
+    fn test_html_export_pass_contains_pass_badge() {
+        let report = make_report(true);
+        let html = report.to_html().expect("html export should succeed");
+        assert!(html.contains("PASS"));
+        assert!(html.contains("All checks passed"));
+    }
+
+    #[test]
+    fn test_html_export_fail_contains_fail_badge() {
+        let report = make_report(false);
+        let html = report.to_html().expect("html export should succeed");
+        assert!(html.contains("FAIL"));
+    }
+
+    #[test]
+    fn test_html_export_contains_file_path() {
+        let report = make_report(false);
+        let html = report.to_html().expect("html export should succeed");
+        assert!(html.contains("test_file.mkv"));
+    }
+
+    #[test]
+    fn test_html_export_contains_rule_names() {
+        let report = make_report(false);
+        let html = report.to_html().expect("html export should succeed");
+        assert!(html.contains("codec_check"));
+        assert!(html.contains("loudness"));
+        assert!(html.contains("frame_rate"));
+    }
+
+    #[test]
+    fn test_html_export_contains_recommendation() {
+        let report = make_report(false);
+        let html = report.to_html().expect("html export should succeed");
+        assert!(html.contains("Use AV1"));
+    }
+
+    #[test]
+    fn test_html_escape_prevents_injection() {
+        let mut report = QcReport::new("<script>alert('xss')</script>");
+        report.add_result(CheckResult::fail(
+            "xss_rule",
+            Severity::Warning,
+            "msg with <b>html</b>",
+        ));
+        let html = report.to_html().expect("html export should succeed");
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn test_html_format_extension() {
+        assert_eq!(ReportFormat::Html.extension(), "html");
+    }
+
+    #[test]
+    fn test_html_report_with_stream_and_timestamp() {
+        let mut report = QcReport::new("vid.mkv");
+        report.add_result(
+            CheckResult::fail("test", Severity::Warning, "warn")
+                .with_stream(2)
+                .with_timestamp(45.0),
+        );
+        let html = report.to_html().expect("html export should succeed");
+        assert!(html.contains("45.00s"));
+    }
+
+    #[test]
+    fn test_html_report_duration_displayed() {
+        let mut report = QcReport::new("vid.mkv");
+        report.set_validation_duration(3.141);
+        let html = report.to_html().expect("html export should succeed");
+        assert!(html.contains("3.141s"));
     }
 }
 

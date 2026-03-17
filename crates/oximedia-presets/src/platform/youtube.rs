@@ -63,6 +63,7 @@ pub fn youtube_360p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -93,6 +94,7 @@ pub fn youtube_480p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -123,6 +125,7 @@ pub fn youtube_720p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -154,6 +157,7 @@ pub fn youtube_720p_60fps() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -184,6 +188,7 @@ pub fn youtube_1080p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -215,6 +220,7 @@ pub fn youtube_1080p_60fps() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -246,6 +252,7 @@ pub fn youtube_1440p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -278,6 +285,7 @@ pub fn youtube_1440p_60fps() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -309,6 +317,7 @@ pub fn youtube_2160p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -341,6 +350,7 @@ pub fn youtube_2160p_60fps() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -371,6 +381,7 @@ pub fn youtube_4320p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -403,6 +414,7 @@ pub fn youtube_vp9_360p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -433,6 +445,7 @@ pub fn youtube_vp9_480p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -463,6 +476,7 @@ pub fn youtube_vp9_720p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -494,6 +508,7 @@ pub fn youtube_vp9_720p_60fps() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -524,6 +539,7 @@ pub fn youtube_vp9_1080p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -555,6 +571,7 @@ pub fn youtube_vp9_1080p_60fps() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -586,6 +603,7 @@ pub fn youtube_vp9_1440p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -618,6 +636,7 @@ pub fn youtube_vp9_1440p_60fps() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -649,6 +668,7 @@ pub fn youtube_vp9_2160p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -681,6 +701,7 @@ pub fn youtube_vp9_2160p_60fps() -> Preset {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -711,6 +732,7 @@ pub fn youtube_vp9_4320p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -744,6 +766,7 @@ pub fn youtube_hdr_1080p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -776,6 +799,7 @@ pub fn youtube_hdr_1440p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -808,6 +832,7 @@ pub fn youtube_hdr_2160p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("webm".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

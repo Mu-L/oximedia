@@ -128,7 +128,7 @@ impl MotionBlurPass {
 
     /// Apply motion blur to `src` writing into `dst`.
     ///
-    /// `vectors` must have one [`MotionVector`] per pixel (row-major order).
+    /// `vectors` must have one `MotionVector` per pixel (row-major order).
     /// Both `src` and `dst` must be `width * height * 4` bytes (RGBA).
     ///
     /// # Panics

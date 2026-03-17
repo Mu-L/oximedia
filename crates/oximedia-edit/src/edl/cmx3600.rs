@@ -28,9 +28,7 @@
 //! 002  AX       A     C        01:00:05;00 01:00:10;00 01:00:05;00 01:00:10;00
 //! ```
 
-use super::{
-    Edl, EdlError, EdlEvent, EdlResult, EditType, MotionEffect, Timecode,
-};
+use super::{EditType, Edl, EdlError, EdlEvent, EdlResult, MotionEffect, Timecode};
 use oximedia_core::Rational;
 use std::collections::HashMap;
 
@@ -63,7 +61,7 @@ impl Cmx3600Parser {
         let mut title = String::new();
         let mut events = Vec::new();
         let mut comments = Vec::new();
-        let mut metadata = HashMap::new();
+        let metadata = HashMap::new();
 
         let mut i = 0;
         while i < lines.len() {
@@ -181,15 +179,11 @@ impl Cmx3600Parser {
 
                 // Check for special metadata in comments
                 if comment.starts_with("FROM CLIP NAME:") {
-                    event_metadata.insert(
-                        "clip_name".to_string(),
-                        comment[15..].trim().to_string(),
-                    );
+                    event_metadata
+                        .insert("clip_name".to_string(), comment[15..].trim().to_string());
                 } else if comment.starts_with("TO CLIP NAME:") {
-                    event_metadata.insert(
-                        "to_clip_name".to_string(),
-                        comment[13..].trim().to_string(),
-                    );
+                    event_metadata
+                        .insert("to_clip_name".to_string(), comment[13..].trim().to_string());
                 } else if comment.contains("FREEZE FRAME") {
                     motion_effect = Some(MotionEffect {
                         speed: 0.0,
@@ -510,7 +504,10 @@ M2   AX       050   01:00:02;15
         let event = &edl.events[0];
 
         assert!(event.motion_effect.is_some());
-        let motion = event.motion_effect.as_ref().expect("motion should be valid");
+        let motion = event
+            .motion_effect
+            .as_ref()
+            .expect("motion should be valid");
         assert_eq!(motion.speed, 0.5);
         assert!(!motion.freeze);
     }
@@ -528,7 +525,10 @@ FCM: DROP FRAME
         let event = &edl.events[0];
 
         assert!(event.motion_effect.is_some());
-        let motion = event.motion_effect.as_ref().expect("motion should be valid");
+        let motion = event
+            .motion_effect
+            .as_ref()
+            .expect("motion should be valid");
         assert!(motion.freeze);
     }
 
@@ -589,7 +589,8 @@ FCM: DROP FRAME
         assert_eq!(tc.frames, 29);
         assert!(!tc.drop_frame);
 
-        let tc_df = Timecode::parse("01:23:45;29", Rational::new(30, 1)).expect("tc_df should be valid");
+        let tc_df =
+            Timecode::parse("01:23:45;29", Rational::new(30, 1)).expect("tc_df should be valid");
         assert!(tc_df.drop_frame);
     }
 

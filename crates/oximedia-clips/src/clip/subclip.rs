@@ -120,4 +120,58 @@ mod tests {
         let subclip = SubClip::new(parent_id, "Invalid", 500, 100);
         assert!(!subclip.is_valid());
     }
+
+    #[test]
+    fn test_subclip_boundary_conditions() {
+        let parent_id = ClipId::new();
+        let clip_duration: i64 = 2400; // 100 frames at 24 fps = 100 frames total
+
+        // start=0, end=clip_duration — the maximal subclip spanning the whole clip
+        let full = SubClip::new(parent_id, "Full Range", 0, clip_duration);
+        assert!(
+            full.is_valid(),
+            "start=0, end=clip_duration should be valid"
+        );
+        assert_eq!(full.in_point, 0, "in_point should be 0");
+        assert_eq!(
+            full.out_point, clip_duration,
+            "out_point should equal clip_duration"
+        );
+        assert_eq!(
+            full.duration(),
+            clip_duration,
+            "duration should equal clip_duration"
+        );
+
+        // start=0, end=1 — minimal valid subclip at the very beginning
+        let first_frame = SubClip::new(parent_id, "First Frame", 0, 1);
+        assert!(
+            first_frame.is_valid(),
+            "single-frame subclip at start should be valid"
+        );
+        assert_eq!(first_frame.duration(), 1);
+
+        // start=clip_duration-1, end=clip_duration — minimal valid subclip at the very end
+        let last_frame = SubClip::new(parent_id, "Last Frame", clip_duration - 1, clip_duration);
+        assert!(
+            last_frame.is_valid(),
+            "single-frame subclip at end should be valid"
+        );
+        assert_eq!(last_frame.duration(), 1);
+
+        // start=0, end=0 — degenerate: zero-duration, NOT valid
+        let zero_dur = SubClip::new(parent_id, "Zero Duration", 0, 0);
+        assert!(
+            !zero_dur.is_valid(),
+            "zero-duration subclip should not be valid"
+        );
+        assert_eq!(zero_dur.duration(), 0);
+
+        // start=clip_duration, end=clip_duration — degenerate at the very end, NOT valid
+        let end_zero = SubClip::new(parent_id, "End Zero", clip_duration, clip_duration);
+        assert!(
+            !end_zero.is_valid(),
+            "zero-duration subclip at end boundary should not be valid"
+        );
+    }
 }

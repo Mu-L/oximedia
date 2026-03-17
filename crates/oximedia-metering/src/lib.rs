@@ -186,14 +186,14 @@
 //! ## Video Metering
 //!
 //! ```rust,no_run
-//! use oximedia_metering::{LuminanceMeter, GamutMeter, ColorGamut, QualityAnalyzer};
-//! use ndarray::Array2;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use oximedia_metering::{LuminanceMeter, GamutMeter, ColorGamut, QualityAnalyzer, Frame2D};
 //!
 //! // Luminance metering for HDR content
 //! let mut lum_meter = LuminanceMeter::new(1920, 1080, 1000.0, 256)
 //!     .expect("Failed to create luminance meter");
 //!
-//! # let luminance_frame = Array2::<f64>::zeros((1080, 1920));
+//! # let luminance_frame = Frame2D::zeros(1080, 1920);
 //! lum_meter.process(&luminance_frame)?;
 //!
 //! println!("Peak: {:.1} nits", lum_meter.peak_nits());
@@ -208,9 +208,9 @@
 //! let mut gamut_meter = GamutMeter::new(1920, 1080, ColorGamut::Rec2020)
 //!     .expect("Failed to create gamut meter");
 //!
-//! # let r_channel = Array2::<f64>::zeros((1080, 1920));
-//! # let g_channel = Array2::<f64>::zeros((1080, 1920));
-//! # let b_channel = Array2::<f64>::zeros((1080, 1920));
+//! # let r_channel = Frame2D::zeros(1080, 1920);
+//! # let g_channel = Frame2D::zeros(1080, 1920);
+//! # let b_channel = Frame2D::zeros(1080, 1920);
 //! gamut_meter.process(&r_channel, &g_channel, &b_channel)?;
 //!
 //! println!("Rec.2020 coverage: {:.1}%", gamut_meter.gamut_coverage_percentage());
@@ -220,13 +220,15 @@
 //! let quality = QualityAnalyzer::new(1920, 1080, 1.0)
 //!     .expect("Failed to create quality analyzer");
 //!
-//! # let reference_frame = Array2::<f64>::zeros((1080, 1920));
-//! # let distorted_frame = Array2::<f64>::zeros((1080, 1920));
+//! # let reference_frame = Frame2D::zeros(1080, 1920);
+//! # let distorted_frame = Frame2D::zeros(1080, 1920);
 //! let metrics = quality.analyze(&reference_frame, &distorted_frame)?;
 //!
 //! println!("PSNR: {:.2} dB", metrics.psnr);
 //! println!("SSIM: {:.4}", metrics.ssim);
 //! println!("Quality: {}", metrics.rating());
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Meter Rendering
@@ -333,9 +335,7 @@
 pub mod atsc;
 pub mod ballistics;
 pub mod correlation;
-pub mod correlation_meter;
 pub mod dr_meter;
-pub mod dynamic_range_meter;
 pub mod dynamics;
 pub mod ebu;
 pub mod ebu_r128_impl;
@@ -349,9 +349,7 @@ pub mod m_s_meter;
 pub mod meter_type_config;
 pub mod octave_bands;
 pub mod peak;
-pub mod peak_meter;
 pub mod phase;
-pub mod phase_analysis;
 pub mod phase_scope;
 pub mod ppm;
 pub mod range;
@@ -361,12 +359,22 @@ pub mod spectral_balance;
 pub mod spectral_energy;
 pub mod spectrum;
 pub mod spectrum_bands;
-pub mod true_peak;
 pub mod truepeak;
 pub mod video_color;
 pub mod video_luminance;
 pub mod video_quality;
 pub mod vu_meter;
+
+/// Backward-compatibility aliases for merged modules.
+pub use correlation as correlation_meter;
+/// Backward-compatibility alias: items from `dynamic_range_meter` now in [`dynamics`].
+pub use dynamics as dynamic_range_meter;
+/// Backward-compatibility alias: items from `peak_meter` now in [`peak`].
+pub use peak as peak_meter;
+/// Backward-compatibility alias: items from `phase_analysis` now in [`phase`].
+pub use phase as phase_analysis;
+/// Backward-compatibility alias: items from `true_peak` now in [`truepeak`].
+pub use truepeak as true_peak;
 
 // Wave 12 modules
 pub mod crest_factor;
@@ -411,7 +419,7 @@ pub use video_color::{
 };
 pub use video_luminance::{BlackWhiteLevelMeter, LuminanceMeter};
 pub use video_quality::{
-    BlockinessDetector, PsnrCalculator, QualityAnalyzer, QualityMetrics, SsimCalculator,
+    BlockinessDetector, Frame2D, PsnrCalculator, QualityAnalyzer, QualityMetrics, SsimCalculator,
 };
 
 /// Metering error types.
@@ -487,6 +495,18 @@ pub enum Standard {
     /// Max True Peak: -2.0 dBTP
     AmazonPrime,
 
+    /// Tidal HiFi streaming platform.
+    ///
+    /// Target: -14 LUFS
+    /// Max True Peak: -1.0 dBTP
+    TidalHiFi,
+
+    /// Amazon Music HD streaming platform.
+    ///
+    /// Target: -14 LUFS
+    /// Max True Peak: -1.0 dBTP
+    AmazonMusicHd,
+
     /// Custom target loudness.
     ///
     /// Specify your own target in LUFS and max true peak in dBTP.
@@ -506,7 +526,7 @@ impl Standard {
         match self {
             Self::EbuR128 => -23.0,
             Self::AtscA85 | Self::AmazonPrime => -24.0,
-            Self::Spotify | Self::YouTube => -14.0,
+            Self::Spotify | Self::YouTube | Self::TidalHiFi | Self::AmazonMusicHd => -14.0,
             Self::AppleMusic => -16.0,
             Self::Netflix => -27.0,
             Self::Custom { target_lufs, .. } => *target_lufs,
@@ -516,7 +536,12 @@ impl Standard {
     /// Get the maximum true peak in dBTP for this standard.
     pub fn max_true_peak_dbtp(&self) -> f64 {
         match self {
-            Self::EbuR128 | Self::Spotify | Self::YouTube | Self::AppleMusic => -1.0,
+            Self::EbuR128
+            | Self::Spotify
+            | Self::YouTube
+            | Self::AppleMusic
+            | Self::TidalHiFi
+            | Self::AmazonMusicHd => -1.0,
             Self::AtscA85 | Self::Netflix | Self::AmazonPrime => -2.0,
             Self::Custom { max_peak_dbtp, .. } => *max_peak_dbtp,
         }
@@ -525,7 +550,12 @@ impl Standard {
     /// Get the tolerance in LU for this standard.
     pub fn tolerance_lu(&self) -> f64 {
         match self {
-            Self::EbuR128 | Self::Spotify | Self::YouTube | Self::AppleMusic => 1.0,
+            Self::EbuR128
+            | Self::Spotify
+            | Self::YouTube
+            | Self::AppleMusic
+            | Self::TidalHiFi
+            | Self::AmazonMusicHd => 1.0,
             Self::AtscA85 | Self::Netflix | Self::AmazonPrime => 2.0,
             Self::Custom { tolerance_lu, .. } => *tolerance_lu,
         }
@@ -541,6 +571,8 @@ impl Standard {
             Self::AppleMusic => "Apple Music",
             Self::Netflix => "Netflix",
             Self::AmazonPrime => "Amazon Prime Video",
+            Self::TidalHiFi => "Tidal HiFi",
+            Self::AmazonMusicHd => "Amazon Music HD",
             Self::Custom { .. } => "Custom",
         }
     }
@@ -646,6 +678,16 @@ pub enum ChannelLayout {
     Surround71,
     /// 7.1.4 Dolby Atmos bed (L, R, C, LFE, Ls, Rs, Lrs, Rrs, Ltf, Rtf, Ltb, Rtb).
     Atmos714,
+    /// NHK 22.2 immersive audio layout per ITU-R BS.2051-3.
+    ///
+    /// 24 speakers arranged in 3 layers:
+    /// - Top layer (9 ch): TpFL, TpFR, TpFC, TpC, TpBL, TpBR, TpSiL, TpSiR, TpBC
+    /// - Middle layer (10 ch): FL, FR, FC, LFE1, BL, BR, FLc, FRc, BC, LFE2
+    /// - Bottom layer (4 ch): BtFL, BtFR, BtFC, BtBC
+    /// - Plus 1 overhead centre (CH): TpFC (already in top)
+    ///
+    /// Channel order follows ITU-R BS.2051-3 Table 1 (22.2 layout).
+    Nhk222,
     /// Custom channel configuration.
     Custom(usize),
 }
@@ -659,6 +701,7 @@ impl ChannelLayout {
             Self::Surround51 => 6,
             Self::Surround71 => 8,
             Self::Atmos714 => 12,
+            Self::Nhk222 => 24,
             Self::Custom(n) => *n,
         }
     }
@@ -666,6 +709,10 @@ impl ChannelLayout {
     /// Get ITU-R BS.1770-4 channel weights for this layout.
     ///
     /// Returns a vector of weights to apply to each channel during loudness calculation.
+    /// For the NHK 22.2 layout the weights follow ITU-R BS.2051-3 Section 6 (reproduced
+    /// below).  The standard specifies that LFE channels contribute zero power and that
+    /// surround/rear/overhead channels use a +1.5 dB gain (linear ≈ 1.189) relative to
+    /// front centre and left/right channels.
     pub fn channel_weights(&self) -> Vec<f64> {
         match self {
             Self::Mono => vec![1.0],
@@ -684,6 +731,65 @@ impl ChannelLayout {
                     1.0, 1.0, 1.0, 0.0, 1.41, 1.41, 1.41, 1.41, 1.41, 1.41, 1.41, 1.41,
                 ]
             }
+            Self::Nhk222 => {
+                // ITU-R BS.2051-3 NHK 22.2 channel weights.
+                //
+                // 24 channels in order (ITU-R BS.2051-3 Table 1):
+                //
+                // Top layer (9 channels):
+                //   0:TpFL  1:TpFR  2:TpFC  3:TpC  4:TpBL  5:TpBR  6:TpSiL  7:TpSiR  8:TpBC
+                // Middle layer (10 channels):
+                //   9:FL  10:FR  11:FC  12:LFE1  13:BL  14:BR  15:FLc  16:FRc  17:BC  18:LFE2
+                // Bottom layer (4 channels):
+                //  19:BtFL  20:BtFR  21:BtFC  22:BtBC
+                // Plus one overhead:
+                //  23:CH (overhead centre, equivalent to +1.5 dB weight)
+                //
+                // Weight rules from BS.2051-3 §6:
+                //   - Front centre (FC): 1.0 (0 dB reference)
+                //   - Left/Right front (FL, FR, FLc, FRc): 1.0
+                //   - Surround/Rear (BL, BR, BC): 1.189 (~+1.5 dB)
+                //   - Top layer: 1.189 (~+1.5 dB)
+                //   - Bottom layer: 1.189 (~+1.5 dB)
+                //   - Overhead centre (CH): 1.189 (~+1.5 dB)
+                //   - LFE1, LFE2: 0.0 (excluded per BS.1770-4 §3.4)
+
+                // √2 ≈ 1.41213, +1.5 dB ≈ 1.18850
+                const W_SURROUND: f64 = 1.188_502_227_4; // 10^(1.5/20)
+                const W_FRONT: f64 = 1.0;
+                const W_LFE: f64 = 0.0;
+
+                vec![
+                    // Top layer (9 ch)
+                    W_SURROUND, // TpFL
+                    W_SURROUND, // TpFR
+                    W_SURROUND, // TpFC
+                    W_SURROUND, // TpC
+                    W_SURROUND, // TpBL
+                    W_SURROUND, // TpBR
+                    W_SURROUND, // TpSiL
+                    W_SURROUND, // TpSiR
+                    W_SURROUND, // TpBC
+                    // Middle layer (10 ch)
+                    W_FRONT,    // FL
+                    W_FRONT,    // FR
+                    W_FRONT,    // FC
+                    W_LFE,      // LFE1
+                    W_SURROUND, // BL
+                    W_SURROUND, // BR
+                    W_FRONT,    // FLc
+                    W_FRONT,    // FRc
+                    W_SURROUND, // BC
+                    W_LFE,      // LFE2
+                    // Bottom layer (4 ch)
+                    W_SURROUND, // BtFL
+                    W_SURROUND, // BtFR
+                    W_SURROUND, // BtFC
+                    W_SURROUND, // BtBC
+                    // Overhead centre
+                    W_SURROUND, // CH
+                ]
+            }
             Self::Custom(n) => vec![1.0; *n],
         }
     }
@@ -696,6 +802,7 @@ impl ChannelLayout {
             6 => Self::Surround51,
             8 => Self::Surround71,
             12 => Self::Atmos714,
+            24 => Self::Nhk222,
             n => Self::Custom(n),
         }
     }
@@ -994,5 +1101,89 @@ impl ComplianceResult {
         } else {
             0.0
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// EBU R128 reference signal test: 997 Hz sine at -23 LUFS.
+    ///
+    /// The K-weighting pre-filter (Stage 1: high-shelf at 1681 Hz, G≈4 dB) adds
+    /// approximately +3.41 dB power gain at 997 Hz, so the raw signal amplitude
+    /// must be compensated by the inverse of that gain.
+    ///
+    /// Calibration procedure:
+    ///   1. Target LUFS = -23; after filter the mean-square must equal
+    ///      `10^((-23 + 0.691) / 10)`.
+    ///   2. The K-weight filter at 997 Hz has power gain ≈ 2.193 (+3.41 dB).
+    ///   3. Required pre-filter RMS² = target_power / filter_gain.
+    ///   4. For a sine wave: peak amplitude A = sqrt(2 × RMS²).
+    ///
+    /// We generate 10 seconds of stereo audio (enough for gating to converge)
+    /// and assert the integrated loudness is within ±0.5 LUFS of -23.0.
+    #[test]
+    fn test_ebu_r128_reference_signal() {
+        let sample_rate = 48000.0_f64;
+        let channels = 2_usize;
+        let duration_secs = 10.0_f64;
+        let freq_hz = 997.0_f64;
+
+        // K-weighting pre-filter adds ~3.41 dB power gain at 997 Hz for the
+        // standard ITU-R BS.1770-4 coefficients implemented in filters.rs.
+        // amplitude calibrated so the integrated loudness converges to -23 LUFS.
+        let k_weight_power_gain_db = 3.41_f64;
+        let target_power = 10.0_f64.powf((-23.0_f64 + 0.691) / 10.0);
+        let filter_power_gain = 10.0_f64.powf(k_weight_power_gain_db / 10.0);
+        // For a stereo signal with identical L/R: the gating normalises by
+        // total_weight = 2.0, so block_ms = (ch0_ms + ch1_ms) / N / 2 = A²/2 * gain.
+        // Solving A²/2 * gain = target_power:
+        let amplitude = (2.0 * target_power / filter_power_gain).sqrt();
+
+        let total_samples = (sample_rate * duration_secs) as usize;
+        let mut interleaved = Vec::with_capacity(total_samples * channels);
+
+        for i in 0..total_samples {
+            let t = i as f64 / sample_rate;
+            let sample = amplitude * (2.0 * std::f64::consts::PI * freq_hz * t).sin();
+            // Stereo: identical L and R channels
+            interleaved.push(sample);
+            interleaved.push(sample);
+        }
+
+        let config = MeterConfig::new(Standard::EbuR128, sample_rate, channels);
+        let mut meter = LoudnessMeter::new(config).expect("Failed to create LoudnessMeter");
+        meter.process_f64(&interleaved);
+
+        let metrics = meter.metrics();
+        let integrated = metrics.integrated_lufs;
+
+        assert!(
+            integrated.is_finite(),
+            "Integrated loudness should be finite, got {integrated}"
+        );
+        assert!(
+            (integrated - (-23.0)).abs() <= 0.5,
+            "Expected -23.0 LUFS ±0.5, got {integrated:.2} LUFS"
+        );
+    }
+
+    /// Verify TidalHiFi standard has correct target loudness.
+    #[test]
+    fn test_tidal_hifi_standard() {
+        let s = Standard::TidalHiFi;
+        assert_eq!(s.target_lufs(), -14.0);
+        assert_eq!(s.max_true_peak_dbtp(), -1.0);
+        assert_eq!(s.name(), "Tidal HiFi");
+    }
+
+    /// Verify AmazonMusicHd standard has correct target loudness.
+    #[test]
+    fn test_amazon_music_hd_standard() {
+        let s = Standard::AmazonMusicHd;
+        assert_eq!(s.target_lufs(), -14.0);
+        assert_eq!(s.max_true_peak_dbtp(), -1.0);
+        assert_eq!(s.name(), "Amazon Music HD");
     }
 }

@@ -57,7 +57,9 @@ pub mod tld;
 // Multi-object trackers
 pub mod centroid;
 pub mod iou_tracker;
+pub mod optical_flow_tracker;
 pub mod sort;
+pub mod sort_enhanced;
 
 // Utilities
 pub mod assignment;
@@ -78,7 +80,9 @@ pub use tld::TldTracker;
 // Re-export multi-object trackers
 pub use centroid::CentroidTracker;
 pub use iou_tracker::{IouTracker, IouTrackerAdvanced};
+pub use optical_flow_tracker::{FlowPoint, GrayFrame, LkTracker};
 pub use sort::{DeepSortTracker, SortTracker};
+pub use sort_enhanced::{BBox as SortBBox, KalmanTrack, SortTrackerV2, TrackedObject};
 
 // Re-export utilities
 pub use assignment::{compute_iou, create_iou_cost_matrix, greedy_assignment, hungarian_algorithm};

@@ -3,9 +3,14 @@
 //! Helps choose optimal local workgroup dimensions given device limits
 //! and the logical problem size.  Provides helpers for 1-D, 2-D, and
 //! 3-D dispatch as well as occupancy estimation.
+//!
+//! The [`compute_optimal_workgroup`] function uses [`DeviceCapabilities`] and
+//! [`OpType`] to select a workgroup size that maximises occupancy for the
+//! given operation class on the target device.
 
 #![allow(dead_code)]
 
+use crate::device_caps::DeviceCapabilities;
 use std::fmt;
 
 /// Workgroup size in up to three dimensions.
@@ -206,6 +211,132 @@ fn div_ceil(a: u32, b: u32) -> u32 {
     a.div_ceil(b)
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Device-Capabilities-Aware Auto-Tuning
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The class of compute operation, used to guide workgroup auto-tuning.
+///
+/// Different operation classes have different memory access patterns and
+/// arithmetic intensities, which influence the optimal workgroup geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OpType {
+    /// Generic 1-D buffer operation (e.g. histogram, reduction).
+    Buffer1D,
+    /// 2-D image operation operating on a rectangular tile (e.g. scale, blur).
+    Image2D,
+    /// Per-pixel colour conversion (memory-bound, prefers wide 1-D groups).
+    ColorConversion,
+    /// Motion estimation or block-matching (prefers square 2-D groups).
+    MotionEstimation,
+    /// Convolution / filter kernel (benefits from shared-memory tiling).
+    Convolution,
+    /// HDR tone mapping (per-pixel, compute-intensive).
+    ToneMapping,
+    /// Alpha compositing / blending (memory-bound, simple arithmetic).
+    AlphaBlend,
+}
+
+/// Select an optimal [`WorkgroupSize`] for the given operation type and device.
+///
+/// The returned size is guaranteed to satisfy the device's compute limits
+/// (max workgroup size in each dimension and maximum total invocations).
+///
+/// # Strategy
+///
+/// | `op_type`           | Preferred shape  | Rationale                              |
+/// |---------------------|------------------|----------------------------------------|
+/// | `Buffer1D`          | 1-D (256)        | Linear memory access                   |
+/// | `Image2D`           | 2-D (16×16)      | Square tiles for cache reuse           |
+/// | `ColorConversion`   | 1-D (256)        | Memory-bound; wide groups hide latency |
+/// | `MotionEstimation`  | 2-D (16×16)      | Block matching in 2-D space            |
+/// | `Convolution`       | 2-D (8×8)        | Smaller tile for shared-mem fit        |
+/// | `ToneMapping`       | 1-D (128)        | Moderate compute intensity             |
+/// | `AlphaBlend`        | 1-D (256)        | Simple per-element blend               |
+///
+/// If the preferred size exceeds the device limits the function falls back
+/// progressively to smaller power-of-two sizes.
+#[must_use]
+pub fn compute_optimal_workgroup(caps: &DeviceCapabilities, op_type: OpType) -> WorkgroupSize {
+    let cl = &caps.compute_limits;
+    let limits = DeviceLimits {
+        max_workgroup_size_x: cl.max_workgroup_size_x,
+        max_workgroup_size_y: cl.max_workgroup_size_y,
+        max_workgroup_size_z: cl.max_workgroup_size_z,
+        max_workgroup_invocations: cl.max_workgroup_invocations,
+        max_dispatch_x: cl.max_dispatch_x,
+        max_dispatch_y: cl.max_dispatch_y,
+        max_dispatch_z: cl.max_dispatch_z,
+    };
+
+    // Vendor-specific hints: AMD GCN-class GPUs prefer 64-wide wavefronts,
+    // NVIDIA prefers 32-wide warps (mapped to multiples of 32), Apple/ARM
+    // prefers 32 or 64.
+    let prefer_wave_multiple = match caps.vendor {
+        crate::device_caps::GpuVendor::Amd => 64,
+        crate::device_caps::GpuVendor::Nvidia => 32,
+        _ => 32,
+    };
+
+    match op_type {
+        OpType::Buffer1D | OpType::ColorConversion | OpType::AlphaBlend => {
+            // Prefer wide 1-D groups in multiples of the wave size
+            for candidate in [512u32, 256, 128, 64, prefer_wave_multiple, 32, 16, 8, 1] {
+                let wg = WorkgroupSize::new_1d(candidate);
+                if wg.fits_within(&limits) {
+                    return wg;
+                }
+            }
+            WorkgroupSize::new_1d(1)
+        }
+
+        OpType::Image2D | OpType::MotionEstimation => {
+            // Prefer square 2-D tiles
+            let candidates: &[(u32, u32)] = &[
+                (32, 32),
+                (16, 16),
+                (32, 8),
+                (8, 32),
+                (16, 8),
+                (8, 16),
+                (8, 8),
+                (4, 4),
+            ];
+            for &(x, y) in candidates {
+                let wg = WorkgroupSize::new_2d(x, y);
+                if wg.fits_within(&limits) {
+                    return wg;
+                }
+            }
+            WorkgroupSize::new_2d(1, 1)
+        }
+
+        OpType::Convolution => {
+            // Smaller tiles to fit filter weights in shared memory
+            let candidates: &[(u32, u32)] =
+                &[(16, 16), (8, 8), (16, 4), (4, 16), (8, 4), (4, 8), (4, 4)];
+            for &(x, y) in candidates {
+                let wg = WorkgroupSize::new_2d(x, y);
+                if wg.fits_within(&limits) {
+                    return wg;
+                }
+            }
+            WorkgroupSize::new_2d(1, 1)
+        }
+
+        OpType::ToneMapping => {
+            // Moderate compute, 1-D preferred
+            for candidate in [256u32, 128, 64, prefer_wave_multiple, 32, 16, 8, 1] {
+                let wg = WorkgroupSize::new_1d(candidate);
+                if wg.fits_within(&limits) {
+                    return wg;
+                }
+            }
+            WorkgroupSize::new_1d(1)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +455,126 @@ mod tests {
         assert_eq!(div_ceil(9, 3), 3);
         assert_eq!(div_ceil(0, 5), 0);
         assert_eq!(div_ceil(5, 0), 0);
+    }
+
+    // ── compute_optimal_workgroup ──────────────────────────────────────────
+
+    fn cpu_caps() -> crate::device_caps::DeviceCapabilities {
+        crate::device_caps::DeviceCapabilities::cpu_fallback()
+    }
+
+    fn wide_caps() -> crate::device_caps::DeviceCapabilities {
+        use crate::device_caps::{ComputeLimits, DeviceCapabilities};
+        let mut caps = DeviceCapabilities::cpu_fallback();
+        caps.compute_limits = ComputeLimits {
+            max_workgroup_size_x: 1024,
+            max_workgroup_size_y: 1024,
+            max_workgroup_size_z: 64,
+            max_workgroup_invocations: 1024,
+            ..ComputeLimits::default()
+        };
+        caps
+    }
+
+    #[test]
+    fn test_optimal_wg_buffer1d_fits() {
+        let caps = wide_caps();
+        let wg = compute_optimal_workgroup(&caps, OpType::Buffer1D);
+        let cl = &caps.compute_limits;
+        let limits = DeviceLimits {
+            max_workgroup_size_x: cl.max_workgroup_size_x,
+            max_workgroup_size_y: cl.max_workgroup_size_y,
+            max_workgroup_size_z: cl.max_workgroup_size_z,
+            max_workgroup_invocations: cl.max_workgroup_invocations,
+            max_dispatch_x: cl.max_dispatch_x,
+            max_dispatch_y: cl.max_dispatch_y,
+            max_dispatch_z: cl.max_dispatch_z,
+        };
+        assert!(wg.fits_within(&limits));
+        assert_eq!(wg.y, 1, "Buffer1D should be 1-D");
+    }
+
+    #[test]
+    fn test_optimal_wg_image2d_is_2d() {
+        let caps = wide_caps();
+        let wg = compute_optimal_workgroup(&caps, OpType::Image2D);
+        assert!(wg.x > 1 && wg.y > 1, "Image2D should be 2-D; got {wg}");
+    }
+
+    #[test]
+    fn test_optimal_wg_motion_estimation_is_2d() {
+        let caps = wide_caps();
+        let wg = compute_optimal_workgroup(&caps, OpType::MotionEstimation);
+        assert!(
+            wg.x > 1 && wg.y > 1,
+            "MotionEstimation should be 2-D; got {wg}"
+        );
+    }
+
+    #[test]
+    fn test_optimal_wg_convolution_is_2d() {
+        let caps = wide_caps();
+        let wg = compute_optimal_workgroup(&caps, OpType::Convolution);
+        assert!(wg.y > 1, "Convolution should use 2-D workgroup; got {wg}");
+    }
+
+    #[test]
+    fn test_optimal_wg_tone_mapping_1d() {
+        let caps = wide_caps();
+        let wg = compute_optimal_workgroup(&caps, OpType::ToneMapping);
+        assert_eq!(wg.y, 1, "ToneMapping should be 1-D; got {wg}");
+    }
+
+    #[test]
+    fn test_optimal_wg_alpha_blend_1d() {
+        let caps = wide_caps();
+        let wg = compute_optimal_workgroup(&caps, OpType::AlphaBlend);
+        assert_eq!(wg.y, 1, "AlphaBlend should be 1-D; got {wg}");
+    }
+
+    #[test]
+    fn test_optimal_wg_restricted_caps_fits() {
+        // Very restricted device — minimal limits
+        use crate::device_caps::{ComputeLimits, DeviceCapabilities};
+        let mut caps = DeviceCapabilities::cpu_fallback();
+        caps.compute_limits = ComputeLimits {
+            max_workgroup_size_x: 4,
+            max_workgroup_size_y: 4,
+            max_workgroup_size_z: 1,
+            max_workgroup_invocations: 8,
+            ..ComputeLimits::default()
+        };
+        for op in [
+            OpType::Buffer1D,
+            OpType::Image2D,
+            OpType::ColorConversion,
+            OpType::MotionEstimation,
+            OpType::Convolution,
+            OpType::ToneMapping,
+            OpType::AlphaBlend,
+        ] {
+            let wg = compute_optimal_workgroup(&caps, op);
+            let cl = &caps.compute_limits;
+            let limits = DeviceLimits {
+                max_workgroup_size_x: cl.max_workgroup_size_x,
+                max_workgroup_size_y: cl.max_workgroup_size_y,
+                max_workgroup_size_z: cl.max_workgroup_size_z,
+                max_workgroup_invocations: cl.max_workgroup_invocations,
+                max_dispatch_x: cl.max_dispatch_x,
+                max_dispatch_y: cl.max_dispatch_y,
+                max_dispatch_z: cl.max_dispatch_z,
+            };
+            assert!(
+                wg.fits_within(&limits),
+                "op {op:?}: {wg} does not fit within limits"
+            );
+        }
+    }
+
+    #[test]
+    fn test_optimal_wg_color_conversion_is_1d() {
+        let caps = cpu_caps();
+        let wg = compute_optimal_workgroup(&caps, OpType::ColorConversion);
+        assert_eq!(wg.y, 1, "ColorConversion should be 1-D; got {wg}");
     }
 }

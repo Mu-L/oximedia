@@ -48,6 +48,106 @@ use super::film_grain::{FilmGrainParams, ScalingPoint};
 use std::collections::BTreeMap;
 
 // =============================================================================
+// Per-Block Grain Parameters
+// =============================================================================
+
+/// Per-block grain parameter override for spatial film grain variation.
+#[derive(Clone, Debug)]
+pub struct BlockGrainOverride {
+    /// Block column index in grain-block units.
+    pub block_col: u32,
+    /// Block row index in grain-block units.
+    pub block_row: u32,
+    /// Delta for `grain_scaling_minus_8` (clamped 0..=3).
+    pub scaling_delta: i8,
+    /// Delta for AR coefficient lag (clamped 0..=3).
+    pub ar_lag_delta: i8,
+    /// XOR mask applied to grain seed for this block.
+    pub seed_xor: u16,
+}
+
+impl BlockGrainOverride {
+    /// Create a default no-op override at the given coordinates.
+    #[must_use]
+    pub fn new(block_col: u32, block_row: u32) -> Self {
+        Self {
+            block_col,
+            block_row,
+            scaling_delta: 0,
+            ar_lag_delta: 0,
+            seed_xor: 0,
+        }
+    }
+
+    /// Apply override to `base`, returning a modified clone.
+    #[must_use]
+    pub fn apply(&self, base: &FilmGrainParams) -> FilmGrainParams {
+        let mut p = base.clone();
+        p.grain_scaling_minus_8 =
+            (i16::from(p.grain_scaling_minus_8) + i16::from(self.scaling_delta)).clamp(0, 3) as u8;
+        p.ar_coeff_lag =
+            (i16::from(p.ar_coeff_lag) + i16::from(self.ar_lag_delta)).clamp(0, 3) as u8;
+        p.grain_seed ^= self.seed_xor;
+        p
+    }
+}
+
+/// Sparse per-block grain override table.
+#[derive(Clone, Debug, Default)]
+pub struct PerBlockGrainTable {
+    overrides: Vec<BlockGrainOverride>,
+}
+
+impl PerBlockGrainTable {
+    /// Create an empty table.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert or replace a per-block override.
+    pub fn set(&mut self, entry: BlockGrainOverride) {
+        if let Some(e) = self
+            .overrides
+            .iter_mut()
+            .find(|o| o.block_col == entry.block_col && o.block_row == entry.block_row)
+        {
+            *e = entry;
+        } else {
+            self.overrides.push(entry);
+        }
+    }
+
+    /// Resolve effective params for a block position.
+    #[must_use]
+    pub fn resolve(&self, base: &FilmGrainParams, col: u32, row: u32) -> FilmGrainParams {
+        for o in &self.overrides {
+            if o.block_col == col && o.block_row == row {
+                return o.apply(base);
+            }
+        }
+        base.clone()
+    }
+
+    /// Number of overrides.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.overrides.len()
+    }
+
+    /// True if empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.overrides.is_empty()
+    }
+
+    /// Iterate overrides.
+    pub fn iter(&self) -> impl Iterator<Item = &BlockGrainOverride> {
+        self.overrides.iter()
+    }
+}
+
+// =============================================================================
 // Film Grain Table
 // =============================================================================
 
@@ -1173,6 +1273,208 @@ mod tests {
             assert!(v500t.validate());
             assert!(v250d.validate());
             assert!(eterna.validate());
+        }
+    }
+
+    // =========================================================================
+    // Per-block grain parameter fidelity tests (Task 1)
+    // =========================================================================
+
+    #[test]
+    fn test_per_block_grain_table_empty() {
+        let table = PerBlockGrainTable::new();
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn test_per_block_grain_override_no_op() {
+        let base = GrainPreset::Film35mmMedium.to_params(8);
+        let table = PerBlockGrainTable::new();
+        // No override → resolved params equal base params
+        let resolved = table.resolve(&base, 0, 0);
+        assert_eq!(
+            resolved.grain_scaling_minus_8, base.grain_scaling_minus_8,
+            "No override should return unchanged scaling"
+        );
+        assert_eq!(
+            resolved.grain_seed, base.grain_seed,
+            "No override should return unchanged seed"
+        );
+    }
+
+    #[test]
+    fn test_per_block_grain_override_scaling_delta() {
+        let base = GrainPreset::Film35mmMedium.to_params(8);
+        let mut table = PerBlockGrainTable::new();
+
+        let mut ovr = BlockGrainOverride::new(3, 5);
+        ovr.scaling_delta = 1;
+        table.set(ovr);
+
+        let resolved = table.resolve(&base, 3, 5);
+        let expected = (base.grain_scaling_minus_8 as i16 + 1).clamp(0, 3) as u8;
+        assert_eq!(
+            resolved.grain_scaling_minus_8, expected,
+            "scaling_delta=+1 must increment grain_scaling_minus_8"
+        );
+    }
+
+    #[test]
+    fn test_per_block_grain_override_seed_xor() {
+        let base = GrainPreset::Film35mmMedium.to_params(8);
+        let mut table = PerBlockGrainTable::new();
+
+        let mut ovr = BlockGrainOverride::new(1, 2);
+        ovr.seed_xor = 0xABCD;
+        table.set(ovr);
+
+        let resolved = table.resolve(&base, 1, 2);
+        assert_eq!(
+            resolved.grain_seed,
+            base.grain_seed ^ 0xABCD,
+            "seed_xor must XOR the base grain seed"
+        );
+    }
+
+    #[test]
+    fn test_per_block_grain_override_ar_lag_clamped() {
+        let base = GrainPreset::Film35mmMedium.to_params(8);
+        let mut table = PerBlockGrainTable::new();
+
+        // Set ar_lag_delta to a large value — should be clamped to [0, 3]
+        let mut ovr = BlockGrainOverride::new(0, 0);
+        ovr.ar_lag_delta = 10;
+        table.set(ovr);
+
+        let resolved = table.resolve(&base, 0, 0);
+        assert!(
+            resolved.ar_coeff_lag <= 3,
+            "ar_coeff_lag must be clamped to [0, 3], got {}",
+            resolved.ar_coeff_lag
+        );
+    }
+
+    #[test]
+    fn test_per_block_grain_different_blocks_independent() {
+        let base = GrainPreset::Film35mmMedium.to_params(8);
+        let mut table = PerBlockGrainTable::new();
+
+        let mut ovr_a = BlockGrainOverride::new(0, 0);
+        ovr_a.scaling_delta = 1;
+        ovr_a.seed_xor = 0x1234;
+        table.set(ovr_a);
+
+        let mut ovr_b = BlockGrainOverride::new(2, 4);
+        ovr_b.scaling_delta = -1;
+        ovr_b.seed_xor = 0x5678;
+        table.set(ovr_b);
+
+        let r_a = table.resolve(&base, 0, 0);
+        let r_b = table.resolve(&base, 2, 4);
+
+        // Block A should have +1 scaling
+        let expected_a = (base.grain_scaling_minus_8 as i16 + 1).clamp(0, 3) as u8;
+        assert_eq!(r_a.grain_scaling_minus_8, expected_a);
+
+        // Block B should have -1 scaling
+        let expected_b = (base.grain_scaling_minus_8 as i16 - 1).clamp(0, 3) as u8;
+        assert_eq!(r_b.grain_scaling_minus_8, expected_b);
+
+        // Seeds differ between blocks
+        assert_ne!(
+            r_a.grain_seed, r_b.grain_seed,
+            "Different blocks must have different seeds"
+        );
+    }
+
+    #[test]
+    fn test_per_block_grain_override_replaced_on_set() {
+        let base = GrainPreset::Film16mmMedium.to_params(8);
+        let mut table = PerBlockGrainTable::new();
+
+        let mut ovr1 = BlockGrainOverride::new(1, 1);
+        ovr1.seed_xor = 0x0001;
+        table.set(ovr1);
+        assert_eq!(table.len(), 1);
+
+        // Set again at same coords → replace
+        let mut ovr2 = BlockGrainOverride::new(1, 1);
+        ovr2.seed_xor = 0x0002;
+        table.set(ovr2);
+        assert_eq!(
+            table.len(),
+            1,
+            "Override at same coords must replace, not duplicate"
+        );
+
+        let r = table.resolve(&base, 1, 1);
+        assert_eq!(
+            r.grain_seed,
+            base.grain_seed ^ 0x0002,
+            "Latest override seed_xor must be used"
+        );
+    }
+
+    #[test]
+    fn test_per_block_grain_iter() {
+        let mut table = PerBlockGrainTable::new();
+        for i in 0..5u32 {
+            table.set(BlockGrainOverride::new(i, i));
+        }
+        assert_eq!(table.iter().count(), 5);
+    }
+
+    #[test]
+    fn test_per_block_grain_non_override_returns_base() {
+        let base = GrainPreset::DigitalNrLight.to_params(8);
+        let mut table = PerBlockGrainTable::new();
+        table.set(BlockGrainOverride::new(7, 7));
+
+        // Block at (0, 0) has no override → returns exact base clone
+        let r = table.resolve(&base, 0, 0);
+        assert_eq!(r.grain_seed, base.grain_seed);
+        assert_eq!(r.grain_scaling_minus_8, base.grain_scaling_minus_8);
+    }
+
+    #[test]
+    fn test_per_block_grain_fidelity_spatial_variation() {
+        // Simulate a coarse 4×4 grid of blocks with varying grain parameters.
+        // This tests the core premise of Task 1: per-block grain variation.
+        let base = GrainPreset::Film35mmHeavy.to_params(8);
+        let mut table = PerBlockGrainTable::new();
+
+        // Vignette pattern: edges get stronger grain, centre gets weaker
+        for row in 0..4u32 {
+            for col in 0..4u32 {
+                let dist_from_center = ((row as i32 - 2).abs() + (col as i32 - 2).abs()) as i8;
+                let mut ovr = BlockGrainOverride::new(col, row);
+                ovr.scaling_delta = (dist_from_center / 2).min(2);
+                ovr.seed_xor = (row * 17 + col * 31) as u16;
+                table.set(ovr);
+            }
+        }
+
+        // Verify: corner blocks should have stronger (or equal) scaling than center
+        let center = table.resolve(&base, 2, 2);
+        let corner = table.resolve(&base, 0, 0);
+
+        assert!(
+            corner.grain_scaling_minus_8 >= center.grain_scaling_minus_8,
+            "Corner grain should be >= center grain: corner={}, center={}",
+            corner.grain_scaling_minus_8,
+            center.grain_scaling_minus_8
+        );
+
+        // All blocks must remain valid after override application
+        for row in 0..4u32 {
+            for col in 0..4u32 {
+                let r = table.resolve(&base, col, row);
+                assert!(
+                    r.validate(),
+                    "Per-block override must produce valid grain params at ({col},{row})"
+                );
+            }
         }
     }
 }

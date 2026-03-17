@@ -200,6 +200,111 @@ pub fn scan_subnet_candidates(base: Ipv4Addr, port: u16) -> Vec<SocketAddr> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// SourceFilter — glob-style name matching + group filtering
+// ---------------------------------------------------------------------------
+
+/// A simple NDI source filter supporting glob-style name patterns and exact
+/// group matching.
+///
+/// # Pattern syntax
+///
+/// | Pattern  | Meaning                                             |
+/// |----------|-----------------------------------------------------|
+/// | `*`      | Matches any source (contains anything)              |
+/// | `prefix*`| Matches sources whose name **starts with** `prefix` |
+/// | `*suffix`| Matches sources whose name **ends with** `suffix`   |
+/// | `*mid*`  | Matches sources whose name **contains** `mid`       |
+/// | `exact`  | Exact case-insensitive match                        |
+///
+/// Matching is always case-insensitive.
+#[derive(Debug, Clone, Default)]
+pub struct SourceFilter {
+    /// Optional glob-style pattern for matching source names.
+    pub name_pattern: Option<String>,
+    /// Optional exact group name match.
+    pub group_filter: Option<String>,
+}
+
+impl SourceFilter {
+    /// Create an empty filter that accepts all sources.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the name pattern.
+    pub fn with_name_pattern(mut self, pattern: &str) -> Self {
+        self.name_pattern = Some(pattern.to_string());
+        self
+    }
+
+    /// Set the group filter.
+    pub fn with_group_filter(mut self, group: &str) -> Self {
+        self.group_filter = Some(group.to_string());
+        self
+    }
+
+    /// Test whether a [`SourceEntry`] passes this filter.
+    pub fn matches(&self, entry: &SourceEntry) -> bool {
+        // Apply name-pattern filter.
+        if let Some(ref pattern) = self.name_pattern {
+            if !glob_match_name(pattern, &entry.name) {
+                return false;
+            }
+        }
+        // Apply group filter.
+        if let Some(ref group) = self.group_filter {
+            let group_lower = group.to_lowercase();
+            if !entry.groups.iter().any(|g| g.to_lowercase() == group_lower) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Match a source name against a glob-style pattern (case-insensitive).
+///
+/// Supported patterns:
+/// - `*` — any name
+/// - `prefix*` — starts with `prefix`
+/// - `*suffix` — ends with `suffix`
+/// - `*mid*` — contains `mid`
+/// - everything else — exact match
+fn glob_match_name(pattern: &str, name: &str) -> bool {
+    let p = pattern.to_lowercase();
+    let n = name.to_lowercase();
+
+    if p == "*" {
+        return true;
+    }
+
+    let starts_star = p.starts_with('*');
+    let ends_star = p.ends_with('*');
+
+    match (starts_star, ends_star) {
+        (true, true) => {
+            // *mid* → contains
+            let mid = p.trim_matches('*');
+            n.contains(mid)
+        }
+        (true, false) => {
+            // *suffix → ends with
+            let suffix = &p[1..];
+            n.ends_with(suffix)
+        }
+        (false, true) => {
+            // prefix* → starts with
+            let prefix = &p[..p.len() - 1];
+            n.starts_with(prefix)
+        }
+        (false, false) => {
+            // exact match
+            n == p
+        }
+    }
+}
+
 /// Parse a "hostname_or_ip:port" string into a `SocketAddr`, defaulting to
 /// port 5960 (NDI default) if no port is given.
 pub fn parse_ndi_address(s: &str) -> Option<SocketAddr> {
@@ -365,5 +470,94 @@ mod tests {
     fn test_parse_ndi_address_invalid() {
         let addr = parse_ndi_address("not_a_valid_address!!!");
         assert!(addr.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // SourceFilter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_source_filter_empty_accepts_all() {
+        let filter = SourceFilter::new();
+        let entry = SourceEntry::new("AnyCamera", make_addr("10.0.0.1"), vec!["public".into()]);
+        assert!(filter.matches(&entry));
+    }
+
+    #[test]
+    fn test_source_filter_name_pattern() {
+        // prefix* — starts_with
+        let filter = SourceFilter::new().with_name_pattern("Studio*");
+        let yes = SourceEntry::new("Studio1", make_addr("10.0.0.1"), vec![]);
+        let no = SourceEntry::new("Remote1", make_addr("10.0.0.2"), vec![]);
+        assert!(filter.matches(&yes), "Studio1 should match Studio*");
+        assert!(!filter.matches(&no), "Remote1 should not match Studio*");
+
+        // *suffix — ends_with
+        let filter_suffix = SourceFilter::new().with_name_pattern("*Cam");
+        let yes2 = SourceEntry::new("StudioCam", make_addr("10.0.0.3"), vec![]);
+        let no2 = SourceEntry::new("StudioCamB", make_addr("10.0.0.4"), vec![]);
+        assert!(filter_suffix.matches(&yes2), "StudioCam should match *Cam");
+        assert!(
+            !filter_suffix.matches(&no2),
+            "StudioCamB should not match *Cam"
+        );
+
+        // *mid* — contains
+        let filter_mid = SourceFilter::new().with_name_pattern("*Studio*");
+        let yes3 = SourceEntry::new("MyStudioCamera", make_addr("10.0.0.5"), vec![]);
+        let no3 = SourceEntry::new("RemoteCamera", make_addr("10.0.0.6"), vec![]);
+        assert!(
+            filter_mid.matches(&yes3),
+            "MyStudioCamera should match *Studio*"
+        );
+        assert!(
+            !filter_mid.matches(&no3),
+            "RemoteCamera should not match *Studio*"
+        );
+
+        // wildcard * — matches everything
+        let filter_all = SourceFilter::new().with_name_pattern("*");
+        assert!(filter_all.matches(&no3), "* should match everything");
+
+        // exact — case-insensitive exact match
+        let filter_exact = SourceFilter::new().with_name_pattern("camera1");
+        let yes4 = SourceEntry::new("Camera1", make_addr("10.0.0.7"), vec![]);
+        let no4 = SourceEntry::new("Camera2", make_addr("10.0.0.8"), vec![]);
+        assert!(
+            filter_exact.matches(&yes4),
+            "Camera1 should match camera1 (case-insensitive)"
+        );
+        assert!(
+            !filter_exact.matches(&no4),
+            "Camera2 should not match camera1"
+        );
+    }
+
+    #[test]
+    fn test_source_filter_group_filter() {
+        let filter = SourceFilter::new().with_group_filter("studio");
+        let yes = SourceEntry::new("Cam1", make_addr("10.0.0.1"), vec!["Studio".into()]);
+        let no = SourceEntry::new("Cam2", make_addr("10.0.0.2"), vec!["public".into()]);
+        assert!(
+            filter.matches(&yes),
+            "studio group match should be case-insensitive"
+        );
+        assert!(
+            !filter.matches(&no),
+            "public group should not match studio filter"
+        );
+    }
+
+    #[test]
+    fn test_source_filter_combined() {
+        let filter = SourceFilter::new()
+            .with_name_pattern("Studio*")
+            .with_group_filter("production");
+        let yes = SourceEntry::new("Studio1", make_addr("10.0.0.1"), vec!["production".into()]);
+        let no_name = SourceEntry::new("Camera1", make_addr("10.0.0.2"), vec!["production".into()]);
+        let no_group = SourceEntry::new("Studio2", make_addr("10.0.0.3"), vec!["public".into()]);
+        assert!(filter.matches(&yes));
+        assert!(!filter.matches(&no_name));
+        assert!(!filter.matches(&no_group));
     }
 }

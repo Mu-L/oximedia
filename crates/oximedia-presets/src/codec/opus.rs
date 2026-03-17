@@ -30,6 +30,7 @@ pub fn opus_voice() -> Preset {
         frame_rate: None,
         quality_mode: Some(QualityMode::Medium),
         container: Some("ogg".to_string()),
+        audio_channel_layout: None,
     };
     Preset::new(metadata, config)
 }
@@ -55,6 +56,7 @@ pub fn opus_music() -> Preset {
         frame_rate: None,
         quality_mode: Some(QualityMode::High),
         container: Some("ogg".to_string()),
+        audio_channel_layout: None,
     };
     Preset::new(metadata, config)
 }
@@ -81,6 +83,7 @@ pub fn opus_hq() -> Preset {
         frame_rate: None,
         quality_mode: Some(QualityMode::High),
         container: Some("ogg".to_string()),
+        audio_channel_layout: None,
     };
     Preset::new(metadata, config)
 }

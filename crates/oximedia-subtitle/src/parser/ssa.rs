@@ -332,7 +332,7 @@ fn parse_ass_alignment(align: u8) -> Alignment {
 fn strip_ass_tags(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut in_tag = false;
-    let mut brace_depth = 0;
+    let mut brace_depth = 0u32;
 
     for c in text.chars() {
         match c {
@@ -341,7 +341,9 @@ fn strip_ass_tags(text: &str) -> String {
                 brace_depth += 1;
             }
             '}' => {
-                brace_depth -= 1;
+                if brace_depth > 0 {
+                    brace_depth -= 1;
+                }
                 if brace_depth == 0 {
                     in_tag = false;
                 }
@@ -356,6 +358,359 @@ fn strip_ass_tags(text: &str) -> String {
 
     // Handle line breaks
     result.replace("\\N", "\n").replace("\\n", "\n")
+}
+
+// ============================================================================
+// ASS override tag parser
+// ============================================================================
+
+/// Rectangular clip region (in script coordinate space).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipRect {
+    /// Left edge.
+    pub x1: f32,
+    /// Top edge.
+    pub y1: f32,
+    /// Right edge.
+    pub x2: f32,
+    /// Bottom edge.
+    pub y2: f32,
+    /// Whether this is an inverse clip (`\iclip`).
+    pub inverse: bool,
+}
+
+/// Origin point for rotation (`\org`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Origin {
+    /// X coordinate.
+    pub x: f32,
+    /// Y coordinate.
+    pub y: f32,
+}
+
+/// Fade animation from `\fad(t1,t2)`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FadTiming {
+    /// Fade-in duration in milliseconds.
+    pub fade_in_ms: u32,
+    /// Fade-out duration in milliseconds.
+    pub fade_out_ms: u32,
+}
+
+/// Move animation from `\move(x1,y1,x2,y2[,t1,t2])`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MoveAnimation {
+    /// Start X position.
+    pub x1: f32,
+    /// Start Y position.
+    pub y1: f32,
+    /// End X position.
+    pub x2: f32,
+    /// End Y position.
+    pub y2: f32,
+    /// Optional start time within the event (milliseconds).
+    pub t1: Option<i64>,
+    /// Optional end time within the event (milliseconds).
+    pub t2: Option<i64>,
+}
+
+/// All recognized override tags extracted from a single `{...}` block.
+#[derive(Clone, Debug, Default)]
+pub struct AssOverrideTags {
+    /// Clip region (from `\clip` or `\iclip`).
+    pub clip: Option<ClipRect>,
+    /// Rotation origin (from `\org`).
+    pub origin: Option<Origin>,
+    /// Fade timing (from `\fad`).
+    pub fad: Option<FadTiming>,
+    /// Move animation (from `\move`).
+    pub movement: Option<MoveAnimation>,
+    /// Remaining unrecognized tag text.
+    pub unknown_tags: Vec<String>,
+}
+
+/// Parse all override tag blocks in an ASS text string.
+///
+/// Iterates over every `{...}` block and extracts recognized override tags.
+///
+/// # Example
+///
+/// ```
+/// use oximedia_subtitle::parser::ssa::parse_override_tags;
+/// let tags = parse_override_tags(r"{\clip(10,20,200,150)\fad(300,500)}Hello");
+/// assert!(tags.clip.is_some());
+/// assert!(tags.fad.is_some());
+/// ```
+#[must_use]
+pub fn parse_override_tags(text: &str) -> AssOverrideTags {
+    let mut result = AssOverrideTags::default();
+
+    let mut remaining = text;
+    while let Some(open) = remaining.find('{') {
+        let after = &remaining[open + 1..];
+        if let Some(close) = after.find('}') {
+            let block = &after[..close];
+            parse_override_block(block, &mut result);
+            remaining = &after[close + 1..];
+        } else {
+            break;
+        }
+    }
+
+    result
+}
+
+/// Parse a single override block content (without the braces).
+fn parse_override_block(block: &str, out: &mut AssOverrideTags) {
+    // Split on backslash to get individual tags
+    for raw_tag in block.split('\\') {
+        let tag = raw_tag.trim();
+        if tag.is_empty() {
+            continue;
+        }
+
+        if let Some(args_str) = tag.strip_prefix("iclip(").and_then(|s| s.strip_suffix(')')) {
+            if let Some(rect) = parse_clip_args(args_str, true) {
+                out.clip = Some(rect);
+            }
+        } else if let Some(args_str) = tag.strip_prefix("clip(").and_then(|s| s.strip_suffix(')')) {
+            if let Some(rect) = parse_clip_args(args_str, false) {
+                out.clip = Some(rect);
+            }
+        } else if let Some(args_str) = tag.strip_prefix("org(").and_then(|s| s.strip_suffix(')')) {
+            if let Some(org) = parse_two_floats(args_str) {
+                out.origin = Some(Origin { x: org.0, y: org.1 });
+            }
+        } else if let Some(args_str) = tag.strip_prefix("fad(").and_then(|s| s.strip_suffix(')')) {
+            if let Some(fad) = parse_fad_args(args_str) {
+                out.fad = Some(fad);
+            }
+        } else if let Some(args_str) = tag.strip_prefix("move(").and_then(|s| s.strip_suffix(')')) {
+            if let Some(mv) = parse_move_args(args_str) {
+                out.movement = Some(mv);
+            }
+        } else {
+            // Store unrecognized tags for downstream use
+            out.unknown_tags.push(tag.to_string());
+        }
+    }
+}
+
+/// Parse `\clip` / `\iclip` rectangular arguments: "x1,y1,x2,y2".
+fn parse_clip_args(args: &str, inverse: bool) -> Option<ClipRect> {
+    let parts: Vec<&str> = args.split(',').collect();
+    if parts.len() == 4 {
+        let x1 = parts[0].trim().parse::<f32>().ok()?;
+        let y1 = parts[1].trim().parse::<f32>().ok()?;
+        let x2 = parts[2].trim().parse::<f32>().ok()?;
+        let y2 = parts[3].trim().parse::<f32>().ok()?;
+        Some(ClipRect {
+            x1,
+            y1,
+            x2,
+            y2,
+            inverse,
+        })
+    } else {
+        None
+    }
+}
+
+/// Parse two comma-separated floats.
+fn parse_two_floats(args: &str) -> Option<(f32, f32)> {
+    let mut it = args.split(',');
+    let x = it.next()?.trim().parse::<f32>().ok()?;
+    let y = it.next()?.trim().parse::<f32>().ok()?;
+    Some((x, y))
+}
+
+/// Parse `\fad(t1,t2)` arguments.
+fn parse_fad_args(args: &str) -> Option<FadTiming> {
+    let mut it = args.split(',');
+    let t1 = it.next()?.trim().parse::<u32>().ok()?;
+    let t2 = it.next()?.trim().parse::<u32>().ok()?;
+    Some(FadTiming {
+        fade_in_ms: t1,
+        fade_out_ms: t2,
+    })
+}
+
+/// Parse `\move(x1,y1,x2,y2[,t1,t2])` arguments.
+fn parse_move_args(args: &str) -> Option<MoveAnimation> {
+    let parts: Vec<&str> = args.split(',').collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    let x1 = parts[0].trim().parse::<f32>().ok()?;
+    let y1 = parts[1].trim().parse::<f32>().ok()?;
+    let x2 = parts[2].trim().parse::<f32>().ok()?;
+    let y2 = parts[3].trim().parse::<f32>().ok()?;
+
+    let (t1, t2) = if parts.len() >= 6 {
+        let t1 = parts[4].trim().parse::<i64>().ok();
+        let t2 = parts[5].trim().parse::<i64>().ok();
+        (t1, t2)
+    } else {
+        (None, None)
+    };
+
+    Some(MoveAnimation {
+        x1,
+        y1,
+        x2,
+        y2,
+        t1,
+        t2,
+    })
+}
+
+#[cfg(test)]
+mod ass_override_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_clip_basic() {
+        let tags = parse_override_tags(r"{\clip(10,20,200,150)}Hello");
+        assert!(tags.clip.is_some());
+        let clip = tags.clip.expect("clip present");
+        assert!((clip.x1 - 10.0).abs() < f32::EPSILON);
+        assert!((clip.y1 - 20.0).abs() < f32::EPSILON);
+        assert!((clip.x2 - 200.0).abs() < f32::EPSILON);
+        assert!((clip.y2 - 150.0).abs() < f32::EPSILON);
+        assert!(!clip.inverse);
+    }
+
+    #[test]
+    fn test_parse_iclip() {
+        let tags = parse_override_tags(r"{\iclip(5,10,100,200)}Text");
+        let clip = tags.clip.expect("iclip present");
+        assert!(clip.inverse);
+        assert!((clip.x1 - 5.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_parse_org() {
+        let tags = parse_override_tags(r"{\org(320,240)}Rotated");
+        let org = tags.origin.expect("org present");
+        assert!((org.x - 320.0).abs() < f32::EPSILON);
+        assert!((org.y - 240.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_parse_fad() {
+        let tags = parse_override_tags(r"{\fad(300,500)}Fading");
+        let fad = tags.fad.expect("fad present");
+        assert_eq!(fad.fade_in_ms, 300);
+        assert_eq!(fad.fade_out_ms, 500);
+    }
+
+    #[test]
+    fn test_parse_move_without_time() {
+        let tags = parse_override_tags(r"{\move(100,200,400,300)}Moving");
+        let mv = tags.movement.expect("move present");
+        assert!((mv.x1 - 100.0).abs() < f32::EPSILON);
+        assert!((mv.y1 - 200.0).abs() < f32::EPSILON);
+        assert!((mv.x2 - 400.0).abs() < f32::EPSILON);
+        assert!((mv.y2 - 300.0).abs() < f32::EPSILON);
+        assert!(mv.t1.is_none());
+        assert!(mv.t2.is_none());
+    }
+
+    #[test]
+    fn test_parse_move_with_time() {
+        let tags = parse_override_tags(r"{\move(0,0,640,360,100,900)}Moving timed");
+        let mv = tags.movement.expect("move timed present");
+        assert_eq!(mv.t1, Some(100));
+        assert_eq!(mv.t2, Some(900));
+    }
+
+    #[test]
+    fn test_parse_combined_tags() {
+        let tags = parse_override_tags(r"{\clip(0,0,320,240)\fad(200,300)\org(160,120)}Text");
+        assert!(tags.clip.is_some());
+        assert!(tags.fad.is_some());
+        assert!(tags.origin.is_some());
+    }
+
+    #[test]
+    fn test_strip_tags_with_override() {
+        // The main parser should strip override tags leaving clean text
+        let text = r"{\clip(0,0,100,100)\fad(100,100)}Hello World";
+        let stripped = strip_ass_tags(text);
+        assert_eq!(stripped.trim(), "Hello World");
+    }
+
+    #[test]
+    fn test_parse_override_no_tags() {
+        let tags = parse_override_tags("No override tags here");
+        assert!(tags.clip.is_none());
+        assert!(tags.fad.is_none());
+        assert!(tags.origin.is_none());
+        assert!(tags.movement.is_none());
+    }
+
+    #[test]
+    fn test_parse_multiple_blocks() {
+        let tags = parse_override_tags(r"{\clip(10,10,100,100)}Mid{\fad(50,50)}");
+        // Should accumulate last seen value; clip from first block
+        assert!(tags.clip.is_some());
+        assert!(tags.fad.is_some());
+    }
+
+    #[test]
+    fn test_parse_move_insufficient_args_returns_none() {
+        let tags = parse_override_tags(r"{\move(100,200)}Bad move");
+        assert!(tags.movement.is_none());
+    }
+
+    #[test]
+    fn test_parse_fad_zero() {
+        let tags = parse_override_tags(r"{\fad(0,0)}Instant");
+        let fad = tags.fad.expect("fad zero");
+        assert_eq!(fad.fade_in_ms, 0);
+        assert_eq!(fad.fade_out_ms, 0);
+    }
+
+    #[test]
+    fn test_clip_rect_fields() {
+        let clip = ClipRect {
+            x1: 1.0,
+            y1: 2.0,
+            x2: 3.0,
+            y2: 4.0,
+            inverse: true,
+        };
+        assert!((clip.x2 - 3.0).abs() < f32::EPSILON);
+        assert!(clip.inverse);
+    }
+
+    #[test]
+    fn test_fad_timing_fields() {
+        let fad = FadTiming {
+            fade_in_ms: 100,
+            fade_out_ms: 200,
+        };
+        assert_eq!(fad.fade_in_ms, 100);
+    }
+
+    #[test]
+    fn test_origin_fields() {
+        let org = Origin { x: 1.5, y: 2.5 };
+        assert!((org.x - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_move_animation_no_time() {
+        let mv = MoveAnimation {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 100.0,
+            y2: 100.0,
+            t1: None,
+            t2: None,
+        };
+        assert!(mv.t1.is_none());
+    }
 }
 
 /// Format milliseconds as ASS timestamp.

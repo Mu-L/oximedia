@@ -13,7 +13,7 @@
 
 use crate::black::{SilenceDetector, SilenceSegment};
 use crate::AnalysisResult;
-use rustfft::{num_complex::Complex, FftPlanner};
+use oxifft::Complex;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -230,33 +230,26 @@ impl AudioAnalyzer {
 
 /// Compute spectrum using FFT.
 fn compute_spectrum(samples: &[f32], _sample_rate: u32) -> Vec<f64> {
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(samples.len());
-
-    // Convert to complex
-    let mut buffer: Vec<Complex<f64>> = samples
+    // Apply Hanning window and convert to complex f32
+    let buffer: Vec<Complex<f32>> = samples
         .iter()
-        .map(|&s| Complex {
-            re: f64::from(s),
-            im: 0.0,
+        .enumerate()
+        .map(|(i, &s)| {
+            #[allow(clippy::cast_precision_loss)]
+            let window =
+                0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / samples.len() as f32).cos());
+            Complex::new(s * window, 0.0)
         })
         .collect();
 
-    // Apply Hanning window
-    for (i, sample) in buffer.iter_mut().enumerate() {
-        let window =
-            0.5 * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / samples.len() as f64).cos());
-        sample.re *= window;
-    }
-
     // Perform FFT
-    fft.process(&mut buffer);
+    let fft_result = oxifft::fft(&buffer);
 
     // Compute magnitude spectrum (only first half, due to symmetry)
-    let half_len = buffer.len() / 2;
-    buffer[..half_len]
+    let half_len = fft_result.len() / 2;
+    fft_result[..half_len]
         .iter()
-        .map(|c| (c.re * c.re + c.im * c.im).sqrt())
+        .map(|c| f64::from((c.re * c.re + c.im * c.im).sqrt()))
         .collect()
 }
 

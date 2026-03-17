@@ -346,9 +346,9 @@ mod tests {
     fn test_metrics_collector_latency() {
         let mut collector = MetricsCollector::new(60);
 
-        collector.record_tracking_latency(Duration::from_micros(1000));
-        collector.record_render_latency(Duration::from_micros(5000));
-        collector.record_composite_latency(Duration::from_micros(2000));
+        collector.record_tracking_latency(Duration::from_millis(1));
+        collector.record_render_latency(Duration::from_millis(5));
+        collector.record_composite_latency(Duration::from_millis(2));
         collector.update_total_latency();
 
         assert_eq!(collector.latency().total_latency_us, 8000);

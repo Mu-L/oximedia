@@ -18,6 +18,7 @@ pub fn prores_proxy_hd() -> PresetConfig {
         frame_rate: Some((25, 1)), // PAL
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -34,6 +35,7 @@ pub fn prores_proxy_full_hd() -> PresetConfig {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -50,6 +52,7 @@ pub fn prores_proxy_4k() -> PresetConfig {
         frame_rate: Some((25, 1)),
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -68,6 +71,7 @@ pub fn dnxhd_proxy() -> PresetConfig {
         frame_rate: Some((24, 1)),
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -84,6 +88,7 @@ pub fn ebu_r128_hd() -> PresetConfig {
         frame_rate: Some((25, 1)), // PAL
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -100,6 +105,7 @@ pub fn atsc_a85_hd() -> PresetConfig {
         frame_rate: Some((30000, 1001)), // 29.97 fps (NTSC)
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 

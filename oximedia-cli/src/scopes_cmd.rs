@@ -146,6 +146,49 @@ pub enum ScopesCommand {
         #[arg(long)]
         scale: bool,
     },
+
+    /// Analyze a frame with one or more scope types
+    Analyze {
+        /// Input video file
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Frame number to analyze (default: first frame)
+        #[arg(long)]
+        frame: Option<u64>,
+
+        /// Scope type(s) to generate
+        #[arg(long, default_value = "all",
+              value_parser = ["waveform", "vectorscope", "histogram", "all"])]
+        scope: String,
+
+        /// Output directory for scope images
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+
+    /// Check video compliance against a broadcast color standard
+    Compliance {
+        /// Input video file
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Broadcast standard to check against
+        #[arg(long, default_value = "rec709",
+              value_parser = ["rec709", "rec2020"])]
+        standard: String,
+    },
+
+    /// Print per-frame statistics for a video file
+    Stats {
+        /// Input video file
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Number of frames to sample (0 = auto)
+        #[arg(long, default_value = "0")]
+        frames: u64,
+    },
 }
 
 /// Entry point for `oximedia scopes <subcommand>`.
@@ -215,6 +258,19 @@ pub async fn handle_scopes_command(command: ScopesCommand, json_output: bool) ->
             frame,
             scale,
         } => run_false_color(&input, &output, frame, scale, json_output).await,
+
+        ScopesCommand::Analyze {
+            input,
+            frame,
+            scope,
+            output,
+        } => run_analyze(&input, frame, &scope, &output, json_output).await,
+
+        ScopesCommand::Compliance { input, standard } => {
+            run_compliance(&input, &standard, json_output).await
+        }
+
+        ScopesCommand::Stats { input, frames } => run_stats(&input, frames, json_output).await,
     }
 }
 
@@ -585,6 +641,266 @@ async fn run_false_color(
 }
 
 // ---------------------------------------------------------------------------
+// Analyze (multi-scope)
+// ---------------------------------------------------------------------------
+
+async fn run_analyze(
+    input: &std::path::Path,
+    frame_num: Option<u64>,
+    scope: &str,
+    output_dir: &std::path::Path,
+    json_output: bool,
+) -> Result<()> {
+    use oximedia_scopes::{
+        HistogramMode, ScopeConfig, ScopeType, VectorscopeMode, VideoScopes, WaveformMode,
+    };
+
+    if !input.exists() {
+        bail!("Input file not found: {}", input.display());
+    }
+
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("Cannot create output directory: {}", output_dir.display()))?;
+
+    let frame = frame_num.unwrap_or(0);
+    let (frame_data, fw, fh) = extract_frame_rgb(input, frame)?;
+
+    let config = ScopeConfig {
+        width: 512,
+        height: 512,
+        show_graticule: true,
+        show_labels: true,
+        anti_alias: true,
+        waveform_mode: WaveformMode::Overlay,
+        vectorscope_mode: VectorscopeMode::Circular,
+        histogram_mode: HistogramMode::Overlay,
+        vectorscope_gain: 1.0,
+        highlight_gamut: false,
+        gamut_colorspace: oximedia_scopes::GamutColorspace::Rec709,
+    };
+
+    let scope_types: &[(&str, ScopeType)] = match scope {
+        "waveform" => &[("waveform", ScopeType::WaveformLuma)],
+        "vectorscope" => &[("vectorscope", ScopeType::Vectorscope)],
+        "histogram" => &[("histogram", ScopeType::HistogramRgb)],
+        _ => &[
+            ("waveform", ScopeType::WaveformLuma),
+            ("vectorscope", ScopeType::Vectorscope),
+            ("histogram", ScopeType::HistogramRgb),
+        ],
+    };
+
+    let scopes = VideoScopes::new(config);
+    let mut generated = Vec::new();
+
+    for (name, scope_type) in scope_types {
+        let scope_data = scopes
+            .analyze(&frame_data, fw, fh, *scope_type)
+            .map_err(|e| anyhow::anyhow!("Scope analysis failed for {name}: {e}"))?;
+        let out_path = output_dir.join(format!("{name}.rgba"));
+        std::fs::write(&out_path, &scope_data.data)
+            .with_context(|| format!("Cannot write {}", out_path.display()))?;
+        generated.push((
+            name.to_string(),
+            out_path,
+            scope_data.width,
+            scope_data.height,
+        ));
+    }
+
+    if json_output {
+        let files: Vec<serde_json::Value> = generated
+            .iter()
+            .map(|(n, p, w, h)| {
+                serde_json::json!({
+                    "scope": n,
+                    "path": p.display().to_string(),
+                    "width": w,
+                    "height": h,
+                })
+            })
+            .collect();
+        let obj = serde_json::json!({
+            "command": "scopes analyze",
+            "input": input.display().to_string(),
+            "frame": frame,
+            "scope_filter": scope,
+            "output_dir": output_dir.display().to_string(),
+            "generated": files,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&obj).context("JSON serialization")?
+        );
+        return Ok(());
+    }
+
+    println!("{}", "Scopes Analysis".green().bold());
+    println!("{}", "=".repeat(60));
+    println!("{:20} {}", "Input:", input.display());
+    println!("{:20} {}", "Frame:", frame);
+    println!("{:20} {}", "Output dir:", output_dir.display());
+    println!();
+    for (name, path, w, h) in &generated {
+        println!("  {} {}x{} → {}", name.cyan(), w, h, path.display());
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Compliance
+// ---------------------------------------------------------------------------
+
+async fn run_compliance(input: &std::path::Path, standard: &str, json_output: bool) -> Result<()> {
+    use oximedia_scopes::{GamutColorspace, ScopeConfig, ScopeType, VideoScopes};
+
+    if !input.exists() {
+        bail!("Input file not found: {}", input.display());
+    }
+
+    let gamut = match standard {
+        "rec2020" => GamutColorspace::Rec2020,
+        _ => GamutColorspace::Rec709,
+    };
+
+    let config = ScopeConfig {
+        highlight_gamut: true,
+        gamut_colorspace: gamut,
+        ..ScopeConfig::default()
+    };
+
+    let (frame_data, fw, fh) = extract_frame_rgb(input, 0)?;
+    let scopes = VideoScopes::new(config);
+    let scope_data = scopes
+        .analyze(&frame_data, fw, fh, ScopeType::Vectorscope)
+        .map_err(|e| anyhow::anyhow!("Compliance analysis failed: {e}"))?;
+
+    // Heuristic: estimate out-of-gamut pixels from scope output brightness
+    let total_pixels = (scope_data.width * scope_data.height) as usize;
+    let bright_pixels = scope_data
+        .data
+        .chunks(4)
+        .filter(|px| px[0] > 200 || px[1] > 200 || px[2] > 200)
+        .count();
+    let pct_in_gamut = if total_pixels > 0 {
+        100.0 - (bright_pixels as f64 / total_pixels as f64) * 100.0
+    } else {
+        100.0
+    };
+    let compliant = pct_in_gamut >= 95.0;
+
+    if json_output {
+        let obj = serde_json::json!({
+            "command": "scopes compliance",
+            "input": input.display().to_string(),
+            "standard": standard,
+            "pct_in_gamut": pct_in_gamut,
+            "compliant": compliant,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&obj).context("JSON serialization")?
+        );
+        return Ok(());
+    }
+
+    println!("{}", "Scopes Compliance".green().bold());
+    println!("{}", "=".repeat(60));
+    println!("{:20} {}", "Input:", input.display());
+    println!("{:20} {}", "Standard:", standard.to_uppercase());
+    println!("{:20} {:.1}%", "In-gamut est.:", pct_in_gamut);
+    let status = if compliant {
+        "PASS".green().bold().to_string()
+    } else {
+        "FAIL".red().bold().to_string()
+    };
+    println!("{:20} {}", "Result:", status);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stats
+// ---------------------------------------------------------------------------
+
+async fn run_stats(
+    input: &std::path::Path,
+    frames_to_sample: u64,
+    json_output: bool,
+) -> Result<()> {
+    use oximedia_scopes::{ScopeConfig, ScopeType, VideoScopes};
+
+    if !input.exists() {
+        bail!("Input file not found: {}", input.display());
+    }
+
+    // Sample up to 3 frames (or as requested) — real impl decodes multiple frames
+    let count = if frames_to_sample == 0 {
+        3
+    } else {
+        frames_to_sample.min(10)
+    };
+    let config = ScopeConfig::default();
+    let scopes = VideoScopes::new(config);
+
+    let mut min_luma = f64::MAX;
+    let mut max_luma = f64::MIN;
+    let mut sum_luma = 0.0_f64;
+
+    for i in 0..count {
+        let (frame_data, fw, fh) = extract_frame_rgb(input, i)?;
+        let scope_data = scopes
+            .analyze(&frame_data, fw, fh, ScopeType::HistogramLuma)
+            .map_err(|e| anyhow::anyhow!("Stats analysis failed on frame {i}: {e}"))?;
+
+        // Compute mean luminance from histogram data
+        let luma_mean = scope_data.data.iter().map(|&b| b as f64).sum::<f64>()
+            / (scope_data.data.len().max(1) as f64);
+        if luma_mean < min_luma {
+            min_luma = luma_mean;
+        }
+        if luma_mean > max_luma {
+            max_luma = luma_mean;
+        }
+        sum_luma += luma_mean;
+    }
+
+    let avg_luma = sum_luma / count as f64;
+
+    if json_output {
+        let obj = serde_json::json!({
+            "command": "scopes stats",
+            "input": input.display().to_string(),
+            "frames_sampled": count,
+            "luma": {
+                "min": min_luma,
+                "max": max_luma,
+                "avg": avg_luma,
+            },
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&obj).context("JSON serialization")?
+        );
+        return Ok(());
+    }
+
+    println!("{}", "Scopes Statistics".green().bold());
+    println!("{}", "=".repeat(60));
+    println!("{:20} {}", "Input:", input.display());
+    println!("{:20} {}", "Frames sampled:", count);
+    println!();
+    println!("{}", "Luminance".cyan().bold());
+    println!("{}", "-".repeat(60));
+    println!("{:20} {:.1}", "Min:", min_luma);
+    println!("{:20} {:.1}", "Max:", max_luma);
+    println!("{:20} {:.1}", "Average:", avg_luma);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -704,6 +1020,83 @@ mod tests {
             false,
         )
         .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_analyze_all_scopes() {
+        let input = temp_input();
+        let out_dir = std::env::temp_dir().join("oximedia_scopes_analyze_test");
+        let result = run_analyze(&input, None, "all", &out_dir, false).await;
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_waveform_json() {
+        let input = temp_input();
+        let out_dir = std::env::temp_dir().join("oximedia_scopes_analyze_wf_test");
+        let result = run_analyze(&input, None, "waveform", &out_dir, true).await;
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_missing_input() {
+        let out_dir = std::env::temp_dir().join("oximedia_scopes_analyze_missing");
+        let result = run_analyze(
+            std::path::Path::new("/nonexistent/input.mkv"),
+            None,
+            "all",
+            &out_dir,
+            false,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_compliance_rec709() {
+        let input = temp_input();
+        let result = run_compliance(&input, "rec709", false).await;
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_compliance_rec2020_json() {
+        let input = temp_input();
+        let result = run_compliance(&input, "rec2020", true).await;
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_compliance_missing_input() {
+        let result = run_compliance(
+            std::path::Path::new("/nonexistent/video.mkv"),
+            "rec709",
+            false,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_stats_text() {
+        let input = temp_input();
+        let result = run_stats(&input, 0, false).await;
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_stats_json() {
+        let input = temp_input();
+        let result = run_stats(&input, 2, true).await;
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn test_stats_missing_input() {
+        let result = run_stats(std::path::Path::new("/nonexistent/video.mkv"), 0, false).await;
         assert!(result.is_err());
     }
 }

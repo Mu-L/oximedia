@@ -236,7 +236,7 @@ impl ReplicationPolicy {
             prefix: None,
             sites: Vec::new(),
             default_consistency: consistency,
-            max_lag: Duration::from_secs(60),
+            max_lag: Duration::from_mins(1),
             enabled: true,
         }
     }
@@ -431,7 +431,7 @@ mod tests {
     fn test_lag_sample_threshold() {
         let sample = LagSample::new("file.mp4", "site-1", Duration::from_secs(30));
         assert!(sample.exceeds_threshold(Duration::from_secs(10)));
-        assert!(!sample.exceeds_threshold(Duration::from_secs(60)));
+        assert!(!sample.exceeds_threshold(Duration::from_mins(1)));
     }
 
     #[test]
@@ -526,8 +526,8 @@ mod tests {
     fn test_replication_tracker_lag_samples() {
         let mut tracker = ReplicationTracker::new();
         tracker.add_lag_sample(LagSample::new("a.mp4", "s1", Duration::from_secs(5)));
-        tracker.add_lag_sample(LagSample::new("b.mp4", "s2", Duration::from_secs(120)));
-        let lagging = tracker.lagging_objects(Duration::from_secs(60));
+        tracker.add_lag_sample(LagSample::new("b.mp4", "s2", Duration::from_mins(2)));
+        let lagging = tracker.lagging_objects(Duration::from_mins(1));
         assert_eq!(lagging.len(), 1);
         assert_eq!(lagging[0].key, "b.mp4");
     }

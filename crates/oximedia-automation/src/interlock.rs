@@ -333,34 +333,38 @@ impl InterlockEngine {
         }
 
         match rule.category {
-            InterlockCategory::AirSafety => {
-                self.check_air_safety(action, channel_state)
-            }
-            InterlockCategory::AudioSafety => {
-                self.check_audio_safety(action, channel_state)
-            }
-            InterlockCategory::TimingConstraint => {
-                self.check_timing(action)
-            }
+            InterlockCategory::AirSafety => self.check_air_safety(action, channel_state),
+            InterlockCategory::AudioSafety => self.check_audio_safety(action, channel_state),
+            InterlockCategory::TimingConstraint => self.check_timing(action),
             _ => InterlockVerdict::Allow,
         }
     }
 
     /// Check air safety rules.
-    fn check_air_safety(&self, action: &AutomationAction, state: Option<&ChannelState>) -> InterlockVerdict {
+    fn check_air_safety(
+        &self,
+        action: &AutomationAction,
+        state: Option<&ChannelState>,
+    ) -> InterlockVerdict {
         let Some(state) = state else {
             return InterlockVerdict::Allow;
         };
 
         // Don't allow stopping playout if no backup and we're live
-        if action.action_type == ActionType::PlayoutStop && state.video_live && !state.backup_source_available {
+        if action.action_type == ActionType::PlayoutStop
+            && state.video_live
+            && !state.backup_source_available
+        {
             return InterlockVerdict::Block {
                 reason: "Cannot stop playout while on-air with no backup source".to_string(),
             };
         }
 
         // Don't allow switching to no source
-        if action.action_type == ActionType::SourceSwitch && action.source_id.is_none() && state.video_live {
+        if action.action_type == ActionType::SourceSwitch
+            && action.source_id.is_none()
+            && state.video_live
+        {
             return InterlockVerdict::Block {
                 reason: "Cannot switch to null source while on-air".to_string(),
             };
@@ -370,12 +374,17 @@ impl InterlockEngine {
     }
 
     /// Check audio safety rules.
-    fn check_audio_safety(&self, action: &AutomationAction, state: Option<&ChannelState>) -> InterlockVerdict {
+    fn check_audio_safety(
+        &self,
+        action: &AutomationAction,
+        state: Option<&ChannelState>,
+    ) -> InterlockVerdict {
         let Some(state) = state else {
             return InterlockVerdict::Allow;
         };
 
-        if action.action_type == ActionType::AudioMute && state.audio_live && state.emergency_active {
+        if action.action_type == ActionType::AudioMute && state.audio_live && state.emergency_active
+        {
             return InterlockVerdict::Block {
                 reason: "Cannot mute audio during emergency alert".to_string(),
             };
@@ -447,21 +456,32 @@ mod tests {
     #[test]
     fn test_interlock_verdict_display() {
         assert_eq!(InterlockVerdict::Allow.to_string(), "ALLOW");
-        let block = InterlockVerdict::Block { reason: "test".to_string() };
+        let block = InterlockVerdict::Block {
+            reason: "test".to_string(),
+        };
         assert_eq!(block.to_string(), "BLOCK: test");
     }
 
     #[test]
     fn test_interlock_verdict_is_allowed() {
         assert!(InterlockVerdict::Allow.is_allowed());
-        assert!(InterlockVerdict::Warn { message: "x".to_string() }.is_allowed());
-        assert!(!InterlockVerdict::Block { reason: "x".to_string() }.is_allowed());
+        assert!(InterlockVerdict::Warn {
+            message: "x".to_string()
+        }
+        .is_allowed());
+        assert!(!InterlockVerdict::Block {
+            reason: "x".to_string()
+        }
+        .is_allowed());
     }
 
     #[test]
     fn test_interlock_verdict_is_blocked() {
         assert!(!InterlockVerdict::Allow.is_blocked());
-        assert!(InterlockVerdict::Block { reason: "x".to_string() }.is_blocked());
+        assert!(InterlockVerdict::Block {
+            reason: "x".to_string()
+        }
+        .is_blocked());
     }
 
     #[test]
@@ -473,9 +493,14 @@ mod tests {
 
     #[test]
     fn test_interlock_rule_creation() {
-        let rule = InterlockRule::new("r1", "Air Safety Check", InterlockCategory::AirSafety, InterlockSeverity::Mandatory)
-            .with_applies_to(vec![ActionType::PlayoutStop])
-            .with_description("Prevents stopping playout while on-air");
+        let rule = InterlockRule::new(
+            "r1",
+            "Air Safety Check",
+            InterlockCategory::AirSafety,
+            InterlockSeverity::Mandatory,
+        )
+        .with_applies_to(vec![ActionType::PlayoutStop])
+        .with_description("Prevents stopping playout while on-air");
         assert_eq!(rule.id, "r1");
         assert!(rule.enabled);
         assert!(rule.applies_to_action(ActionType::PlayoutStop));
@@ -484,7 +509,12 @@ mod tests {
 
     #[test]
     fn test_interlock_rule_empty_applies_to() {
-        let rule = InterlockRule::new("r2", "Global Rule", InterlockCategory::OperatorSafety, InterlockSeverity::Advisory);
+        let rule = InterlockRule::new(
+            "r2",
+            "Global Rule",
+            InterlockCategory::OperatorSafety,
+            InterlockSeverity::Advisory,
+        );
         // Empty applies_to means applies to all actions
         assert!(rule.applies_to_action(ActionType::PlayoutStop));
         assert!(rule.applies_to_action(ActionType::AudioMute));
@@ -493,7 +523,12 @@ mod tests {
     #[test]
     fn test_engine_add_remove_rules() {
         let mut engine = InterlockEngine::new();
-        let rule = InterlockRule::new("r1", "Rule 1", InterlockCategory::AirSafety, InterlockSeverity::Mandatory);
+        let rule = InterlockRule::new(
+            "r1",
+            "Rule 1",
+            InterlockCategory::AirSafety,
+            InterlockSeverity::Mandatory,
+        );
         engine.add_rule(rule);
         assert_eq!(engine.rule_count(), 1);
         assert!(engine.remove_rule("r1").is_some());
@@ -503,8 +538,13 @@ mod tests {
     #[test]
     fn test_engine_air_safety_block() {
         let mut engine = InterlockEngine::new();
-        let rule = InterlockRule::new("air1", "No Black Air", InterlockCategory::AirSafety, InterlockSeverity::Mandatory)
-            .with_applies_to(vec![ActionType::PlayoutStop]);
+        let rule = InterlockRule::new(
+            "air1",
+            "No Black Air",
+            InterlockCategory::AirSafety,
+            InterlockSeverity::Mandatory,
+        )
+        .with_applies_to(vec![ActionType::PlayoutStop]);
         engine.add_rule(rule);
 
         let mut state = ChannelState::default();
@@ -520,8 +560,13 @@ mod tests {
     #[test]
     fn test_engine_air_safety_allow_with_backup() {
         let mut engine = InterlockEngine::new();
-        let rule = InterlockRule::new("air1", "No Black Air", InterlockCategory::AirSafety, InterlockSeverity::Mandatory)
-            .with_applies_to(vec![ActionType::PlayoutStop]);
+        let rule = InterlockRule::new(
+            "air1",
+            "No Black Air",
+            InterlockCategory::AirSafety,
+            InterlockSeverity::Mandatory,
+        )
+        .with_applies_to(vec![ActionType::PlayoutStop]);
         engine.add_rule(rule);
 
         let mut state = ChannelState::default();
@@ -536,8 +581,13 @@ mod tests {
     #[test]
     fn test_engine_audio_safety_block_during_emergency() {
         let mut engine = InterlockEngine::new();
-        let rule = InterlockRule::new("aud1", "No Mute During EAS", InterlockCategory::AudioSafety, InterlockSeverity::Mandatory)
-            .with_applies_to(vec![ActionType::AudioMute]);
+        let rule = InterlockRule::new(
+            "aud1",
+            "No Mute During EAS",
+            InterlockCategory::AudioSafety,
+            InterlockSeverity::Mandatory,
+        )
+        .with_applies_to(vec![ActionType::AudioMute]);
         engine.add_rule(rule);
 
         let mut state = ChannelState::default();
@@ -552,8 +602,13 @@ mod tests {
     #[test]
     fn test_engine_bypass_mode() {
         let mut engine = InterlockEngine::new();
-        let rule = InterlockRule::new("r1", "Block Everything", InterlockCategory::AirSafety, InterlockSeverity::Mandatory)
-            .with_applies_to(vec![ActionType::PlayoutStop]);
+        let rule = InterlockRule::new(
+            "r1",
+            "Block Everything",
+            InterlockCategory::AirSafety,
+            InterlockSeverity::Mandatory,
+        )
+        .with_applies_to(vec![ActionType::PlayoutStop]);
         engine.add_rule(rule);
 
         let mut state = ChannelState::default();
@@ -570,8 +625,13 @@ mod tests {
     #[test]
     fn test_engine_timing_constraint_zero_duration() {
         let mut engine = InterlockEngine::new();
-        let rule = InterlockRule::new("t1", "No Zero Duration", InterlockCategory::TimingConstraint, InterlockSeverity::Mandatory)
-            .with_applies_to(vec![ActionType::AdBreakStart]);
+        let rule = InterlockRule::new(
+            "t1",
+            "No Zero Duration",
+            InterlockCategory::TimingConstraint,
+            InterlockSeverity::Mandatory,
+        )
+        .with_applies_to(vec![ActionType::AdBreakStart]);
         engine.add_rule(rule);
 
         let mut action = make_action(ActionType::AdBreakStart, "CH1");
@@ -589,9 +649,19 @@ mod tests {
     #[test]
     fn test_engine_enabled_rules() {
         let mut engine = InterlockEngine::new();
-        let mut r1 = InterlockRule::new("r1", "Enabled", InterlockCategory::AirSafety, InterlockSeverity::Mandatory);
+        let mut r1 = InterlockRule::new(
+            "r1",
+            "Enabled",
+            InterlockCategory::AirSafety,
+            InterlockSeverity::Mandatory,
+        );
         r1.enabled = true;
-        let mut r2 = InterlockRule::new("r2", "Disabled", InterlockCategory::AirSafety, InterlockSeverity::Mandatory);
+        let mut r2 = InterlockRule::new(
+            "r2",
+            "Disabled",
+            InterlockCategory::AirSafety,
+            InterlockSeverity::Mandatory,
+        );
         r2.enabled = false;
         engine.add_rule(r1);
         engine.add_rule(r2);

@@ -1,10 +1,18 @@
 //! High-level `MediaMetadata` struct, format-specific parsers, and the
 //! `MetadataStore` / `InMemoryMetadataStore` abstractions.
+//!
+//! # Parallel Extraction
+//!
+//! `ParallelMetadataExtractor` provides multi-format, rayon-parallel metadata
+//! probing.  Given a slice of `ProbeTarget` descriptors it spawns one task per
+//! target and merges the results.
 
 #![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::sync::RwLock;
+
+use rayon::prelude::*;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MediaMetadata
@@ -711,6 +719,178 @@ impl MetadataStore for InMemoryMetadataStore {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Parallel metadata extraction
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The format a `ProbeTarget` should be parsed as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeFormat {
+    /// Parse as ID3v2 (MP3)
+    Id3v2,
+    /// Parse as XMP (XML)
+    Xmp,
+    /// Extract EXIF from JPEG/TIFF bytes
+    Exif,
+    /// Try all known formats and return the first successful parse
+    Auto,
+}
+
+/// A single probe target: a label plus the raw bytes to inspect.
+#[derive(Debug, Clone)]
+pub struct ProbeTarget {
+    /// Human-readable label for this data source (e.g. a file path).
+    pub label: String,
+    /// The raw bytes of the media or sidecar to probe.
+    pub data: Vec<u8>,
+    /// Which format to attempt.
+    pub format: ProbeFormat,
+}
+
+impl ProbeTarget {
+    /// Create a new `ProbeTarget`.
+    #[must_use]
+    pub fn new(label: impl Into<String>, data: impl Into<Vec<u8>>, format: ProbeFormat) -> Self {
+        Self {
+            label: label.into(),
+            data: data.into(),
+            format,
+        }
+    }
+}
+
+/// The result of probing a single `ProbeTarget`.
+#[derive(Debug, Clone)]
+pub struct ProbeResult {
+    /// The label passed in with the `ProbeTarget`.
+    pub label: String,
+    /// Extracted metadata, or an error message on failure.
+    pub outcome: Result<MediaMetadata, String>,
+}
+
+impl ProbeResult {
+    /// Return `true` if extraction succeeded.
+    #[must_use]
+    pub fn is_ok(&self) -> bool {
+        self.outcome.is_ok()
+    }
+
+    /// Return a reference to the extracted `MediaMetadata`, if successful.
+    #[must_use]
+    pub fn metadata(&self) -> Option<&MediaMetadata> {
+        self.outcome.as_ref().ok()
+    }
+}
+
+/// Parallel metadata extractor.
+///
+/// Probes multiple sources concurrently using rayon.
+///
+/// # Example
+///
+/// ```rust
+/// use oximedia_metadata::media_metadata::{ParallelMetadataExtractor, ProbeFormat, ProbeTarget};
+///
+/// let targets = vec![
+///     ProbeTarget::new("sample1", b"ID3\x04\x00\x00\x00\x00\x00\x00".to_vec(), ProbeFormat::Id3v2),
+/// ];
+/// let results = ParallelMetadataExtractor::extract_all(&targets);
+/// assert_eq!(results.len(), 1);
+/// ```
+pub struct ParallelMetadataExtractor;
+
+impl ParallelMetadataExtractor {
+    /// Extract metadata from all `targets` in parallel (rayon).
+    ///
+    /// Results are returned in the same order as `targets`.
+    #[must_use]
+    pub fn extract_all(targets: &[ProbeTarget]) -> Vec<ProbeResult> {
+        targets
+            .par_iter()
+            .map(|target| {
+                let outcome = Self::probe_one(target);
+                ProbeResult {
+                    label: target.label.clone(),
+                    outcome,
+                }
+            })
+            .collect()
+    }
+
+    /// Probe a single target and return `MediaMetadata` or an error string.
+    fn probe_one(target: &ProbeTarget) -> Result<MediaMetadata, String> {
+        match target.format {
+            ProbeFormat::Id3v2 => {
+                let meta = ID3Parser::read(&target.data);
+                Ok(meta)
+            }
+            ProbeFormat::Xmp => {
+                let text = std::str::from_utf8(&target.data)
+                    .map_err(|e| format!("XMP data is not valid UTF-8: {e}"))?;
+                Ok(XmpParser::parse(text))
+            }
+            ProbeFormat::Exif => {
+                let exif_map = ExifReader::extract(&target.data);
+                let mut meta = MediaMetadata::new();
+                if let Some(title) = exif_map.get("ImageDescription") {
+                    meta.title = Some(title.clone());
+                }
+                if let Some(artist) = exif_map.get("Artist") {
+                    meta.creator = Some(artist.clone());
+                }
+                if let Some(dt) = exif_map
+                    .get("DateTimeOriginal")
+                    .or_else(|| exif_map.get("DateTime"))
+                {
+                    meta.created_at = Some(dt.clone());
+                }
+                for (k, v) in &exif_map {
+                    meta.extra.insert(k.clone(), v.clone());
+                }
+                Ok(meta)
+            }
+            ProbeFormat::Auto => {
+                // Try ID3v2, then XMP, then EXIF; return first success
+                if target.data.len() >= 3 && &target.data[..3] == b"ID3" {
+                    return Ok(ID3Parser::read(&target.data));
+                }
+                if target.data.len() >= 5
+                    && (target.data.starts_with(b"<?xml")
+                        || target.data.starts_with(b"<x:xm")
+                        || target.data.starts_with(b"<rdf:"))
+                {
+                    if let Ok(text) = std::str::from_utf8(&target.data) {
+                        return Ok(XmpParser::parse(text));
+                    }
+                }
+                // Fallback: try EXIF from JPEG
+                let exif_map = ExifReader::extract(&target.data);
+                let mut meta = MediaMetadata::new();
+                for (k, v) in exif_map {
+                    meta.extra.insert(k, v);
+                }
+                Ok(meta)
+            }
+        }
+    }
+
+    /// Extract and merge all results into a single `MediaMetadata`.
+    ///
+    /// Results are merged in order, with earlier targets taking precedence
+    /// for scalar fields (title, creator, etc.).
+    #[must_use]
+    pub fn extract_and_merge(targets: &[ProbeTarget]) -> MediaMetadata {
+        let results = Self::extract_all(targets);
+        let mut merged = MediaMetadata::new();
+        for result in results {
+            if let Ok(meta) = result.outcome {
+                merged.merge_from(&meta);
+            }
+        }
+        merged
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -997,5 +1177,157 @@ mod tests {
         let results = store.search("orchestral").expect("should succeed in test");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "x");
+    }
+
+    // ─── ParallelMetadataExtractor ─────────────────────────────────────────
+
+    fn make_minimal_id3v2() -> Vec<u8> {
+        // Minimal valid ID3v2.4 tag: header only, no frames
+        let mut data = Vec::new();
+        data.extend_from_slice(b"ID3");
+        data.push(4); // v2.4
+        data.push(0);
+        data.push(0);
+        // synchsafe size = 0
+        data.extend_from_slice(&[0u8; 4]);
+        data
+    }
+
+    #[test]
+    fn test_parallel_extractor_empty_targets() {
+        let results = ParallelMetadataExtractor::extract_all(&[]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_parallel_extractor_id3v2_target() {
+        let targets = vec![ProbeTarget::new(
+            "test.mp3",
+            make_minimal_id3v2(),
+            ProbeFormat::Id3v2,
+        )];
+        let results = ParallelMetadataExtractor::extract_all(&targets);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].label, "test.mp3");
+        assert!(results[0].is_ok());
+    }
+
+    #[test]
+    fn test_parallel_extractor_xmp_target() {
+        let xml = r#"<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:title>XMP Title</dc:title>
+  <dc:creator>XMP Author</dc:creator>
+</rdf:Description>"#;
+        let targets = vec![ProbeTarget::new(
+            "sample.xmp",
+            xml.as_bytes(),
+            ProbeFormat::Xmp,
+        )];
+        let results = ParallelMetadataExtractor::extract_all(&targets);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+        let meta = results[0].metadata().expect("Should have metadata");
+        assert_eq!(meta.title.as_deref(), Some("XMP Title"));
+    }
+
+    #[test]
+    fn test_parallel_extractor_exif_target_non_jpeg() {
+        // Non-JPEG data: EXIF reader returns empty map
+        let targets = vec![ProbeTarget::new(
+            "not_a_jpeg.bin",
+            b"not jpeg data",
+            ProbeFormat::Exif,
+        )];
+        let results = ParallelMetadataExtractor::extract_all(&targets);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_ok());
+    }
+
+    #[test]
+    fn test_parallel_extractor_auto_id3v2() {
+        let targets = vec![ProbeTarget::new(
+            "auto.mp3",
+            make_minimal_id3v2(),
+            ProbeFormat::Auto,
+        )];
+        let results = ParallelMetadataExtractor::extract_all(&targets);
+        assert!(results[0].is_ok());
+    }
+
+    #[test]
+    fn test_parallel_extractor_auto_xmp() {
+        let xml = b"<?xml version=\"1.0\"?><root><dc:title>Auto XMP</dc:title></root>";
+        let targets = vec![ProbeTarget::new(
+            "auto.xmp",
+            xml.to_vec(),
+            ProbeFormat::Auto,
+        )];
+        let results = ParallelMetadataExtractor::extract_all(&targets);
+        assert!(results[0].is_ok());
+    }
+
+    #[test]
+    fn test_parallel_extractor_multiple_targets_in_order() {
+        let targets = vec![
+            ProbeTarget::new("first", make_minimal_id3v2(), ProbeFormat::Id3v2),
+            ProbeTarget::new("second", make_minimal_id3v2(), ProbeFormat::Id3v2),
+            ProbeTarget::new("third", make_minimal_id3v2(), ProbeFormat::Id3v2),
+        ];
+        let results = ParallelMetadataExtractor::extract_all(&targets);
+        // Results must be in the same order as targets
+        assert_eq!(results[0].label, "first");
+        assert_eq!(results[1].label, "second");
+        assert_eq!(results[2].label, "third");
+    }
+
+    #[test]
+    fn test_parallel_extractor_probe_result_is_ok() {
+        let targets = vec![ProbeTarget::new(
+            "ok",
+            make_minimal_id3v2(),
+            ProbeFormat::Id3v2,
+        )];
+        let results = ParallelMetadataExtractor::extract_all(&targets);
+        assert!(results[0].is_ok());
+        assert!(results[0].metadata().is_some());
+    }
+
+    #[test]
+    fn test_parallel_extractor_xmp_invalid_utf8() {
+        // Non-UTF-8 bytes for XMP should return an error
+        let bad = vec![0xFF, 0xFE, 0x00, 0x01];
+        let targets = vec![ProbeTarget::new("bad.xmp", bad, ProbeFormat::Xmp)];
+        let results = ParallelMetadataExtractor::extract_all(&targets);
+        assert_eq!(results.len(), 1);
+        // Invalid UTF-8 should be an error
+        assert!(!results[0].is_ok());
+    }
+
+    #[test]
+    fn test_parallel_extractor_extract_and_merge() {
+        let xmp1 = r#"<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:title>Merged Title</dc:title>
+</rdf:Description>"#;
+        let xmp2 = r#"<rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:creator>Merged Author</dc:creator>
+</rdf:Description>"#;
+
+        let targets = vec![
+            ProbeTarget::new("src1.xmp", xmp1.as_bytes(), ProbeFormat::Xmp),
+            ProbeTarget::new("src2.xmp", xmp2.as_bytes(), ProbeFormat::Xmp),
+        ];
+
+        let merged = ParallelMetadataExtractor::extract_and_merge(&targets);
+        // Title from src1, creator from src2
+        assert_eq!(merged.title.as_deref(), Some("Merged Title"));
+        assert_eq!(merged.creator.as_deref(), Some("Merged Author"));
+    }
+
+    #[test]
+    fn test_probe_target_new() {
+        let t = ProbeTarget::new("label", vec![1u8, 2, 3], ProbeFormat::Auto);
+        assert_eq!(t.label, "label");
+        assert_eq!(t.data, vec![1u8, 2, 3]);
+        assert_eq!(t.format, ProbeFormat::Auto);
     }
 }

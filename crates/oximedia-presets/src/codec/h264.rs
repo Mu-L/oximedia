@@ -241,6 +241,7 @@ pub fn to_library_preset(id: &str, name: &str, hp: &H264Preset) -> Preset {
             QualityMode::Medium
         }),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

@@ -41,7 +41,10 @@ pub struct JobPersistence {
 }
 
 impl JobPersistence {
-    /// Create a new persistence layer
+    /// Create a new persistence layer with WAL mode enabled for better concurrency.
+    ///
+    /// WAL (Write-Ahead Logging) mode allows concurrent reads and a single writer,
+    /// dramatically improving throughput for the job queue's read-heavy workload.
     ///
     /// # Errors
     ///
@@ -51,11 +54,14 @@ impl JobPersistence {
         let pool = Pool::new(manager)?;
 
         let persistence = Self { pool };
+        persistence.enable_wal()?;
         persistence.initialize_schema()?;
         Ok(persistence)
     }
 
-    /// Create an in-memory persistence layer (for testing)
+    /// Create an in-memory persistence layer (for testing).
+    ///
+    /// WAL is not applicable to in-memory databases; normal journal mode is used.
     ///
     /// # Errors
     ///
@@ -67,6 +73,20 @@ impl JobPersistence {
         let persistence = Self { pool };
         persistence.initialize_schema()?;
         Ok(persistence)
+    }
+
+    /// Enable WAL journal mode and set synchronous=NORMAL for better write performance.
+    ///
+    /// WAL mode allows concurrent reads while a write is in progress, which is ideal
+    /// for the job queue where many workers query job state while the dispatcher writes.
+    fn enable_wal(&self) -> Result<()> {
+        let conn = self.pool.get()?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA wal_autocheckpoint=1000;",
+        )?;
+        Ok(())
     }
 
     /// Initialize database schema

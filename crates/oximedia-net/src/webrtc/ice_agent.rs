@@ -173,7 +173,7 @@ pub struct IceAgentConfig {
 
 impl Default for IceAgentConfig {
     fn default() -> Self {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         Self {
@@ -561,7 +561,7 @@ impl IceAgent {
 /// Generates a random ICE string.
 #[must_use]
 fn generate_ice_string(length: usize) -> String {
-    use rand::Rng;
+    use rand::RngExt;
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     let mut rng = rand::rng();
 

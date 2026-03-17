@@ -549,6 +549,99 @@ fn test_different_resolutions() {
     }
 }
 
+/// Full pipeline integration test: 10-frame synthetic 320×240 gray-gradient video.
+///
+/// Creates a synthetic sequence where luminance increases linearly across frames
+/// (simulating a fade-in) and passes it through the complete `Analyzer` pipeline.
+/// Verifies that a valid `AnalysisResults` report is produced without errors,
+/// JSON serialization succeeds, and basic sanity invariants hold.
+#[test]
+fn test_full_analysis_pipeline() {
+    let width: usize = 320;
+    let height: usize = 240;
+    let uv_width = (width + 1) / 2;
+    let uv_height = (height + 1) / 2;
+
+    // Enable every analysis module that does not require external model data.
+    let config = AnalysisConfig::new()
+        .with_scene_detection(true)
+        .with_quality_assessment(true)
+        .with_black_frame_detection(true)
+        .with_motion_analysis(true)
+        .with_temporal_analysis(true);
+
+    let mut analyzer = Analyzer::new(config);
+
+    for frame_idx in 0..10usize {
+        // Gray gradient: brightness increases linearly from 30 to 220 over 10 frames.
+        let brightness = (30 + frame_idx * 19) as u8; // 30, 49, 68, …, 201
+
+        // Y-plane: horizontal gradient modulated by per-frame brightness.
+        let y_plane: Vec<u8> = (0..width * height)
+            .map(|i| {
+                let col = i % width;
+                let base = brightness as u32;
+                let gradient_offset = (col * 30 / width) as u32;
+                (base + gradient_offset).min(255) as u8
+            })
+            .collect();
+
+        let u_plane = vec![128u8; uv_width * uv_height];
+        let v_plane = vec![128u8; uv_width * uv_height];
+
+        analyzer
+            .process_video_frame(
+                &y_plane,
+                &u_plane,
+                &v_plane,
+                width,
+                height,
+                Rational::new(30, 1),
+            )
+            .expect("process_video_frame should not fail for valid input");
+    }
+
+    let results = analyzer.finalize();
+
+    // Sanity checks on the report.
+    assert_eq!(results.frame_count, 10, "All 10 frames must be counted");
+    assert_eq!(
+        results.frame_rate,
+        Rational::new(30, 1),
+        "Frame rate must be preserved"
+    );
+    // Quality stats must be populated (quality assessment was enabled).
+    assert_eq!(
+        results.quality_stats.frame_scores.len(),
+        10,
+        "Quality assessor must have scored all 10 frames"
+    );
+    assert!(
+        results.quality_stats.average_score >= 0.0 && results.quality_stats.average_score <= 1.0,
+        "Average quality score must be in [0, 1]"
+    );
+
+    // Serialize to JSON — must not fail.
+    let json = results.to_json().expect("JSON serialization must succeed");
+    assert!(
+        json.contains("frame_count"),
+        "JSON output must contain frame_count field"
+    );
+    assert!(
+        json.contains("quality_stats"),
+        "JSON output must contain quality_stats field"
+    );
+
+    // HTML report must not fail.
+    let html = results
+        .to_html()
+        .expect("HTML report generation must succeed");
+    assert!(
+        html.contains("<!DOCTYPE html>"),
+        "HTML output must start with DOCTYPE"
+    );
+}
+
 #[test]
 fn test_different_frame_rates() {
     let frame_rates = vec![

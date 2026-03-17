@@ -542,6 +542,281 @@ impl Default for DveProcessor {
     }
 }
 
+// ── Keyframe animation ────────────────────────────────────────────────────────
+
+/// Easing function for DVE fly-key keyframe interpolation.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum DveEasing {
+    /// Linear interpolation (t).
+    Linear,
+    /// Ease-in (t²).
+    EaseIn,
+    /// Ease-out (1-(1-t)²).
+    EaseOut,
+    /// Ease-in-out (smooth S-curve).
+    EaseInOut,
+    /// Hold start value until next keyframe.
+    Hold,
+}
+
+impl DveEasing {
+    /// Apply the easing function to normalized progress `t` in [0.0, 1.0].
+    pub fn apply(self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => t,
+            Self::EaseIn => t * t,
+            Self::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
+            Self::EaseInOut => {
+                if t < 0.5 {
+                    2.0 * t * t
+                } else {
+                    1.0 - 2.0 * (1.0 - t) * (1.0 - t)
+                }
+            }
+            Self::Hold => 0.0,
+        }
+    }
+}
+
+/// A single DVE keyframe in an animation sequence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DveKeyframe {
+    /// Frame index (zero-based) at which this keyframe is defined.
+    pub frame: u32,
+    /// Position at this keyframe.
+    pub position: DvePosition,
+    /// Scale at this keyframe.
+    pub scale: DveScale,
+    /// Rotation at this keyframe (degrees, 0.0–360.0).
+    pub rotation: f32,
+    /// Easing applied from this keyframe to the next.
+    pub easing: DveEasing,
+}
+
+impl DveKeyframe {
+    /// Create a new keyframe.
+    pub fn new(
+        frame: u32,
+        position: DvePosition,
+        scale: DveScale,
+        rotation: f32,
+        easing: DveEasing,
+    ) -> Self {
+        Self {
+            frame,
+            position,
+            scale,
+            rotation: rotation.clamp(0.0, 360.0),
+            easing,
+        }
+    }
+
+    /// Create a keyframe using default DVE params.
+    pub fn at_frame(frame: u32) -> Self {
+        Self::new(
+            frame,
+            DvePosition::center(),
+            DveScale::full(),
+            0.0,
+            DveEasing::Linear,
+        )
+    }
+}
+
+/// Fly-key animation that stores a sequence of `DveKeyframe` values and
+/// interpolates between them to produce smooth DVE motion paths.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DveFlyKeyAnimation {
+    keyframes: Vec<DveKeyframe>,
+}
+
+impl DveFlyKeyAnimation {
+    /// Create a new empty animation.
+    pub fn new() -> Self {
+        Self {
+            keyframes: Vec::new(),
+        }
+    }
+
+    /// Add a keyframe to the animation.
+    ///
+    /// Keyframes must be added in non-decreasing frame order; adding one out
+    /// of order returns `DveError::ProcessingError`.
+    pub fn add_keyframe(&mut self, keyframe: DveKeyframe) -> Result<(), DveError> {
+        if let Some(last) = self.keyframes.last() {
+            if keyframe.frame < last.frame {
+                return Err(DveError::ProcessingError(format!(
+                    "Keyframe at frame {} would be before last keyframe at frame {}",
+                    keyframe.frame, last.frame
+                )));
+            }
+        }
+        self.keyframes.push(keyframe);
+        Ok(())
+    }
+
+    /// Number of keyframes stored.
+    pub fn keyframe_count(&self) -> usize {
+        self.keyframes.len()
+    }
+
+    /// Remove all keyframes.
+    pub fn clear_keyframes(&mut self) {
+        self.keyframes.clear();
+    }
+
+    /// Get a slice of all keyframes.
+    pub fn keyframes(&self) -> &[DveKeyframe] {
+        &self.keyframes
+    }
+
+    /// Evaluate the animation at the given frame, returning interpolated
+    /// `DveParams`.  Returns `None` if the animation has no keyframes.
+    pub fn evaluate(&self, frame: u32) -> Option<DveParams> {
+        if self.keyframes.is_empty() {
+            return None;
+        }
+
+        // Before or at first keyframe: clamp to first.
+        if frame <= self.keyframes[0].frame {
+            let kf = &self.keyframes[0];
+            let mut params = DveParams::new();
+            params.position = kf.position;
+            params.scale = kf.scale;
+            params.rotation = kf.rotation;
+            return Some(params);
+        }
+
+        // After or at last keyframe: clamp to last.
+        let last = self.keyframes.last()?;
+        if frame >= last.frame {
+            let mut params = DveParams::new();
+            params.position = last.position;
+            params.scale = last.scale;
+            params.rotation = last.rotation;
+            return Some(params);
+        }
+
+        // Find the surrounding pair [a, b] such that a.frame <= frame < b.frame.
+        let b_idx = self.keyframes.partition_point(|kf| kf.frame <= frame);
+        if b_idx == 0 || b_idx >= self.keyframes.len() {
+            // Shouldn't happen given the clamps above, but be safe.
+            return None;
+        }
+        let a = &self.keyframes[b_idx - 1];
+        let b = &self.keyframes[b_idx];
+
+        let span = (b.frame - a.frame) as f32;
+        let raw_t = if span > 0.0 {
+            (frame - a.frame) as f32 / span
+        } else {
+            1.0
+        };
+        let t = a.easing.apply(raw_t);
+
+        let lerp = |va: f32, vb: f32| va + (vb - va) * t;
+
+        let mut params = DveParams::new();
+        params.position = DvePosition {
+            x: lerp(a.position.x, b.position.x),
+            y: lerp(a.position.y, b.position.y),
+        };
+        params.scale = DveScale {
+            x: lerp(a.scale.x, b.scale.x),
+            y: lerp(a.scale.y, b.scale.y),
+        };
+        // Shortest-path rotation interpolation.
+        let rot_diff = {
+            let d = b.rotation - a.rotation;
+            // Normalise to [-180, 180]
+            if d > 180.0 {
+                d - 360.0
+            } else if d < -180.0 {
+                d + 360.0
+            } else {
+                d
+            }
+        };
+        params.rotation = (a.rotation + rot_diff * t).rem_euclid(360.0);
+
+        Some(params)
+    }
+}
+
+/// DVE fly-key: combines a `DveProcessor` with a `DveFlyKeyAnimation`,
+/// advancing frame-by-frame and applying interpolated parameters automatically.
+pub struct DveFlyKey {
+    processor: DveProcessor,
+    animation: DveFlyKeyAnimation,
+    current_frame: u32,
+}
+
+impl DveFlyKey {
+    /// Create a new fly-key with default settings.
+    pub fn new() -> Self {
+        Self {
+            processor: DveProcessor::new(),
+            animation: DveFlyKeyAnimation::new(),
+            current_frame: 0,
+        }
+    }
+
+    /// Access the animation for keyframe editing.
+    pub fn animation_mut(&mut self) -> &mut DveFlyKeyAnimation {
+        &mut self.animation
+    }
+
+    /// Access the animation read-only.
+    pub fn animation(&self) -> &DveFlyKeyAnimation {
+        &self.animation
+    }
+
+    /// Access the underlying DVE processor (read-only).
+    pub fn processor(&self) -> &DveProcessor {
+        &self.processor
+    }
+
+    /// Access the underlying DVE processor (mutable).
+    pub fn processor_mut(&mut self) -> &mut DveProcessor {
+        &mut self.processor
+    }
+
+    /// Current animation frame index.
+    pub fn current_frame(&self) -> u32 {
+        self.current_frame
+    }
+
+    /// Advance the animation by one frame and update the processor's params.
+    ///
+    /// The frame counter is incremented first, then the animation is evaluated
+    /// at the new frame index.  This means after N calls `current_frame()` is N
+    /// and the processor reflects frame N's interpolated state.
+    ///
+    /// If the animation has keyframes, the interpolated params are applied;
+    /// otherwise the processor's existing params remain unchanged.
+    pub fn advance_frame(&mut self) {
+        self.current_frame = self.current_frame.saturating_add(1);
+        if let Some(params) = self.animation.evaluate(self.current_frame) {
+            self.processor.set_params(params);
+        }
+    }
+
+    /// Reset the frame counter to zero and re-apply the first keyframe (if any).
+    pub fn reset(&mut self) {
+        self.current_frame = 0;
+        if let Some(params) = self.animation.evaluate(0) {
+            self.processor.set_params(params);
+        }
+    }
+}
+
+impl Default for DveFlyKey {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,5 +1017,165 @@ mod tests {
         assert_eq!(height, 270.0);
         assert_eq!(x, -240.0); // Left edge - half width
         assert_eq!(y, -135.0); // Top edge - half height
+    }
+
+    // ── DveFlyKeyAnimation tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_easing_linear() {
+        assert!((DveEasing::Linear.apply(0.5) - 0.5).abs() < 1e-6);
+        assert!((DveEasing::Linear.apply(0.0) - 0.0).abs() < 1e-6);
+        assert!((DveEasing::Linear.apply(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_easing_ease_in() {
+        let t = 0.5_f32;
+        let expected = t * t; // 0.25
+        assert!((DveEasing::EaseIn.apply(t) - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_easing_ease_out() {
+        let t = 0.5_f32;
+        let expected = 1.0 - (1.0 - t) * (1.0 - t); // 0.75
+        assert!((DveEasing::EaseOut.apply(t) - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_easing_ease_in_out_midpoint() {
+        // At t=0.5, EaseInOut should return 0.5 (symmetric).
+        assert!((DveEasing::EaseInOut.apply(0.5) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_easing_hold_always_zero() {
+        assert!((DveEasing::Hold.apply(0.0) - 0.0).abs() < 1e-6);
+        assert!((DveEasing::Hold.apply(0.5) - 0.0).abs() < 1e-6);
+        assert!((DveEasing::Hold.apply(1.0) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_animation_empty_returns_none() {
+        let anim = DveFlyKeyAnimation::new();
+        assert!(anim.evaluate(0).is_none());
+        assert_eq!(anim.keyframe_count(), 0);
+    }
+
+    #[test]
+    fn test_animation_single_keyframe() {
+        let mut anim = DveFlyKeyAnimation::new();
+        let kf = DveKeyframe::new(
+            10,
+            DvePosition::new(0.3, 0.7),
+            DveScale::half(),
+            45.0,
+            DveEasing::Linear,
+        );
+        anim.add_keyframe(kf).expect("should succeed");
+
+        // Any frame should return the single keyframe value.
+        let params = anim.evaluate(0).expect("should return params");
+        assert!((params.position.x - 0.3).abs() < 1e-5);
+        assert!((params.scale.x - 0.5).abs() < 1e-5);
+
+        let params_after = anim.evaluate(100).expect("should return params");
+        assert!((params_after.position.x - 0.3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_animation_two_keyframes_midpoint() {
+        let mut anim = DveFlyKeyAnimation::new();
+        anim.add_keyframe(DveKeyframe::new(
+            0,
+            DvePosition::new(0.0, 0.0),
+            DveScale::full(),
+            0.0,
+            DveEasing::Linear,
+        ))
+        .expect("ok");
+        anim.add_keyframe(DveKeyframe::new(
+            10,
+            DvePosition::new(1.0, 1.0),
+            DveScale::half(),
+            180.0,
+            DveEasing::Linear,
+        ))
+        .expect("ok");
+
+        // At frame 5 (midpoint, linear), position should be 0.5, scale x should be 0.75.
+        let params = anim.evaluate(5).expect("should return params");
+        assert!((params.position.x - 0.5).abs() < 1e-5);
+        assert!((params.position.y - 0.5).abs() < 1e-5);
+        assert!((params.scale.x - 0.75).abs() < 1e-5);
+        assert!((params.rotation - 90.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_animation_out_of_order_keyframe_error() {
+        let mut anim = DveFlyKeyAnimation::new();
+        anim.add_keyframe(DveKeyframe::at_frame(10)).expect("ok");
+        let result = anim.add_keyframe(DveKeyframe::at_frame(5));
+        assert!(result.is_err(), "out-of-order keyframe should fail");
+    }
+
+    #[test]
+    fn test_animation_clear_keyframes() {
+        let mut anim = DveFlyKeyAnimation::new();
+        anim.add_keyframe(DveKeyframe::at_frame(0)).expect("ok");
+        assert_eq!(anim.keyframe_count(), 1);
+        anim.clear_keyframes();
+        assert_eq!(anim.keyframe_count(), 0);
+        assert!(anim.evaluate(0).is_none());
+    }
+
+    #[test]
+    fn test_fly_key_advance_frame() {
+        let mut fly_key = DveFlyKey::new();
+
+        // Add two keyframes spanning frames 0-10.
+        fly_key
+            .animation_mut()
+            .add_keyframe(DveKeyframe::new(
+                0,
+                DvePosition::new(0.0, 0.0),
+                DveScale::full(),
+                0.0,
+                DveEasing::Linear,
+            ))
+            .expect("ok");
+        fly_key
+            .animation_mut()
+            .add_keyframe(DveKeyframe::new(
+                10,
+                DvePosition::new(1.0, 1.0),
+                DveScale::half(),
+                180.0,
+                DveEasing::Linear,
+            ))
+            .expect("ok");
+
+        // Advance 5 frames.
+        for _ in 0..5 {
+            fly_key.advance_frame();
+        }
+        assert_eq!(fly_key.current_frame(), 5);
+        let pos = fly_key.processor().params().position;
+        assert!((pos.x - 0.5).abs() < 1e-4, "expected ~0.5, got {}", pos.x);
+    }
+
+    #[test]
+    fn test_fly_key_reset() {
+        let mut fly_key = DveFlyKey::new();
+        fly_key
+            .animation_mut()
+            .add_keyframe(DveKeyframe::at_frame(0))
+            .expect("ok");
+        for _ in 0..20 {
+            fly_key.advance_frame();
+        }
+        assert_eq!(fly_key.current_frame(), 20);
+        fly_key.reset();
+        assert_eq!(fly_key.current_frame(), 0);
     }
 }

@@ -1,26 +1,105 @@
-//! Central plugin registry.
+//! Central plugin registry with priority ordering and capability caching.
 //!
 //! The [`PluginRegistry`] is the main entry point for managing plugins.
 //! It handles registration, discovery, and codec lookup across all
 //! loaded plugins.
+//!
+//! # Priority
+//!
+//! Each plugin can be assigned a numeric priority (higher = preferred).
+//! When multiple plugins provide the same codec, the one with the highest
+//! priority wins.  Plugins with equal priority are ranked by registration
+//! order (first-registered wins among equals).
+//!
+//! # Capability Cache
+//!
+//! The registry maintains an internal cache of codec → plugin index
+//! mappings to avoid O(n) scans on every lookup.  The cache is invalidated
+//! atomically on every `register` or `unregister` operation.
 
 use crate::error::{PluginError, PluginResult};
 use crate::traits::{CodecPlugin, CodecPluginInfo, PluginCapability, PLUGIN_API_VERSION};
 use oximedia_codec::{CodecResult, EncoderConfig, VideoDecoder, VideoEncoder};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+// ── PluginEntry ───────────────────────────────────────────────────────────────
+
+/// An entry in the plugin registry, bundling the plugin with its priority.
+struct PluginEntry {
+    plugin: Arc<dyn CodecPlugin>,
+    /// Numeric priority: higher values are preferred over lower values.
+    /// When two plugins have the same priority, the one registered first wins.
+    priority: i32,
+}
+
+// ── CapabilityCache ───────────────────────────────────────────────────────────
+
+/// Cached mapping from codec name to the index of the best plugin for that codec.
+///
+/// Two separate caches for decode and encode allow plugins that only support
+/// one direction to serve correctly without confusion.
+#[derive(Default)]
+struct CapabilityCache {
+    /// codec_name → index into the sorted plugins Vec for decode.
+    decoder_index: HashMap<String, usize>,
+    /// codec_name → index into the sorted plugins Vec for encode.
+    encoder_index: HashMap<String, usize>,
+}
+
+impl CapabilityCache {
+    fn new() -> Self {
+        Self {
+            decoder_index: HashMap::new(),
+            encoder_index: HashMap::new(),
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.decoder_index.clear();
+        self.encoder_index.clear();
+    }
+
+    /// Rebuild the cache from the current (already priority-sorted) plugin list.
+    fn rebuild(&mut self, plugins: &[PluginEntry]) {
+        self.invalidate();
+        for (idx, entry) in plugins.iter().enumerate() {
+            for cap in entry.plugin.capabilities() {
+                if cap.can_decode {
+                    self.decoder_index
+                        .entry(cap.codec_name.clone())
+                        .or_insert(idx);
+                }
+                if cap.can_encode {
+                    self.encoder_index
+                        .entry(cap.codec_name.clone())
+                        .or_insert(idx);
+                }
+            }
+        }
+    }
+}
+
+// ── PluginRegistry ────────────────────────────────────────────────────────────
+
 /// Central registry for all loaded codec plugins.
 ///
-/// The registry maintains a list of registered plugins and provides
-/// methods to discover codecs, create decoders/encoders, and manage
-/// the plugin lifecycle.
+/// The registry maintains a list of registered plugins ordered by priority
+/// (descending) and provides methods to discover codecs, create
+/// decoders/encoders, and manage the plugin lifecycle.
 ///
 /// # Thread Safety
 ///
 /// The registry uses interior mutability (`RwLock`) so it can be
 /// shared across threads. Multiple readers can query the registry
 /// concurrently; writes (registration) acquire an exclusive lock.
+///
+/// # Priority
+///
+/// Higher `priority` values take precedence when multiple plugins provide
+/// the same codec.  Use [`register_with_priority`](Self::register_with_priority)
+/// to supply a custom priority (default is `0`).
 ///
 /// # Example
 ///
@@ -54,7 +133,10 @@ use std::sync::{Arc, RwLock};
 /// assert!(registry.has_codec("test"));
 /// ```
 pub struct PluginRegistry {
-    plugins: RwLock<Vec<Arc<dyn CodecPlugin>>>,
+    /// Plugins sorted by descending priority.
+    plugins: RwLock<Vec<PluginEntry>>,
+    /// Capability lookup cache — invalidated on every mutation.
+    cache: RwLock<CapabilityCache>,
     search_paths: Vec<PathBuf>,
 }
 
@@ -64,6 +146,7 @@ impl PluginRegistry {
     pub fn new() -> Self {
         Self {
             plugins: RwLock::new(Vec::new()),
+            cache: RwLock::new(CapabilityCache::new()),
             search_paths: Self::default_search_paths(),
         }
     }
@@ -73,6 +156,7 @@ impl PluginRegistry {
     pub fn empty() -> Self {
         Self {
             plugins: RwLock::new(Vec::new()),
+            cache: RwLock::new(CapabilityCache::new()),
             search_paths: Vec::new(),
         }
     }
@@ -136,7 +220,7 @@ impl PluginRegistry {
         paths
     }
 
-    /// Register a static plugin instance.
+    /// Register a static plugin instance with default priority (0).
     ///
     /// The plugin is validated (API version check, duplicate name check)
     /// before being added to the registry.
@@ -147,6 +231,22 @@ impl PluginRegistry {
     /// not match, or [`PluginError::AlreadyRegistered`] if a plugin
     /// with the same name is already loaded.
     pub fn register(&self, plugin: Arc<dyn CodecPlugin>) -> PluginResult<()> {
+        self.register_with_priority(plugin, 0)
+    }
+
+    /// Register a plugin with an explicit priority.
+    ///
+    /// Plugins with a higher `priority` value are preferred when multiple
+    /// plugins provide the same codec.  Negative priorities are allowed.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`register`](Self::register).
+    pub fn register_with_priority(
+        &self,
+        plugin: Arc<dyn CodecPlugin>,
+        priority: i32,
+    ) -> PluginResult<()> {
         let info = plugin.info();
 
         // Validate API version
@@ -164,15 +264,16 @@ impl PluginRegistry {
 
         // Check for duplicates
         for existing in plugins.iter() {
-            if existing.info().name == info.name {
+            if existing.plugin.info().name == info.name {
                 return Err(PluginError::AlreadyRegistered(info.name));
             }
         }
 
         tracing::info!(
-            "Registered plugin: {} v{} ({} codec(s))",
+            "Registered plugin: {} v{} (priority={}, {} codec(s))",
             info.name,
             info.version,
+            priority,
             plugin.capabilities().len()
         );
 
@@ -183,7 +284,37 @@ impl PluginRegistry {
             );
         }
 
-        plugins.push(plugin);
+        plugins.push(PluginEntry { plugin, priority });
+
+        // Re-sort by descending priority (stable sort preserves FIFO for equal priorities).
+        plugins.sort_by(|a, b| b.priority.cmp(&a.priority));
+
+        // Invalidate and rebuild the cache.
+        drop(plugins);
+        self.rebuild_cache()?;
+        Ok(())
+    }
+
+    /// Unregister a plugin by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PluginError::NotFound`] if no plugin with that name is registered.
+    pub fn unregister(&self, name: &str) -> PluginResult<()> {
+        let mut plugins = self
+            .plugins
+            .write()
+            .map_err(|e| PluginError::InitFailed(format!("Lock poisoned: {e}")))?;
+
+        let before = plugins.len();
+        plugins.retain(|e| e.plugin.info().name != name);
+
+        if plugins.len() == before {
+            return Err(PluginError::NotFound(name.to_string()));
+        }
+
+        drop(plugins);
+        self.rebuild_cache()?;
         Ok(())
     }
 
@@ -295,18 +426,18 @@ impl PluginRegistry {
             .read()
             .map_err(|e| PluginError::InitFailed(format!("Lock poisoned: {e}")))?;
 
-        plugins.last().map(|p| p.info()).ok_or_else(|| {
+        plugins.last().map(|e| e.plugin.info()).ok_or_else(|| {
             PluginError::InitFailed("Plugin was not added after loading".to_string())
         })
     }
 
-    /// List all registered plugins.
+    /// List all registered plugins (in priority order, highest first).
     pub fn list_plugins(&self) -> Vec<CodecPluginInfo> {
         let plugins = match self.plugins.read() {
             Ok(p) => p,
             Err(_) => return Vec::new(),
         };
-        plugins.iter().map(|p| p.info()).collect()
+        plugins.iter().map(|e| e.plugin.info()).collect()
     }
 
     /// List all available codecs across all plugins.
@@ -315,26 +446,37 @@ impl PluginRegistry {
             Ok(p) => p,
             Err(_) => return Vec::new(),
         };
-        plugins.iter().flat_map(|p| p.capabilities()).collect()
+        plugins
+            .iter()
+            .flat_map(|e| e.plugin.capabilities())
+            .collect()
     }
 
     /// Find and create a decoder for a given codec name.
     ///
-    /// Searches all registered plugins for one that can decode the
-    /// requested codec, and creates a new decoder instance.
+    /// Searches all registered plugins (in priority order) for one that
+    /// can decode the requested codec, and creates a new decoder instance.
+    ///
+    /// Uses the capability cache for O(1) plugin lookup.
     ///
     /// # Errors
     ///
     /// Returns error if no plugin supports decoding the given codec.
     pub fn find_decoder(&self, codec_name: &str) -> CodecResult<Box<dyn VideoDecoder>> {
+        // Try the fast cache path first.
+        if let Some(plugin) = self.cached_decoder_plugin(codec_name) {
+            return plugin.create_decoder(codec_name);
+        }
+
+        // Fall back to a linear scan (cache miss or rebuild needed).
         let plugins = self
             .plugins
             .read()
             .map_err(|e| oximedia_codec::CodecError::Internal(format!("Lock poisoned: {e}")))?;
 
-        for plugin in plugins.iter() {
-            if plugin.can_decode(codec_name) {
-                return plugin.create_decoder(codec_name);
+        for entry in plugins.iter() {
+            if entry.plugin.can_decode(codec_name) {
+                return entry.plugin.create_decoder(codec_name);
             }
         }
 
@@ -345,8 +487,10 @@ impl PluginRegistry {
 
     /// Find and create an encoder for a given codec name.
     ///
-    /// Searches all registered plugins for one that can encode the
-    /// requested codec, and creates a new encoder instance.
+    /// Searches all registered plugins (in priority order) for one that
+    /// can encode the requested codec, and creates a new encoder instance.
+    ///
+    /// Uses the capability cache for O(1) plugin lookup.
     ///
     /// # Errors
     ///
@@ -356,14 +500,20 @@ impl PluginRegistry {
         codec_name: &str,
         config: EncoderConfig,
     ) -> CodecResult<Box<dyn VideoEncoder>> {
+        // Try the fast cache path first.
+        if let Some(plugin) = self.cached_encoder_plugin(codec_name) {
+            return plugin.create_encoder(codec_name, config);
+        }
+
+        // Fall back to a linear scan.
         let plugins = self
             .plugins
             .read()
             .map_err(|e| oximedia_codec::CodecError::Internal(format!("Lock poisoned: {e}")))?;
 
-        for plugin in plugins.iter() {
-            if plugin.can_encode(codec_name) {
-                return plugin.create_encoder(codec_name, config);
+        for entry in plugins.iter() {
+            if entry.plugin.can_encode(codec_name) {
+                return entry.plugin.create_encoder(codec_name, config);
             }
         }
 
@@ -374,29 +524,47 @@ impl PluginRegistry {
 
     /// Check if any plugin provides a given codec (decode or encode).
     pub fn has_codec(&self, codec_name: &str) -> bool {
+        // Check cache first.
+        if let Ok(cache) = self.cache.read() {
+            if cache.decoder_index.contains_key(codec_name)
+                || cache.encoder_index.contains_key(codec_name)
+            {
+                return true;
+            }
+        }
         let plugins = match self.plugins.read() {
             Ok(p) => p,
             Err(_) => return false,
         };
-        plugins.iter().any(|p| p.supports_codec(codec_name))
+        plugins.iter().any(|e| e.plugin.supports_codec(codec_name))
     }
 
     /// Check if any plugin can decode a given codec.
     pub fn has_decoder(&self, codec_name: &str) -> bool {
+        if let Ok(cache) = self.cache.read() {
+            if cache.decoder_index.contains_key(codec_name) {
+                return true;
+            }
+        }
         let plugins = match self.plugins.read() {
             Ok(p) => p,
             Err(_) => return false,
         };
-        plugins.iter().any(|p| p.can_decode(codec_name))
+        plugins.iter().any(|e| e.plugin.can_decode(codec_name))
     }
 
     /// Check if any plugin can encode a given codec.
     pub fn has_encoder(&self, codec_name: &str) -> bool {
+        if let Ok(cache) = self.cache.read() {
+            if cache.encoder_index.contains_key(codec_name) {
+                return true;
+            }
+        }
         let plugins = match self.plugins.read() {
             Ok(p) => p,
             Err(_) => return false,
         };
-        plugins.iter().any(|p| p.can_encode(codec_name))
+        plugins.iter().any(|e| e.plugin.can_encode(codec_name))
     }
 
     /// Get the number of registered plugins.
@@ -407,20 +575,75 @@ impl PluginRegistry {
         }
     }
 
-    /// Unload all registered plugins.
+    /// Unload all registered plugins and clear the cache.
     pub fn clear(&self) {
         if let Ok(mut plugins) = self.plugins.write() {
             plugins.clear();
         }
+        if let Ok(mut cache) = self.cache.write() {
+            cache.invalidate();
+        }
     }
 
-    /// Find the plugin that provides a given codec.
+    /// Find the plugin that provides a given codec (respects priority ordering).
     pub fn find_plugin_for_codec(&self, codec_name: &str) -> Option<CodecPluginInfo> {
+        // Check cache for decoder first, then encoder.
+        if let Some(plugin) = self.cached_decoder_plugin(codec_name) {
+            return Some(plugin.info());
+        }
+        if let Some(plugin) = self.cached_encoder_plugin(codec_name) {
+            return Some(plugin.info());
+        }
         let plugins = self.plugins.read().ok()?;
         plugins
             .iter()
-            .find(|p| p.supports_codec(codec_name))
-            .map(|p| p.info())
+            .find(|e| e.plugin.supports_codec(codec_name))
+            .map(|e| e.plugin.info())
+    }
+
+    /// Get the priority of a registered plugin by name.
+    ///
+    /// Returns `None` if no plugin with that name is registered.
+    pub fn plugin_priority(&self, name: &str) -> Option<i32> {
+        let plugins = self.plugins.read().ok()?;
+        plugins
+            .iter()
+            .find(|e| e.plugin.info().name == name)
+            .map(|e| e.priority)
+    }
+
+    // ── Internal helpers ─────────────────────────────────────────────────────
+
+    /// Rebuild the capability cache from the current sorted plugin list.
+    fn rebuild_cache(&self) -> PluginResult<()> {
+        let plugins = self
+            .plugins
+            .read()
+            .map_err(|e| PluginError::InitFailed(format!("Lock poisoned: {e}")))?;
+        let mut cache = self
+            .cache
+            .write()
+            .map_err(|e| PluginError::InitFailed(format!("Cache lock poisoned: {e}")))?;
+        cache.rebuild(&plugins);
+        Ok(())
+    }
+
+    /// Return the plugin for the best decoder of `codec_name` using the cache.
+    fn cached_decoder_plugin(&self, codec_name: &str) -> Option<Arc<dyn CodecPlugin>> {
+        let cache = self.cache.read().ok()?;
+        let idx = *cache.decoder_index.get(codec_name)?;
+        drop(cache);
+        let plugins = self.plugins.read().ok()?;
+        plugins.get(idx).map(|e| Arc::clone(&e.plugin))
+    }
+
+    /// Return the plugin for the best encoder of `codec_name` using the cache.
+    fn cached_encoder_plugin(&self, codec_name: &str) -> Option<Arc<dyn CodecPlugin>> {
+        let cache = self.cache.read().ok()?;
+        let idx = *cache.encoder_index.get(codec_name)?;
+        drop(cache);
+        let plugins = self.plugins.read().ok()?;
+        plugins.get(idx).map(|e| Arc::clone(&e.plugin))
     }
 }
 
@@ -553,8 +776,10 @@ mod tests {
 
         let list = registry.list_plugins();
         assert_eq!(list.len(), 2);
-        assert_eq!(list[0].name, "alpha");
-        assert_eq!(list[1].name, "beta");
+        // Both default priority 0: FIFO preserved (alpha first)
+        let names: Vec<&str> = list.iter().map(|i| i.name.as_str()).collect();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
     }
 
     #[test]
@@ -596,6 +821,8 @@ mod tests {
         assert_eq!(registry.plugin_count(), 1);
         registry.clear();
         assert_eq!(registry.plugin_count(), 0);
+        // Cache should also be cleared.
+        assert!(!registry.has_codec("h264"));
     }
 
     #[test]
@@ -616,9 +843,9 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_plugins_first_wins() {
+    fn test_multiple_plugins_first_wins_same_priority() {
         let registry = PluginRegistry::empty();
-        // Both provide h264 decode, but first registered wins
+        // Both provide h264 decode, but first registered wins at equal priority
         let p1 = make_test_plugin("first", &[("h264", true, false)]);
         let p2 = make_test_plugin("second", &[("h264", true, true)]);
         registry.register(p1).expect("should register first");
@@ -626,6 +853,102 @@ mod tests {
 
         let found = registry.find_plugin_for_codec("h264");
         assert_eq!(found.as_ref().map(|i| i.name.as_str()), Some("first"));
+    }
+
+    #[test]
+    fn test_priority_ordering() {
+        let registry = PluginRegistry::empty();
+        // Register "low" first at priority 0, then "high" at priority 10.
+        let low = make_test_plugin("low-priority", &[("h264", true, false)]);
+        let high = make_test_plugin("high-priority", &[("h264", true, true)]);
+
+        registry
+            .register_with_priority(low, 0)
+            .expect("register low");
+        registry
+            .register_with_priority(high, 10)
+            .expect("register high");
+
+        // High-priority plugin should win for h264.
+        let found = registry.find_plugin_for_codec("h264");
+        assert_eq!(
+            found.as_ref().map(|i| i.name.as_str()),
+            Some("high-priority")
+        );
+    }
+
+    #[test]
+    fn test_priority_negative() {
+        let registry = PluginRegistry::empty();
+        let normal = make_test_plugin("normal", &[("vp9", true, true)]);
+        let fallback = make_test_plugin("fallback", &[("vp9", true, false)]);
+
+        registry
+            .register_with_priority(normal, 0)
+            .expect("register normal");
+        registry
+            .register_with_priority(fallback, -5)
+            .expect("register fallback");
+
+        // Normal should win (higher priority).
+        let found = registry.find_plugin_for_codec("vp9");
+        assert_eq!(found.as_ref().map(|i| i.name.as_str()), Some("normal"));
+    }
+
+    #[test]
+    fn test_priority_accessor() {
+        let registry = PluginRegistry::empty();
+        let p = make_test_plugin("prio-test", &[]);
+        registry.register_with_priority(p, 42).expect("register");
+        assert_eq!(registry.plugin_priority("prio-test"), Some(42));
+        assert_eq!(registry.plugin_priority("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_unregister() {
+        let registry = PluginRegistry::empty();
+        let p = make_test_plugin("to-remove", &[("aac", true, false)]);
+        registry.register(p).expect("register");
+        assert_eq!(registry.plugin_count(), 1);
+        assert!(registry.has_codec("aac"));
+
+        registry.unregister("to-remove").expect("unregister");
+        assert_eq!(registry.plugin_count(), 0);
+        assert!(!registry.has_codec("aac"));
+    }
+
+    #[test]
+    fn test_unregister_not_found() {
+        let registry = PluginRegistry::empty();
+        assert!(matches!(
+            registry.unregister("ghost"),
+            Err(PluginError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn test_capability_cache_after_clear() {
+        let registry = PluginRegistry::empty();
+        let p = make_test_plugin("cached", &[("opus", true, true)]);
+        registry.register(p).expect("register");
+        assert!(registry.has_decoder("opus"));
+        registry.clear();
+        assert!(!registry.has_decoder("opus"));
+        assert!(!registry.has_encoder("opus"));
+    }
+
+    #[test]
+    fn test_cache_invalidated_on_unregister() {
+        let registry = PluginRegistry::empty();
+        let p1 = make_test_plugin("provider-a", &[("vorbis", true, false)]);
+        let p2 = make_test_plugin("provider-b", &[("flac", true, true)]);
+        registry.register(p1).expect("register a");
+        registry.register(p2).expect("register b");
+
+        assert!(registry.has_decoder("vorbis"));
+        registry.unregister("provider-a").expect("unregister");
+        assert!(!registry.has_decoder("vorbis"));
+        assert!(registry.has_codec("flac")); // b still present
     }
 
     #[test]

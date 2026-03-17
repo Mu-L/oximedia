@@ -1,7 +1,10 @@
 //! Motion capture integration
 //!
-//! Provides motion capture integration for actor and prop tracking.
+//! Provides motion capture integration for actor and prop tracking,
+//! plus standard mocap file format parsers (BVH, C3D).
 
+pub mod bvh;
+pub mod c3d;
 pub mod integrate;
 pub mod prop;
 pub mod skeleton;

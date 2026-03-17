@@ -77,21 +77,28 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(dead_code)]
 
+use rayon::prelude::*;
+
 pub mod analysis;
+pub mod audio_scene_boundary;
 pub mod boundary;
 pub mod camera;
 pub mod camera_movement;
 pub mod classification;
 pub mod classify;
+pub mod color_continuity;
+pub mod color_histogram;
 pub mod composition;
 pub mod continuity;
 pub mod coverage;
 pub mod coverage_map;
+pub mod depth_of_field;
 pub mod detect;
 pub mod detector;
 pub mod duration;
 pub mod error;
 pub mod export;
+pub mod flash_detection;
 pub mod frame_buffer;
 pub mod framing;
 pub mod framing_guide;
@@ -100,16 +107,20 @@ pub mod metrics;
 pub mod pacing;
 pub mod pattern;
 pub mod rating;
+pub mod realtime;
 pub mod scene;
 pub mod scene_graph;
+pub mod shot_annotation;
 pub mod shot_grouping;
 pub mod shot_matching;
 pub mod shot_report;
 pub mod shot_rhythm;
+pub mod shot_similarity;
 pub mod shot_stats;
 pub mod shot_transition;
 pub mod shot_type;
 pub mod storyboard;
+pub mod temporal_fingerprint;
 pub mod transition_analysis;
 pub mod types;
 pub mod visualize;
@@ -196,6 +207,12 @@ impl ShotDetector {
 
     /// Detect shots in a sequence of frames.
     ///
+    /// The boundary detection phase runs in parallel using rayon: adjacent frame
+    /// pairs are evaluated concurrently, and the results are collected in order.
+    /// Classification and composition analysis per detected shot are then applied
+    /// sequentially because those classifiers hold interior-mutability caches that
+    /// are not `Sync`.
+    ///
     /// # Errors
     ///
     /// Returns error if frame processing fails.
@@ -204,23 +221,42 @@ impl ShotDetector {
             return Ok(Vec::new());
         }
 
-        let mut shots = Vec::new();
-        let mut shot_boundaries = vec![0]; // Start of first shot
+        let mut shot_boundaries = vec![0usize]; // Start of first shot
 
-        // Detect shot boundaries
-        if self.config.enable_cut_detection {
-            for i in 1..frames.len() {
-                let (is_cut, _score) = self.cut_detector.detect_cut(&frames[i - 1], &frames[i])?;
-                if is_cut {
-                    shot_boundaries.push(i);
+        // ── Parallel boundary detection ────────────────────────────────────────
+        // Each adjacent pair (i-1, i) is independent, so we can evaluate all
+        // pairs concurrently.  We collect a Vec<bool> (is_cut at position i)
+        // then filter the indices.
+        //
+        // Note: `CutDetector` has a `RefCell` inside and is therefore not `Sync`.
+        // We work around this by producing a *fresh* `CutDetector` per rayon
+        // task using the current (non-adaptive) threshold configuration.
+        if self.config.enable_cut_detection && frames.len() > 1 {
+            let cut_threshold = self.config.cut_threshold;
+            let is_cut_flags: Result<Vec<bool>, ShotError> = (1..frames.len())
+                .into_par_iter()
+                .map(|i| {
+                    // Create a thread-local detector with the same thresholds.
+                    let detector = detect::CutDetector::with_params(cut_threshold, 0.4, 5);
+                    let (is_cut, _score) = detector.detect_cut(&frames[i - 1], &frames[i])?;
+                    Ok(is_cut)
+                })
+                .collect();
+
+            let flags = is_cut_flags?;
+            for (idx, &cut) in flags.iter().enumerate() {
+                if cut {
+                    shot_boundaries.push(idx + 1);
                 }
             }
         }
 
         shot_boundaries.push(frames.len()); // End of last shot
 
-        // Create shots from boundaries
-        for i in 0..shot_boundaries.len() - 1 {
+        // ── Sequential classification and composition analysis ─────────────────
+        let mut shots = Vec::with_capacity(shot_boundaries.len().saturating_sub(1));
+
+        for i in 0..shot_boundaries.len().saturating_sub(1) {
             let start_frame = shot_boundaries[i];
             let end_frame = shot_boundaries[i + 1];
 

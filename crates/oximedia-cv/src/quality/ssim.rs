@@ -158,6 +158,7 @@ pub fn calculate_ssim(reference: &VideoFrame, distorted: &VideoFrame) -> CvResul
 
 /// Calculate SSIM for a single plane.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::manual_checked_ops)]
 fn calculate_plane_ssim(
     reference: &[u8],
     distorted: &[u8],
@@ -234,6 +235,7 @@ fn calculate_plane_ssim(
 
 /// Calculate local statistics within a window.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::manual_checked_ops)]
 fn calculate_local_statistics(
     reference: &[u8],
     distorted: &[u8],
@@ -459,7 +461,7 @@ fn downsample_plane(
                 }
             }
 
-            let avg = if count > 0 { (sum / count) as u8 } else { 0 };
+            let avg = sum.checked_div(count).unwrap_or(0) as u8;
 
             let dst_idx = y * dst_width + x;
             if dst_idx < dst.len() {
@@ -474,6 +476,7 @@ fn downsample_plane(
 /// Calculate SSIM with detailed component breakdown.
 ///
 /// Returns luminance, contrast, and structure components separately.
+#[allow(clippy::manual_checked_ops)]
 pub fn calculate_ssim_components(
     reference: &VideoFrame,
     distorted: &VideoFrame,
@@ -570,6 +573,7 @@ pub struct SsimComponents {
 
 /// Calculate statistics for a window.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::manual_checked_ops)]
 fn calculate_window_stats(
     reference: &[u8],
     distorted: &[u8],

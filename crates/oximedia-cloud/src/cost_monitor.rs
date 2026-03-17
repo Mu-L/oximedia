@@ -157,6 +157,114 @@ impl CostMonitor {
     }
 }
 
+// ── Cost anomaly detection ────────────────────────────────────────────────────
+
+/// A detected cost anomaly for a single day in the series.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CostAnomaly {
+    /// 0-based index in the input `daily_costs` slice.
+    pub day_index: usize,
+    /// The cost recorded on that day.
+    pub cost: f64,
+    /// How many standard deviations this cost is from the rolling mean.
+    pub deviation_sigma: f64,
+}
+
+/// Detects anomalous daily costs using a z-score threshold.
+///
+/// A day is flagged when its cost is more than `sigma_threshold` standard
+/// deviations away from the mean of all provided daily costs.
+#[derive(Debug, Clone)]
+pub struct CostAnomalyDetector {
+    /// Number of standard deviations above/below the mean that trigger a flag.
+    pub sigma_threshold: f64,
+}
+
+impl Default for CostAnomalyDetector {
+    fn default() -> Self {
+        Self {
+            sigma_threshold: 3.0,
+        }
+    }
+}
+
+impl CostAnomalyDetector {
+    /// Create a detector with the given sigma threshold.
+    #[must_use]
+    pub fn new(sigma_threshold: f64) -> Self {
+        Self { sigma_threshold }
+    }
+
+    /// Scan `daily_costs` and return the **first** anomaly found, if any.
+    ///
+    /// The mean and standard deviation are computed over the entire slice.
+    /// If fewer than two data points are provided, or the standard deviation
+    /// is zero, no anomaly can be detected and `None` is returned.
+    #[must_use]
+    pub fn detect_anomaly(&self, daily_costs: &[f64]) -> Option<CostAnomaly> {
+        if daily_costs.len() < 2 {
+            return None;
+        }
+
+        let n = daily_costs.len() as f64;
+        let mean = daily_costs.iter().sum::<f64>() / n;
+
+        let variance = daily_costs.iter().map(|c| (c - mean).powi(2)).sum::<f64>() / n;
+        let std_dev = variance.sqrt();
+
+        if std_dev == 0.0 {
+            return None;
+        }
+
+        daily_costs.iter().enumerate().find_map(|(i, &cost)| {
+            let z = (cost - mean).abs() / std_dev;
+            if z > self.sigma_threshold {
+                Some(CostAnomaly {
+                    day_index: i,
+                    cost,
+                    deviation_sigma: z,
+                })
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Return **all** anomalous days in the series.
+    #[must_use]
+    pub fn detect_all_anomalies(&self, daily_costs: &[f64]) -> Vec<CostAnomaly> {
+        if daily_costs.len() < 2 {
+            return Vec::new();
+        }
+
+        let n = daily_costs.len() as f64;
+        let mean = daily_costs.iter().sum::<f64>() / n;
+        let variance = daily_costs.iter().map(|c| (c - mean).powi(2)).sum::<f64>() / n;
+        let std_dev = variance.sqrt();
+
+        if std_dev == 0.0 {
+            return Vec::new();
+        }
+
+        daily_costs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &cost)| {
+                let z = (cost - mean).abs() / std_dev;
+                if z > self.sigma_threshold {
+                    Some(CostAnomaly {
+                        day_index: i,
+                        cost,
+                        deviation_sigma: z,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +387,69 @@ mod tests {
         monitor.record(CostEntry::new(CostCategory::Storage, 1, 50.0));
         let top = monitor.top_cost_categories(10);
         assert_eq!(top.len(), 1);
+    }
+
+    // ── CostAnomalyDetector tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_anomaly_no_data_returns_none() {
+        let detector = CostAnomalyDetector::default();
+        assert!(detector.detect_anomaly(&[]).is_none());
+        assert!(detector.detect_anomaly(&[100.0]).is_none());
+    }
+
+    #[test]
+    fn test_detect_anomaly_uniform_data_returns_none() {
+        let detector = CostAnomalyDetector::default();
+        // All values identical → std_dev = 0 → no anomaly can be detected
+        let data = vec![50.0; 10];
+        assert!(detector.detect_anomaly(&data).is_none());
+    }
+
+    #[test]
+    fn test_detect_anomaly_clear_spike() {
+        let detector = CostAnomalyDetector::default();
+        // 29 normal days at ~100, one extreme spike
+        let mut data: Vec<f64> = vec![100.0; 29];
+        data.push(10_000.0); // extreme outlier at index 29
+        let anomaly = detector
+            .detect_anomaly(&data)
+            .expect("spike must be detected");
+        assert_eq!(anomaly.day_index, 29);
+        assert!((anomaly.cost - 10_000.0).abs() < 1e-9);
+        assert!(anomaly.deviation_sigma > 3.0);
+    }
+
+    #[test]
+    fn test_detect_anomaly_sigma_threshold_respected() {
+        // Use a very high threshold so even large spikes are not flagged
+        let detector = CostAnomalyDetector::new(100.0);
+        let mut data: Vec<f64> = vec![100.0; 29];
+        data.push(10_000.0);
+        // With a 100σ threshold this spike should not trigger
+        assert!(detector.detect_anomaly(&data).is_none());
+    }
+
+    #[test]
+    fn test_detect_all_anomalies_multiple_spikes() {
+        let detector = CostAnomalyDetector::default();
+        let mut data: Vec<f64> = vec![100.0; 28];
+        data.push(9_999.0); // index 28
+        data.push(9_998.0); // index 29
+        let anomalies = detector.detect_all_anomalies(&data);
+        assert_eq!(anomalies.len(), 2, "both spikes must be flagged");
+        let indices: Vec<usize> = anomalies.iter().map(|a| a.day_index).collect();
+        assert!(indices.contains(&28));
+        assert!(indices.contains(&29));
+    }
+
+    #[test]
+    fn test_cost_anomaly_deviation_sigma_positive() {
+        let detector = CostAnomalyDetector::default();
+        let mut data: Vec<f64> = vec![100.0; 29];
+        data.push(50_000.0);
+        if let Some(anomaly) = detector.detect_anomaly(&data) {
+            assert!(anomaly.deviation_sigma > 0.0, "sigma must be positive");
+        }
     }
 }

@@ -61,7 +61,9 @@
 
 mod congestion;
 mod connection;
+pub mod connection_mode;
 mod crypto;
+pub mod hsv5;
 pub mod key_exchange;
 mod loss;
 mod monitor;
@@ -72,10 +74,14 @@ mod stream;
 
 pub use congestion::CongestionControl;
 pub use connection::SrtConnection;
+pub use connection_mode::{
+    CallerState, ConnectionMode, ListenerState, PendingConnection, RendezvousPhase, RendezvousState,
+};
 pub use crypto::{
     derive_session_key, AesContext, KeyMaterial, KeyMaterialPacket, KeySchedule, PassphraseAuth,
     SrtCryptoContext, SrtPacketBuffer,
 };
+pub use hsv5::{SrtEncryption, SrtExtensionBlock, SrtHandshake, SrtPacketType, SrtStreamConfig};
 pub use key_exchange::KeyMaterial as KmxKeyMaterial;
 pub use key_exchange::{EncryptionSession, EncryptionState, KwAlgorithm};
 pub use loss::{LossList, LossRange, ReceiveBuffer};

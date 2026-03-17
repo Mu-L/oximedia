@@ -1,18 +1,20 @@
 //! Core synchronisation primitives for `OxiMedia`.
 //!
-//! This module offers lightweight, single-threaded simulation types for
-//! synchronisation concepts, useful in non-`async` multimedia pipelines:
+//! This module offers both lightweight single-threaded simulation types and
+//! a fully thread-safe bounded channel with backpressure:
 //!
-//! - [`AtomicCounter`] – simple monotonic u64 counter
-//! - [`Semaphore`] – counting semaphore
-//! - [`SimRwLock`] – readers-writer lock simulation
-//! - [`Barrier`] – cyclic barrier
+//! - [`AtomicCounter`] – simple monotonic u64 counter (single-threaded)
+//! - [`Semaphore`] – counting semaphore (single-threaded)
+//! - [`SimRwLock`] – readers-writer lock simulation (single-threaded)
+//! - [`Barrier`] – cyclic barrier (single-threaded)
+//! - [`BoundedChannel`] – bounded MPSC channel with backpressure (thread-safe)
 //!
 //! # Note
 //!
-//! These are **logical** (non-OS) implementations intended for testing and
-//! single-threaded pipeline coordination.  For real multi-threaded use,
-//! prefer `std::sync`.
+//! The simulation types ([`AtomicCounter`], [`Semaphore`], [`SimRwLock`],
+//! [`Barrier`]) are **logical** (non-OS) implementations intended for testing
+//! and single-threaded pipeline coordination.  For real multi-threaded use,
+//! prefer `std::sync` or [`BoundedChannel`].
 //!
 //! # Example
 //!
@@ -33,6 +35,9 @@
 //! ```
 
 #![allow(dead_code)]
+
+use std::collections::VecDeque;
+use std::sync::{Arc, Condvar, Mutex};
 
 /// A simple, non-atomic counter backed by a plain `u64`.
 ///
@@ -257,6 +262,309 @@ impl Barrier {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// BoundedChannel – thread-safe bounded MPSC channel with backpressure
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Error returned by [`BoundedSender`] and [`BoundedReceiver`] operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelError {
+    /// The channel has been closed (all senders or all receivers dropped).
+    Disconnected,
+    /// The channel is currently full (only from [`BoundedSender::try_send`]).
+    Full,
+    /// The channel is currently empty (only from [`BoundedReceiver::try_recv`]).
+    Empty,
+}
+
+impl std::fmt::Display for ChannelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disconnected => write!(f, "channel disconnected"),
+            Self::Full => write!(f, "channel is full"),
+            Self::Empty => write!(f, "channel is empty"),
+        }
+    }
+}
+
+impl std::error::Error for ChannelError {}
+
+/// Shared state hidden behind an `Arc`.
+struct ChannelInner<T> {
+    queue: Mutex<ChannelState<T>>,
+    not_full: Condvar,
+    not_empty: Condvar,
+}
+
+struct ChannelState<T> {
+    buf: VecDeque<T>,
+    capacity: usize,
+    /// Number of live [`BoundedSender`] handles.
+    sender_count: usize,
+    /// Number of live [`BoundedReceiver`] handles.
+    receiver_count: usize,
+}
+
+impl<T> ChannelState<T> {
+    fn is_closed_for_send(&self) -> bool {
+        self.receiver_count == 0
+    }
+
+    fn is_closed_for_recv(&self) -> bool {
+        self.sender_count == 0 && self.buf.is_empty()
+    }
+}
+
+/// The sending half of a [`BoundedChannel`].
+///
+/// Cloneable – each clone increments the sender reference count so the channel
+/// remains open until all senders are dropped.
+///
+/// [`send`](BoundedSender::send) **blocks** when the channel is full,
+/// providing natural backpressure to the producer.
+pub struct BoundedSender<T> {
+    inner: Arc<ChannelInner<T>>,
+}
+
+impl<T> Clone for BoundedSender<T> {
+    fn clone(&self) -> Self {
+        let mut state = self.inner.queue.lock().expect("channel mutex poisoned");
+        state.sender_count += 1;
+        drop(state);
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<T> Drop for BoundedSender<T> {
+    fn drop(&mut self) {
+        let mut state = self.inner.queue.lock().expect("channel mutex poisoned");
+        state.sender_count -= 1;
+        let was_last = state.sender_count == 0;
+        drop(state);
+        if was_last {
+            // Wake any blocked receivers so they can observe the closed state.
+            self.inner.not_empty.notify_all();
+        }
+    }
+}
+
+impl<T: Send> BoundedSender<T> {
+    /// Sends `item`, **blocking** until space is available or the channel closes.
+    ///
+    /// Returns `Ok(())` on success, [`ChannelError::Disconnected`] when all
+    /// receivers have been dropped.
+    pub fn send(&self, item: T) -> Result<(), ChannelError> {
+        let mut state = self.inner.queue.lock().expect("channel mutex poisoned");
+        loop {
+            if state.is_closed_for_send() {
+                return Err(ChannelError::Disconnected);
+            }
+            if state.buf.len() < state.capacity {
+                state.buf.push_back(item);
+                drop(state);
+                self.inner.not_empty.notify_one();
+                return Ok(());
+            }
+            // Block until a slot opens (backpressure).
+            state = self
+                .inner
+                .not_full
+                .wait(state)
+                .expect("channel condvar poisoned");
+        }
+    }
+
+    /// Non-blocking variant; returns [`ChannelError::Full`] immediately if
+    /// the channel is at capacity.
+    pub fn try_send(&self, item: T) -> Result<(), ChannelError> {
+        let mut state = self.inner.queue.lock().expect("channel mutex poisoned");
+        if state.is_closed_for_send() {
+            return Err(ChannelError::Disconnected);
+        }
+        if state.buf.len() >= state.capacity {
+            return Err(ChannelError::Full);
+        }
+        state.buf.push_back(item);
+        drop(state);
+        self.inner.not_empty.notify_one();
+        Ok(())
+    }
+
+    /// Returns the number of items currently in the channel buffer.
+    pub fn len(&self) -> usize {
+        self.inner
+            .queue
+            .lock()
+            .expect("channel mutex poisoned")
+            .buf
+            .len()
+    }
+
+    /// Returns `true` when the channel buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns the channel capacity.
+    pub fn capacity(&self) -> usize {
+        self.inner
+            .queue
+            .lock()
+            .expect("channel mutex poisoned")
+            .capacity
+    }
+}
+
+/// The receiving half of a [`BoundedChannel`].
+pub struct BoundedReceiver<T> {
+    inner: Arc<ChannelInner<T>>,
+}
+
+impl<T> Clone for BoundedReceiver<T> {
+    fn clone(&self) -> Self {
+        let mut state = self.inner.queue.lock().expect("channel mutex poisoned");
+        state.receiver_count += 1;
+        drop(state);
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<T> Drop for BoundedReceiver<T> {
+    fn drop(&mut self) {
+        let mut state = self.inner.queue.lock().expect("channel mutex poisoned");
+        state.receiver_count -= 1;
+        let was_last = state.receiver_count == 0;
+        drop(state);
+        if was_last {
+            // Wake blocked senders so they can observe the closed state.
+            self.inner.not_full.notify_all();
+        }
+    }
+}
+
+impl<T: Send> BoundedReceiver<T> {
+    /// Receives an item, **blocking** until one is available or the channel closes.
+    ///
+    /// Returns `Ok(item)` on success, [`ChannelError::Disconnected`] when all
+    /// senders have been dropped **and** the buffer is empty.
+    pub fn recv(&self) -> Result<T, ChannelError> {
+        let mut state = self.inner.queue.lock().expect("channel mutex poisoned");
+        loop {
+            if let Some(item) = state.buf.pop_front() {
+                drop(state);
+                self.inner.not_full.notify_one();
+                return Ok(item);
+            }
+            if state.is_closed_for_recv() {
+                return Err(ChannelError::Disconnected);
+            }
+            state = self
+                .inner
+                .not_empty
+                .wait(state)
+                .expect("channel condvar poisoned");
+        }
+    }
+
+    /// Non-blocking variant; returns [`ChannelError::Empty`] when no item is
+    /// immediately available.
+    pub fn try_recv(&self) -> Result<T, ChannelError> {
+        let mut state = self.inner.queue.lock().expect("channel mutex poisoned");
+        if let Some(item) = state.buf.pop_front() {
+            drop(state);
+            self.inner.not_full.notify_one();
+            return Ok(item);
+        }
+        if state.is_closed_for_recv() {
+            Err(ChannelError::Disconnected)
+        } else {
+            Err(ChannelError::Empty)
+        }
+    }
+
+    /// Returns the number of items currently in the channel buffer.
+    pub fn len(&self) -> usize {
+        self.inner
+            .queue
+            .lock()
+            .expect("channel mutex poisoned")
+            .buf
+            .len()
+    }
+
+    /// Returns `true` when the channel buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A bounded MPSC channel with configurable backpressure.
+///
+/// Create with [`BoundedChannel::new`]; split into sender/receiver halves with
+/// [`into_split`](BoundedChannel::into_split).
+///
+/// # Example
+///
+/// ```
+/// use oximedia_core::sync::BoundedChannel;
+///
+/// let (tx, rx) = BoundedChannel::<u32>::new(4).into_split();
+/// tx.send(1).expect("send ok");
+/// tx.send(2).expect("send ok");
+/// assert_eq!(rx.recv().expect("recv ok"), 1);
+/// assert_eq!(rx.recv().expect("recv ok"), 2);
+/// ```
+pub struct BoundedChannel<T> {
+    inner: Arc<ChannelInner<T>>,
+}
+
+impl<T: Send> BoundedChannel<T> {
+    /// Creates a new `BoundedChannel` with the given `capacity`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is zero.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "BoundedChannel capacity must be non-zero");
+        let state = ChannelState {
+            buf: VecDeque::with_capacity(capacity),
+            capacity,
+            sender_count: 1,
+            receiver_count: 1,
+        };
+        Self {
+            inner: Arc::new(ChannelInner {
+                queue: Mutex::new(state),
+                not_full: Condvar::new(),
+                not_empty: Condvar::new(),
+            }),
+        }
+    }
+
+    /// Splits the channel into a `(BoundedSender<T>, BoundedReceiver<T>)` pair.
+    ///
+    /// Consumes `self`; the initial reference counts (set to 1 by
+    /// [`new`](Self::new)) are transferred to the returned halves.
+    pub fn into_split(self) -> (BoundedSender<T>, BoundedReceiver<T>) {
+        // Clone each half's Arc (refcount: 1 -> 3 total across inner + tx + rx).
+        let tx = BoundedSender {
+            inner: Arc::clone(&self.inner),
+        };
+        let rx = BoundedReceiver {
+            inner: Arc::clone(&self.inner),
+        };
+        // Forget `self` so its Drop does not run, leaving refcount at 2 (tx + rx).
+        // The sender_count / receiver_count remain at 1 each, which is correct.
+        std::mem::forget(self);
+        (tx, rx)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -401,5 +709,113 @@ mod tests {
     fn test_barrier_target_count() {
         let b = Barrier::new(7);
         assert_eq!(b.target_count(), 7);
+    }
+
+    // ── BoundedChannel tests ─────────────────────────────────────────────────
+
+    // 16. Basic send/recv round-trip
+    #[test]
+    fn test_bounded_channel_basic() {
+        let (tx, rx) = BoundedChannel::<i32>::new(4).into_split();
+        tx.send(10).expect("send");
+        tx.send(20).expect("send");
+        assert_eq!(rx.recv().expect("recv"), 10);
+        assert_eq!(rx.recv().expect("recv"), 20);
+    }
+
+    // 17. try_send returns Full when at capacity
+    #[test]
+    fn test_bounded_channel_try_send_full() {
+        let (tx, rx) = BoundedChannel::<i32>::new(2).into_split();
+        assert!(tx.try_send(1).is_ok());
+        assert!(tx.try_send(2).is_ok());
+        assert_eq!(tx.try_send(3), Err(ChannelError::Full));
+        // drain so the channel can close cleanly
+        rx.try_recv().expect("recv 1");
+        rx.try_recv().expect("recv 2");
+    }
+
+    // 18. try_recv returns Empty when buffer is empty
+    #[test]
+    fn test_bounded_channel_try_recv_empty() {
+        let (_tx, rx) = BoundedChannel::<i32>::new(2).into_split();
+        assert_eq!(rx.try_recv(), Err(ChannelError::Empty));
+    }
+
+    // 19. Disconnected when receiver is dropped
+    #[test]
+    fn test_bounded_channel_disconnected_on_recv_drop() {
+        let (tx, rx) = BoundedChannel::<i32>::new(2).into_split();
+        drop(rx);
+        assert_eq!(tx.try_send(1), Err(ChannelError::Disconnected));
+    }
+
+    // 20. Disconnected when sender is dropped and buffer is empty
+    #[test]
+    fn test_bounded_channel_disconnected_on_send_drop() {
+        let (tx, rx) = BoundedChannel::<i32>::new(2).into_split();
+        drop(tx);
+        assert_eq!(rx.try_recv(), Err(ChannelError::Disconnected));
+    }
+
+    // 21. After sender drop, buffered items are still readable
+    #[test]
+    fn test_bounded_channel_drain_after_sender_drop() {
+        let (tx, rx) = BoundedChannel::<i32>::new(4).into_split();
+        tx.send(7).expect("send");
+        tx.send(8).expect("send");
+        drop(tx);
+        assert_eq!(rx.recv().expect("recv"), 7);
+        assert_eq!(rx.recv().expect("recv"), 8);
+        assert_eq!(rx.recv(), Err(ChannelError::Disconnected));
+    }
+
+    // 22. len/is_empty/capacity accessors
+    #[test]
+    fn test_bounded_channel_accessors() {
+        let (tx, rx) = BoundedChannel::<u8>::new(8).into_split();
+        assert_eq!(tx.capacity(), 8);
+        assert!(tx.is_empty());
+        tx.send(1).expect("send");
+        tx.send(2).expect("send");
+        assert_eq!(tx.len(), 2);
+        assert_eq!(rx.len(), 2);
+    }
+
+    // 23. Multi-threaded producer/consumer with backpressure
+    #[test]
+    fn test_bounded_channel_threaded() {
+        use std::thread;
+        let (tx, rx) = BoundedChannel::<u32>::new(4).into_split();
+        let producer = thread::spawn(move || {
+            for i in 0..16_u32 {
+                tx.send(i).expect("send");
+            }
+        });
+        let consumer = thread::spawn(move || {
+            let mut out = Vec::with_capacity(16);
+            for _ in 0..16 {
+                out.push(rx.recv().expect("recv"));
+            }
+            out
+        });
+        producer.join().expect("producer");
+        let result = consumer.join().expect("consumer");
+        assert_eq!(result, (0..16).collect::<Vec<_>>());
+    }
+
+    // 24. Cloned sender increments reference count correctly
+    #[test]
+    fn test_bounded_channel_clone_sender() {
+        let (tx, rx) = BoundedChannel::<i32>::new(4).into_split();
+        let tx2 = tx.clone();
+        tx.send(1).expect("send");
+        tx2.send(2).expect("send");
+        drop(tx);
+        drop(tx2);
+        // Both senders dropped – receiver should see Disconnected after draining
+        assert_eq!(rx.recv().expect("recv 1"), 1);
+        assert_eq!(rx.recv().expect("recv 2"), 2);
+        assert_eq!(rx.recv(), Err(ChannelError::Disconnected));
     }
 }

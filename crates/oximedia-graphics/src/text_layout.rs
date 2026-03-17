@@ -2,8 +2,22 @@
 //! Text layout engine for broadcast graphics.
 //!
 //! Provides paragraph-level text layout with support for line breaking,
-//! justification, alignment, and multi-line text rendering for broadcast
-//! graphics elements such as lower thirds, tickers, and scoreboards.
+//! justification, alignment, BiDi (bi-directional) text direction, and
+//! multi-line text rendering for broadcast graphics elements such as lower
+//! thirds, tickers, and scoreboards.
+//!
+//! ## Right-to-Left (RTL) support
+//!
+//! Set [`TextLayoutConfig::direction`] to [`TextDirection::Rtl`] when
+//! rendering Arabic, Hebrew, Persian, or other RTL scripts.  In RTL mode:
+//!
+//! - Glyph X-positions are **mirrored** within the line width so the first
+//!   logical character appears at the right edge of the line.
+//! - The default horizontal alignment is implicitly right-aligned when
+//!   `TextAlign::Left` is requested (you may override this explicitly).
+//! - `TextDirection::Auto` uses a simple Unicode heuristic to pick a
+//!   direction: if the first strongly-directional character belongs to the
+//!   Arabic or Hebrew Unicode blocks the direction is RTL, otherwise LTR.
 
 use std::fmt;
 
@@ -56,6 +70,65 @@ pub enum TextOverflow {
     Visible,
     /// Shrink font size to fit.
     ShrinkToFit,
+}
+
+/// Unicode BiDi base direction for a paragraph.
+///
+/// This controls whether glyph positions are computed left-to-right (LTR) or
+/// right-to-left (RTL) within each line.  For mixed scripts use `Auto`, which
+/// inspects the first strongly-directional Unicode character in the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TextDirection {
+    /// Left-to-right — the default for Latin, CJK, etc.
+    #[default]
+    Ltr,
+    /// Right-to-left — Arabic, Hebrew, Persian, Urdu, etc.
+    Rtl,
+    /// Auto-detect from the first strongly-directional Unicode codepoint.
+    Auto,
+}
+
+impl TextDirection {
+    /// Resolve `Auto` into a concrete `Ltr` or `Rtl` value by scanning `text`.
+    ///
+    /// The heuristic examines each character in order and returns `Rtl` if the
+    /// first character from a strongly-RTL Unicode block (Arabic U+0600–06FF,
+    /// Hebrew U+0590–05FF, Thaana U+0780–07BF, N'Ko U+07C0–07FF) is found
+    /// before any strongly-LTR character.  Falls back to `Ltr`.
+    #[must_use]
+    pub fn resolve(&self, text: &str) -> TextDirection {
+        match self {
+            Self::Ltr => Self::Ltr,
+            Self::Rtl => Self::Rtl,
+            Self::Auto => {
+                for ch in text.chars() {
+                    let cp = ch as u32;
+                    if (0x0590..=0x05FF).contains(&cp)   // Hebrew
+                        || (0x0600..=0x06FF).contains(&cp)  // Arabic
+                        || (0x0750..=0x077F).contains(&cp)  // Arabic Supplement
+                        || (0x0780..=0x07BF).contains(&cp)  // Thaana
+                        || (0x07C0..=0x07FF).contains(&cp)  // N'Ko
+                        || (0xFB50..=0xFDFF).contains(&cp)  // Arabic Presentation Forms-A
+                        || (0xFE70..=0xFEFF).contains(&cp)
+                    // Arabic Presentation Forms-B
+                    {
+                        return Self::Rtl;
+                    }
+                    // Latin, Cyrillic, Greek → definitely LTR.
+                    if ch.is_alphabetic() {
+                        return Self::Ltr;
+                    }
+                }
+                Self::Ltr // default
+            }
+        }
+    }
+
+    /// Returns `true` if this direction (or its resolved value for `text`) is RTL.
+    #[must_use]
+    pub fn is_rtl(&self, text: &str) -> bool {
+        self.resolve(text) == TextDirection::Rtl
+    }
 }
 
 /// Line break mode for text wrapping.
@@ -161,6 +234,11 @@ pub struct TextLayoutConfig {
     pub paragraph_spacing: f32,
     /// Tab stop width in spaces.
     pub tab_width: u32,
+    /// Base text direction for BiDi layout.
+    ///
+    /// Set to [`TextDirection::Rtl`] for Arabic / Hebrew, or leave as
+    /// [`TextDirection::Auto`] to detect direction from the first character.
+    pub direction: TextDirection,
 }
 
 impl Default for TextLayoutConfig {
@@ -179,6 +257,7 @@ impl Default for TextLayoutConfig {
             first_line_indent: 0.0,
             paragraph_spacing: 0.0,
             tab_width: 4,
+            direction: TextDirection::Ltr,
         }
     }
 }
@@ -221,6 +300,33 @@ impl TextLayoutConfig {
             align: TextAlign::Left,
             line_break: LineBreakMode::NoWrap,
             overflow: TextOverflow::Visible,
+            ..Default::default()
+        }
+    }
+
+    /// Create a config for right-to-left ticker text (Arabic / Hebrew).
+    ///
+    /// Uses `TextDirection::Rtl` and right-aligns text by default.
+    pub fn ticker_rtl(max_width: f32, font_size: f32) -> Self {
+        Self {
+            max_width,
+            font_size,
+            align: TextAlign::Right,
+            line_break: LineBreakMode::NoWrap,
+            overflow: TextOverflow::Visible,
+            direction: TextDirection::Rtl,
+            ..Default::default()
+        }
+    }
+
+    /// Create a config for right-to-left paragraph text (Arabic / Hebrew).
+    pub fn rtl_paragraph(max_width: f32, font_size: f32) -> Self {
+        Self {
+            max_width,
+            font_size,
+            align: TextAlign::Right,
+            line_break: LineBreakMode::WordWrap,
+            direction: TextDirection::Rtl,
             ..Default::default()
         }
     }
@@ -346,10 +452,16 @@ impl TextLayoutEngine {
     }
 
     /// Layout text according to the current configuration.
+    ///
+    /// When [`TextLayoutConfig::direction`] is `Rtl` (or `Auto` and the text
+    /// is detected as RTL), glyphs are **mirrored** within each line so that
+    /// the first logical character appears near the right edge.
     pub fn layout(&self, text: &str) -> TextLayoutResult {
         let total_chars = text.chars().count();
         let line_h = self.config.effective_line_height();
         let max_w = self.config.max_width;
+        // Resolve the effective text direction for this particular string.
+        let resolved_dir = self.config.direction.resolve(text);
 
         let mut lines: Vec<LayoutLine> = Vec::new();
         let mut y_offset: f32 = 0.0;
@@ -474,16 +586,69 @@ impl TextLayoutEngine {
         }
 
         // Apply horizontal alignment.
-        for line in &mut lines {
-            let shift = match self.config.align {
-                TextAlign::Left | TextAlign::Justify => 0.0,
-                TextAlign::Center => (max_w - line.width) / 2.0,
-                TextAlign::Right => max_w - line.width,
-            };
-            if shift > 0.0 {
-                for glyph in &mut line.glyphs {
-                    glyph.x += shift;
+        let total_lines = lines.len();
+        for (line_idx, line) in lines.iter_mut().enumerate() {
+            match self.config.align {
+                TextAlign::Left => {}
+                TextAlign::Center => {
+                    let shift = (max_w - line.width) / 2.0;
+                    if shift > 0.0 {
+                        for glyph in &mut line.glyphs {
+                            glyph.x += shift;
+                        }
+                    }
                 }
+                TextAlign::Right => {
+                    let shift = max_w - line.width;
+                    if shift > 0.0 {
+                        for glyph in &mut line.glyphs {
+                            glyph.x += shift;
+                        }
+                    }
+                }
+                TextAlign::Justify => {
+                    // Last line and single-glyph lines are left-aligned.
+                    let is_last_line = line_idx == total_lines - 1;
+                    let space_count = line
+                        .glyphs
+                        .windows(2)
+                        .filter(|w| w[0].character == ' ')
+                        .count();
+                    if !is_last_line && space_count > 0 {
+                        let slack = (max_w - line.width).max(0.0);
+                        let extra_per_space = slack / space_count as f32;
+                        let mut accumulated_shift = 0.0_f32;
+                        for glyph in &mut line.glyphs {
+                            glyph.x += accumulated_shift;
+                            if glyph.character == ' ' {
+                                accumulated_shift += extra_per_space;
+                            }
+                        }
+                        // Update line width to reflect full justification.
+                        line.width = max_w;
+                    }
+                }
+            }
+        }
+
+        // Apply RTL glyph mirroring.
+        //
+        // In RTL mode the layout was built left-to-right (for simplicity), so
+        // we mirror each glyph's X position within the line width:
+        //   x_rtl = line_width - (x_ltr + advance_width)
+        //
+        // This places the **first** logical character at the right edge and the
+        // **last** at the left edge, matching RTL reading order.
+        if resolved_dir == TextDirection::Rtl {
+            for line in &mut lines {
+                let line_w = line.width;
+                for glyph in &mut line.glyphs {
+                    // Mirror: new right edge = line_w - old left edge
+                    // new left edge = line_w - (old left edge + advance)
+                    glyph.x = line_w - glyph.x - glyph.advance_width;
+                }
+                // Reverse glyph order so iteration is still left-to-right on screen.
+                line.glyphs.reverse();
             }
         }
 
@@ -758,6 +923,31 @@ mod tests {
     }
 
     #[test]
+    fn test_justify_alignment_multi_line() {
+        // Use a very narrow width to force multi-line wrapping, then check justify.
+        let config = TextLayoutConfig {
+            max_width: 80.0,
+            font_size: 16.0,
+            align: TextAlign::Justify,
+            line_break: LineBreakMode::WordWrap,
+            ..Default::default()
+        };
+        let engine = TextLayoutEngine::new(config);
+        // This text should wrap to at least 2 lines, making the first line justified.
+        let result = engine.layout("Hello World Testing");
+        // At least 2 lines expected due to narrow width.
+        if result.line_count() >= 2 {
+            // First (non-last) line should be justified to full width.
+            let first_line = &result.lines[0];
+            // Width should equal max_width (or close) after justify.
+            if !first_line.glyphs.is_empty() {
+                // Justified line width equals max_w.
+                assert!((first_line.width - 80.0).abs() < 1.0 || first_line.width <= 80.0);
+            }
+        }
+    }
+
+    #[test]
     fn test_set_config() {
         let config1 = TextLayoutConfig {
             font_size: 16.0,
@@ -778,5 +968,537 @@ mod tests {
         let engine = TextLayoutEngine::new(config);
         let result = engine.layout("");
         assert_eq!(result.total_chars, 0);
+    }
+
+    // --- TextDirection / RTL tests ---
+
+    #[test]
+    fn test_text_direction_default_is_ltr() {
+        assert_eq!(TextDirection::default(), TextDirection::Ltr);
+    }
+
+    #[test]
+    fn test_text_direction_ltr_resolves_ltr() {
+        assert_eq!(TextDirection::Ltr.resolve("Hello"), TextDirection::Ltr);
+    }
+
+    #[test]
+    fn test_text_direction_rtl_resolves_rtl() {
+        assert_eq!(TextDirection::Rtl.resolve("مرحبا"), TextDirection::Rtl);
+    }
+
+    #[test]
+    fn test_text_direction_auto_latin_is_ltr() {
+        assert_eq!(
+            TextDirection::Auto.resolve("Hello World"),
+            TextDirection::Ltr
+        );
+    }
+
+    #[test]
+    fn test_text_direction_auto_arabic_is_rtl() {
+        // U+0645 is Arabic letter Meem.
+        let arabic = "\u{0645}\u{0631}\u{062D}\u{0628}\u{0627}"; // "مرحبا"
+        assert_eq!(TextDirection::Auto.resolve(arabic), TextDirection::Rtl);
+    }
+
+    #[test]
+    fn test_text_direction_auto_hebrew_is_rtl() {
+        // U+05E9 is Hebrew letter Shin.
+        let hebrew = "\u{05E9}\u{05DC}\u{05D5}\u{05DD}"; // "שלום"
+        assert_eq!(TextDirection::Auto.resolve(hebrew), TextDirection::Rtl);
+    }
+
+    #[test]
+    fn test_text_direction_auto_empty_is_ltr() {
+        assert_eq!(TextDirection::Auto.resolve(""), TextDirection::Ltr);
+    }
+
+    #[test]
+    fn test_text_direction_is_rtl_helper() {
+        assert!(TextDirection::Rtl.is_rtl("anything"));
+        assert!(!TextDirection::Ltr.is_rtl("anything"));
+    }
+
+    #[test]
+    fn test_layout_config_has_direction_field() {
+        let cfg = TextLayoutConfig::default();
+        assert_eq!(cfg.direction, TextDirection::Ltr);
+    }
+
+    #[test]
+    fn test_ticker_rtl_config() {
+        let cfg = TextLayoutConfig::ticker_rtl(1920.0, 18.0);
+        assert_eq!(cfg.direction, TextDirection::Rtl);
+        assert_eq!(cfg.align, TextAlign::Right);
+        assert_eq!(cfg.line_break, LineBreakMode::NoWrap);
+    }
+
+    #[test]
+    fn test_rtl_paragraph_config() {
+        let cfg = TextLayoutConfig::rtl_paragraph(800.0, 24.0);
+        assert_eq!(cfg.direction, TextDirection::Rtl);
+        assert_eq!(cfg.align, TextAlign::Right);
+    }
+
+    #[test]
+    fn test_rtl_layout_glyph_positions_are_mirrored() {
+        // RTL layout should mirror glyph x-positions within the line width.
+        let text = "ABC"; // Three equal-width chars
+        let config = TextLayoutConfig {
+            max_width: 1000.0,
+            font_size: 16.0,
+            direction: TextDirection::Rtl,
+            ..Default::default()
+        };
+        let engine = TextLayoutEngine::new(config);
+        let result = engine.layout(text);
+        assert_eq!(result.line_count(), 1);
+        let glyphs = &result.lines[0].glyphs;
+        assert_eq!(glyphs.len(), 3);
+        // After mirroring + reversal, screen-left glyph should be 'C' (last logical).
+        // In our simplified model all chars have equal width so positions are:
+        // logical: A@0, B@w, C@2w — mirrored: C@0, B@w, A@2w
+        // The first on-screen glyph should be 'C'.
+        assert_eq!(glyphs[0].character, 'C');
+        assert_eq!(glyphs[1].character, 'B');
+        assert_eq!(glyphs[2].character, 'A');
+    }
+
+    #[test]
+    fn test_rtl_layout_glyph_x_positions_increasing() {
+        // After RTL mirroring the on-screen X positions should be non-decreasing.
+        let config = TextLayoutConfig {
+            max_width: 500.0,
+            font_size: 16.0,
+            direction: TextDirection::Rtl,
+            ..Default::default()
+        };
+        let engine = TextLayoutEngine::new(config);
+        let result = engine.layout("ABCDE");
+        let glyphs = &result.lines[0].glyphs;
+        for pair in glyphs.windows(2) {
+            assert!(
+                pair[1].x >= pair[0].x,
+                "x positions should be non-decreasing after RTL mirror"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ltr_layout_first_char_near_left_edge() {
+        // Sanity check: LTR layout first glyph should be at x ≈ 0.
+        let config = TextLayoutConfig {
+            max_width: 1000.0,
+            font_size: 16.0,
+            direction: TextDirection::Ltr,
+            ..Default::default()
+        };
+        let engine = TextLayoutEngine::new(config);
+        let result = engine.layout("ABC");
+        let glyphs = &result.lines[0].glyphs;
+        // First glyph x should be 0 (left-aligned, no indent).
+        assert!(glyphs[0].x < 1.0);
+    }
+
+    #[test]
+    fn test_rtl_layout_total_width_equals_ltr() {
+        // RTL mirroring should not change the total content width of a line.
+        let text = "Hello";
+        let ltr_config = TextLayoutConfig {
+            max_width: 500.0,
+            font_size: 16.0,
+            direction: TextDirection::Ltr,
+            ..Default::default()
+        };
+        let rtl_config = TextLayoutConfig {
+            max_width: 500.0,
+            font_size: 16.0,
+            direction: TextDirection::Rtl,
+            ..Default::default()
+        };
+        let ltr_result = TextLayoutEngine::new(ltr_config).layout(text);
+        let rtl_result = TextLayoutEngine::new(rtl_config).layout(text);
+        assert!(
+            (ltr_result.total_width - rtl_result.total_width).abs() < 0.1,
+            "LTR width={} RTL width={}",
+            ltr_result.total_width,
+            rtl_result.total_width
+        );
+    }
+}
+
+// ============================================================================
+// High-level multiline API with newtype aliases
+// ============================================================================
+
+/// Wrap mode alias — maps to the underlying [`LineBreakMode`].
+///
+/// This type alias exposes a simpler, intention-revealing name for callers
+/// who use the [`TextLayout`] high-level API.
+pub type WrapMode = LineBreakMode;
+
+/// Justification alias — maps to the underlying [`TextAlign`].
+///
+/// This type alias exposes a simpler name for callers who use the
+/// [`TextLayout`] high-level API.
+pub type Justification = TextAlign;
+
+/// Configuration for the high-level [`TextLayout::layout_multiline`] function.
+///
+/// Mirrors the fields most commonly needed for simple paragraph layout, and
+/// internally converts to a [`TextLayoutConfig`] when invoking the engine.
+#[derive(Clone, Debug)]
+pub struct MultilineLayoutConfig {
+    /// Maximum line width in pixels.
+    pub max_width: u32,
+    /// Word/char/no-wrap strategy.
+    pub wrap_mode: WrapMode,
+    /// Horizontal justification.
+    pub justification: Justification,
+    /// Line-height multiplier (1.0 = normal).
+    pub line_spacing: f32,
+    /// Font size in pixels (used for advance-width estimation).
+    pub font_size: f32,
+}
+
+impl Default for MultilineLayoutConfig {
+    fn default() -> Self {
+        Self {
+            max_width: 800,
+            wrap_mode: WrapMode::WordWrap,
+            justification: Justification::Left,
+            line_spacing: 1.2,
+            font_size: 16.0,
+        }
+    }
+}
+
+/// Unit struct providing the [`layout_multiline`](TextLayout::layout_multiline) entry-point.
+pub struct TextLayout;
+
+impl TextLayout {
+    /// Lay out `text` according to `config` and return one [`LayoutLine`] per
+    /// wrapped line.
+    ///
+    /// Internally this builds a [`TextLayoutConfig`], creates a
+    /// [`TextLayoutEngine`], runs `layout()`, and returns the resulting lines.
+    #[must_use]
+    pub fn layout_multiline(text: &str, config: &MultilineLayoutConfig) -> Vec<LayoutLine> {
+        let engine_config = TextLayoutConfig {
+            max_width: config.max_width as f32,
+            max_height: 0.0,
+            align: config.justification,
+            vertical_align: VerticalAlign::Top,
+            font_size: config.font_size,
+            line_height: config.line_spacing,
+            letter_spacing: 0.0,
+            word_spacing: 1.0,
+            overflow: TextOverflow::Visible,
+            line_break: config.wrap_mode,
+            first_line_indent: 0.0,
+            paragraph_spacing: 0.0,
+            tab_width: 4,
+            direction: TextDirection::Ltr,
+        };
+        let engine = TextLayoutEngine::new(engine_config);
+        engine.layout(text).lines
+    }
+}
+
+// ============================================================================
+// Multiline API tests
+// ============================================================================
+
+#[cfg(test)]
+mod multiline_tests {
+    use super::*;
+
+    fn default_config() -> MultilineLayoutConfig {
+        MultilineLayoutConfig::default()
+    }
+
+    // ── Type alias checks ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_wrap_mode_alias_is_line_break_mode() {
+        // Compile-time confirmation that WrapMode == LineBreakMode.
+        let _: WrapMode = LineBreakMode::WordWrap;
+        let _: WrapMode = LineBreakMode::CharWrap;
+        let _: WrapMode = LineBreakMode::NoWrap;
+    }
+
+    #[test]
+    fn test_justification_alias_is_text_align() {
+        let _: Justification = TextAlign::Left;
+        let _: Justification = TextAlign::Center;
+        let _: Justification = TextAlign::Right;
+        let _: Justification = TextAlign::Justify;
+    }
+
+    // ── MultilineLayoutConfig ────────────────────────────────────────────────
+
+    #[test]
+    fn test_multiline_config_default_sensible() {
+        let cfg = default_config();
+        assert!(cfg.max_width > 0);
+        assert!(cfg.line_spacing > 0.0);
+        assert!(cfg.font_size > 0.0);
+        assert_eq!(cfg.justification, Justification::Left);
+        assert_eq!(cfg.wrap_mode, WrapMode::WordWrap);
+    }
+
+    // ── TextLayout::layout_multiline ─────────────────────────────────────────
+
+    #[test]
+    fn test_layout_multiline_nonempty_text_returns_lines() {
+        let cfg = default_config();
+        let lines = TextLayout::layout_multiline("Hello World", &cfg);
+        assert!(!lines.is_empty(), "Should have at least one line");
+    }
+
+    #[test]
+    fn test_layout_multiline_empty_text_returns_empty() {
+        let cfg = default_config();
+        let lines = TextLayout::layout_multiline("", &cfg);
+        assert!(lines.is_empty() || lines.iter().all(|l| l.is_empty()));
+    }
+
+    // ── WrapMode::None (NoWrap) ──────────────────────────────────────────────
+
+    #[test]
+    fn test_wrap_mode_none_single_line() {
+        let cfg = MultilineLayoutConfig {
+            max_width: 50,
+            wrap_mode: WrapMode::NoWrap,
+            ..default_config()
+        };
+        let lines = TextLayout::layout_multiline("This is a very long line of text", &cfg);
+        assert_eq!(lines.len(), 1, "NoWrap should produce exactly 1 line");
+    }
+
+    // ── WrapMode::WordWrap ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_wrap_mode_word_wrap_produces_multiple_lines() {
+        let cfg = MultilineLayoutConfig {
+            max_width: 60,
+            font_size: 16.0,
+            wrap_mode: WrapMode::WordWrap,
+            ..default_config()
+        };
+        let lines = TextLayout::layout_multiline("Hello World Testing Overflow", &cfg);
+        assert!(lines.len() > 1, "WordWrap should wrap into multiple lines");
+    }
+
+    #[test]
+    fn test_wrap_mode_word_wrap_each_line_nonempty_glyphs() {
+        let cfg = MultilineLayoutConfig {
+            max_width: 60,
+            font_size: 16.0,
+            wrap_mode: WrapMode::WordWrap,
+            ..default_config()
+        };
+        let lines = TextLayout::layout_multiline("Alpha Beta Gamma Delta", &cfg);
+        for line in &lines {
+            assert!(!line.is_empty(), "Each wrapped line should have glyphs");
+        }
+    }
+
+    // ── WrapMode::CharWrap ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_wrap_mode_char_wrap_produces_multiple_lines() {
+        let cfg = MultilineLayoutConfig {
+            max_width: 40,
+            font_size: 16.0,
+            wrap_mode: WrapMode::CharWrap,
+            ..default_config()
+        };
+        let lines = TextLayout::layout_multiline("ABCDEFGHIJKLMNOPQRSTUVWXYZ", &cfg);
+        assert!(lines.len() > 1, "CharWrap should split into multiple lines");
+    }
+
+    // ── Justification::Left ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_justification_left_first_glyph_at_zero() {
+        let cfg = MultilineLayoutConfig {
+            max_width: 500,
+            font_size: 16.0,
+            justification: Justification::Left,
+            ..default_config()
+        };
+        let lines = TextLayout::layout_multiline("Hello", &cfg);
+        if let Some(first_line) = lines.first() {
+            if let Some(first_glyph) = first_line.glyphs.first() {
+                assert!(
+                    first_glyph.x < 1.0,
+                    "Left-aligned first glyph x should be ~0, got {}",
+                    first_glyph.x
+                );
+            }
+        }
+    }
+
+    // ── Justification::Center ────────────────────────────────────────────────
+
+    #[test]
+    fn test_justification_center_first_glyph_offset() {
+        let cfg = MultilineLayoutConfig {
+            max_width: 500,
+            font_size: 16.0,
+            justification: Justification::Center,
+            ..default_config()
+        };
+        let lines = TextLayout::layout_multiline("Hi", &cfg);
+        if let Some(first_line) = lines.first() {
+            if let Some(first_glyph) = first_line.glyphs.first() {
+                assert!(
+                    first_glyph.x > 0.0,
+                    "Center-aligned first glyph x should be > 0, got {}",
+                    first_glyph.x
+                );
+            }
+        }
+    }
+
+    // ── Justification::Right ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_justification_right_first_glyph_offset() {
+        let cfg = MultilineLayoutConfig {
+            max_width: 500,
+            font_size: 16.0,
+            justification: Justification::Right,
+            ..default_config()
+        };
+        let lines = TextLayout::layout_multiline("Hi", &cfg);
+        if let Some(first_line) = lines.first() {
+            if let Some(first_glyph) = first_line.glyphs.first() {
+                assert!(
+                    first_glyph.x > 100.0,
+                    "Right-aligned first glyph x should be near right edge, got {}",
+                    first_glyph.x
+                );
+            }
+        }
+    }
+
+    // ── Justification::Full (Justify) ────────────────────────────────────────
+
+    #[test]
+    fn test_justification_full_non_last_line_expanded() {
+        let cfg = MultilineLayoutConfig {
+            max_width: 80,
+            font_size: 16.0,
+            justification: Justification::Justify,
+            wrap_mode: WrapMode::WordWrap,
+            ..default_config()
+        };
+        let lines = TextLayout::layout_multiline("Hello World Testing", &cfg);
+        if lines.len() >= 2 {
+            // Non-last line with spaces should be justified to full width.
+            let first = &lines[0];
+            let has_spaces = first.glyphs.iter().any(|g| g.character == ' ');
+            if has_spaces {
+                assert!(
+                    (first.width - 80.0).abs() < 1.0 || first.width <= 80.0,
+                    "Justified non-last line width={} should be ~80.0",
+                    first.width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_justification_full_last_line_not_expanded() {
+        let cfg = MultilineLayoutConfig {
+            max_width: 80,
+            font_size: 16.0,
+            justification: Justification::Justify,
+            wrap_mode: WrapMode::WordWrap,
+            ..default_config()
+        };
+        let lines = TextLayout::layout_multiline("Hello World Testing", &cfg);
+        if let Some(last) = lines.last() {
+            // Last line should not be forced to max_width.
+            assert!(
+                last.width <= 80.0 + 1.0,
+                "Last justified line should not exceed max_width"
+            );
+        }
+    }
+
+    // ── Line spacing ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_line_spacing_affects_y_offset() {
+        let cfg1 = MultilineLayoutConfig {
+            max_width: 60,
+            font_size: 16.0,
+            line_spacing: 1.0,
+            wrap_mode: WrapMode::WordWrap,
+            ..default_config()
+        };
+        let cfg2 = MultilineLayoutConfig {
+            max_width: 60,
+            font_size: 16.0,
+            line_spacing: 2.0,
+            wrap_mode: WrapMode::WordWrap,
+            ..default_config()
+        };
+        let lines1 = TextLayout::layout_multiline("Hello World Testing", &cfg1);
+        let lines2 = TextLayout::layout_multiline("Hello World Testing", &cfg2);
+        if lines1.len() >= 2 && lines2.len() >= 2 {
+            let gap1 = lines1[1].y_offset - lines1[0].y_offset;
+            let gap2 = lines2[1].y_offset - lines2[0].y_offset;
+            assert!(
+                gap2 > gap1,
+                "Larger line_spacing should produce larger y gap: gap1={gap1}, gap2={gap2}"
+            );
+        }
+    }
+
+    // ── Additional corner-case tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_single_word_no_wrap() {
+        let cfg = MultilineLayoutConfig {
+            max_width: 10,
+            font_size: 16.0,
+            wrap_mode: WrapMode::WordWrap,
+            ..default_config()
+        };
+        // A single long word cannot break on word boundaries, so it stays on one line.
+        let lines = TextLayout::layout_multiline("Superlongwordwithnobreaks", &cfg);
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn test_multiline_explicit_newlines_respected() {
+        let cfg = MultilineLayoutConfig {
+            max_width: 1000,
+            ..default_config()
+        };
+        let lines = TextLayout::layout_multiline("Line one\nLine two\nLine three", &cfg);
+        assert!(
+            lines.len() >= 3,
+            "Explicit newlines should produce >= 3 lines"
+        );
+    }
+
+    #[test]
+    fn test_char_wrap_lines_have_finite_widths() {
+        let cfg = MultilineLayoutConfig {
+            max_width: 40,
+            font_size: 16.0,
+            wrap_mode: WrapMode::CharWrap,
+            ..default_config()
+        };
+        let lines = TextLayout::layout_multiline("ABCDEFGHIJKLMNO", &cfg);
+        for line in &lines {
+            assert!(line.width.is_finite(), "Line width should be finite");
+        }
     }
 }

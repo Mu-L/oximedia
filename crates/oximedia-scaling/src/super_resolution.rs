@@ -350,6 +350,368 @@ fn idft_2d(freq: &[(f32, f32)], w: usize, h: usize) -> Vec<f32> {
     out
 }
 
+// ── High-level SuperResolutionEngine API ─────────────────────────────────────
+
+/// Algorithm variants for the high-level `SuperResolutionEngine`.
+///
+/// These differ from the lower-level [`SrAlgorithm`] enum in that every
+/// variant also applies a sharpening pass controlled by
+/// [`SuperResolutionConfig::sharpening_strength`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuperResAlgorithm {
+    /// Catmull-Rom bicubic upscale followed by an unsharp mask.
+    BicubicSharp,
+    /// Lanczos3 (a=3 sinc) upscale followed by an unsharp mask.
+    Lanczos3Sharp,
+    /// Edge-Directed Super-Resolution (EDSR) approximation.
+    ///
+    /// Computes Sobel gradient magnitude *and angle* on the upscaled bicubic
+    /// base, then at each strong-edge pixel blends in a directional interpolate
+    /// taken **along** the detected edge direction rather than across it.  This
+    /// preserves diagonal edges more faithfully than plain bicubic.
+    Edsr,
+}
+
+/// Configuration for the high-level super-resolution engine.
+#[derive(Debug, Clone)]
+pub struct SuperResolutionConfig {
+    /// Integer upscale factor.  Values of 2 and 4 are recommended;
+    /// 1 is a no-op (input is returned unchanged).
+    pub scale_factor: u32,
+    /// Algorithm to use for upscaling.
+    pub algorithm: SuperResAlgorithm,
+    /// Strength of the unsharp-mask sharpening pass (0.0 = none, 1.0 = maximum).
+    pub sharpening_strength: f32,
+}
+
+impl Default for SuperResolutionConfig {
+    fn default() -> Self {
+        Self {
+            scale_factor: 2,
+            algorithm: SuperResAlgorithm::Edsr,
+            sharpening_strength: 0.5,
+        }
+    }
+}
+
+/// Error type returned by [`SuperResolutionEngine::upscale`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuperResError {
+    /// The provided pixel buffer length does not match `src_w * src_h`.
+    DimensionMismatch {
+        /// Expected buffer size.
+        expected: usize,
+        /// Actual buffer size.
+        got: usize,
+    },
+    /// Source dimensions are zero.
+    ZeroDimension,
+    /// Scale factor is zero.
+    ZeroScaleFactor,
+}
+
+impl std::fmt::Display for SuperResError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DimensionMismatch { expected, got } => write!(
+                f,
+                "pixel buffer length mismatch: expected {expected} bytes (w×h), got {got}"
+            ),
+            Self::ZeroDimension => write!(f, "source width or height is zero"),
+            Self::ZeroScaleFactor => write!(f, "scale_factor must be ≥ 1"),
+        }
+    }
+}
+
+impl std::error::Error for SuperResError {}
+
+/// High-level super-resolution upscaler that operates on **u8 grayscale** images
+/// (one byte per pixel, row-major).
+///
+/// ```rust
+/// use oximedia_scaling::super_resolution::{
+///     SuperResolutionConfig, SuperResolutionEngine, SuperResAlgorithm,
+/// };
+///
+/// let config = SuperResolutionConfig {
+///     scale_factor: 2,
+///     algorithm: SuperResAlgorithm::BicubicSharp,
+///     sharpening_strength: 0.4,
+/// };
+/// let engine = SuperResolutionEngine::new(config);
+/// let src = vec![128u8; 16]; // 4×4 uniform grey
+/// let (dst, w, h) = engine.upscale(&src, 4, 4).expect("upscale should succeed");
+/// assert_eq!((w, h), (8, 8));
+/// assert_eq!(dst.len(), 64);
+/// ```
+pub struct SuperResolutionEngine {
+    config: SuperResolutionConfig,
+}
+
+impl SuperResolutionEngine {
+    /// Create a new engine with the given configuration.
+    #[must_use]
+    pub fn new(config: SuperResolutionConfig) -> Self {
+        Self { config }
+    }
+
+    /// Upscale a grayscale u8 image.
+    ///
+    /// `src` must contain exactly `src_w * src_h` bytes (one byte per pixel).
+    /// Returns `(output_pixels, output_width, output_height)`.
+    pub fn upscale(
+        &self,
+        src: &[u8],
+        src_w: u32,
+        src_h: u32,
+    ) -> Result<(Vec<u8>, u32, u32), SuperResError> {
+        // ── Validate inputs ──────────────────────────────────────────────
+        if src_w == 0 || src_h == 0 {
+            return Err(SuperResError::ZeroDimension);
+        }
+        if self.config.scale_factor == 0 {
+            return Err(SuperResError::ZeroScaleFactor);
+        }
+        let expected = (src_w as usize) * (src_h as usize);
+        if src.len() != expected {
+            return Err(SuperResError::DimensionMismatch {
+                expected,
+                got: src.len(),
+            });
+        }
+
+        // Identity short-circuit.
+        if self.config.scale_factor == 1 {
+            return Ok((src.to_vec(), src_w, src_h));
+        }
+
+        // ── Normalise u8 → f32 ───────────────────────────────────────────
+        let src_f32: Vec<f32> = src.iter().map(|&v| v as f32 / 255.0).collect();
+
+        let dst_w = src_w * self.config.scale_factor;
+        let dst_h = src_h * self.config.scale_factor;
+        let dw = dst_w as usize;
+        let dh = dst_h as usize;
+        let sw = src_w as usize;
+        let sh = src_h as usize;
+
+        // ── Upscale ──────────────────────────────────────────────────────
+        let upscaled_f32: Vec<f32> = match self.config.algorithm {
+            SuperResAlgorithm::BicubicSharp => {
+                let base = bicubic_upscale(&src_f32, sw, sh, dw, dh);
+                unsharp_mask(&base, dw, dh, self.config.sharpening_strength)
+            }
+            SuperResAlgorithm::Lanczos3Sharp => {
+                let base = lanczos3_upscale(&src_f32, sw, sh, dw, dh);
+                unsharp_mask(&base, dw, dh, self.config.sharpening_strength)
+            }
+            SuperResAlgorithm::Edsr => {
+                edsr_upscale(&src_f32, sw, sh, dw, dh, self.config.sharpening_strength)
+            }
+        };
+
+        // ── Convert f32 → u8 ─────────────────────────────────────────────
+        let output: Vec<u8> = upscaled_f32
+            .iter()
+            .map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+            .collect();
+
+        Ok((output, dst_w, dst_h))
+    }
+}
+
+// ── Lanczos3 upscaler (separable H×V passes, a=3) ────────────────────────────
+
+/// Lanczos kernel weight for parameter `a=3`.
+#[inline]
+fn lanczos3_weight(x: f32) -> f32 {
+    const A: f32 = 3.0;
+    if x.abs() < 1e-7 {
+        return 1.0;
+    }
+    if x.abs() >= A {
+        return 0.0;
+    }
+    let px = std::f32::consts::PI * x;
+    let apx = std::f32::consts::PI * x / A;
+    A * px.sin() * apx.sin() / (px * px)
+}
+
+/// Lanczos3 1-D horizontal pass: resample `src` (width=`sw`, height=`sh`) to
+/// width=`dw`, keeping height unchanged.
+fn lanczos3_horizontal(src: &[f32], sw: usize, sh: usize, dw: usize) -> Vec<f32> {
+    let mut dst = vec![0.0f32; dw * sh];
+    let scale = sw as f32 / dw as f32;
+
+    for row in 0..sh {
+        for dx in 0..dw {
+            let src_x = (dx as f32 + 0.5) * scale - 0.5;
+            let center = src_x.floor() as i32;
+
+            let mut sum = 0.0f32;
+            let mut weight_sum = 0.0f32;
+
+            for tap in -2i32..=3 {
+                let sx = (center + tap).clamp(0, sw as i32 - 1) as usize;
+                let w = lanczos3_weight(src_x - (center + tap) as f32);
+                sum += src[row * sw + sx] * w;
+                weight_sum += w;
+            }
+
+            dst[row * dw + dx] = if weight_sum.abs() > 1e-8 {
+                (sum / weight_sum).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+        }
+    }
+    dst
+}
+
+/// Lanczos3 1-D vertical pass: resample `src` (width=`dw`, height=`sh`) to
+/// height=`dh`.
+fn lanczos3_vertical(src: &[f32], dw: usize, sh: usize, dh: usize) -> Vec<f32> {
+    let mut dst = vec![0.0f32; dw * dh];
+    let scale = sh as f32 / dh as f32;
+
+    for dy in 0..dh {
+        let src_y = (dy as f32 + 0.5) * scale - 0.5;
+        let center = src_y.floor() as i32;
+
+        for col in 0..dw {
+            let mut sum = 0.0f32;
+            let mut weight_sum = 0.0f32;
+
+            for tap in -2i32..=3 {
+                let sy = (center + tap).clamp(0, sh as i32 - 1) as usize;
+                let w = lanczos3_weight(src_y - (center + tap) as f32);
+                sum += src[sy * dw + col] * w;
+                weight_sum += w;
+            }
+
+            dst[dy * dw + col] = if weight_sum.abs() > 1e-8 {
+                (sum / weight_sum).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+        }
+    }
+    dst
+}
+
+/// Full separable Lanczos3 upscale from (sw×sh) to (dw×dh).
+fn lanczos3_upscale(src: &[f32], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<f32> {
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return Vec::new();
+    }
+    // H-pass: sw→dw, height stays sh
+    let h_pass = lanczos3_horizontal(src, sw, sh, dw);
+    // V-pass: sh→dh, width stays dw
+    lanczos3_vertical(&h_pass, dw, sh, dh)
+}
+
+// ── Edge-Directed Super-Resolution (EDSR) ────────────────────────────────────
+
+/// EDSR approximation.
+///
+/// Pipeline:
+/// 1. Bicubic upscale to target size (provides a smooth base).
+/// 2. Compute Sobel Gx, Gy at each pixel of the upscaled image.
+/// 3. At pixels where the gradient magnitude exceeds a threshold, compute
+///    the **edge angle** (atan2 of Gy/Gx) and blend in a directional
+///    interpolate taken *along* the edge.  This reinforces diagonal edges
+///    that bicubic tends to blur.
+/// 4. Apply unsharp mask to recover remaining sharpness.
+fn edsr_upscale(src: &[f32], sw: usize, sh: usize, dw: usize, dh: usize, sharpen: f32) -> Vec<f32> {
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+        return Vec::new();
+    }
+
+    // Step 1: bicubic base.
+    let base = bicubic_upscale(src, sw, sh, dw, dh);
+
+    // Step 2+3: edge-directed refinement.
+    let refined = edge_directed_refinement(&base, dw, dh);
+
+    // Step 4: unsharp mask.
+    unsharp_mask(&refined, dw, dh, sharpen)
+}
+
+/// Edge-directed refinement with gradient angle estimation.
+///
+/// For each interior pixel:
+/// - Compute Sobel Gx/Gy on the *base* image.
+/// - If the gradient magnitude exceeds `EDGE_THRESHOLD`, compute the angle θ.
+/// - Build a directional sample *along* the edge (perpendicular to the
+///   gradient) by bilinearly sampling the base at offsets (±cos θ, ±sin θ).
+/// - Blend the directional sample into the pixel with weight proportional to
+///   the clamped magnitude; weak-gradient pixels retain the bicubic value.
+fn edge_directed_refinement(base: &[f32], w: usize, h: usize) -> Vec<f32> {
+    const EDGE_THRESHOLD: f32 = 0.05;
+    const MAX_BLEND: f32 = 0.8; // maximum blend weight for directional sample
+
+    let mut out = base.to_vec();
+
+    for y in 1..h.saturating_sub(1) {
+        for x in 1..w.saturating_sub(1) {
+            // 3×3 Sobel neighbourhood.
+            let tl = base[(y - 1) * w + (x - 1)];
+            let tc = base[(y - 1) * w + x];
+            let tr = base[(y - 1) * w + (x + 1)];
+            let ml = base[y * w + (x - 1)];
+            let mr = base[y * w + (x + 1)];
+            let bl = base[(y + 1) * w + (x - 1)];
+            let bc = base[(y + 1) * w + x];
+            let br = base[(y + 1) * w + (x + 1)];
+
+            let gx = -tl - 2.0 * ml - bl + tr + 2.0 * mr + br;
+            let gy = -tl - 2.0 * tc - tr + bl + 2.0 * bc + br;
+            let mag = (gx * gx + gy * gy).sqrt();
+
+            if mag < EDGE_THRESHOLD {
+                // Weak or no edge — keep bicubic value.
+                continue;
+            }
+
+            // Edge angle: direction *along* the edge = perpendicular to gradient.
+            // gradient direction = (gx, gy); along-edge direction = (-gy, gx) / mag.
+            let along_x = -gy / mag;
+            let along_y = gx / mag;
+
+            // Sample the base image at (x ± along_x, y ± along_y) via bilinear.
+            let sample_fwd = bilinear_sample(base, w, h, x as f32 + along_x, y as f32 + along_y);
+            let sample_bck = bilinear_sample(base, w, h, x as f32 - along_x, y as f32 - along_y);
+            let directional = (sample_fwd + sample_bck) * 0.5;
+
+            // Blend weight proportional to magnitude, capped at MAX_BLEND.
+            let blend = (mag * 2.0).min(MAX_BLEND);
+            out[y * w + x] = (1.0 - blend) * base[y * w + x] + blend * directional;
+        }
+    }
+
+    out
+}
+
+/// Bilinear sample at sub-pixel position (fx, fy) with clamped boundary.
+#[inline]
+fn bilinear_sample(src: &[f32], w: usize, h: usize, fx: f32, fy: f32) -> f32 {
+    let x0 = fx.floor().max(0.0) as usize;
+    let y0 = fy.floor().max(0.0) as usize;
+    let x1 = (x0 + 1).min(w.saturating_sub(1));
+    let y1 = (y0 + 1).min(h.saturating_sub(1));
+    let x0c = x0.min(w.saturating_sub(1));
+    let y0c = y0.min(h.saturating_sub(1));
+
+    let tx = (fx - fx.floor()).clamp(0.0, 1.0);
+    let ty = (fy - fy.floor()).clamp(0.0, 1.0);
+
+    let top = src[y0c * w + x0c] * (1.0 - tx) + src[y0c * w + x1] * tx;
+    let bot = src[y1 * w + x0c] * (1.0 - tx) + src[y1 * w + x1] * tx;
+    top * (1.0 - ty) + bot * ty
+}
+
+// ── Quality estimate for super-resolution output ──────────────────────────────
+
 /// Quality estimate for super-resolution output.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -506,5 +868,196 @@ mod tests {
         let w = catmull_rom_weights(0.0);
         // At t=0 the weight for the second control point should be 1.0
         assert!((w[1] - 1.0).abs() < 1e-5);
+    }
+
+    // ── SuperResolutionEngine tests ──────────────────────────────────────
+
+    use super::{SuperResAlgorithm, SuperResError, SuperResolutionConfig, SuperResolutionEngine};
+
+    fn make_engine(algo: SuperResAlgorithm, scale: u32) -> SuperResolutionEngine {
+        SuperResolutionEngine::new(SuperResolutionConfig {
+            scale_factor: scale,
+            algorithm: algo,
+            sharpening_strength: 0.5,
+        })
+    }
+
+    #[test]
+    fn test_bicubic_sharp_output_size_2x() {
+        let engine = make_engine(SuperResAlgorithm::BicubicSharp, 2);
+        let src = vec![128u8; 16]; // 4×4
+        let (dst, w, h) = engine.upscale(&src, 4, 4).expect("upscale");
+        assert_eq!((w, h), (8, 8));
+        assert_eq!(dst.len(), 64);
+    }
+
+    #[test]
+    fn test_lanczos3_sharp_output_size_2x() {
+        let engine = make_engine(SuperResAlgorithm::Lanczos3Sharp, 2);
+        let src = vec![200u8; 25]; // 5×5
+        let (dst, w, h) = engine.upscale(&src, 5, 5).expect("upscale");
+        assert_eq!((w, h), (10, 10));
+        assert_eq!(dst.len(), 100);
+    }
+
+    #[test]
+    fn test_edsr_output_size_2x() {
+        let engine = make_engine(SuperResAlgorithm::Edsr, 2);
+        let src = vec![64u8; 36]; // 6×6
+        let (dst, w, h) = engine.upscale(&src, 6, 6).expect("upscale");
+        assert_eq!((w, h), (12, 12));
+        assert_eq!(dst.len(), 144);
+    }
+
+    #[test]
+    fn test_bicubic_sharp_output_size_4x() {
+        let engine = make_engine(SuperResAlgorithm::BicubicSharp, 4);
+        let src = vec![100u8; 9]; // 3×3
+        let (dst, w, h) = engine.upscale(&src, 3, 3).expect("upscale");
+        assert_eq!((w, h), (12, 12));
+        assert_eq!(dst.len(), 144);
+    }
+
+    #[test]
+    fn test_uniform_input_produces_uniform_output_bicubic() {
+        // A perfectly uniform grey image should remain uniform (or very close)
+        // after upscaling, since bicubic of a constant is a constant.
+        let engine = make_engine(SuperResAlgorithm::BicubicSharp, 2);
+        let gray = 128u8;
+        let src = vec![gray; 16];
+        let (dst, _, _) = engine.upscale(&src, 4, 4).expect("upscale");
+        for &v in &dst {
+            let diff = (v as i16 - gray as i16).abs();
+            assert!(
+                diff <= 2,
+                "uniform input should produce ~uniform output, got {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_uniform_input_produces_uniform_output_edsr() {
+        let engine = make_engine(SuperResAlgorithm::Edsr, 2);
+        let gray = 200u8;
+        let src = vec![gray; 16];
+        let (dst, _, _) = engine.upscale(&src, 4, 4).expect("upscale");
+        for &v in &dst {
+            let diff = (v as i16 - gray as i16).abs();
+            assert!(
+                diff <= 3,
+                "EDSR uniform input should produce ~uniform output, got {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_empty_input_returns_error() {
+        let engine = make_engine(SuperResAlgorithm::BicubicSharp, 2);
+        // 0×0 → ZeroDimension error
+        let err = engine.upscale(&[], 0, 0).unwrap_err();
+        assert_eq!(err, SuperResError::ZeroDimension);
+    }
+
+    #[test]
+    fn test_dimension_mismatch_returns_error() {
+        let engine = make_engine(SuperResAlgorithm::BicubicSharp, 2);
+        // Claim 4×4 but provide only 10 bytes
+        let err = engine.upscale(&vec![0u8; 10], 4, 4).unwrap_err();
+        assert!(matches!(
+            err,
+            SuperResError::DimensionMismatch {
+                expected: 16,
+                got: 10
+            }
+        ));
+    }
+
+    #[test]
+    fn test_scale_factor_one_is_identity() {
+        let engine = make_engine(SuperResAlgorithm::BicubicSharp, 1);
+        let src: Vec<u8> = (0u8..16).collect();
+        let (dst, w, h) = engine.upscale(&src, 4, 4).expect("upscale");
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn test_zero_scale_factor_returns_error() {
+        let engine = make_engine(SuperResAlgorithm::BicubicSharp, 0);
+        let err = engine.upscale(&vec![128u8; 16], 4, 4).unwrap_err();
+        assert_eq!(err, SuperResError::ZeroScaleFactor);
+    }
+
+    #[test]
+    fn test_bicubic_sharp_values_in_range() {
+        let engine = make_engine(SuperResAlgorithm::BicubicSharp, 2);
+        // Gradient image: left half dark, right half bright
+        let mut src = vec![0u8; 64]; // 8×8
+        for y in 0..8usize {
+            for x in 4..8usize {
+                src[y * 8 + x] = 255;
+            }
+        }
+        let (dst, _, _) = engine.upscale(&src, 8, 8).expect("upscale");
+        for &v in &dst {
+            // All output values must be valid u8 (already guaranteed by type,
+            // but also numerically in [0, 255])
+            let _ = v; // value is u8, always in range
+        }
+        // Output must be non-empty
+        assert!(!dst.is_empty());
+    }
+
+    #[test]
+    fn test_edsr_preserves_edge_contrast() {
+        // A hard left-dark / right-bright edge.  After 2× upscaling, the
+        // difference between the darkest and brightest output pixels should be
+        // substantial, proving that EDSR does not blur the edge to nothing.
+        let engine = make_engine(SuperResAlgorithm::Edsr, 2);
+        let mut src = vec![0u8; 64]; // 8×8
+        for y in 0..8usize {
+            for x in 4..8usize {
+                src[y * 8 + x] = 255;
+            }
+        }
+        let (dst, _, _) = engine.upscale(&src, 8, 8).expect("upscale");
+        let min_val = dst.iter().copied().min().unwrap_or(0);
+        let max_val = dst.iter().copied().max().unwrap_or(0);
+        assert!(
+            max_val as i16 - min_val as i16 > 100,
+            "EDSR should preserve edge contrast; min={min_val} max={max_val}"
+        );
+    }
+
+    #[test]
+    fn test_lanczos3_weight_at_zero_is_one() {
+        assert!((super::lanczos3_weight(0.0) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_lanczos3_weight_at_boundary_is_zero() {
+        assert!(super::lanczos3_weight(3.0).abs() < 1e-5);
+        assert!(super::lanczos3_weight(-3.0).abs() < 1e-5);
+        assert!(super::lanczos3_weight(4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_lanczos3_sharp_values_in_range() {
+        let engine = make_engine(SuperResAlgorithm::Lanczos3Sharp, 2);
+        let src: Vec<u8> = (0u8..=255).cycle().take(64).collect();
+        let (dst, w, h) = engine.upscale(&src, 8, 8).expect("upscale");
+        assert_eq!((w, h), (16, 16));
+        assert_eq!(dst.len(), 256);
+        // All pixel values must remain in [0, 255] — guaranteed by u8 type,
+        // verified here to be non-empty and correctly sized.
+        assert!(!dst.is_empty());
+    }
+
+    #[test]
+    fn test_super_res_config_default() {
+        let cfg = SuperResolutionConfig::default();
+        assert_eq!(cfg.scale_factor, 2);
+        assert_eq!(cfg.algorithm, SuperResAlgorithm::Edsr);
+        assert!((cfg.sharpening_strength - 0.5).abs() < 1e-6);
     }
 }

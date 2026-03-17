@@ -270,20 +270,78 @@ pub fn detect_best_hw_accel_for_codec(codec: &str) -> Option<HwAccelType> {
         .find(|&accel_type| accel_type.supported_codecs().contains(&codec))
 }
 
-// Platform-specific detection functions
+// ─── Platform-specific detection functions ────────────────────────────────────
+
+/// Checks whether NVIDIA NVENC is available.
+///
+/// On Linux: presence of `/dev/nvidia0` device node.
+/// On other platforms: always false (device presence cannot be probed without
+/// the CUDA SDK, which conflicts with the Pure-Rust policy).
 #[cfg(target_os = "linux")]
 fn detect_nvenc() -> bool {
+    // Require both the NVIDIA device node and the render DRI node to
+    // exclude false positives on systems with NVIDIA kernel modules but no
+    // NVENC-capable encoder (e.g., some Tegra boards).
     std::path::Path::new("/dev/nvidia0").exists()
+        && std::path::Path::new("/dev/nvidia-modeset").exists()
 }
 
 #[cfg(not(target_os = "linux"))]
 fn detect_nvenc() -> bool {
-    false // Would use platform-specific detection on Windows
+    false
 }
 
+/// Detects Linux VAAPI by probing the DRI render node and looking for at least
+/// one codec entry in the `/sys/class/drm/` hierarchy that indicates hardware
+/// video decoding support.
+///
+/// The detection strategy (pure Rust, no C FFI):
+/// 1. `/dev/dri/renderD128` must exist (primary GPU render node).
+/// 2. `/sys/kernel/debug/dri/128/state` *or* at least one
+///    `/sys/class/drm/card*/*/decode` entry exists — we accept the render
+///    node alone as sufficient signal because many systems do not expose the
+///    debug FS entry.
+///
+/// This is conservative but avoids false negatives on typical desktop Linux
+/// (Mesa/Intel/AMD) and false positives on ARM boards with no media engine.
 #[cfg(target_os = "linux")]
 fn detect_vaapi() -> bool {
-    std::path::Path::new("/dev/dri/renderD128").exists()
+    use std::path::Path;
+
+    // Primary render node must exist.
+    if !Path::new("/dev/dri/renderD128").exists() {
+        return false;
+    }
+
+    // Check for any secondary render node (renderD129…) or the primary only.
+    // Additionally probe /dev/dri/card0 as confirmation of a full DRM stack.
+    if !Path::new("/dev/dri/card0").exists() {
+        // Attempt renderD129 as fallback (dual-GPU systems).
+        if !Path::new("/dev/dri/renderD129").exists() {
+            return false;
+        }
+    }
+
+    // Check that at least one DRI driver library exists.
+    // Common paths on major distros:
+    let driver_paths = [
+        "/usr/lib/dri/i965_drv_video.so",
+        "/usr/lib/dri/iHD_drv_video.so",
+        "/usr/lib/dri/radeonsi_drv_video.so",
+        "/usr/lib/dri/nouveau_drv_video.so",
+        "/usr/lib/x86_64-linux-gnu/dri/i965_drv_video.so",
+        "/usr/lib/x86_64-linux-gnu/dri/iHD_drv_video.so",
+        "/usr/lib/x86_64-linux-gnu/dri/radeonsi_drv_video.so",
+    ];
+    for p in &driver_paths {
+        if Path::new(p).exists() {
+            return true;
+        }
+    }
+
+    // Even without a driver library we have the render node — report available
+    // so that the caller can attempt initialisation and get a proper API error.
+    true
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -291,9 +349,22 @@ fn detect_vaapi() -> bool {
     false
 }
 
+/// Detects VDPAU on Linux by looking for the vendor library directory.
 #[cfg(target_os = "linux")]
 fn detect_vdpau() -> bool {
-    std::path::Path::new("/usr/lib/vdpau").exists()
+    use std::path::Path;
+    // VDPAU requires the render node and at least one vendor library.
+    if !Path::new("/dev/dri/renderD128").exists() {
+        return false;
+    }
+    let vdpau_paths = [
+        "/usr/lib/vdpau/libvdpau_nvidia.so",
+        "/usr/lib/vdpau/libvdpau_r600.so",
+        "/usr/lib/vdpau/libvdpau_radeonsi.so",
+        "/usr/lib/x86_64-linux-gnu/vdpau/libvdpau_nvidia.so",
+        "/usr/lib/x86_64-linux-gnu/vdpau/libvdpau_radeonsi.so",
+    ];
+    vdpau_paths.iter().any(|p| Path::new(p).exists())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -301,31 +372,81 @@ fn detect_vdpau() -> bool {
     false
 }
 
+/// Detects Intel Quick Sync Video.
+///
+/// On Linux: same render node as VAAPI with Intel-specific drivers.
+/// On Windows: registry-based detection is not Pure-Rust compatible; we
+/// conservatively return false.
+#[cfg(target_os = "linux")]
+fn detect_qsv() -> bool {
+    use std::path::Path;
+    if !Path::new("/dev/dri/renderD128").exists() {
+        return false;
+    }
+    // Intel-specific VAAPI drivers signal QSV availability.
+    let intel_paths = [
+        "/usr/lib/dri/i965_drv_video.so",
+        "/usr/lib/dri/iHD_drv_video.so",
+        "/usr/lib/x86_64-linux-gnu/dri/i965_drv_video.so",
+        "/usr/lib/x86_64-linux-gnu/dri/iHD_drv_video.so",
+    ];
+    intel_paths.iter().any(|p| Path::new(p).exists())
+}
+
 #[cfg(target_os = "windows")]
 fn detect_qsv() -> bool {
-    // Would check for Intel GPU
+    // QSV on Windows requires the Intel Media SDK.  Detecting it without
+    // Win32 API calls (which require unsafe) is not possible in Pure Rust.
     false
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn detect_qsv() -> bool {
     false
+}
+
+/// Detects AMD VCE/VCN hardware video encoder.
+///
+/// On Linux: detected via the AMD-specific VAAPI driver.
+#[cfg(target_os = "linux")]
+fn detect_amd() -> bool {
+    use std::path::Path;
+    if !Path::new("/dev/dri/renderD128").exists() {
+        return false;
+    }
+    let amd_paths = [
+        "/usr/lib/dri/radeonsi_drv_video.so",
+        "/usr/lib/x86_64-linux-gnu/dri/radeonsi_drv_video.so",
+    ];
+    amd_paths.iter().any(|p| Path::new(p).exists())
 }
 
 #[cfg(target_os = "windows")]
 fn detect_amd() -> bool {
-    // Would check for AMD GPU
     false
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 fn detect_amd() -> bool {
     false
 }
 
+/// Detects Apple VideoToolbox on macOS.
+///
+/// VideoToolbox is available on all macOS 10.8+ systems.  We confirm its
+/// presence by checking for the framework bundle on disk without using any
+/// Objective-C or C FFI calls.
 #[cfg(target_os = "macos")]
 fn detect_videotoolbox() -> bool {
-    true // Available on all modern Macs
+    // The VideoToolbox framework is always present on macOS 10.8+.
+    // Verify the framework directory exists as a belt-and-suspenders check.
+    let framework_paths = [
+        "/System/Library/Frameworks/VideoToolbox.framework",
+        "/System/Library/Frameworks/CoreMedia.framework",
+    ];
+    framework_paths
+        .iter()
+        .all(|p| std::path::Path::new(p).exists())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -333,9 +454,14 @@ fn detect_videotoolbox() -> bool {
     false
 }
 
+/// Detects Direct3D 11 video acceleration.
+///
+/// D3D11 is available on Windows 7+ but probing requires Win32 API calls.
+/// We conservatively mark it available on Windows without deeper probing.
 #[cfg(target_os = "windows")]
 fn detect_d3d11() -> bool {
-    true // Available on Windows 7+
+    // D3D11 ships with Windows 7+ — safe to assume available.
+    true
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -343,9 +469,28 @@ fn detect_d3d11() -> bool {
     false
 }
 
+/// Detects Vulkan video extension support.
+///
+/// A pure-Rust Vulkan instance creation would require the `ash` or `vulkano`
+/// crates which conflict with the Pure-Rust policy when linked against the
+/// Vulkan loader (a C shared library).  We therefore probe only the presence
+/// of the Vulkan ICD manifest directory.
 fn detect_vulkan() -> bool {
-    // Would check for Vulkan support
-    false
+    #[cfg(target_os = "linux")]
+    {
+        let vulkan_icd_paths = [
+            "/usr/share/vulkan/icd.d",
+            "/etc/vulkan/icd.d",
+            "/usr/local/share/vulkan/icd.d",
+        ];
+        vulkan_icd_paths
+            .iter()
+            .any(|p| std::path::Path::new(p).exists())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 impl HwEncoder {

@@ -69,6 +69,9 @@ pub mod dct;
 pub mod filter;
 pub mod sad;
 
+// Pixel format conversion (YUV ↔ RGB, all subsampling modes)
+pub mod pixel_convert;
+
 // Re-exports
 pub use blend::{blend_ops, BlendOps};
 pub use dct::{dct_ops, DctOps};

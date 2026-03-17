@@ -478,3 +478,264 @@ mod tests {
         assert!(by_rule.contains_key("max_lines"));
     }
 }
+
+// ============================================================================
+// WCAG 2.1 AA contrast ratio checker
+// ============================================================================
+
+/// An sRGB colour value for contrast calculation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SrgbColor {
+    /// Red channel (0–255).
+    pub r: u8,
+    /// Green channel (0–255).
+    pub g: u8,
+    /// Blue channel (0–255).
+    pub b: u8,
+}
+
+impl SrgbColor {
+    /// Create a new colour.
+    #[must_use]
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+
+    /// Pure white.
+    #[must_use]
+    pub const fn white() -> Self {
+        Self::new(255, 255, 255)
+    }
+
+    /// Pure black.
+    #[must_use]
+    pub const fn black() -> Self {
+        Self::new(0, 0, 0)
+    }
+
+    /// Convert an sRGB channel byte (0–255) to a linear light value.
+    fn linearise(channel: u8) -> f64 {
+        let c = f64::from(channel) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// Relative luminance as defined by WCAG 2.1 (IEC 61966-2-1 sRGB).
+    ///
+    /// Returns a value in `[0.0, 1.0]` where 0 = black and 1 = white.
+    #[must_use]
+    pub fn relative_luminance(&self) -> f64 {
+        let r = Self::linearise(self.r);
+        let g = Self::linearise(self.g);
+        let b = Self::linearise(self.b);
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+}
+
+/// Compute the WCAG 2.1 contrast ratio between two colours.
+///
+/// The ratio is always ≥ 1.0; higher means better contrast.
+/// WCAG AA requires ≥ 4.5:1 for normal text, ≥ 3.0:1 for large text (≥ 18pt / ≥ 14pt bold).
+///
+/// # Example
+///
+/// ```
+/// use oximedia_subtitle::subtitle_validator::{SrgbColor, wcag_contrast_ratio};
+/// let ratio = wcag_contrast_ratio(SrgbColor::white(), SrgbColor::black());
+/// assert!((ratio - 21.0).abs() < 0.01);
+/// ```
+#[must_use]
+pub fn wcag_contrast_ratio(foreground: SrgbColor, background: SrgbColor) -> f64 {
+    let l1 = foreground.relative_luminance();
+    let l2 = background.relative_luminance();
+    let (lighter, darker) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+/// WCAG 2.1 conformance level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WcagLevel {
+    /// Fails WCAG contrast requirements.
+    Fail,
+    /// Passes WCAG AA for large text only (≥ 3.0:1).
+    AaLargeText,
+    /// Passes WCAG AA for all text (≥ 4.5:1).
+    Aa,
+    /// Passes WCAG AAA for all text (≥ 7.0:1).
+    Aaa,
+}
+
+/// Evaluate the WCAG 2.1 conformance level for a contrast ratio.
+#[must_use]
+pub fn wcag_level(ratio: f64) -> WcagLevel {
+    if ratio >= 7.0 {
+        WcagLevel::Aaa
+    } else if ratio >= 4.5 {
+        WcagLevel::Aa
+    } else if ratio >= 3.0 {
+        WcagLevel::AaLargeText
+    } else {
+        WcagLevel::Fail
+    }
+}
+
+/// Check that subtitle text meets WCAG 2.1 AA contrast against a given background.
+///
+/// Returns `true` if `ratio >= 4.5` (AA for normal text).
+///
+/// # Example
+///
+/// ```
+/// use oximedia_subtitle::subtitle_validator::{SrgbColor, passes_wcag_aa};
+/// assert!(passes_wcag_aa(SrgbColor::white(), SrgbColor::black()));
+/// assert!(!passes_wcag_aa(SrgbColor::new(200, 200, 200), SrgbColor::new(255, 255, 255)));
+/// ```
+#[must_use]
+pub fn passes_wcag_aa(foreground: SrgbColor, background: SrgbColor) -> bool {
+    wcag_contrast_ratio(foreground, background) >= 4.5
+}
+
+/// Check WCAG 2.1 AA for large text (18pt or 14pt bold) — requires ≥ 3.0:1.
+#[must_use]
+pub fn passes_wcag_aa_large(foreground: SrgbColor, background: SrgbColor) -> bool {
+    wcag_contrast_ratio(foreground, background) >= 3.0
+}
+
+/// Check WCAG 2.1 AAA compliance — requires ≥ 7.0:1.
+#[must_use]
+pub fn passes_wcag_aaa(foreground: SrgbColor, background: SrgbColor) -> bool {
+    wcag_contrast_ratio(foreground, background) >= 7.0
+}
+
+#[cfg(test)]
+mod wcag_tests {
+    use super::*;
+
+    #[test]
+    fn test_white_black_contrast_is_21() {
+        let ratio = wcag_contrast_ratio(SrgbColor::white(), SrgbColor::black());
+        assert!((ratio - 21.0).abs() < 0.05, "ratio={ratio}");
+    }
+
+    #[test]
+    fn test_same_color_contrast_is_1() {
+        let ratio = wcag_contrast_ratio(SrgbColor::white(), SrgbColor::white());
+        assert!((ratio - 1.0).abs() < 0.01, "ratio={ratio}");
+    }
+
+    #[test]
+    fn test_relative_luminance_black() {
+        assert!((SrgbColor::black().relative_luminance() - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_relative_luminance_white() {
+        assert!((SrgbColor::white().relative_luminance() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_relative_luminance_mid_grey() {
+        // sRGB 0x80 = 128 linearises to ~0.2158
+        let grey = SrgbColor::new(128, 128, 128);
+        let lum = grey.relative_luminance();
+        assert!(lum > 0.2 && lum < 0.25, "lum={lum}");
+    }
+
+    #[test]
+    fn test_passes_wcag_aa_white_on_black() {
+        assert!(passes_wcag_aa(SrgbColor::white(), SrgbColor::black()));
+    }
+
+    #[test]
+    fn test_fails_wcag_aa_similar_colors() {
+        // Light grey on white — low contrast
+        let fg = SrgbColor::new(170, 170, 170);
+        let bg = SrgbColor::white();
+        assert!(!passes_wcag_aa(fg, bg));
+    }
+
+    #[test]
+    fn test_passes_wcag_aa_yellow_on_black() {
+        // Yellow #FFD700 on black has high contrast
+        let fg = SrgbColor::new(255, 215, 0);
+        let bg = SrgbColor::black();
+        assert!(passes_wcag_aa(fg, bg), "Yellow on black should pass AA");
+    }
+
+    #[test]
+    fn test_passes_wcag_aa_large_white_on_dark_grey() {
+        let fg = SrgbColor::white();
+        let bg = SrgbColor::new(80, 80, 80);
+        assert!(passes_wcag_aa_large(fg, bg));
+    }
+
+    #[test]
+    fn test_fails_wcag_aa_large_similar() {
+        let fg = SrgbColor::new(140, 140, 140);
+        let bg = SrgbColor::new(180, 180, 180);
+        assert!(!passes_wcag_aa_large(fg, bg));
+    }
+
+    #[test]
+    fn test_wcag_level_aaa() {
+        assert_eq!(wcag_level(7.5), WcagLevel::Aaa);
+        assert_eq!(wcag_level(21.0), WcagLevel::Aaa);
+    }
+
+    #[test]
+    fn test_wcag_level_aa() {
+        assert_eq!(wcag_level(5.0), WcagLevel::Aa);
+        assert_eq!(wcag_level(4.5), WcagLevel::Aa);
+    }
+
+    #[test]
+    fn test_wcag_level_aa_large() {
+        assert_eq!(wcag_level(3.5), WcagLevel::AaLargeText);
+        assert_eq!(wcag_level(3.0), WcagLevel::AaLargeText);
+    }
+
+    #[test]
+    fn test_wcag_level_fail() {
+        assert_eq!(wcag_level(2.9), WcagLevel::Fail);
+        assert_eq!(wcag_level(1.0), WcagLevel::Fail);
+    }
+
+    #[test]
+    fn test_passes_wcag_aaa_white_black() {
+        assert!(passes_wcag_aaa(SrgbColor::white(), SrgbColor::black()));
+    }
+
+    #[test]
+    fn test_fails_wcag_aaa_moderate_contrast() {
+        let fg = SrgbColor::new(100, 100, 100);
+        let bg = SrgbColor::white();
+        assert!(!passes_wcag_aaa(fg, bg));
+    }
+
+    #[test]
+    fn test_contrast_ratio_symmetric() {
+        let a = SrgbColor::new(255, 100, 0);
+        let b = SrgbColor::new(10, 10, 200);
+        let r1 = wcag_contrast_ratio(a, b);
+        let r2 = wcag_contrast_ratio(b, a);
+        assert!((r1 - r2).abs() < 1e-9, "ratio must be symmetric");
+    }
+
+    #[test]
+    fn test_srgb_color_new() {
+        let c = SrgbColor::new(10, 20, 30);
+        assert_eq!(c.r, 10);
+        assert_eq!(c.g, 20);
+        assert_eq!(c.b, 30);
+    }
+
+    #[test]
+    fn test_wcag_level_ordering() {
+        assert!(WcagLevel::Aaa > WcagLevel::Aa);
+        assert!(WcagLevel::Aa > WcagLevel::AaLargeText);
+        assert!(WcagLevel::AaLargeText > WcagLevel::Fail);
+    }
+}

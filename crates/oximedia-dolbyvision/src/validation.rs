@@ -5,6 +5,227 @@
 
 #![allow(dead_code)]
 
+use crate::DolbyVisionRpu;
+
+// ---------------------------------------------------------------------------
+// RPU metadata validation (structured errors with level/field context)
+// ---------------------------------------------------------------------------
+
+/// Severity of a validation error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationSeverity {
+    /// The value is technically outside spec but may still work.
+    Warning,
+    /// The value is invalid and will cause errors on conformant decoders.
+    Error,
+}
+
+/// A structured error produced by RPU-level metadata validation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidationError {
+    /// Metadata level number (e.g. 1 for Level 1).
+    pub level: u8,
+    /// Human-readable field name within that level.
+    pub field: String,
+    /// Description of what is wrong.
+    pub message: String,
+    /// Severity of this validation finding.
+    pub severity: ValidationSeverity,
+}
+
+impl ValidationError {
+    /// Create a new error-severity `ValidationError`.
+    fn error(level: u8, field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            level,
+            field: field.into(),
+            message: message.into(),
+            severity: ValidationSeverity::Error,
+        }
+    }
+
+    /// Create a new warning-severity `ValidationError`.
+    fn warning(level: u8, field: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            level,
+            field: field.into(),
+            message: message.into(),
+            severity: ValidationSeverity::Warning,
+        }
+    }
+}
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[L{} {:?}] {}: {}",
+            self.level, self.severity, self.field, self.message
+        )
+    }
+}
+
+impl std::error::Error for ValidationError {}
+
+/// Validate a complete `DolbyVisionRpu` and return all validation findings.
+///
+/// Returns an empty vector when the RPU is fully valid.
+///
+/// # Errors
+///
+/// Returns `Err` if the RPU has fatal structural issues; otherwise returns
+/// `Ok(())` (even if the returned list is non-empty — callers should also
+/// check the structured list from [`collect_validation_errors`]).
+pub fn validate_rpu(rpu: &DolbyVisionRpu) -> crate::Result<()> {
+    let errors = collect_validation_errors(rpu);
+    let fatal: Vec<_> = errors
+        .iter()
+        .filter(|e| e.severity == ValidationSeverity::Error)
+        .collect();
+
+    if fatal.is_empty() {
+        Ok(())
+    } else {
+        Err(crate::DolbyVisionError::InvalidPayload(
+            fatal
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; "),
+        ))
+    }
+}
+
+/// Collect all validation errors/warnings for a `DolbyVisionRpu`.
+///
+/// Returns a structured list suitable for reporting.
+#[must_use]
+pub fn collect_validation_errors(rpu: &DolbyVisionRpu) -> Vec<ValidationError> {
+    let mut errs: Vec<ValidationError> = Vec::new();
+
+    // ── Level 1 ─────────────────────────────────────────────────────────────
+    if let Some(ref l1) = rpu.level1 {
+        // All values must be in [0, 4095]
+        if l1.min_pq > 4095 {
+            errs.push(ValidationError::error(
+                1,
+                "min_pq",
+                format!("value {} exceeds maximum 4095", l1.min_pq),
+            ));
+        }
+        if l1.avg_pq > 4095 {
+            errs.push(ValidationError::error(
+                1,
+                "avg_pq",
+                format!("value {} exceeds maximum 4095", l1.avg_pq),
+            ));
+        }
+        if l1.max_pq > 4095 {
+            errs.push(ValidationError::error(
+                1,
+                "max_pq",
+                format!("value {} exceeds maximum 4095", l1.max_pq),
+            ));
+        }
+        // Order constraint: min_pq <= avg_pq <= max_pq
+        if l1.min_pq > l1.avg_pq {
+            errs.push(ValidationError::error(
+                1,
+                "min_pq/avg_pq",
+                format!("min_pq ({}) must be <= avg_pq ({})", l1.min_pq, l1.avg_pq),
+            ));
+        }
+        if l1.avg_pq > l1.max_pq {
+            errs.push(ValidationError::error(
+                1,
+                "avg_pq/max_pq",
+                format!("avg_pq ({}) must be <= max_pq ({})", l1.avg_pq, l1.max_pq),
+            ));
+        }
+    }
+
+    // ── Level 2 ─────────────────────────────────────────────────────────────
+    if let Some(ref l2) = rpu.level2 {
+        // Trim slope: typically in [-4096, 4096] (fixed-point Q12)
+        if l2.trim_slope < -4096 || l2.trim_slope > 4096 {
+            errs.push(ValidationError::warning(
+                2,
+                "trim_slope",
+                format!(
+                    "value {} outside typical range [-4096, 4096]",
+                    l2.trim_slope
+                ),
+            ));
+        }
+        // Trim offset: similar range
+        if l2.trim_offset < -4096 || l2.trim_offset > 4096 {
+            errs.push(ValidationError::warning(
+                2,
+                "trim_offset",
+                format!(
+                    "value {} outside typical range [-4096, 4096]",
+                    l2.trim_offset
+                ),
+            ));
+        }
+        // Trim power: must be positive fixed-point
+        if l2.trim_power < 0 {
+            errs.push(ValidationError::error(
+                2,
+                "trim_power",
+                format!("value {} must be >= 0", l2.trim_power),
+            ));
+        }
+        // Chroma weight and saturation gain: [-4096, 4096]
+        if l2.trim_chroma_weight < -4096 || l2.trim_chroma_weight > 4096 {
+            errs.push(ValidationError::warning(
+                2,
+                "trim_chroma_weight",
+                format!(
+                    "value {} outside typical range [-4096, 4096]",
+                    l2.trim_chroma_weight
+                ),
+            ));
+        }
+        if l2.trim_saturation_gain < -4096 || l2.trim_saturation_gain > 4096 {
+            errs.push(ValidationError::warning(
+                2,
+                "trim_saturation_gain",
+                format!(
+                    "value {} outside typical range [-4096, 4096]",
+                    l2.trim_saturation_gain
+                ),
+            ));
+        }
+        // ms_weight: [-4096, 4096]
+        if l2.ms_weight < -4096 || l2.ms_weight > 4096 {
+            errs.push(ValidationError::warning(
+                2,
+                "ms_weight",
+                format!("value {} outside typical range [-4096, 4096]", l2.ms_weight),
+            ));
+        }
+    }
+
+    // ── Level 4 ─────────────────────────────────────────────────────────────
+    if let Some(ref l4) = rpu.level4 {
+        let l4_errors = l4.validate();
+        for msg in l4_errors {
+            errs.push(ValidationError::error(4, "level4", msg));
+        }
+    }
+
+    // ── Level 7 ─────────────────────────────────────────────────────────────
+    if let Some(ref l7) = rpu.level7 {
+        let l7_errors = l7.validate();
+        for msg in l7_errors {
+            errs.push(ValidationError::error(7, "level7", msg));
+        }
+    }
+
+    errs
+}
+
 /// Validation errors that can occur during Dolby Vision stream validation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DvValidationError {
@@ -341,5 +562,99 @@ mod tests {
             errors.is_empty(),
             "Profile 8.1 defaults should be valid, got: {errors:?}"
         );
+    }
+
+    // ── validate_rpu / collect_validation_errors ─────────────────────────────
+
+    #[test]
+    fn test_validate_rpu_empty_is_ok() {
+        use crate::{DolbyVisionRpu, Profile};
+        let rpu = DolbyVisionRpu::new(Profile::Profile8);
+        assert!(
+            validate_rpu(&rpu).is_ok(),
+            "Empty RPU should pass validation"
+        );
+    }
+
+    #[test]
+    fn test_validate_l1_valid_order() {
+        use crate::{DolbyVisionRpu, Level1Metadata, Profile};
+        let mut rpu = DolbyVisionRpu::new(Profile::Profile8);
+        rpu.level1 = Some(Level1Metadata {
+            min_pq: 100,
+            avg_pq: 500,
+            max_pq: 3000,
+        });
+        let errs = collect_validation_errors(&rpu);
+        assert!(
+            errs.is_empty(),
+            "Valid L1 should produce no errors: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_l1_inverted_order_produces_error() {
+        use crate::{DolbyVisionRpu, Level1Metadata, Profile};
+        let mut rpu = DolbyVisionRpu::new(Profile::Profile8);
+        // avg_pq > max_pq — invalid
+        rpu.level1 = Some(Level1Metadata {
+            min_pq: 0,
+            avg_pq: 3500,
+            max_pq: 2000,
+        });
+        let errs = collect_validation_errors(&rpu);
+        assert!(
+            errs.iter()
+                .any(|e| e.level == 1 && e.field.contains("avg_pq")),
+            "Should detect avg_pq > max_pq: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_l1_out_of_range_produces_error() {
+        use crate::{DolbyVisionRpu, Level1Metadata, Profile};
+        let mut rpu = DolbyVisionRpu::new(Profile::Profile8);
+        rpu.level1 = Some(Level1Metadata {
+            min_pq: 0,
+            avg_pq: 100,
+            max_pq: 5000, // > 4095
+        });
+        let errs = collect_validation_errors(&rpu);
+        assert!(
+            errs.iter().any(|e| e.level == 1 && e.field == "max_pq"),
+            "Should detect max_pq > 4095: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_l2_invalid_trim_power() {
+        use crate::{DolbyVisionRpu, Level2Metadata, Profile};
+        let mut rpu = DolbyVisionRpu::new(Profile::Profile8);
+        rpu.level2 = Some(Level2Metadata {
+            target_display_index: 0,
+            trim_slope: 4096,
+            trim_offset: 0,
+            trim_power: -1, // invalid
+            trim_chroma_weight: 0,
+            trim_saturation_gain: 0,
+            ms_weight: 4096,
+            target_mid_contrast: 0,
+            clip_trim: 0,
+            saturation_vector_field: vec![],
+            hue_vector_field: vec![],
+        });
+        let errs = collect_validation_errors(&rpu);
+        assert!(
+            errs.iter().any(|e| e.level == 2 && e.field == "trim_power"),
+            "Should detect negative trim_power: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_error_display() {
+        let e = ValidationError::error(1, "min_pq", "some error");
+        let s = e.to_string();
+        assert!(s.contains("L1"));
+        assert!(s.contains("min_pq"));
     }
 }

@@ -343,6 +343,334 @@ impl SpectrumScope {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Stereo Phase Correlation Meter
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Classification of the stereo phase correlation reading.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CorrelationZone {
+    /// Correlation in [+0.5, +1.0] — strong mono compatibility, wide but healthy stereo.
+    GoodStereo,
+    /// Correlation in [0.0, +0.5) — moderate stereo spread, acceptable mono fold-down.
+    ModerateStereo,
+    /// Correlation in (-0.5, 0.0) — significant anti-phase content, mono fold-down issues.
+    PhaseWarning,
+    /// Correlation in [-1.0, -0.5] — near-total anti-phase, severe mono cancellation.
+    PhaseDanger,
+}
+
+impl CorrelationZone {
+    /// Classify a correlation value into a zone.
+    #[must_use]
+    pub fn classify(corr: f32) -> Self {
+        if corr >= 0.5 {
+            Self::GoodStereo
+        } else if corr >= 0.0 {
+            Self::ModerateStereo
+        } else if corr >= -0.5 {
+            Self::PhaseWarning
+        } else {
+            Self::PhaseDanger
+        }
+    }
+}
+
+/// A sliding-window stereo phase correlation meter.
+///
+/// Computes the Pearson correlation coefficient between left and right channels
+/// over a configurable window and maintains a smoothed readout suitable for
+/// a broadcast-style phase meter display.
+#[derive(Debug, Clone)]
+pub struct PhaseCorrelationMeter {
+    /// Current instantaneous (per-block) correlation.
+    pub instant_correlation: f32,
+    /// Smoothed correlation (IIR low-pass, suitable for meter ballistics).
+    pub smooth_correlation: f32,
+    /// Minimum correlation seen since last reset.
+    pub min_correlation: f32,
+    /// Maximum correlation seen since last reset.
+    pub max_correlation: f32,
+    /// Total number of sample frames processed.
+    pub frames_processed: u64,
+    /// Smoothing coefficient (0 = no smoothing, 1 = frozen).
+    smoothing: f32,
+}
+
+impl PhaseCorrelationMeter {
+    /// Creates a new meter with the given smoothing coefficient.
+    ///
+    /// `smoothing` should be in [0.0, 1.0]; typical values are 0.8–0.95 for
+    /// broadcast ballistics matching an analogue correlation meter.
+    #[must_use]
+    pub fn new(smoothing: f32) -> Self {
+        let s = smoothing.clamp(0.0, 0.999);
+        Self {
+            instant_correlation: 1.0,
+            smooth_correlation: 1.0,
+            min_correlation: 1.0,
+            max_correlation: 1.0,
+            frames_processed: 0,
+            smoothing: s,
+        }
+    }
+
+    /// Process a block of interleaved stereo samples (L, R, L, R, …).
+    ///
+    /// Each call updates `instant_correlation`, `smooth_correlation`,
+    /// `min_correlation`, and `max_correlation`.
+    ///
+    /// Returns the instantaneous correlation for the current block.
+    pub fn process_interleaved(&mut self, samples: &[f32]) -> f32 {
+        if samples.len() < 2 {
+            return self.instant_correlation;
+        }
+        let n = samples.len() / 2;
+        let corr = correlation_from_interleaved(samples, n);
+        self.update(corr);
+        corr
+    }
+
+    /// Process separate left and right channel slices.
+    ///
+    /// The shorter slice determines the frame length used.
+    pub fn process_channels(&mut self, left: &[f32], right: &[f32]) -> f32 {
+        let n = left.len().min(right.len());
+        if n == 0 {
+            return self.instant_correlation;
+        }
+        let corr = correlation_from_channels(left, right, n);
+        self.update(corr);
+        corr
+    }
+
+    /// Returns the current zone classification for the smoothed reading.
+    #[must_use]
+    pub fn zone(&self) -> CorrelationZone {
+        CorrelationZone::classify(self.smooth_correlation)
+    }
+
+    /// Resets statistics (min/max/smooth) but keeps smoothing coefficient.
+    pub fn reset(&mut self) {
+        self.instant_correlation = 1.0;
+        self.smooth_correlation = 1.0;
+        self.min_correlation = 1.0;
+        self.max_correlation = 1.0;
+        self.frames_processed = 0;
+    }
+
+    fn update(&mut self, corr: f32) {
+        self.instant_correlation = corr;
+        self.smooth_correlation =
+            self.smoothing * self.smooth_correlation + (1.0 - self.smoothing) * corr;
+        if corr < self.min_correlation {
+            self.min_correlation = corr;
+        }
+        if corr > self.max_correlation {
+            self.max_correlation = corr;
+        }
+        self.frames_processed = self.frames_processed.saturating_add(1);
+    }
+}
+
+impl Default for PhaseCorrelationMeter {
+    fn default() -> Self {
+        Self::new(0.85)
+    }
+}
+
+/// Compute Pearson correlation from interleaved stereo samples (L,R,L,R,…).
+#[allow(clippy::cast_precision_loss)]
+fn correlation_from_interleaved(samples: &[f32], n: usize) -> f32 {
+    let mut sum_l = 0.0f64;
+    let mut sum_r = 0.0f64;
+    let mut sum_ll = 0.0f64;
+    let mut sum_rr = 0.0f64;
+    let mut sum_lr = 0.0f64;
+
+    for i in 0..n {
+        let l = f64::from(samples[i * 2]);
+        let r = f64::from(samples[i * 2 + 1]);
+        sum_l += l;
+        sum_r += r;
+        sum_ll += l * l;
+        sum_rr += r * r;
+        sum_lr += l * r;
+    }
+    pearson_correlation(sum_l, sum_r, sum_ll, sum_rr, sum_lr, n)
+}
+
+/// Compute Pearson correlation from separate left and right channel slices.
+#[allow(clippy::cast_precision_loss)]
+fn correlation_from_channels(left: &[f32], right: &[f32], n: usize) -> f32 {
+    let mut sum_l = 0.0f64;
+    let mut sum_r = 0.0f64;
+    let mut sum_ll = 0.0f64;
+    let mut sum_rr = 0.0f64;
+    let mut sum_lr = 0.0f64;
+
+    for i in 0..n {
+        let l = f64::from(left[i]);
+        let r = f64::from(right[i]);
+        sum_l += l;
+        sum_r += r;
+        sum_ll += l * l;
+        sum_rr += r * r;
+        sum_lr += l * r;
+    }
+    pearson_correlation(sum_l, sum_r, sum_ll, sum_rr, sum_lr, n)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn pearson_correlation(
+    sum_l: f64,
+    sum_r: f64,
+    sum_ll: f64,
+    sum_rr: f64,
+    sum_lr: f64,
+    n: usize,
+) -> f32 {
+    if n == 0 {
+        return 0.0;
+    }
+    let nf = n as f64;
+    let mean_l = sum_l / nf;
+    let mean_r = sum_r / nf;
+    let var_l = (sum_ll / nf) - mean_l * mean_l;
+    let var_r = (sum_rr / nf) - mean_r * mean_r;
+    let covar = (sum_lr / nf) - mean_l * mean_r;
+    if var_l > 1e-15 && var_r > 1e-15 {
+        (covar / (var_l.sqrt() * var_r.sqrt())).clamp(-1.0, 1.0) as f32
+    } else {
+        0.0
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase Correlation Meter rendering
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Configuration for rendering a phase correlation meter bar.
+#[derive(Debug, Clone)]
+pub struct PhaseCorrelationRenderConfig {
+    /// Width of the output RGBA image.
+    pub width: u32,
+    /// Height of the output RGBA image.
+    pub height: u32,
+    /// Whether to draw zone boundary markers.
+    pub show_zones: bool,
+    /// Whether to draw the current-value needle over the bar.
+    pub show_needle: bool,
+}
+
+impl Default for PhaseCorrelationRenderConfig {
+    fn default() -> Self {
+        Self {
+            width: 256,
+            height: 32,
+            show_zones: true,
+            show_needle: true,
+        }
+    }
+}
+
+/// Render a horizontal phase correlation meter bar as an RGBA image.
+///
+/// The bar spans -1 (left, red) to +1 (right, green) with a centre white tick at 0.
+/// The filled region reflects `meter.smooth_correlation` and a needle marks
+/// `meter.instant_correlation`.
+///
+/// # Returns
+///
+/// An RGBA `Vec<u8>` of length `config.width * config.height * 4`.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_sign_loss)]
+#[allow(clippy::cast_precision_loss)]
+pub fn render_phase_correlation_bar(
+    meter: &PhaseCorrelationMeter,
+    config: &PhaseCorrelationRenderConfig,
+) -> Vec<u8> {
+    let w = config.width as usize;
+    let h = config.height as usize;
+    let mut out = vec![30u8; w * h * 4]; // Dark background
+
+    // Set all alpha channels to 255
+    for chunk in out.chunks_exact_mut(4) {
+        chunk[3] = 255;
+    }
+
+    // Draw background gradient from red (left) to green (right)
+    for x in 0..w {
+        let t = x as f32 / (w - 1).max(1) as f32; // 0.0 = left (-1), 1.0 = right (+1)
+        let r = ((1.0 - t) * 160.0) as u8;
+        let g = (t * 160.0) as u8;
+        for y in 1..(h.saturating_sub(1)) {
+            let idx = (y * w + x) * 4;
+            out[idx] = r;
+            out[idx + 1] = g;
+            out[idx + 2] = 20;
+            out[idx + 3] = 255;
+        }
+    }
+
+    // Draw zone boundary markers at -0.5, 0.0, +0.5
+    if config.show_zones {
+        for &corr_val in &[-0.5f32, 0.0, 0.5] {
+            let xf = (corr_val + 1.0) / 2.0; // normalise to [0,1]
+            let xi = (xf * (w - 1) as f32).round() as usize;
+            let tick_color = if corr_val.abs() < 1e-3 {
+                [255u8, 255, 255, 255]
+            } else {
+                [180, 180, 180, 200]
+            };
+            for y in 0..h {
+                let idx = (y * w + xi.min(w - 1)) * 4;
+                out[idx] = tick_color[0];
+                out[idx + 1] = tick_color[1];
+                out[idx + 2] = tick_color[2];
+                out[idx + 3] = tick_color[3];
+            }
+        }
+    }
+
+    // Draw smoothed fill from centre to current reading
+    let smooth = meter.smooth_correlation.clamp(-1.0, 1.0);
+    let centre_x = w / 2;
+    let fill_x = ((smooth + 1.0) / 2.0 * (w - 1) as f32).round() as usize;
+    let (fill_left, fill_right) = if fill_x >= centre_x {
+        (centre_x, fill_x.min(w - 1))
+    } else {
+        (fill_x, centre_x)
+    };
+
+    let fill_y0 = h / 4;
+    let fill_y1 = 3 * h / 4;
+    for x in fill_left..=fill_right {
+        for y in fill_y0..fill_y1 {
+            let idx = (y * w + x) * 4;
+            out[idx] = out[idx].saturating_add(60);
+            out[idx + 1] = out[idx + 1].saturating_add(60);
+            out[idx + 2] = out[idx + 2].saturating_add(60);
+        }
+    }
+
+    // Draw instant needle
+    if config.show_needle {
+        let inst = meter.instant_correlation.clamp(-1.0, 1.0);
+        let nx = ((inst + 1.0) / 2.0 * (w - 1) as f32).round() as usize;
+        for y in 0..h {
+            let idx = (y * w + nx.min(w - 1)) * 4;
+            out[idx] = 255;
+            out[idx + 1] = 255;
+            out[idx + 2] = 255;
+            out[idx + 3] = 255;
+        }
+    }
+
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,5 +934,116 @@ mod tests {
         // Band index 2 has the highest magnitude
         let pf = scope.peak_frequency();
         assert_eq!(pf, scope.bars[2].frequency_hz);
+    }
+
+    // --- PhaseCorrelationMeter tests ---
+
+    #[test]
+    fn test_phase_correlation_meter_default() {
+        let m = PhaseCorrelationMeter::default();
+        assert!((m.instant_correlation - 1.0).abs() < f32::EPSILON);
+        assert!((m.smooth_correlation - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_phase_correlation_meter_new_clamps_smoothing() {
+        let m = PhaseCorrelationMeter::new(2.0);
+        // Smoothing is clamped to 0.999
+        assert!(m.smoothing < 1.0);
+    }
+
+    #[test]
+    fn test_phase_correlation_mono_interleaved() {
+        let mut m = PhaseCorrelationMeter::new(0.0); // No smoothing
+                                                     // Mono signal: L == R every sample
+        let samples: Vec<f32> = (0..200)
+            .flat_map(|i| {
+                let v = (i as f32 * 0.1).sin();
+                [v, v]
+            })
+            .collect();
+        let corr = m.process_interleaved(&samples);
+        assert!(
+            (corr - 1.0).abs() < 0.001,
+            "Mono should give corr ≈ 1, got {corr}"
+        );
+        assert_eq!(m.zone(), CorrelationZone::GoodStereo);
+    }
+
+    #[test]
+    fn test_phase_correlation_antiphase_channels() {
+        let mut m = PhaseCorrelationMeter::new(0.0);
+        let left: Vec<f32> = (0..200).map(|i| (i as f32 * 0.1).sin()).collect();
+        let right: Vec<f32> = left.iter().map(|&v| -v).collect();
+        let corr = m.process_channels(&left, &right);
+        assert!(corr < -0.99, "Anti-phase should give corr ≈ -1, got {corr}");
+        assert_eq!(m.zone(), CorrelationZone::PhaseDanger);
+    }
+
+    #[test]
+    fn test_phase_correlation_reset() {
+        let mut m = PhaseCorrelationMeter::new(0.5);
+        let samples: Vec<f32> = vec![-0.9f32, 0.9].repeat(50);
+        m.process_interleaved(&samples);
+        m.reset();
+        assert!((m.instant_correlation - 1.0).abs() < f32::EPSILON);
+        assert_eq!(m.frames_processed, 0);
+    }
+
+    #[test]
+    fn test_phase_correlation_zone_classification() {
+        assert_eq!(CorrelationZone::classify(0.8), CorrelationZone::GoodStereo);
+        assert_eq!(
+            CorrelationZone::classify(0.2),
+            CorrelationZone::ModerateStereo
+        );
+        assert_eq!(
+            CorrelationZone::classify(-0.2),
+            CorrelationZone::PhaseWarning
+        );
+        assert_eq!(
+            CorrelationZone::classify(-0.8),
+            CorrelationZone::PhaseDanger
+        );
+    }
+
+    #[test]
+    fn test_phase_correlation_empty_input() {
+        let mut m = PhaseCorrelationMeter::default();
+        let prev = m.instant_correlation;
+        m.process_interleaved(&[]);
+        // Should not change on empty input
+        assert!((m.instant_correlation - prev).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_render_phase_correlation_bar_size() {
+        let m = PhaseCorrelationMeter::default();
+        let cfg = PhaseCorrelationRenderConfig {
+            width: 128,
+            height: 24,
+            ..Default::default()
+        };
+        let out = render_phase_correlation_bar(&m, &cfg);
+        assert_eq!(out.len(), 128 * 24 * 4);
+    }
+
+    #[test]
+    fn test_render_phase_correlation_bar_non_empty() {
+        let m = PhaseCorrelationMeter::default();
+        let cfg = PhaseCorrelationRenderConfig::default();
+        let out = render_phase_correlation_bar(&m, &cfg);
+        assert!(out.iter().any(|&v| v > 0));
+    }
+
+    #[test]
+    fn test_phase_correlation_smoothing_effect() {
+        let mut m = PhaseCorrelationMeter::new(0.9); // strong smoothing
+                                                     // First block at -1
+        let left: Vec<f32> = vec![0.5; 100];
+        let right: Vec<f32> = vec![-0.5; 100];
+        m.process_channels(&left, &right);
+        // Smoothed value should be between 1.0 (initial) and -1.0 (instant)
+        assert!(m.smooth_correlation > m.instant_correlation);
     }
 }

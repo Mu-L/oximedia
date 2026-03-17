@@ -1,6 +1,7 @@
 [package]
 name = "oximedia-subtitle"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -18,6 +19,7 @@ thiserror.workspace = true
 bytes.workspace = true
 nom.workspace = true
 serde = { workspace = true, features = ["derive"] }
+rayon.workspace = true
 
 # Font rendering and text layout
 fontdue = "0.9"

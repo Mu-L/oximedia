@@ -132,6 +132,7 @@ impl ConversionProfile {
     /// Returns `0.0` if `fps_den` is zero (avoids divide-by-zero).
     #[allow(dead_code)]
     #[must_use]
+    #[allow(clippy::manual_checked_ops)]
     pub fn fps(&self) -> f64 {
         if self.fps_den == 0 {
             0.0
@@ -162,11 +163,10 @@ impl ConversionProfile {
     #[must_use]
     pub fn aspect_ratio(&self) -> (u32, u32) {
         let g = gcd(self.width, self.height);
-        if g == 0 {
-            (self.width, self.height)
-        } else {
-            (self.width / g, self.height / g)
-        }
+        (
+            self.width.checked_div(g).unwrap_or(self.width),
+            self.height.checked_div(g).unwrap_or(self.height),
+        )
     }
 }
 

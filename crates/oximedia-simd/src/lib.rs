@@ -25,12 +25,17 @@ mod scalar;
 pub mod accumulator;
 pub mod alpha_premul;
 pub mod audio_ops;
+pub mod avx512;
 pub mod bitwise_ops;
 pub mod blend;
 pub mod blend_simd;
 pub mod color_convert_simd;
 pub mod color_space;
 pub mod convolution;
+pub mod deblock_filter;
+pub mod dispatch;
+pub mod dot_product;
+pub mod entropy_coding;
 pub mod filter;
 pub mod fixed_point;
 pub mod gather_scatter;
@@ -40,24 +45,84 @@ pub mod lookup_table;
 pub mod math_ops;
 pub mod matrix;
 pub mod min_max;
+pub mod motion_search;
+pub mod neon;
 pub mod pack_unpack;
 pub mod pixel_ops;
+pub mod portable;
 pub mod prefix_sum;
+pub mod psnr;
 pub mod reduce;
+pub mod resize;
+pub mod satd;
 pub mod saturate;
+pub mod simd_bench;
+pub mod ssim;
+pub mod swizzle;
 pub mod threshold;
 pub mod transpose;
 pub mod vector_math;
 pub mod yuv_ops;
 
-/// CPU features detected at runtime
+/// CPU features detected at runtime.
+///
+/// Use [`CpuFeatures::detect`] to query the current CPU capabilities, or
+/// [`detect_cpu_features`] for a cached version backed by a [`OnceLock`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct CpuFeatures {
+    /// AVX2 (256-bit integer / float SIMD).
     pub avx2: bool,
+    /// AVX-512 Foundation (512-bit float SIMD).
     pub avx512f: bool,
+    /// AVX-512 Byte-and-Word (512-bit byte/word integer SIMD).
     pub avx512bw: bool,
+    /// AVX-512 Vector Length extensions (128/256-bit masked operations).
+    pub avx512vl: bool,
+    /// SSE 4.2 (128-bit SIMD with string/text processing extras).
+    pub sse4_2: bool,
+    /// ARM NEON (128-bit SIMD on aarch64).
     pub neon: bool,
+}
+
+impl CpuFeatures {
+    /// Detect CPU features on the current machine.
+    ///
+    /// This is a thin wrapper around [`detect_cpu_features`] which caches the
+    /// result in a `OnceLock` so subsequent calls are free.
+    #[must_use]
+    pub fn detect() -> Self {
+        detect_cpu_features()
+    }
+
+    /// Return the widest available SIMD register width in bits.
+    ///
+    /// | CPU capability | Width |
+    /// |---------------|-------|
+    /// | AVX-512F      | 512   |
+    /// | AVX2          | 256   |
+    /// | SSE 4.2       | 128   |
+    /// | scalar        |  64   |
+    #[must_use]
+    pub fn best_simd_width(&self) -> usize {
+        if self.avx512f {
+            512
+        } else if self.avx2 {
+            256
+        } else if self.sse4_2 {
+            128
+        } else {
+            64 // scalar word width
+        }
+    }
+}
+
+/// Returns `true` when the executing CPU provides NEON (always `true` on `aarch64`).
+///
+/// This is a convenience re-export of [`neon::has_neon`].
+#[must_use]
+pub fn has_neon() -> bool {
+    neon::has_neon()
 }
 
 static CPU_FEATURES: OnceLock<CpuFeatures> = OnceLock::new();
@@ -79,6 +144,8 @@ pub fn detect_cpu_features() -> CpuFeatures {
                 avx2: false,
                 avx512f: false,
                 avx512bw: false,
+                avx512vl: false,
+                sse4_2: false,
                 neon: false,
             }
         }
@@ -91,6 +158,8 @@ fn detect_x86_features() -> CpuFeatures {
         avx2: is_x86_feature_detected!("avx2"),
         avx512f: is_x86_feature_detected!("avx512f"),
         avx512bw: is_x86_feature_detected!("avx512bw"),
+        avx512vl: is_x86_feature_detected!("avx512vl"),
+        sse4_2: is_x86_feature_detected!("sse4.2"),
         neon: false,
     }
 }
@@ -101,6 +170,8 @@ fn detect_arm_features() -> CpuFeatures {
         avx2: false,
         avx512f: false,
         avx512bw: false,
+        avx512vl: false,
+        sse4_2: false,
         neon: cfg!(target_feature = "neon") || std::arch::is_aarch64_feature_detected!("neon"),
     }
 }
@@ -112,6 +183,8 @@ pub enum DctSize {
     Dct8x8,
     Dct16x16,
     Dct32x32,
+    /// AV1 large-block 64×64 transform (4096 coefficients).
+    Dct64x64,
 }
 
 /// Interpolation filter types
@@ -179,6 +252,7 @@ pub fn forward_dct(input: &[i16], output: &mut [i16], size: DctSize) -> Result<(
         DctSize::Dct8x8 => 64,
         DctSize::Dct16x16 => 256,
         DctSize::Dct32x32 => 1024,
+        DctSize::Dct64x64 => 4096,
     };
 
     if input.len() < required_size || output.len() < required_size {
@@ -219,6 +293,7 @@ pub fn inverse_dct(input: &[i16], output: &mut [i16], size: DctSize) -> Result<(
         DctSize::Dct8x8 => 64,
         DctSize::Dct16x16 => 256,
         DctSize::Dct32x32 => 1024,
+        DctSize::Dct64x64 => 4096,
     };
 
     if input.len() < required_size || output.len() < required_size {

@@ -1,6 +1,7 @@
 [package]
 name = "oximedia-py"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -18,7 +19,7 @@ doc = false
 workspace = true
 
 [dependencies]
-pyo3 = { version = "0.27", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["extension-module"] }
 oximedia-core.workspace = true
 oximedia-io.workspace = true
 oximedia-codec = { workspace = true, default-features = true, features = ["av1", "vp9", "vp8", "opus"] }

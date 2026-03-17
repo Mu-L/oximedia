@@ -74,18 +74,22 @@ pub mod bitrate_quality;
 pub mod codec_quality;
 pub mod color_fidelity;
 pub mod compression_artifacts;
+pub mod confidence;
 pub mod histogram_quality;
 pub mod metrics;
+pub mod peaq_like;
 pub mod perceptual;
 pub mod perceptual_model;
 pub mod quality_gate;
 pub mod quality_preset;
 pub mod quality_report;
+pub mod realtime_monitor;
 pub mod reference_free;
 pub mod scene_quality;
 pub mod sharpness_score;
 pub mod spatial_quality;
 pub mod temporal_quality;
+pub mod vmaf_like;
 pub mod vmaf_score;
 
 use oximedia_core::{OxiError, OxiResult, PixelFormat};
@@ -96,13 +100,20 @@ pub use batch::{BatchAssessment, BatchResult};
 pub use blockiness::BlockinessDetector;
 pub use blur::BlurDetector;
 pub use brisque::BrisqueAssessor;
-pub use fsim::FsimCalculator;
+pub use fsim::{
+    compute_fsim, gradient_magnitude, phase_congruency_approx, scharr_gradient, FsimCalculator,
+};
 pub use msssim::MsSsimCalculator;
 pub use niqe::NiqeAssessor;
 pub use noise::NoiseEstimator;
 pub use psnr::PsnrCalculator;
+pub use quality_gate::{PipelineQualityGate, QualityGateResult};
 pub use reference::ReferenceManager;
 pub use ssim::SsimCalculator;
+pub use temporal_quality::{
+    FrameQuality, QualityStats, SceneAwarePooler, SceneAwarePoolingReport, SceneSegmentStats,
+    TemporalQualityAnalysisReport, TemporalQualityAnalyzer,
+};
 pub use vif::VifCalculator;
 pub use vmaf::VmafCalculator;
 
@@ -311,17 +322,11 @@ impl PoolingMethod {
             Self::Min => scores
                 .iter()
                 .copied()
-                .min_by(|a, b| {
-                    a.partial_cmp(b)
-                        .expect("invariant: quality metric values are finite f64")
-                })
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .unwrap_or(0.0),
             Self::Percentile(p) => {
                 let mut sorted = scores.to_vec();
-                sorted.sort_by(|a, b| {
-                    a.partial_cmp(b)
-                        .expect("invariant: quality metric values are finite f64")
-                });
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let idx = ((f64::from(*p) / 100.0) * sorted.len() as f64) as usize;
                 sorted[idx.min(sorted.len() - 1)]
             }
@@ -419,7 +424,9 @@ impl QualityAssessor {
             MetricType::Blockiness => self.blockiness.detect(frame),
             MetricType::Blur => self.blur.detect(frame),
             MetricType::Noise => self.noise.estimate(frame),
-            _ => unreachable!(),
+            _ => Err(OxiError::InvalidData(format!(
+                "Metric {metric:?} is not a no-reference metric"
+            ))),
         }
     }
 }

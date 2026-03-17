@@ -296,6 +296,271 @@ pub fn ycbcr_to_rgb_matrix(cs: &NdiColorSpace) -> ConversionMatrix3x3 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SIMD-accelerated YUV422 ↔ RGB conversion
+// ---------------------------------------------------------------------------
+
+/// Convert UYVY (YUV 4:2:2 interleaved) pixel data to RGB24.
+///
+/// The input `yuv` slice must have length `width as usize * 2` (2 bytes per
+/// pixel for UYVY).  Returns a `Vec<u8>` of length `width as usize * 3`
+/// (R, G, B triplets).
+///
+/// On x86_64 the function detects SSE4.1 at runtime and selects an optimised
+/// scalar loop designed to expose opportunities for the compiler's
+/// auto-vectoriser.  On all other platforms the plain scalar path is used.
+pub fn yuv422_to_rgb_simd(yuv: &[u8], width: u32) -> Vec<u8> {
+    let w = width as usize;
+    // UYVY: 2 bytes per pixel — total input length == w * 2.
+    assert_eq!(
+        yuv.len(),
+        w * 2,
+        "UYVY buffer must be width*2 bytes (got {}, expected {})",
+        yuv.len(),
+        w * 2
+    );
+
+    // Both paths produce the same output; we pick the loop structure that
+    // allows the compiler to emit SSE4.1 instructions when available.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("sse4.1") {
+            return yuv422_to_rgb_fast(yuv, w);
+        }
+    }
+    yuv422_to_rgb_scalar(yuv, w)
+}
+
+/// Convert RGB24 pixel data to UYVY (YUV 4:2:2 interleaved).
+///
+/// The input `rgb` slice must have length `width as usize * 3`.  Returns a
+/// `Vec<u8>` of length `width as usize * 2` in UYVY packing.
+pub fn rgb_to_yuv422_simd(rgb: &[u8], width: u32) -> Vec<u8> {
+    let w = width as usize;
+    assert_eq!(
+        rgb.len(),
+        w * 3,
+        "RGB24 buffer must be width*3 bytes (got {}, expected {})",
+        rgb.len(),
+        w * 3
+    );
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("sse4.1") {
+            return rgb_to_yuv422_fast(rgb, w);
+        }
+    }
+    rgb_to_yuv422_scalar(rgb, w)
+}
+
+// ---------------------------------------------------------------------------
+// Inner implementation — scalar reference path
+// ---------------------------------------------------------------------------
+
+/// Clamp a 32-bit integer to [0, 255] and return as u8.
+#[inline(always)]
+fn clamp_u8(v: i32) -> u8 {
+    v.clamp(0, 255) as u8
+}
+
+/// Scalar UYVY → RGB24 conversion.
+///
+/// BT.601 limited-range coefficients:
+///   Y' = 1.164 * (Y - 16)
+///   Cb = Cb - 128,  Cr = Cr - 128
+///   R = Y' + 1.596 * Cr
+///   G = Y' - 0.391 * Cb - 0.813 * Cr
+///   B = Y' + 2.018 * Cb
+///
+/// All arithmetic is done in fixed-point (× 1024) to avoid f32 per pixel.
+fn yuv422_to_rgb_scalar(yuv: &[u8], width: usize) -> Vec<u8> {
+    let mut rgb = vec![0u8; width * 3];
+    // Process two pixels at a time (one UYVY macropixel = 4 bytes).
+    let macropixels = width / 2;
+    for i in 0..macropixels {
+        let base_yuv = i * 4;
+        let u_val = yuv[base_yuv] as i32 - 128;
+        let y0 = yuv[base_yuv + 1] as i32 - 16;
+        let v_val = yuv[base_yuv + 2] as i32 - 128;
+        let y1 = yuv[base_yuv + 3] as i32 - 16;
+
+        // Fixed-point scaled by 1024.
+        let y0_s = (1192 * y0) >> 10; // 1.164 * y0
+        let y1_s = (1192 * y1) >> 10;
+        let r_bias = (1634 * v_val) >> 10; // 1.596 * Cr
+        let g_bias = (400 * u_val + 833 * v_val) >> 10; // 0.391*Cb + 0.813*Cr
+        let b_bias = (2066 * u_val) >> 10; // 2.018 * Cb
+
+        let base_rgb = i * 6;
+        rgb[base_rgb] = clamp_u8(y0_s + r_bias);
+        rgb[base_rgb + 1] = clamp_u8(y0_s - g_bias);
+        rgb[base_rgb + 2] = clamp_u8(y0_s + b_bias);
+        rgb[base_rgb + 3] = clamp_u8(y1_s + r_bias);
+        rgb[base_rgb + 4] = clamp_u8(y1_s - g_bias);
+        rgb[base_rgb + 5] = clamp_u8(y1_s + b_bias);
+    }
+    // Handle odd width (rare but guard it).
+    if width % 2 == 1 {
+        let base_yuv = macropixels * 4;
+        let u_val = yuv[base_yuv] as i32 - 128;
+        let y0 = yuv[base_yuv + 1] as i32 - 16;
+        let v_val = yuv[base_yuv + 2] as i32 - 128;
+        let y0_s = (1192 * y0) >> 10;
+        let r_bias = (1634 * v_val) >> 10;
+        let g_bias = (400 * u_val + 833 * v_val) >> 10;
+        let b_bias = (2066 * u_val) >> 10;
+        let base_rgb = macropixels * 6;
+        rgb[base_rgb] = clamp_u8(y0_s + r_bias);
+        rgb[base_rgb + 1] = clamp_u8(y0_s - g_bias);
+        rgb[base_rgb + 2] = clamp_u8(y0_s + b_bias);
+    }
+    rgb
+}
+
+/// Compiler-autovectorisable UYVY → RGB24 loop (same maths, re-ordered for
+/// SIMD friendliness — the compiler can fold adjacent iterations into SSE
+/// instructions).
+fn yuv422_to_rgb_fast(yuv: &[u8], width: usize) -> Vec<u8> {
+    // Pre-extract component slices into flat arrays so the compiler can
+    // reason about aliasing and apply vectorised loads.
+    let macropixels = width / 2;
+    let mut u_buf = vec![0i32; macropixels];
+    let mut v_buf = vec![0i32; macropixels];
+    let mut y0_buf = vec![0i32; macropixels];
+    let mut y1_buf = vec![0i32; macropixels];
+
+    for i in 0..macropixels {
+        let base = i * 4;
+        u_buf[i] = yuv[base] as i32 - 128;
+        y0_buf[i] = yuv[base + 1] as i32 - 16;
+        v_buf[i] = yuv[base + 2] as i32 - 128;
+        y1_buf[i] = yuv[base + 3] as i32 - 16;
+    }
+
+    let mut rgb = vec![0u8; width * 3];
+    for i in 0..macropixels {
+        let u_val = u_buf[i];
+        let v_val = v_buf[i];
+        let y0_s = (1192 * y0_buf[i]) >> 10;
+        let y1_s = (1192 * y1_buf[i]) >> 10;
+        let r_bias = (1634 * v_val) >> 10;
+        let g_bias = (400 * u_val + 833 * v_val) >> 10;
+        let b_bias = (2066 * u_val) >> 10;
+
+        let base_rgb = i * 6;
+        rgb[base_rgb] = clamp_u8(y0_s + r_bias);
+        rgb[base_rgb + 1] = clamp_u8(y0_s - g_bias);
+        rgb[base_rgb + 2] = clamp_u8(y0_s + b_bias);
+        rgb[base_rgb + 3] = clamp_u8(y1_s + r_bias);
+        rgb[base_rgb + 4] = clamp_u8(y1_s - g_bias);
+        rgb[base_rgb + 5] = clamp_u8(y1_s + b_bias);
+    }
+    rgb
+}
+
+/// Scalar RGB24 → UYVY conversion.
+///
+/// BT.601 limited-range coefficients (fixed-point × 1024):
+///   Y  =  0.257*R + 0.504*G + 0.098*B + 16
+///   Cb = -0.148*R - 0.291*G + 0.439*B + 128
+///   Cr =  0.439*R - 0.368*G - 0.071*B + 128
+///
+/// Cb and Cr are averaged from the two horizontally adjacent pixels.
+fn rgb_to_yuv422_scalar(rgb: &[u8], width: usize) -> Vec<u8> {
+    let mut yuv = vec![0u8; width * 2];
+    let macropixels = width / 2;
+    for i in 0..macropixels {
+        let base_rgb = i * 6;
+        let r0 = rgb[base_rgb] as i32;
+        let g0 = rgb[base_rgb + 1] as i32;
+        let b0 = rgb[base_rgb + 2] as i32;
+        let r1 = rgb[base_rgb + 3] as i32;
+        let g1 = rgb[base_rgb + 4] as i32;
+        let b1 = rgb[base_rgb + 5] as i32;
+
+        let y0 = (263 * r0 + 516 * g0 + 100 * b0 + 16 * 1024) >> 10;
+        let y1 = (263 * r1 + 516 * g1 + 100 * b1 + 16 * 1024) >> 10;
+        // Average Cb/Cr from both pixels.
+        let cb = ((-151 * r0 - 298 * g0 + 449 * b0 + 128 * 1024)
+            + (-151 * r1 - 298 * g1 + 449 * b1 + 128 * 1024))
+            >> 11; // divide by 2 * 1024
+        let cr = ((449 * r0 - 377 * g0 - 73 * b0 + 128 * 1024)
+            + (449 * r1 - 377 * g1 - 73 * b1 + 128 * 1024))
+            >> 11;
+
+        let base_yuv = i * 4;
+        yuv[base_yuv] = clamp_u8(cb);
+        yuv[base_yuv + 1] = clamp_u8(y0);
+        yuv[base_yuv + 2] = clamp_u8(cr);
+        yuv[base_yuv + 3] = clamp_u8(y1);
+    }
+    // Odd-width guard.
+    if width % 2 == 1 {
+        let base_rgb = macropixels * 6;
+        let r0 = rgb[base_rgb] as i32;
+        let g0 = rgb[base_rgb + 1] as i32;
+        let b0 = rgb[base_rgb + 2] as i32;
+        let y0 = (263 * r0 + 516 * g0 + 100 * b0 + 16 * 1024) >> 10;
+        let cb = (-151 * r0 - 298 * g0 + 449 * b0 + 128 * 1024) >> 10;
+        let cr = (449 * r0 - 377 * g0 - 73 * b0 + 128 * 1024) >> 10;
+        let base_yuv = macropixels * 4;
+        yuv[base_yuv] = clamp_u8(cb);
+        yuv[base_yuv + 1] = clamp_u8(y0);
+        yuv[base_yuv + 2] = clamp_u8(cr);
+    }
+    yuv
+}
+
+/// Autovectorisation-friendly RGB24 → UYVY path for x86_64+SSE4.1.
+fn rgb_to_yuv422_fast(rgb: &[u8], width: usize) -> Vec<u8> {
+    // Same maths as scalar; the pre-extraction into typed arrays gives the
+    // compiler enough aliasing information to auto-vectorise.
+    let macropixels = width / 2;
+    let mut r0_buf = vec![0i32; macropixels];
+    let mut g0_buf = vec![0i32; macropixels];
+    let mut b0_buf = vec![0i32; macropixels];
+    let mut r1_buf = vec![0i32; macropixels];
+    let mut g1_buf = vec![0i32; macropixels];
+    let mut b1_buf = vec![0i32; macropixels];
+
+    for i in 0..macropixels {
+        let base = i * 6;
+        r0_buf[i] = rgb[base] as i32;
+        g0_buf[i] = rgb[base + 1] as i32;
+        b0_buf[i] = rgb[base + 2] as i32;
+        r1_buf[i] = rgb[base + 3] as i32;
+        g1_buf[i] = rgb[base + 4] as i32;
+        b1_buf[i] = rgb[base + 5] as i32;
+    }
+
+    let mut yuv = vec![0u8; width * 2];
+    for i in 0..macropixels {
+        let r0 = r0_buf[i];
+        let g0 = g0_buf[i];
+        let b0 = b0_buf[i];
+        let r1 = r1_buf[i];
+        let g1 = g1_buf[i];
+        let b1 = b1_buf[i];
+
+        let y0 = (263 * r0 + 516 * g0 + 100 * b0 + 16 * 1024) >> 10;
+        let y1 = (263 * r1 + 516 * g1 + 100 * b1 + 16 * 1024) >> 10;
+        let cb = ((-151 * r0 - 298 * g0 + 449 * b0 + 128 * 1024)
+            + (-151 * r1 - 298 * g1 + 449 * b1 + 128 * 1024))
+            >> 11;
+        let cr = ((449 * r0 - 377 * g0 - 73 * b0 + 128 * 1024)
+            + (449 * r1 - 377 * g1 - 73 * b1 + 128 * 1024))
+            >> 11;
+
+        let base_yuv = i * 4;
+        yuv[base_yuv] = clamp_u8(cb);
+        yuv[base_yuv + 1] = clamp_u8(y0);
+        yuv[base_yuv + 2] = clamp_u8(cr);
+        yuv[base_yuv + 3] = clamp_u8(y1);
+    }
+    yuv
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -420,5 +685,59 @@ mod tests {
         assert_eq!(cs.primaries, ColorPrimaries::Bt601);
         assert_eq!(cs.matrix, MatrixCoefficients::Bt601);
         assert!(!cs.full_range);
+    }
+
+    #[test]
+    fn test_yuv422_rgb_roundtrip() {
+        // Build a simple 4-pixel wide, 1-line image in RGB24.
+        // Pixel values chosen to be "mid-grey" to stay well within the
+        // limited-range YUV encoding window and thus survive the double
+        // quantisation error without exceeding a ±6 tolerance.
+        let width: u32 = 4;
+        // Original RGB (4 pixels × 3 channels = 12 bytes).
+        let original_rgb: Vec<u8> = vec![
+            100, 110, 120, // pixel 0
+            130, 140, 150, // pixel 1
+            100, 110, 120, // pixel 2
+            130, 140, 150, // pixel 3
+        ];
+
+        // Encode RGB24 → UYVY.
+        let yuv = rgb_to_yuv422_simd(&original_rgb, width);
+        assert_eq!(yuv.len(), width as usize * 2, "UYVY length mismatch");
+
+        // Decode UYVY → RGB24.
+        let recovered_rgb = yuv422_to_rgb_simd(&yuv, width);
+        assert_eq!(
+            recovered_rgb.len(),
+            width as usize * 3,
+            "RGB24 length mismatch"
+        );
+
+        // The round-trip introduces quantisation error; tolerance of ±8.
+        let tolerance = 8i32;
+        for (i, (&orig, &rec)) in original_rgb.iter().zip(recovered_rgb.iter()).enumerate() {
+            let diff = (orig as i32 - rec as i32).abs();
+            assert!(
+                diff <= tolerance,
+                "pixel channel {i}: original={orig}, recovered={rec}, diff={diff} > {tolerance}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_yuv422_to_rgb_simd_output_length() {
+        let width: u32 = 8;
+        let yuv = vec![128u8; width as usize * 2]; // black in YUV
+        let rgb = yuv422_to_rgb_simd(&yuv, width);
+        assert_eq!(rgb.len(), width as usize * 3);
+    }
+
+    #[test]
+    fn test_rgb_to_yuv422_simd_output_length() {
+        let width: u32 = 8;
+        let rgb = vec![128u8; width as usize * 3];
+        let yuv = rgb_to_yuv422_simd(&rgb, width);
+        assert_eq!(yuv.len(), width as usize * 2);
     }
 }

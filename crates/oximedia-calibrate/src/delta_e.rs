@@ -410,4 +410,15 @@ mod tests {
         assert_eq!(pass, 1);
         assert_eq!(fail, 1);
     }
+
+    /// CIEDE2000 of a colour with itself must be exactly 0.
+    #[test]
+    fn test_delta_e2000_identical() {
+        let lab = [50.0, 25.0, -10.0];
+        let de = delta_e_2000(lab, lab);
+        assert!(
+            de.abs() < 1e-12,
+            "ΔE2000 of identical LAB colours must be 0, got {de}"
+        );
+    }
 }

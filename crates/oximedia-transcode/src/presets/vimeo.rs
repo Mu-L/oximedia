@@ -15,6 +15,7 @@ pub fn vimeo_sd() -> PresetConfig {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -31,6 +32,7 @@ pub fn vimeo_hd() -> PresetConfig {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -47,6 +49,7 @@ pub fn vimeo_full_hd() -> PresetConfig {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -63,6 +66,7 @@ pub fn vimeo_4k() -> PresetConfig {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -79,6 +83,7 @@ pub fn vimeo_pro() -> PresetConfig {
         frame_rate: Some((24, 1)), // Film standard
         quality_mode: Some(QualityMode::VeryHigh),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 

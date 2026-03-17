@@ -284,6 +284,148 @@ impl SessionMetrics {
     }
 }
 
+// ── Cycle time analytics ─────────────────────────────────────────────────────
+
+/// A single review cycle: one round of feedback → revision → re-review.
+#[derive(Debug, Clone)]
+pub struct ReviewCycle {
+    /// Cycle number (1-indexed).
+    pub cycle_number: u32,
+    /// Timestamp when feedback was submitted (ms since epoch).
+    pub feedback_submitted_ms: u64,
+    /// Timestamp when the revision was completed (ms since epoch).
+    pub revision_completed_ms: Option<u64>,
+    /// Timestamp when re-review was approved (ms since epoch).
+    pub approved_ms: Option<u64>,
+    /// Number of comments open at the start of this cycle.
+    pub open_comment_count: usize,
+}
+
+impl ReviewCycle {
+    /// Create a new cycle.
+    #[must_use]
+    pub fn new(cycle_number: u32, feedback_submitted_ms: u64, open_comment_count: usize) -> Self {
+        Self {
+            cycle_number,
+            feedback_submitted_ms,
+            revision_completed_ms: None,
+            approved_ms: None,
+            open_comment_count,
+        }
+    }
+
+    /// Duration from feedback submission to revision completion.
+    #[must_use]
+    pub fn revision_turnaround_ms(&self) -> Option<u64> {
+        self.revision_completed_ms
+            .map(|r| r.saturating_sub(self.feedback_submitted_ms))
+    }
+
+    /// Duration from revision completion to approval.
+    #[must_use]
+    pub fn review_turnaround_ms(&self) -> Option<u64> {
+        match (self.revision_completed_ms, self.approved_ms) {
+            (Some(rev), Some(apr)) => Some(apr.saturating_sub(rev)),
+            _ => None,
+        }
+    }
+
+    /// Total cycle duration from feedback submission to approval.
+    #[must_use]
+    pub fn total_cycle_ms(&self) -> Option<u64> {
+        self.approved_ms
+            .map(|a| a.saturating_sub(self.feedback_submitted_ms))
+    }
+}
+
+/// Aggregated cycle time statistics across multiple review cycles.
+#[derive(Debug, Clone, Default)]
+pub struct CycleTimeStats {
+    /// Individual cycles ordered by cycle number.
+    pub cycles: Vec<ReviewCycle>,
+}
+
+impl CycleTimeStats {
+    /// Create empty statistics.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a cycle.
+    pub fn add_cycle(&mut self, cycle: ReviewCycle) {
+        self.cycles.push(cycle);
+    }
+
+    /// Count completed cycles (those with an `approved_ms`).
+    #[must_use]
+    pub fn completed_count(&self) -> usize {
+        self.cycles
+            .iter()
+            .filter(|c| c.approved_ms.is_some())
+            .count()
+    }
+
+    /// Mean total cycle duration in ms across completed cycles.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn mean_cycle_ms(&self) -> Option<f64> {
+        let completed: Vec<u64> = self
+            .cycles
+            .iter()
+            .filter_map(|c| c.total_cycle_ms())
+            .collect();
+        if completed.is_empty() {
+            return None;
+        }
+        let sum: u64 = completed.iter().sum();
+        Some(sum as f64 / completed.len() as f64)
+    }
+
+    /// Minimum total cycle duration among completed cycles.
+    #[must_use]
+    pub fn min_cycle_ms(&self) -> Option<u64> {
+        self.cycles.iter().filter_map(|c| c.total_cycle_ms()).min()
+    }
+
+    /// Maximum total cycle duration among completed cycles.
+    #[must_use]
+    pub fn max_cycle_ms(&self) -> Option<u64> {
+        self.cycles.iter().filter_map(|c| c.total_cycle_ms()).max()
+    }
+
+    /// Trend: last completed cycle duration minus first (positive = getting slower).
+    #[must_use]
+    pub fn trend_ms(&self) -> Option<i64> {
+        let durations: Vec<u64> = self
+            .cycles
+            .iter()
+            .filter_map(|c| c.total_cycle_ms())
+            .collect();
+        if durations.len() < 2 {
+            return None;
+        }
+        let first = *durations.first()?;
+        let last = *durations.last()?;
+        Some(last as i64 - first as i64)
+    }
+
+    /// Mean revision turnaround across cycles that have it.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn mean_revision_turnaround_ms(&self) -> Option<f64> {
+        let values: Vec<u64> = self
+            .cycles
+            .iter()
+            .filter_map(|c| c.revision_turnaround_ms())
+            .collect();
+        if values.is_empty() {
+            return None;
+        }
+        Some(values.iter().sum::<u64>() as f64 / values.len() as f64)
+    }
+}
+
 /// Computes a review health score (0.0 to 100.0).
 #[derive(Debug, Clone)]
 pub struct ReviewHealthScore {
@@ -479,5 +621,92 @@ mod tests {
         assert!(health.factors.contains_key("resolution_rate"));
         assert!(health.factors.contains_key("participation"));
         assert!(health.factors.contains_key("response_time"));
+    }
+
+    // ── Cycle time analytics tests ────────────────────────────────────────────
+
+    fn make_complete_cycle(n: u32, start: u64, rev: u64, approve: u64) -> ReviewCycle {
+        let mut c = ReviewCycle::new(n, start, 5);
+        c.revision_completed_ms = Some(rev);
+        c.approved_ms = Some(approve);
+        c
+    }
+
+    #[test]
+    fn test_cycle_revision_turnaround() {
+        let c = make_complete_cycle(1, 1000, 3000, 5000);
+        assert_eq!(c.revision_turnaround_ms(), Some(2000));
+    }
+
+    #[test]
+    fn test_cycle_review_turnaround() {
+        let c = make_complete_cycle(1, 1000, 3000, 5000);
+        assert_eq!(c.review_turnaround_ms(), Some(2000));
+    }
+
+    #[test]
+    fn test_cycle_total_cycle_ms() {
+        let c = make_complete_cycle(1, 1000, 3000, 5000);
+        assert_eq!(c.total_cycle_ms(), Some(4000));
+    }
+
+    #[test]
+    fn test_cycle_no_approval_gives_none() {
+        let c = ReviewCycle::new(1, 0, 3);
+        assert!(c.total_cycle_ms().is_none());
+        assert!(c.review_turnaround_ms().is_none());
+    }
+
+    #[test]
+    fn test_cycle_stats_empty() {
+        let stats = CycleTimeStats::new();
+        assert_eq!(stats.completed_count(), 0);
+        assert!(stats.mean_cycle_ms().is_none());
+        assert!(stats.min_cycle_ms().is_none());
+        assert!(stats.max_cycle_ms().is_none());
+        assert!(stats.trend_ms().is_none());
+    }
+
+    #[test]
+    fn test_cycle_stats_mean() {
+        let mut stats = CycleTimeStats::new();
+        stats.add_cycle(make_complete_cycle(1, 0, 1000, 2000)); // 2000
+        stats.add_cycle(make_complete_cycle(2, 0, 1000, 4000)); // 4000
+        let mean = stats.mean_cycle_ms().expect("has completed cycles");
+        assert!((mean - 3000.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_cycle_stats_min_max() {
+        let mut stats = CycleTimeStats::new();
+        stats.add_cycle(make_complete_cycle(1, 0, 500, 1000)); // 1000
+        stats.add_cycle(make_complete_cycle(2, 0, 500, 3000)); // 3000
+        assert_eq!(stats.min_cycle_ms(), Some(1000));
+        assert_eq!(stats.max_cycle_ms(), Some(3000));
+    }
+
+    #[test]
+    fn test_cycle_stats_trend_improving() {
+        let mut stats = CycleTimeStats::new();
+        stats.add_cycle(make_complete_cycle(1, 0, 2000, 5000)); // 5000
+        stats.add_cycle(make_complete_cycle(2, 0, 1000, 3000)); // 3000
+        let trend = stats.trend_ms().expect("two cycles");
+        assert!(trend < 0, "trend should be negative (improving)");
+    }
+
+    #[test]
+    fn test_cycle_stats_trend_single_cycle_is_none() {
+        let mut stats = CycleTimeStats::new();
+        stats.add_cycle(make_complete_cycle(1, 0, 1000, 5000));
+        assert!(stats.trend_ms().is_none());
+    }
+
+    #[test]
+    fn test_cycle_stats_mean_revision_turnaround() {
+        let mut stats = CycleTimeStats::new();
+        stats.add_cycle(make_complete_cycle(1, 0, 2000, 5000)); // turnaround=2000
+        stats.add_cycle(make_complete_cycle(2, 0, 4000, 6000)); // turnaround=4000
+        let mean = stats.mean_revision_turnaround_ms().expect("has data");
+        assert!((mean - 3000.0).abs() < f64::EPSILON);
     }
 }

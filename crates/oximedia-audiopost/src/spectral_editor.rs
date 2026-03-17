@@ -213,9 +213,7 @@ fn linear_to_db(linear: f64) -> f64 {
 #[allow(clippy::cast_precision_loss)]
 pub fn hann_window(size: usize) -> Vec<f64> {
     (0..size)
-        .map(|i| {
-            0.5 * (1.0 - (2.0 * PI * i as f64 / size as f64).cos())
-        })
+        .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f64 / size as f64).cos()))
         .collect()
 }
 
@@ -369,9 +367,17 @@ mod tests {
     fn test_hann_window() {
         let w = hann_window(4);
         assert_eq!(w.len(), 4);
-        // Hann window: ends should be near 0, middle near 1.
-        assert!(w[0].abs() < 1e-10);
-        assert!(w[2].abs() < 1e-10);
+        // Hann window of size 4:
+        //   w[0] = 0.5*(1 - cos(0))       = 0.0  (near 0)
+        //   w[1] = 0.5*(1 - cos(π/2))     = 0.5
+        //   w[2] = 0.5*(1 - cos(π))       = 1.0  (peak, near 1)
+        //   w[3] = 0.5*(1 - cos(3π/2))    = 0.5
+        assert!(w[0].abs() < 1e-10, "w[0] should be near 0, got {}", w[0]);
+        assert!(
+            (w[2] - 1.0).abs() < 1e-10,
+            "w[2] should be near 1, got {}",
+            w[2]
+        );
     }
 
     #[test]
@@ -403,8 +409,7 @@ mod tests {
     #[test]
     fn test_feathered_edit() {
         let region = SpectralRegion::new(1.0, 2.0, 200.0, 400.0);
-        let edit = SpectralEdit::new(region, SpectralEditOp::Silence)
-            .with_feather(50.0, 0.1);
+        let edit = SpectralEdit::new(region, SpectralEditOp::Silence).with_feather(50.0, 0.1);
         // Inside region: gain = 0.
         assert_eq!(edit.gain_at(1.5, 300.0), 0.0);
         // Just outside feather range: gain = 1.

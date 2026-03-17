@@ -115,14 +115,15 @@ impl PatchworkEmbedder {
 
     /// Generate pseudorandom sample pairs for a bit.
     fn generate_pairs(&self, sample_count: usize, bit_idx: usize) -> Vec<(usize, usize)> {
-        use rand::{rngs::SmallRng, Rng, SeedableRng};
-        let mut rng = SmallRng::seed_from_u64(self.config.key.wrapping_add(bit_idx as u64));
+        let mut rng =
+            scirs2_core::random::Random::seed(self.config.key.wrapping_add(bit_idx as u64));
 
         let mut pairs = Vec::new();
         let max_idx = sample_count - self.config.pair_distance;
 
         for _ in 0..self.config.pairs_per_bit {
-            let a_idx = rng.random_range(0..max_idx);
+            let a_idx = (rng.random_f64() * max_idx as f64) as usize;
+            let a_idx = a_idx.min(max_idx.saturating_sub(1));
             let b_idx = a_idx + self.config.pair_distance;
 
             if b_idx < sample_count {
@@ -196,14 +197,15 @@ impl BlockPatchworkEmbedder {
 
     /// Generate pairs within a block.
     fn generate_block_pairs(&self, block_len: usize) -> Vec<(usize, usize)> {
-        use rand::{rngs::SmallRng, Rng, SeedableRng};
-        let mut rng = SmallRng::seed_from_u64(self.key);
+        let mut rng = scirs2_core::random::Random::seed(self.key);
 
         let mut pairs = Vec::new();
 
         for _ in 0..self.pairs_per_block {
-            let a = rng.random_range(0..block_len);
-            let b = rng.random_range(0..block_len);
+            let a = (rng.random_f64() * block_len as f64) as usize;
+            let a = a.min(block_len.saturating_sub(1));
+            let b = (rng.random_f64() * block_len as f64) as usize;
+            let b = b.min(block_len.saturating_sub(1));
 
             if a != b {
                 pairs.push((a.min(b), a.max(b)));
@@ -272,11 +274,13 @@ impl CorrelationPatchwork {
 
     /// Generate pseudorandom patch indices.
     fn generate_patch_indices(&self, max_len: usize) -> Vec<usize> {
-        use rand::{rngs::SmallRng, Rng, SeedableRng};
-        let mut rng = SmallRng::seed_from_u64(self.key);
+        let mut rng = scirs2_core::random::Random::seed(self.key);
 
         (0..self.patch_size)
-            .map(|_| rng.random_range(0..max_len))
+            .map(|_| {
+                let idx = (rng.random_f64() * max_len as f64) as usize;
+                idx.min(max_len.saturating_sub(1))
+            })
             .collect()
     }
 }

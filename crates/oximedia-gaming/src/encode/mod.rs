@@ -13,6 +13,6 @@ pub mod qsv;
 pub mod vce;
 
 pub use lowlatency::{EncoderConfig, LatencyMode, LowLatencyEncoder};
-pub use nvenc::{NvencEncoder, NvencPreset};
-pub use qsv::{QsvEncoder, QsvPreset};
-pub use vce::{VceEncoder, VcePreset};
+pub use nvenc::{NvencConfig, NvencEncoder, NvencPreset};
+pub use qsv::{QsvConfig, QsvEncoder, QsvPreset};
+pub use vce::{VceConfig, VceEncoder, VcePreset};

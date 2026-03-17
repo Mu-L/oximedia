@@ -35,6 +35,7 @@ impl ChannelHistogram {
     ///   (use `width * num_channels` for packed images).
     /// * `num_channels` - Total number of interleaved channels per pixel.
     #[must_use]
+    #[allow(clippy::manual_checked_ops)]
     pub fn compute(data: &[u8], channel: u8, stride: usize, num_channels: usize) -> Self {
         let ch = channel as usize;
         let mut bins = [0u32; 256];
@@ -53,7 +54,7 @@ impl ChannelHistogram {
         // Iterate over all pixels: stride may differ from num_channels for
         // padded rows, but for packed images stride == width * num_channels.
         // We iterate byte-by-byte and pick channel `ch` from each pixel.
-        let total_rows = if stride > 0 { data.len() / stride } else { 0 };
+        let total_rows = data.len().checked_div(stride).unwrap_or(0);
 
         let mut count = 0u64;
         let mut sum = 0u64;
@@ -150,6 +151,7 @@ impl ChannelHistogram {
     ///
     /// Returns `0.0` for a uniform (all-same-value) distribution.
     #[must_use]
+    #[allow(clippy::manual_checked_ops)]
     pub fn entropy(&self) -> f64 {
         let total: u64 = self.bins.iter().map(|&b| u64::from(b)).sum();
         if total == 0 {
@@ -191,7 +193,7 @@ impl ImageHistogram {
     #[must_use]
     pub fn from_rgb(data: &[u8], width: u32, height: u32) -> Self {
         let pixels = (width * height) as usize;
-        let num_channels = if pixels > 0 { data.len() / pixels } else { 3 };
+        let num_channels = data.len().checked_div(pixels).unwrap_or(3);
         let stride = width as usize * num_channels;
 
         let channels = (0..num_channels as u8)

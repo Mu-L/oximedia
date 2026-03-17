@@ -9,10 +9,10 @@
 //! use oximedia_core::work_queue::{WorkItem, WorkQueue};
 //!
 //! let mut q: WorkQueue<u32> = WorkQueue::new(8);
-//! q.push(WorkItem::new(42_u32, 10))?;
-//! q.push(WorkItem::new(99_u32, 20))?;
+//! q.push(WorkItem::new(42_u32, 10)).expect("queue not full");
+//! q.push(WorkItem::new(99_u32, 20)).expect("queue not full");
 //! // Highest-priority item comes out first.
-//! let item = q.pop()?;
+//! let item = q.pop().expect("queue not empty");
 //! assert_eq!(item.payload, 99_u32);
 //! ```
 
@@ -75,7 +75,7 @@ impl std::error::Error for QueueError {}
 /// use oximedia_core::work_queue::{WorkItem, WorkQueue};
 ///
 /// let mut q: WorkQueue<()> = WorkQueue::new(16);
-/// q.push(WorkItem::new((), 1))?;
+/// q.push(WorkItem::new((), 1)).expect("queue not full");
 /// let _ = q.pop();
 /// let stats = q.stats();
 /// assert_eq!(stats.total_pushed, 1);
@@ -116,10 +116,10 @@ impl QueueStats {
 /// use oximedia_core::work_queue::{WorkItem, WorkQueue};
 ///
 /// let mut q: WorkQueue<i32> = WorkQueue::new(4);
-/// q.push(WorkItem::new(1, 5))?;
-/// q.push(WorkItem::new(2, 1))?;
-/// q.push(WorkItem::new(3, 9))?;
-/// assert_eq!(q.pop()?.payload, 3); // priority 9 first
+/// q.push(WorkItem::new(1, 5)).expect("queue not full");
+/// q.push(WorkItem::new(2, 1)).expect("queue not full");
+/// q.push(WorkItem::new(3, 9)).expect("queue not full");
+/// assert_eq!(q.pop().expect("queue not empty").payload, 3); // priority 9 first
 /// assert_eq!(q.len(), 2);
 /// ```
 #[derive(Debug)]

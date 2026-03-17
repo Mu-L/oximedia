@@ -152,9 +152,12 @@ impl MotionDetector {
     /// ```
     /// use oximedia_cv::detect::MotionDetector;
     ///
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut detector = MotionDetector::new(10, 10);
     /// let frame = vec![100u8; 100];
     /// let (mask, regions) = detector.process(&frame)?;
+    /// Ok(())
+    /// }
     /// ```
     pub fn process(&mut self, frame: &[u8]) -> CvResult<(Vec<u8>, Vec<MotionRegion>)> {
         let expected_size = self.width as usize * self.height as usize;

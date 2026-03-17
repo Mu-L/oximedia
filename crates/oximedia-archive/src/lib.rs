@@ -3,33 +3,45 @@
 //! This crate provides comprehensive media archive verification and long-term preservation
 //! capabilities, including checksumming, fixity checking, validation, and OAIS compliance.
 
+pub mod archive_verify;
 pub mod asset_manifest;
 pub mod audit_trail;
 pub mod batch_archive;
 pub mod catalog;
 pub mod catalog_export;
+#[cfg(feature = "sqlite")]
 pub mod checksum;
 pub mod dedup_archive;
+#[cfg(feature = "sqlite")]
 pub mod fixity;
 pub mod format_registry;
+pub mod health_dashboard;
 pub mod indexing;
 pub mod ingest_log;
 pub mod integrity_scan;
 pub mod migration;
+pub mod parallel_checksum;
 pub mod preservation;
 pub mod preservation_policy;
+#[cfg(feature = "sqlite")]
 pub mod quarantine;
+#[cfg(feature = "sqlite")]
 pub mod report;
 pub mod restore_plan;
+pub mod retention_enforce;
 pub mod retention_schedule;
 pub mod search_index;
+pub mod split_archive;
+pub mod streaming_compress;
 pub mod tape;
 pub mod validate;
 pub mod version_history;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+#[cfg(feature = "sqlite")]
+use std::path::Path;
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Archive verification error types
@@ -38,8 +50,13 @@ pub enum ArchiveError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[cfg(feature = "sqlite")]
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
+
+    #[cfg(not(feature = "sqlite"))]
+    #[error("Database error: {0}")]
+    Database(String),
 
     #[error("Checksum mismatch: expected {expected}, got {actual}")]
     ChecksumMismatch { expected: String, actual: String },
@@ -131,11 +148,13 @@ impl Default for VerificationConfig {
 }
 
 /// Archive verifier - main entry point
+#[cfg(feature = "sqlite")]
 pub struct ArchiveVerifier {
     config: VerificationConfig,
     db_pool: Option<sqlx::SqlitePool>,
 }
 
+#[cfg(feature = "sqlite")]
 impl ArchiveVerifier {
     /// Create a new archive verifier with default configuration
     pub fn new() -> Self {
@@ -332,6 +351,7 @@ impl ArchiveVerifier {
     }
 }
 
+#[cfg(feature = "sqlite")]
 impl Default for ArchiveVerifier {
     fn default() -> Self {
         Self::new()
@@ -355,6 +375,7 @@ pub struct VerificationResult {
     pub status: VerificationStatus,
     pub checksums: ChecksumSet,
     pub validation_errors: Vec<String>,
+    #[cfg(feature = "sqlite")]
     pub fixity_status: Option<fixity::FixityStatus>,
 }
 

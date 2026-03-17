@@ -1,6 +1,7 @@
 [package]
 name = "oximedia-virtual"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -17,4 +18,4 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

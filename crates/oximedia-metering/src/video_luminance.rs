@@ -5,9 +5,104 @@
 //! - Average luminance
 //! - Minimum luminance
 //! - Luminance distribution
+//! - PQ (HDR10/ST.2084) and HLG (Hybrid Log-Gamma) electro-optical transfer functions
 
+use crate::video_quality::Frame2D;
 use crate::{MeteringError, MeteringResult};
-use ndarray::Array2;
+
+/// Transfer function for video luminance encoding.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TransferFunction {
+    /// Linear (no transfer function, values are already absolute nits).
+    Linear,
+    /// SMPTE ST 2084 (PQ / HDR10). Signal range 0–1 maps to 0–10 000 cd/m².
+    Pq,
+    /// Hybrid Log-Gamma (ITU-R BT.2100, BBC/NHK HLG). Signal range 0–1.
+    /// Peak luminance is configurable (typically 1000 cd/m² for broadcast).
+    Hlg,
+    /// ITU-R BT.709 / BT.1886 (SDR). Signal range 0–1 maps to 0–100 cd/m².
+    Sdr,
+}
+
+impl TransferFunction {
+    /// Convert a normalised signal value (0–1) to absolute luminance in cd/m²
+    /// (nits) using the specified peak white luminance `peak_nits`.
+    ///
+    /// # Arguments
+    ///
+    /// * `signal` - Normalised signal value in [0, 1]
+    /// * `peak_nits` - Display peak white luminance in cd/m²
+    pub fn to_nits(&self, signal: f64, peak_nits: f64) -> f64 {
+        let signal = signal.clamp(0.0, 1.0);
+        match self {
+            Self::Linear => signal * peak_nits,
+            Self::Sdr => {
+                // ITU-R BT.1886 gamma 2.4 EOTF, reference white = 100 nits.
+                // L = Lw * (E / 1.0)^2.4  (simplified; Lw = peak SDR white = 100 nits)
+                signal.powf(2.4) * peak_nits.min(100.0)
+            }
+            Self::Pq => Self::pq_eotf(signal) * peak_nits.max(1.0),
+            Self::Hlg => Self::hlg_eotf(signal, peak_nits),
+        }
+    }
+
+    /// SMPTE ST 2084 (PQ) EOTF — maps normalised signal to linear scene luminance.
+    /// Output is normalised to [0, 1] relative to 10 000 cd/m².
+    fn pq_eotf(e: f64) -> f64 {
+        // ST 2084 constants
+        const M1: f64 = 0.1593_017_578_125;
+        const M2: f64 = 78.843_750;
+        const C1: f64 = 0.835_937_5;
+        const C2: f64 = 18.851_562_5;
+        const C3: f64 = 18.687_5;
+
+        let ep = e.powf(1.0 / M2);
+        let num = (ep - C1).max(0.0);
+        let den = C2 - C3 * ep;
+        let linear = if den.abs() > 1e-12 {
+            (num / den).powf(1.0 / M1)
+        } else {
+            0.0
+        };
+        linear
+    }
+
+    /// ITU-R BT.2100 HLG EOTF — maps normalised signal to linear scene luminance
+    /// in cd/m², using the system gamma that depends on `peak_nits`.
+    ///
+    /// Reference: ITU-R BT.2100-2, Table 5.
+    fn hlg_eotf(e: f64, peak_nits: f64) -> f64 {
+        // HLG constants
+        const A: f64 = 0.178_832_77;
+        const B: f64 = 0.284_668_66;
+        const C: f64 = 0.559_910_73;
+
+        // Compute normalised scene linear value E_s from opto-electronic signal E.
+        let e_s = if e <= 0.5 {
+            (e * e) / 3.0
+        } else {
+            ((e - C).exp() / A + B) / 12.0
+        };
+
+        // Apply system gamma γ = 1.2 + 0.42 * log10(Lw / 1000).
+        // For Lw = 1000 nits, γ = 1.2 (no correction).
+        let gamma = 1.2 + 0.42 * (peak_nits / 1000.0).log10();
+        let e_d = e_s.powf(gamma);
+
+        // Scale to nits
+        e_d * peak_nits
+    }
+}
+
+/// Convert a frame whose pixel values are encoded as a normalised signal (0–1)
+/// into absolute luminance values in nits according to the given transfer function.
+///
+/// Returns a new `Frame2D` where each pixel value is in cd/m².
+pub fn decode_to_nits(frame: &Frame2D, tf: TransferFunction, peak_nits: f64) -> Frame2D {
+    Frame2D::from_shape_fn(frame.height, frame.width, |y, x| {
+        tf.to_nits(frame.get(y, x), peak_nits)
+    })
+}
 
 /// Luminance meter for video frames.
 pub struct LuminanceMeter {
@@ -73,7 +168,7 @@ impl LuminanceMeter {
     /// # Errors
     ///
     /// Returns error if frame dimensions don't match.
-    pub fn process(&mut self, luminance: &Array2<f64>) -> MeteringResult<()> {
+    pub fn process(&mut self, luminance: &Frame2D) -> MeteringResult<()> {
         let (height, width) = luminance.dim();
 
         if width != self.width || height != self.height {
@@ -90,7 +185,7 @@ impl LuminanceMeter {
         self.histogram.fill(0);
 
         // Analyze frame
-        for &value in luminance {
+        for &value in luminance.iter() {
             // Update peak and min
             if value > self.peak_nits {
                 self.peak_nits = value;
@@ -229,7 +324,7 @@ impl BlackWhiteLevelMeter {
     }
 
     /// Process a video frame (normalized 0.0 to 1.0).
-    pub fn process(&mut self, frame: &Array2<f64>) -> MeteringResult<()> {
+    pub fn process(&mut self, frame: &Frame2D) -> MeteringResult<()> {
         let (height, width) = frame.dim();
 
         if width != self.width || height != self.height {
@@ -243,7 +338,7 @@ impl BlackWhiteLevelMeter {
         let mut min_val = f64::INFINITY;
         let mut max_val = 0.0;
 
-        for &value in frame {
+        for &value in frame.iter() {
             if value < min_val {
                 min_val = value;
             }
@@ -308,7 +403,7 @@ mod tests {
             LuminanceMeter::new(1920, 1080, 1000.0, 256).expect("test expectation failed");
 
         // Create test frame with known values
-        let frame = Array2::from_shape_fn((1080, 1920), |(y, x)| {
+        let frame = Frame2D::from_shape_fn(1080, 1920, |y, x| {
             (x + y) as f64 / (1920 + 1080) as f64 * 100.0
         });
 
@@ -325,7 +420,7 @@ mod tests {
             LuminanceMeter::new(100, 100, 1000.0, 256).expect("test expectation failed");
 
         // SDR frame (max 100 nits)
-        let frame = Array2::from_elem((100, 100), 80.0);
+        let frame = Frame2D::from_elem(100, 100, 80.0);
         meter.process(&frame).expect("process should succeed");
 
         assert!(meter.is_sdr());
@@ -338,7 +433,7 @@ mod tests {
             LuminanceMeter::new(100, 100, 1000.0, 256).expect("test expectation failed");
 
         // HDR frame (500 nits)
-        let frame = Array2::from_elem((100, 100), 500.0);
+        let frame = Frame2D::from_elem(100, 100, 500.0);
         meter.process(&frame).expect("process should succeed");
 
         assert!(!meter.is_sdr());
@@ -351,9 +446,9 @@ mod tests {
             LuminanceMeter::new(100, 100, 1000.0, 256).expect("test expectation failed");
 
         // Frame with known contrast
-        let mut frame = Array2::zeros((100, 100));
-        frame[[0, 0]] = 1.0; // Min
-        frame[[99, 99]] = 100.0; // Max
+        let mut frame = Frame2D::zeros(100, 100);
+        frame.set(0, 0, 1.0); // Min
+        frame.set(99, 99, 100.0); // Max
 
         meter.process(&frame).expect("process should succeed");
 
@@ -367,7 +462,7 @@ mod tests {
             BlackWhiteLevelMeter::new(100, 100, 0.0, 1.0).expect("test expectation failed");
 
         // Compliant frame
-        let frame = Array2::from_elem((100, 100), 0.5);
+        let frame = Frame2D::from_elem(100, 100, 0.5);
         meter.process(&frame).expect("process should succeed");
 
         assert!(meter.is_compliant());
@@ -380,9 +475,9 @@ mod tests {
             BlackWhiteLevelMeter::new(100, 100, 0.0, 1.0).expect("test expectation failed");
 
         // Frame with illegal pixels
-        let mut frame = Array2::from_elem((100, 100), 0.5);
-        frame[[0, 0]] = -0.1; // Below black
-        frame[[99, 99]] = 1.1; // Above white
+        let mut frame = Frame2D::from_elem(100, 100, 0.5);
+        frame.set(0, 0, -0.1); // Below black
+        frame.set(99, 99, 1.1); // Above white
 
         meter.process(&frame).expect("process should succeed");
 

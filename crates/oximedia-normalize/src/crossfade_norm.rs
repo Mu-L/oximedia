@@ -116,9 +116,7 @@ pub fn crossfade_coefficient(t: f64, shape: CrossfadeShape) -> f64 {
     let t = t.clamp(0.0, 1.0);
     match shape {
         CrossfadeShape::Linear => t,
-        CrossfadeShape::EqualPower => {
-            (t * std::f64::consts::FRAC_PI_2).sin()
-        }
+        CrossfadeShape::EqualPower => (t * std::f64::consts::FRAC_PI_2).sin(),
         CrossfadeShape::SCurve => {
             // Hermite interpolation: 3t^2 - 2t^3
             t * t * (3.0 - 2.0 * t)
@@ -130,9 +128,7 @@ pub fn crossfade_coefficient(t: f64, shape: CrossfadeShape) -> f64 {
                 (1.0 + (t * 9.0 + 1.0).ln() / 10.0_f64.ln()).min(1.0)
             }
         }
-        CrossfadeShape::Exponential => {
-            (10.0_f64.powf(t) - 1.0) / 9.0
-        }
+        CrossfadeShape::Exponential => (10.0_f64.powf(t) - 1.0) / 9.0,
     }
 }
 
@@ -189,11 +185,7 @@ impl CrossfadeNormalizer {
         // Sort segments by start sample
         self.segments.sort_by_key(|s| s.start_sample);
 
-        let total_samples = self
-            .segments
-            .last()
-            .map(|s| s.end_sample)
-            .unwrap_or(0);
+        let total_samples = self.segments.last().map(|s| s.end_sample).unwrap_or(0);
 
         // Build per-sample gain values
         let cf_len = self.config.crossfade_samples;

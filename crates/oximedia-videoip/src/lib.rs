@@ -78,11 +78,13 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod bandwidth_est;
+pub mod bbr;
 pub mod bonding;
 pub mod codec;
 pub mod color_space_conv;
 pub mod congestion;
 pub mod discovery;
+pub mod dtls_srtp;
 pub mod encryption;
 pub mod error;
 pub mod fec;
@@ -97,6 +99,7 @@ pub mod ndi_bridge;
 pub mod nmos;
 pub mod packet;
 pub mod packet_loss;
+pub mod ptp;
 pub mod ptp_boundary;
 pub mod ptz;
 pub mod quic_transport;
@@ -104,9 +107,11 @@ pub mod receiver;
 pub mod redundancy;
 pub mod rist;
 pub mod sdp;
+pub mod sfp_monitor;
 pub mod smpte2110;
 pub mod source;
 pub mod srt_config;
+pub mod st2110_20;
 pub mod stats;
 pub mod stream_descriptor;
 pub mod stream_health;

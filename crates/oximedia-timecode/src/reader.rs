@@ -526,17 +526,7 @@ mod tests {
     #[test]
     fn test_timecode_validator_invalid_frames() {
         let validator = TimecodeValidator::new(FrameRate::Fps25);
-        let tc = Timecode {
-            hours: 0,
-            minutes: 0,
-            seconds: 0,
-            frames: 30, // invalid for 25fps
-            frame_rate: FrameRateInfo {
-                fps: 25,
-                drop_frame: false,
-            },
-            user_bits: 0,
-        };
+        let tc = Timecode::from_raw_fields(0, 0, 0, 30, 25, false, 0); // frames=30 invalid for 25fps
         assert!(validator.validate(&tc).is_err());
     }
 

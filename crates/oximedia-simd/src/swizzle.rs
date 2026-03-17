@@ -33,7 +33,10 @@ impl SwizzlePattern {
     pub fn new(indices: Vec<usize>) -> Self {
         let len = indices.len();
         for &idx in &indices {
-            assert!(idx < len, "swizzle index {idx} out of range for length {len}");
+            assert!(
+                idx < len,
+                "swizzle index {idx} out of range for length {len}"
+            );
         }
         Self { indices }
     }
@@ -54,7 +57,10 @@ impl SwizzlePattern {
 
     /// Create a broadcast pattern that replicates lane `src` across `len` lanes.
     pub fn broadcast(src: usize, len: usize) -> Self {
-        assert!(src < len, "broadcast source {src} out of range for length {len}");
+        assert!(
+            src < len,
+            "broadcast source {src} out of range for length {len}"
+        );
         Self {
             indices: vec![src; len],
         }
@@ -70,9 +76,7 @@ impl SwizzlePattern {
     /// Create a rotate-right pattern by `amount` positions.
     pub fn rotate_right(len: usize, amount: usize) -> Self {
         Self {
-            indices: (0..len)
-                .map(|i| (i + len - amount % len) % len)
-                .collect(),
+            indices: (0..len).map(|i| (i + len - amount % len) % len).collect(),
         }
     }
 

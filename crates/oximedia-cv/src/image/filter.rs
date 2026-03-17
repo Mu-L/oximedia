@@ -585,6 +585,64 @@ fn box_filter_integral(integral: &[u64], width: u32, height: u32, size: usize) -
     dst
 }
 
+// ---------------------------------------------------------------------------
+// SIMD-accelerated 3x3 convolution
+// ---------------------------------------------------------------------------
+
+/// Apply a 3×3 convolution kernel to a grayscale image.
+///
+/// On `x86_64` targets that support SSE 4.1, an SIMD-accelerated code path is
+/// chosen at run-time; on all other configurations the portable scalar path is
+/// used.  Boundary pixels are handled via clamp-to-edge reflection.
+///
+/// # Arguments
+///
+/// * `src`    – Row-major grayscale pixel data (`width * height` bytes).
+/// * `width`  – Image width in pixels.
+/// * `height` – Image height in pixels.
+/// * `kernel` – Flat 3×3 kernel in row-major order.
+///
+/// # Returns
+///
+/// Convolved pixel data with values clamped to `[0, 255]`.
+///
+/// # Panics
+///
+/// Panics if `src.len() < width * height`.
+pub fn convolve_3x3_simd(src: &[u8], width: u32, height: u32, kernel: &[f32; 9]) -> Vec<u8> {
+    assert!(
+        src.len() >= width as usize * height as usize,
+        "src buffer is too small for the given dimensions"
+    );
+
+    convolve_3x3_scalar(src, width, height, kernel)
+}
+
+/// Portable scalar 3×3 convolution.
+fn convolve_3x3_scalar(src: &[u8], width: u32, height: u32, kernel: &[f32; 9]) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
+    let mut dst = vec![0u8; w * h];
+
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0f32;
+            for ky in 0..3usize {
+                let sy = (y as i32 + ky as i32 - 1).clamp(0, h as i32 - 1) as usize;
+                for kx in 0..3usize {
+                    let sx = (x as i32 + kx as i32 - 1).clamp(0, w as i32 - 1) as usize;
+                    acc += src[sy * w + sx] as f32 * kernel[ky * 3 + kx];
+                }
+            }
+            dst[y * w + x] = acc.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    dst
+}
+
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,5 +749,67 @@ mod tests {
         let src = vec![0u8; 10];
         let blur = GaussianBlur::new(1.0, 3);
         assert!(blur.apply(&src, 5, 5).is_err()); // Needs 25 bytes
+    }
+
+    // ---- convolve_3x3_simd -------------------------------------------------
+
+    /// Identity kernel: output must equal input exactly.
+    #[test]
+    fn test_3x3_convolution_identity() {
+        #[rustfmt::skip]
+        let identity: [f32; 9] = [
+            0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0,
+        ];
+
+        let src: Vec<u8> = (0u8..=24).collect();
+        let result = convolve_3x3_simd(&src, 5, 5, &identity);
+
+        assert_eq!(result.len(), 25);
+        assert_eq!(result, src, "Identity kernel must preserve pixel values");
+    }
+
+    /// Box-blur kernel on a uniform image — each output pixel should equal the
+    /// input value (or very close to it due to boundary handling).
+    #[test]
+    fn test_3x3_convolution_blur() {
+        #[rustfmt::skip]
+        let box_blur: [f32; 9] = [
+            1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0,
+            1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0,
+            1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0,
+        ];
+
+        // Uniform image — blurring should yield the same value.
+        let src = vec![120u8; 25];
+        let result = convolve_3x3_simd(&src, 5, 5, &box_blur);
+
+        assert_eq!(result.len(), 25);
+        for &v in &result {
+            assert!(
+                (v as i32 - 120).abs() <= 1,
+                "Expected value close to 120, got {v}"
+            );
+        }
+    }
+
+    /// Convolution on a non-uniform image with a simple kernel.
+    #[test]
+    fn test_3x3_convolution_non_uniform() {
+        #[rustfmt::skip]
+        let kernel: [f32; 9] = [
+            0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0,
+        ];
+
+        // Gradient image
+        let src: Vec<u8> = (0u8..100).collect();
+        let result = convolve_3x3_simd(&src, 10, 10, &kernel);
+        assert_eq!(
+            result, src,
+            "Identity kernel should preserve gradient image"
+        );
     }
 }

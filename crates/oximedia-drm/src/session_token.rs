@@ -370,13 +370,13 @@ mod tests {
 
     #[test]
     fn test_is_signed_false_before_sign() {
-        let t = SessionToken::new("unsign", Duration::from_secs(3600));
+        let t = SessionToken::new("unsign", Duration::from_hours(1));
         assert!(!t.is_signed());
     }
 
     #[test]
     fn test_is_signed_true_after_sign() {
-        let mut t = SessionToken::new("signed", Duration::from_secs(3600));
+        let mut t = SessionToken::new("signed", Duration::from_hours(1));
         t.sign(SECRET);
         assert!(t.is_signed());
     }

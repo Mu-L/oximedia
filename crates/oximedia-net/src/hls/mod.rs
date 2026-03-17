@@ -26,6 +26,7 @@
 
 mod abr;
 mod client;
+pub mod ll_hls;
 mod playlist;
 mod segment;
 

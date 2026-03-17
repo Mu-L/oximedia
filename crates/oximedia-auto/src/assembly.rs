@@ -70,6 +70,110 @@ impl AssemblyType {
     }
 }
 
+/// Platform-specific export preset.
+///
+/// Each platform variant encodes the canonical aspect ratio, maximum duration,
+/// and recommended codec/quality settings for that platform's short-form
+/// content format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PlatformPreset {
+    /// YouTube Shorts: vertical 9:16, ≤60 s, ≥720p.
+    YouTubeShorts,
+    /// Instagram Reels: vertical 9:16, ≤90 s, ≥720p.
+    InstagramReels,
+    /// TikTok: vertical 9:16, 15–60 s (ideal), ≥720p.
+    TikTok,
+    /// Instagram Feed: square 1:1 or portrait 4:5, ≤60 s.
+    InstagramFeed,
+    /// Twitter/X: landscape 16:9 or 1:1, ≤140 s.
+    Twitter,
+    /// Facebook Reels: vertical 9:16, ≤60 s.
+    FacebookReels,
+}
+
+impl PlatformPreset {
+    /// Return the target aspect ratio for this platform.
+    #[must_use]
+    pub const fn aspect_ratio(&self) -> AspectRatio {
+        match self {
+            Self::YouTubeShorts | Self::InstagramReels | Self::TikTok | Self::FacebookReels => {
+                AspectRatio::Vertical9x16
+            }
+            Self::InstagramFeed => AspectRatio::Square1x1,
+            Self::Twitter => AspectRatio::Landscape16x9,
+        }
+    }
+
+    /// Return the maximum allowed duration in milliseconds.
+    #[must_use]
+    pub const fn max_duration_ms(&self) -> i64 {
+        match self {
+            Self::YouTubeShorts => 60_000,
+            Self::InstagramReels => 90_000,
+            Self::TikTok => 60_000,
+            Self::InstagramFeed => 60_000,
+            Self::Twitter => 140_000,
+            Self::FacebookReels => 60_000,
+        }
+    }
+
+    /// Return the ideal (target) duration in milliseconds.
+    #[must_use]
+    pub const fn ideal_duration_ms(&self) -> i64 {
+        match self {
+            Self::YouTubeShorts => 45_000,
+            Self::InstagramReels => 30_000,
+            Self::TikTok => 30_000,
+            Self::InstagramFeed => 30_000,
+            Self::Twitter => 60_000,
+            Self::FacebookReels => 30_000,
+        }
+    }
+
+    /// Return the minimum recommended resolution height in pixels.
+    #[must_use]
+    pub const fn min_height_px(&self) -> u32 {
+        match self {
+            Self::YouTubeShorts | Self::InstagramReels | Self::TikTok | Self::FacebookReels => 1080,
+            Self::InstagramFeed => 1080,
+            Self::Twitter => 720,
+        }
+    }
+
+    /// Friendly display name for this platform.
+    #[must_use]
+    pub const fn display_name(&self) -> &'static str {
+        match self {
+            Self::YouTubeShorts => "YouTube Shorts",
+            Self::InstagramReels => "Instagram Reels",
+            Self::TikTok => "TikTok",
+            Self::InstagramFeed => "Instagram Feed",
+            Self::Twitter => "Twitter/X",
+            Self::FacebookReels => "Facebook Reels",
+        }
+    }
+
+    /// Build an `AssemblyConfig` tailored for this platform.
+    #[must_use]
+    pub fn to_assembly_config(&self) -> AssemblyConfig {
+        AssemblyConfig {
+            assembly_type: AssemblyType::SocialClip,
+            target_duration_ms: self.ideal_duration_ms(),
+            target_aspect_ratio: self.aspect_ratio(),
+            min_clip_duration_ms: 1_000,
+            max_clip_duration_ms: 10_000,
+            min_importance: 0.45,
+            target_clip_count: 0,
+            allow_speed_changes: false,
+            add_bookends: false,
+            intro_duration_ms: 0,
+            outro_duration_ms: 0,
+            chronological_order: false,
+            use_dramatic_arc: true,
+        }
+    }
+}
+
 /// An assembled clip segment.
 #[derive(Debug, Clone)]
 pub struct AssembledClip {
@@ -580,6 +684,24 @@ impl AutoAssembler {
         // In a real implementation, this would use cut points to inform clip selection
         assembler.config.min_clip_duration_ms = 2000; // Longer clips for trailers
         assembler
+    }
+
+    /// Generate a platform-specific export clip.
+    ///
+    /// Uses [`PlatformPreset`] to configure the assembly for the target
+    /// platform's ideal duration and aspect ratio.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if generation fails.
+    pub fn generate_platform_clip(
+        &self,
+        scenes: &[ScoredScene],
+        preset: PlatformPreset,
+    ) -> AutoResult<Vec<AssembledClip>> {
+        let platform_config = preset.to_assembly_config();
+        let assembler = Self::new(platform_config);
+        assembler.assemble_from_scenes(scenes)
     }
 
     /// Get the current configuration.

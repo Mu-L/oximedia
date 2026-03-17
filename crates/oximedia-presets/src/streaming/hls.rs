@@ -54,6 +54,7 @@ pub fn hls_240p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -83,6 +84,7 @@ pub fn hls_360p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -112,6 +114,7 @@ pub fn hls_480p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -141,6 +144,7 @@ pub fn hls_720p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -170,6 +174,7 @@ pub fn hls_1080p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -199,6 +204,7 @@ pub fn hls_1440p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -229,6 +235,7 @@ pub fn hls_2160p() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

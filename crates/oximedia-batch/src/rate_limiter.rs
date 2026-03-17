@@ -2,8 +2,13 @@
 //!
 //! Provides a token-bucket implementation and a concurrency limiter that
 //! can be composed to enforce both throughput and parallelism constraints.
+//! Also provides a per-user rate limiter (`UserRateLimiter`) to enforce
+//! per-user submission quotas and concurrency caps.
 
 #![allow(dead_code)]
+
+use parking_lot::Mutex;
+use std::collections::HashMap;
 
 /// Configuration for rate and concurrency limiting.
 #[derive(Debug, Clone)]
@@ -185,6 +190,150 @@ impl ThrottleStats {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Per-user rate limiting
+// ---------------------------------------------------------------------------
+
+/// Configuration for per-user submission quotas and concurrency caps.
+#[derive(Debug, Clone)]
+pub struct UserLimitConfig {
+    /// Maximum number of jobs a single user may have concurrently active.
+    pub max_concurrent_jobs: usize,
+    /// Maximum number of job submissions allowed within `window_secs`.
+    pub max_submissions_per_window: usize,
+    /// Length of the sliding submission-count window in seconds.
+    pub window_secs: u64,
+}
+
+impl UserLimitConfig {
+    /// Lenient defaults: 10 concurrent jobs, 100 submissions per minute.
+    #[must_use]
+    pub fn lenient() -> Self {
+        Self {
+            max_concurrent_jobs: 10,
+            max_submissions_per_window: 100,
+            window_secs: 60,
+        }
+    }
+
+    /// Strict defaults: 2 concurrent jobs, 10 submissions per minute.
+    #[must_use]
+    pub fn strict() -> Self {
+        Self {
+            max_concurrent_jobs: 2,
+            max_submissions_per_window: 10,
+            window_secs: 60,
+        }
+    }
+}
+
+/// Internal per-user accounting state.
+#[derive(Debug, Default)]
+struct UserState {
+    /// Number of currently active (in-progress) jobs for this user.
+    active_jobs: usize,
+    /// Timestamps (in seconds) of recent submissions within the current window.
+    submission_times: Vec<u64>,
+}
+
+impl UserState {
+    /// Purge submission timestamps that have fallen outside `window_secs`.
+    fn evict_stale(&mut self, now_secs: u64, window_secs: u64) {
+        let cutoff = now_secs.saturating_sub(window_secs);
+        self.submission_times.retain(|&t| t >= cutoff);
+    }
+}
+
+/// Enforces per-user job submission quotas and concurrency limits.
+///
+/// All state is protected by a `parking_lot::Mutex` so this type is `Send +
+/// Sync` and can be shared across async tasks without additional wrapping.
+pub struct UserRateLimiter {
+    config: UserLimitConfig,
+    users: Mutex<HashMap<String, UserState>>,
+}
+
+impl UserRateLimiter {
+    /// Create a new limiter with the given configuration.
+    #[must_use]
+    pub fn new(config: UserLimitConfig) -> Self {
+        Self {
+            config,
+            users: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Attempt to record a new job submission for `user_id` at `now_secs`.
+    ///
+    /// Returns `true` when both limits are satisfied and the submission is
+    /// recorded.  Returns `false` when either the per-window submission quota
+    /// or the concurrency cap would be exceeded.
+    pub fn try_submit_at(&self, user_id: &str, now_secs: u64) -> bool {
+        let mut guard = self.users.lock();
+        let state = guard.entry(user_id.to_string()).or_default();
+
+        // Evict stale entries from the sliding window.
+        state.evict_stale(now_secs, self.config.window_secs);
+
+        // Check both limits before recording.
+        if state.submission_times.len() >= self.config.max_submissions_per_window {
+            return false;
+        }
+        if state.active_jobs >= self.config.max_concurrent_jobs {
+            return false;
+        }
+
+        state.submission_times.push(now_secs);
+        state.active_jobs += 1;
+        true
+    }
+
+    /// Signal that one active job for `user_id` has finished (success or failure).
+    ///
+    /// Silently does nothing when called for an unknown user or when `active_jobs`
+    /// is already zero (idempotent / safe to call from error paths).
+    pub fn release(&self, user_id: &str) {
+        let mut guard = self.users.lock();
+        if let Some(state) = guard.get_mut(user_id) {
+            state.active_jobs = state.active_jobs.saturating_sub(1);
+        }
+    }
+
+    /// Return the number of currently active jobs for `user_id`.
+    ///
+    /// Returns `0` for unknown users.
+    #[must_use]
+    pub fn active_jobs(&self, user_id: &str) -> usize {
+        self.users.lock().get(user_id).map_or(0, |s| s.active_jobs)
+    }
+
+    /// Return the number of submissions recorded for `user_id` in the current window.
+    ///
+    /// The window is evaluated relative to `now_secs`.
+    #[must_use]
+    pub fn window_submissions(&self, user_id: &str) -> usize {
+        self.users
+            .lock()
+            .get(user_id)
+            .map_or(0, |s| s.submission_times.len())
+    }
+
+    /// Remove all recorded state for `user_id`.  Primarily useful in tests.
+    pub fn reset_user(&self, user_id: &str) {
+        self.users.lock().remove(user_id);
+    }
+
+    /// Return the number of distinct users currently tracked.
+    #[must_use]
+    pub fn tracked_user_count(&self) -> usize {
+        self.users.lock().len()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +475,123 @@ mod tests {
             total_wait_ms: 200,
         };
         assert!((s.avg_wait_ms() - 50.0).abs() < f64::EPSILON);
+    }
+
+    // ---------- UserRateLimiter ----------
+
+    fn make_limiter(
+        max_concurrent: usize,
+        max_per_window: usize,
+        window_secs: u64,
+    ) -> UserRateLimiter {
+        UserRateLimiter::new(UserLimitConfig {
+            max_concurrent_jobs: max_concurrent,
+            max_submissions_per_window: max_per_window,
+            window_secs,
+        })
+    }
+
+    #[test]
+    fn test_user_rate_limiter_first_submission_allowed() {
+        let lim = make_limiter(5, 10, 60);
+        assert!(lim.try_submit_at("alice", 0));
+        assert_eq!(lim.active_jobs("alice"), 1);
+        assert_eq!(lim.window_submissions("alice"), 1);
+    }
+
+    #[test]
+    fn test_user_rate_limiter_concurrent_cap_blocks() {
+        let lim = make_limiter(2, 100, 60);
+        assert!(lim.try_submit_at("bob", 0));
+        assert!(lim.try_submit_at("bob", 0));
+        // Third submission exceeds max_concurrent_jobs=2
+        assert!(!lim.try_submit_at("bob", 0));
+    }
+
+    #[test]
+    fn test_user_rate_limiter_window_quota_blocks() {
+        let lim = make_limiter(100, 3, 60);
+        assert!(lim.try_submit_at("carol", 0));
+        assert!(lim.try_submit_at("carol", 0));
+        assert!(lim.try_submit_at("carol", 0));
+        // Fourth exceeds max_submissions_per_window=3
+        assert!(!lim.try_submit_at("carol", 0));
+    }
+
+    #[test]
+    fn test_user_rate_limiter_release_allows_new_submission() {
+        let lim = make_limiter(1, 100, 60);
+        assert!(lim.try_submit_at("dave", 0));
+        assert!(!lim.try_submit_at("dave", 0)); // at cap
+        lim.release("dave");
+        assert!(lim.try_submit_at("dave", 1)); // slot freed
+    }
+
+    #[test]
+    fn test_user_rate_limiter_sliding_window_evicts_old() {
+        // Window of 10 seconds, quota of 2 per window
+        let lim = make_limiter(100, 2, 10);
+        assert!(lim.try_submit_at("eve", 0));
+        assert!(lim.try_submit_at("eve", 0));
+        // At quota inside the window
+        assert!(!lim.try_submit_at("eve", 5));
+        // Advance past the window — old entries should be evicted
+        assert!(lim.try_submit_at("eve", 15));
+    }
+
+    #[test]
+    fn test_user_rate_limiter_release_unknown_user_is_safe() {
+        let lim = make_limiter(5, 10, 60);
+        // Releasing a user that was never tracked must not panic or error
+        lim.release("unknown");
+        assert_eq!(lim.active_jobs("unknown"), 0);
+    }
+
+    #[test]
+    fn test_user_rate_limiter_active_jobs_unknown_user_is_zero() {
+        let lim = make_limiter(5, 10, 60);
+        assert_eq!(lim.active_jobs("nobody"), 0);
+    }
+
+    #[test]
+    fn test_user_rate_limiter_window_submissions_unknown_user_is_zero() {
+        let lim = make_limiter(5, 10, 60);
+        assert_eq!(lim.window_submissions("nobody"), 0);
+    }
+
+    #[test]
+    fn test_user_rate_limiter_reset_clears_state() {
+        let lim = make_limiter(5, 10, 60);
+        lim.try_submit_at("frank", 0);
+        assert_eq!(lim.active_jobs("frank"), 1);
+        lim.reset_user("frank");
+        assert_eq!(lim.active_jobs("frank"), 0);
+        assert_eq!(lim.tracked_user_count(), 0);
+    }
+
+    #[test]
+    fn test_user_rate_limiter_tracked_user_count() {
+        let lim = make_limiter(5, 10, 60);
+        assert_eq!(lim.tracked_user_count(), 0);
+        lim.try_submit_at("grace", 0);
+        lim.try_submit_at("henry", 0);
+        assert_eq!(lim.tracked_user_count(), 2);
+    }
+
+    #[test]
+    fn test_user_rate_limiter_independent_users() {
+        let lim = make_limiter(1, 100, 60);
+        // Different users should not interfere with each other's concurrency cap
+        assert!(lim.try_submit_at("user_a", 0));
+        assert!(!lim.try_submit_at("user_a", 0)); // user_a at cap
+        assert!(lim.try_submit_at("user_b", 0)); // user_b unaffected
+    }
+
+    #[test]
+    fn test_user_limit_config_lenient_gt_strict() {
+        let lenient = UserLimitConfig::lenient();
+        let strict = UserLimitConfig::strict();
+        assert!(lenient.max_concurrent_jobs > strict.max_concurrent_jobs);
+        assert!(lenient.max_submissions_per_window > strict.max_submissions_per_window);
     }
 }

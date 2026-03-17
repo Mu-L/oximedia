@@ -287,11 +287,7 @@ impl<S: SimdOps> CdefSimd<S> {
             }
         }
 
-        if count > 0 {
-            variance / count
-        } else {
-            u32::MAX
-        }
+        variance.checked_div(count).unwrap_or(u32::MAX)
     }
 
     /// SIMD-accelerated row filtering (process 8 pixels at once).

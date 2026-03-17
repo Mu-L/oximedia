@@ -244,11 +244,9 @@ impl SilkFrame {
     pub fn subframe_count(&self) -> usize {
         // 5ms per subframe
         let samples_per_subframe = SilkSubframe::samples_per_subframe(self.bandwidth.sample_rate());
-        if samples_per_subframe > 0 {
-            self.frame_size / samples_per_subframe
-        } else {
-            0
-        }
+        self.frame_size
+            .checked_div(samples_per_subframe)
+            .unwrap_or(0)
     }
 
     /// Check if this is a voiced frame.
@@ -637,11 +635,7 @@ pub fn encode_frame(
     // ── Compute residual (excitation) ────────────────────────────────────
     let mut subframes = Vec::new();
     let samples_per_subframe = SilkSubframe::samples_per_subframe(sample_rate);
-    let num_subframes = if samples_per_subframe > 0 {
-        frame_size / samples_per_subframe
-    } else {
-        0
-    };
+    let num_subframes = frame_size.checked_div(samples_per_subframe).unwrap_or(0);
 
     for sf_idx in 0..num_subframes {
         let start = sf_idx * samples_per_subframe;

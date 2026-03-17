@@ -72,8 +72,11 @@ pub fn format_file_size(size_bytes: u64) -> String {
 /// ```
 /// use oximedia_batch::utils::parse_file_size;
 ///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let bytes = parse_file_size("10MB")?;
 /// assert_eq!(bytes, 10485760);
+/// # Ok(())
+/// # }
 /// ```
 pub fn parse_file_size(size_str: &str) -> Result<u64> {
     let size_str = size_str.trim().to_uppercase();

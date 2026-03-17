@@ -4,10 +4,10 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-v0.1.1-green.svg)](https://github.com/cool-japan/oximedia)
-[![Released](https://img.shields.io/badge/released-2026--03--10-brightgreen.svg)](https://github.com/cool-japan/oximedia)
-[![Crates](https://img.shields.io/badge/crates-97-blue.svg)](https://github.com/cool-japan/oximedia)
-[![SLOC](https://img.shields.io/badge/SLOC-~1.49M-blueviolet.svg)](https://github.com/cool-japan/oximedia)
+[![Version](https://img.shields.io/badge/version-v0.1.2-green.svg)](https://github.com/cool-japan/oximedia)
+[![Released](https://img.shields.io/badge/released-2026--03--17-brightgreen.svg)](https://github.com/cool-japan/oximedia)
+[![Crates](https://img.shields.io/badge/crates-106-blue.svg)](https://github.com/cool-japan/oximedia)
+[![SLOC](https://img.shields.io/badge/SLOC-~2.16M-blueviolet.svg)](https://github.com/cool-japan/oximedia)
 
 ## Vision
 
@@ -55,13 +55,13 @@ Computer vision (object detection, motion tracking, video enhancement, quality a
 
 ## Project Scale
 
-OxiMedia is a **production-grade** framework at **v0.1.1** (released 2026-03-10):
+OxiMedia is a **production-grade** framework at **v0.1.2** (released 2026-03-17):
 
 | Metric | Value |
 |--------|-------|
-| Total crates | 97 |
-| Total SLOC (Rust) | ~1,486,000 |
-| Stable crates | 97 |
+| Total crates | 106 |
+| Total SLOC (Rust) | ~2,155,000 |
+| Stable crates | 106 |
 | Alpha crates | 0 |
 | Partial crates | 0 |
 | License | Apache 2.0 |
@@ -368,14 +368,14 @@ cargo install oximedia-cli
 
 | Status | Count | Description |
 |--------|-------|-------------|
-| Stable | 97 | Feature-complete, tested, production-ready |
+| Stable | 106 | Feature-complete, tested, production-ready |
 | Alpha | 0 | Core functionality implemented, API may change |
 | Partial | 0 | Under active development, incomplete |
-| **Total** | **97** | Including top-level oximedia, oximedia-cli, oximedia-wasm |
+| **Total** | **106** | Including top-level oximedia, oximedia-cli, oximedia-wasm |
 
 ### Detailed Status Breakdown
 
-**Stable (97 crates):**
+**Stable (106 crates):**
 `oximedia-aaf`, `oximedia-accel`, `oximedia-access`, `oximedia-align`, `oximedia-analysis`,
 `oximedia-archive`, `oximedia-archive-pro`, `oximedia-audio`, `oximedia-audio-analysis`,
 `oximedia-audiopost`, `oximedia-auto`, `oximedia-automation`, `oximedia-batch`, `oximedia-bench`,
@@ -448,7 +448,7 @@ If you find OxiMedia useful, please consider sponsoring the project to support c
 **[https://github.com/sponsors/cool-japan](https://github.com/sponsors/cool-japan)**
 
 Your sponsorship helps us:
-- Maintain and improve 97 crates (~1.49M SLOC)
+- Maintain and improve 106 crates (~2.16M SLOC)
 - Implement new royalty-free codecs and CV algorithms
 - Keep the entire COOLJAPAN ecosystem (OxiBLAS, OxiFFT, SciRS2, etc.) 100% Pure Rust
 - Provide long-term support and security updates

@@ -708,7 +708,7 @@ impl ScriptExecutor {
     ///
     /// The script is evaluated as a boolean expression using the same
     /// recursive-descent parser as the condition evaluator (see
-    /// [`evaluate_script_condition`]).  A `true` result is represented as
+    /// `evaluate_script_condition`).  A `true` result is represented as
     /// `{"result": true, "value": 1}` and `false` as `{"result": false,
     /// "value": 0}`.  Complex Lua-style assignments or multi-statement scripts
     /// are not supported; they are treated as a single boolean predicate.

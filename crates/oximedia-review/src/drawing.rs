@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 pub mod annotation;
 pub mod color;
 pub mod export;
+pub mod measurement;
 pub mod tools;
 
 pub use annotation::{Annotation, AnnotationLayer};
 pub use color::{Color, StrokeStyle};
+pub use measurement::{AngleMarker, MeasurementAnnotation, Ruler, SafeAreaOverlay, SafeAreaPreset};
 pub use tools::{DrawingTool, Shape};
 
 /// Point in 2D space (normalized coordinates 0.0-1.0).

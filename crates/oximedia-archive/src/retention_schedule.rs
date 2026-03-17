@@ -109,7 +109,7 @@ impl RetentionEntry {
 /// Manages a collection of retention entries.
 #[derive(Debug, Default)]
 pub struct RetentionSchedule {
-    entries: Vec<RetentionEntry>,
+    pub(crate) entries: Vec<RetentionEntry>,
 }
 
 impl RetentionSchedule {

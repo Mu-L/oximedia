@@ -467,6 +467,199 @@ impl AudioExportConfig {
     }
 }
 
+// ── Broadcast Limiter with True-Peak Limiting ─────────────────────────────────
+
+/// Broadcast-grade limiter with ITU-R BS.1770-4 compliant true-peak detection.
+///
+/// The limiter enforces two simultaneous constraints:
+/// 1. **Sample-peak ceiling** – Instantaneous samples are never allowed to exceed
+///    `ceiling_db` dBFS.  Gain reduction is applied in advance via a look-ahead
+///    buffer.
+/// 2. **True-peak ceiling** – An 4× oversampled (polyphase FIR) true-peak detector
+///    ensures that inter-sample peaks also stay within `true_peak_ceiling_dbtp`.
+///
+/// The limiter uses a brick-wall attack (0 samples) with a configurable release
+/// time to prevent audible distortion while recovering gain quickly.
+///
+/// Typical broadcast use-case: instantaneous ceiling –1 dBFS, true-peak –1 dBTP,
+/// release 50 ms (EBU R128 recommendation).
+#[derive(Debug)]
+pub struct BroadcastLimiter {
+    /// Instantaneous sample ceiling in dBFS (negative, e.g. –1.0).
+    pub ceiling_db: f32,
+    /// True-peak ceiling in dBTP (negative, e.g. –1.0).
+    pub true_peak_ceiling_dbtp: f32,
+    /// Release time constant in milliseconds (controls gain recovery speed).
+    pub release_ms: f32,
+    sample_rate: u32,
+    // Look-ahead buffer length (samples).  0 = no look-ahead.
+    lookahead_samples: usize,
+    // Ring buffer for look-ahead delay.
+    lookahead_buf: Vec<f32>,
+    lookahead_pos: usize,
+    // Current gain reduction (linear).
+    current_gain: f32,
+    // Release coefficient per sample.
+    release_coeff: f32,
+    // 4× oversampled true-peak state.
+    tp_state: Vec<f32>,
+    tp_pos: usize,
+    // Limiter statistics.
+    /// Number of samples where gain reduction was applied.
+    pub limiting_sample_count: u64,
+    /// Maximum gain reduction applied (dB, as a positive number).
+    pub max_gain_reduction_db: f32,
+}
+
+impl BroadcastLimiter {
+    /// Polyphase FIR phases for 4× true-peak oversampling (same as `Bs1770TruePeakMeter`).
+    const TP_TAPS: usize = 12;
+    #[rustfmt::skip]
+    const TP_PHASE_COEFFS: [[f32; 12]; 4] = [
+        [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        [-0.0013, 0.0052, -0.0133, 0.0285, -0.0576, 0.6254,
+          0.4896, -0.1367, 0.0586, -0.0269, 0.0107, -0.0022],
+        [-0.0020, 0.0076, -0.0195, 0.0413, -0.0835, 0.5000,
+          0.5000, -0.0835, 0.0413, -0.0195, 0.0076, -0.0020],
+        [-0.0022, 0.0107, -0.0269, 0.0586, -0.1367, 0.4896,
+          0.6254, -0.0576, 0.0285, -0.0133, 0.0052, -0.0013],
+    ];
+
+    /// Create a new broadcast limiter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioPostError::InvalidSampleRate`] for a zero sample rate.
+    /// Returns [`AudioPostError::InvalidBufferSize`] if `lookahead_samples`
+    /// would overflow.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn new(sample_rate: u32, lookahead_ms: f32) -> AudioPostResult<Self> {
+        if sample_rate == 0 {
+            return Err(AudioPostError::InvalidSampleRate(sample_rate));
+        }
+        let lookahead_samples = (sample_rate as f32 * lookahead_ms / 1000.0).round() as usize;
+        let release_ms = 50.0f32;
+        let release_coeff = (-1.0 / (release_ms / 1000.0 * sample_rate as f32)).exp();
+
+        let lookahead_buf = vec![0.0f32; lookahead_samples.max(1)];
+
+        Ok(Self {
+            ceiling_db: -1.0,
+            true_peak_ceiling_dbtp: -1.0,
+            release_ms,
+            sample_rate,
+            lookahead_samples,
+            lookahead_buf,
+            lookahead_pos: 0,
+            current_gain: 1.0,
+            release_coeff,
+            tp_state: vec![0.0f32; Self::TP_TAPS],
+            tp_pos: 0,
+            limiting_sample_count: 0,
+            max_gain_reduction_db: 0.0,
+        })
+    }
+
+    /// Update the release coefficient after changing `release_ms`.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn update_release(&mut self) {
+        self.release_coeff = (-1.0 / (self.release_ms / 1000.0 * self.sample_rate as f32)).exp();
+    }
+
+    /// Compute the 4× oversampled true-peak for one input sample.
+    fn true_peak_for_sample(&mut self, x: f32) -> f32 {
+        self.tp_state[self.tp_pos] = x;
+        self.tp_pos = (self.tp_pos + 1) % Self::TP_TAPS;
+
+        let mut peak = 0.0f32;
+        for phase_coeffs in &Self::TP_PHASE_COEFFS {
+            let mut acc = 0.0f32;
+            for (tap, &coeff) in phase_coeffs.iter().enumerate() {
+                let idx = (self.tp_pos + tap) % Self::TP_TAPS;
+                acc += self.tp_state[idx] * coeff;
+            }
+            let abs_val = acc.abs();
+            if abs_val > peak {
+                peak = abs_val;
+            }
+        }
+        peak
+    }
+
+    /// Process one sample.
+    ///
+    /// Returns the gain-limited output sample.
+    pub fn process_sample(&mut self, input: f32) -> f32 {
+        let ceiling_linear = 10.0_f32.powf(self.ceiling_db / 20.0);
+        let tp_ceiling_linear = 10.0_f32.powf(self.true_peak_ceiling_dbtp / 20.0);
+
+        // Push input into look-ahead buffer, read delayed sample.
+        let buf_len = self.lookahead_buf.len();
+        let delayed = self.lookahead_buf[self.lookahead_pos % buf_len];
+        self.lookahead_buf[self.lookahead_pos % buf_len] = input;
+        self.lookahead_pos = (self.lookahead_pos + 1) % buf_len;
+
+        // Compute true-peak for the incoming sample.
+        let tp = self.true_peak_for_sample(input);
+
+        // Determine required gain reduction.
+        let gain_for_peak = if input.abs() > ceiling_linear && input.abs() > 0.0 {
+            ceiling_linear / input.abs()
+        } else {
+            1.0
+        };
+        let gain_for_tp = if tp > tp_ceiling_linear && tp > 0.0 {
+            tp_ceiling_linear / tp
+        } else {
+            1.0
+        };
+        let target_gain = gain_for_peak.min(gain_for_tp);
+
+        // Brick-wall attack (instant), then release.
+        if target_gain < self.current_gain {
+            self.current_gain = target_gain;
+        } else {
+            self.current_gain = self.release_coeff * self.current_gain
+                + (1.0 - self.release_coeff) * target_gain.min(1.0);
+        }
+
+        // Track statistics.
+        if self.current_gain < 1.0 {
+            self.limiting_sample_count += 1;
+            let gr_db = -20.0 * self.current_gain.max(1e-10).log10();
+            if gr_db > self.max_gain_reduction_db {
+                self.max_gain_reduction_db = gr_db;
+            }
+        }
+
+        delayed * self.current_gain
+    }
+
+    /// Process a block of samples in-place.
+    pub fn process(&mut self, samples: &mut [f32]) {
+        for s in samples.iter_mut() {
+            *s = self.process_sample(*s);
+        }
+    }
+
+    /// Reset limiter state.
+    pub fn reset(&mut self) {
+        self.lookahead_buf.fill(0.0);
+        self.lookahead_pos = 0;
+        self.current_gain = 1.0;
+        self.tp_state.fill(0.0);
+        self.tp_pos = 0;
+        self.limiting_sample_count = 0;
+        self.max_gain_reduction_db = 0.0;
+    }
+
+    /// Whether the limiter is currently applying gain reduction.
+    #[must_use]
+    pub fn is_limiting(&self) -> bool {
+        self.current_gain < 0.9999
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -631,5 +824,90 @@ mod tests {
         assert!(AudioCodec::Flac.is_lossless());
         assert!(!AudioCodec::Mp3.is_lossless());
         assert!(!AudioCodec::AacLc.is_lossless());
+    }
+
+    // ── BroadcastLimiter tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_broadcast_limiter_creation() {
+        let limiter = BroadcastLimiter::new(48000, 5.0).expect("failed to create");
+        assert!(!limiter.is_limiting());
+    }
+
+    #[test]
+    fn test_broadcast_limiter_invalid_sr() {
+        assert!(BroadcastLimiter::new(0, 5.0).is_err());
+    }
+
+    #[test]
+    fn test_broadcast_limiter_attenuates_clipping_signal() {
+        let mut limiter = BroadcastLimiter::new(48000, 2.0).expect("failed to create");
+        limiter.ceiling_db = -1.0;
+        limiter.true_peak_ceiling_dbtp = -1.0;
+        // Feed a full-scale signal (samples at 2.0).
+        let mut samples = vec![2.0f32; 1000];
+        limiter.process(&mut samples);
+        // All output samples should be <= ceiling.
+        let ceiling_linear = 10.0f32.powf(-1.0 / 20.0);
+        for &s in &samples {
+            assert!(
+                s.abs() <= ceiling_linear + 1e-4,
+                "Output {s} exceeds ceiling {ceiling_linear}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_broadcast_limiter_passes_quiet_signal() {
+        let mut limiter = BroadcastLimiter::new(48000, 2.0).expect("failed to create");
+        limiter.ceiling_db = -1.0;
+        // A very quiet signal should pass through without limiting.
+        let input = vec![0.01f32; 1000];
+        let mut samples = input.clone();
+        limiter.process(&mut samples);
+        // Should not be limiting (gain near 1.0).
+        assert!(
+            limiter.limiting_sample_count < 50,
+            "Should not limit a quiet signal; count={}",
+            limiter.limiting_sample_count
+        );
+    }
+
+    #[test]
+    fn test_broadcast_limiter_statistics() {
+        let mut limiter = BroadcastLimiter::new(48000, 0.0).expect("failed to create");
+        limiter.ceiling_db = -6.0; // Hard ceiling at –6 dBFS (0.5 linear)
+        let mut samples = vec![1.0f32; 500];
+        limiter.process(&mut samples);
+        assert!(
+            limiter.limiting_sample_count > 0,
+            "Should have limiting events"
+        );
+        assert!(
+            limiter.max_gain_reduction_db > 0.0,
+            "Should have non-zero max GR"
+        );
+    }
+
+    #[test]
+    fn test_broadcast_limiter_reset() {
+        let mut limiter = BroadcastLimiter::new(48000, 2.0).expect("failed to create");
+        let mut samples = vec![2.0f32; 200];
+        limiter.process(&mut samples);
+        limiter.reset();
+        assert_eq!(limiter.limiting_sample_count, 0);
+        assert_eq!(limiter.max_gain_reduction_db, 0.0);
+        assert!(!limiter.is_limiting());
+    }
+
+    #[test]
+    fn test_broadcast_limiter_output_is_finite() {
+        let mut limiter = BroadcastLimiter::new(48000, 1.0).expect("failed to create");
+        // Process a mix of different signal levels.
+        let mut samples: Vec<f32> = (0..4800).map(|i| (i as f32 * 0.05).sin() * 3.0).collect();
+        limiter.process(&mut samples);
+        for &s in &samples {
+            assert!(s.is_finite(), "Non-finite output: {s}");
+        }
     }
 }

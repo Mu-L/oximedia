@@ -76,10 +76,15 @@ pub struct FrameStat {
     pub was_shaky: bool,
     /// Crop percentage applied to this frame (0–100)
     pub crop_pct: f64,
+    /// Effective crop area in pixels (width × height of the stable output region).
+    /// `None` when frame dimensions are not available.
+    pub crop_area_px: Option<u64>,
+    /// Per-frame quality classification.
+    pub quality: StabilizationQuality,
 }
 
 impl FrameStat {
-    /// Create a new frame stat record.
+    /// Create a new frame stat record with minimal fields.
     pub fn new(
         index: usize,
         motion_before: f64,
@@ -87,12 +92,58 @@ impl FrameStat {
         was_shaky: bool,
         crop_pct: f64,
     ) -> Self {
+        let reduction = if motion_before < 1e-9 {
+            100.0
+        } else {
+            ((motion_before - motion_after) / motion_before * 100.0).clamp(0.0, 100.0)
+        };
         Self {
             index,
             motion_before,
             motion_after,
             was_shaky,
             crop_pct,
+            crop_area_px: None,
+            quality: StabilizationQuality::from_reduction(reduction),
+        }
+    }
+
+    /// Create a frame stat with all fields including crop area and quality.
+    #[must_use]
+    pub fn with_details(
+        index: usize,
+        motion_before: f64,
+        motion_after: f64,
+        was_shaky: bool,
+        crop_pct: f64,
+        frame_width: u32,
+        frame_height: u32,
+    ) -> Self {
+        // Effective crop area shrinks proportionally with crop percentage.
+        // crop_pct is the fraction of width/height removed on each side (0–50).
+        let crop_fraction = (crop_pct / 100.0).clamp(0.0, 0.5);
+        let eff_w = (frame_width as f64 * (1.0 - 2.0 * crop_fraction))
+            .max(1.0)
+            .round() as u64;
+        let eff_h = (frame_height as f64 * (1.0 - 2.0 * crop_fraction))
+            .max(1.0)
+            .round() as u64;
+        let crop_area = eff_w * eff_h;
+
+        let reduction = if motion_before < 1e-9 {
+            100.0
+        } else {
+            ((motion_before - motion_after) / motion_before * 100.0).clamp(0.0, 100.0)
+        };
+
+        Self {
+            index,
+            motion_before,
+            motion_after,
+            was_shaky,
+            crop_pct,
+            crop_area_px: Some(crop_area),
+            quality: StabilizationQuality::from_reduction(reduction),
         }
     }
 
@@ -275,6 +326,42 @@ impl StabilizeAnalyzer {
         let crops = vec![crop_pct; motion_before.len()];
         self.analyze(motion_before, motion_after, &crops)
     }
+
+    /// Analyse motion vectors and produce a full `StabilizeReport` with per-frame
+    /// crop area in pixels and per-frame quality classification.
+    ///
+    /// `motion_before` and `motion_after` must have the same length.
+    /// `frame_width` / `frame_height` are the dimensions of the original frames.
+    pub fn analyze_with_dimensions(
+        &self,
+        motion_before: &[f64],
+        motion_after: &[f64],
+        crop_pcts: &[f64],
+        frame_width: u32,
+        frame_height: u32,
+    ) -> StabilizeReport {
+        let n = motion_before.len().min(motion_after.len());
+        let crop_len = crop_pcts.len();
+
+        let frame_stats: Vec<FrameStat> = (0..n)
+            .map(|i| {
+                let before = motion_before[i];
+                let after = motion_after[i];
+                let crop = if i < crop_len { crop_pcts[i] } else { 0.0 };
+                FrameStat::with_details(
+                    i,
+                    before,
+                    after,
+                    before > self.shake_threshold,
+                    crop,
+                    frame_width,
+                    frame_height,
+                )
+            })
+            .collect();
+
+        StabilizeReport::new(frame_stats, self.shake_threshold)
+    }
 }
 
 #[cfg(test)]
@@ -410,5 +497,62 @@ mod tests {
         let a = vec![0.5, 0.5, 0.5];
         let report = analyzer.analyze_uniform_crop(&b, &a, 0.0);
         assert_eq!(report.shaky_frames(), 2);
+    }
+
+    #[test]
+    fn test_frame_stat_with_details_crop_area() {
+        let stat = FrameStat::with_details(0, 10.0, 1.0, true, 5.0, 100, 80);
+        // 5% crop on each side: effective w = 90, h = 72, area = 6480
+        let area = stat.crop_area_px.expect("crop area should be set");
+        assert!(area < 100 * 80, "crop area should be less than full frame");
+        assert!(area > 0);
+    }
+
+    #[test]
+    fn test_frame_stat_with_details_zero_crop() {
+        let stat = FrameStat::with_details(0, 10.0, 1.0, true, 0.0, 100, 80);
+        let area = stat.crop_area_px.expect("should have area");
+        assert_eq!(area, 100 * 80, "zero crop → full frame area");
+    }
+
+    #[test]
+    fn test_frame_stat_with_details_quality_excellent() {
+        let stat = FrameStat::with_details(0, 100.0, 0.5, true, 0.0, 100, 80);
+        // 99.5% reduction → Excellent
+        assert_eq!(stat.quality, StabilizationQuality::Excellent);
+    }
+
+    #[test]
+    fn test_frame_stat_quality_new_method() {
+        let stat = FrameStat::new(0, 20.0, 4.0, true, 5.0);
+        // 80% reduction → Good
+        assert_eq!(stat.quality, StabilizationQuality::Good);
+    }
+
+    #[test]
+    fn test_analyze_with_dimensions_produces_crop_area() {
+        let analyzer = StabilizeAnalyzer::new();
+        let b = vec![10.0; 5];
+        let a = vec![1.0; 5];
+        let crops = vec![10.0; 5]; // 10% crop per side
+        let report = analyzer.analyze_with_dimensions(&b, &a, &crops, 1920, 1080);
+        assert_eq!(report.frame_count(), 5);
+        for stat in &report.frame_stats {
+            let area = stat.crop_area_px.expect("should have area");
+            // effective w = 1920 * 0.8 = 1536, h = 1080 * 0.8 = 864
+            assert_eq!(area, 1536 * 864);
+        }
+    }
+
+    #[test]
+    fn test_analyze_with_dimensions_quality_classification() {
+        let analyzer = StabilizeAnalyzer::new();
+        let b = vec![50.0; 4];
+        let a = vec![0.5; 4]; // 99% reduction
+        let crops = vec![0.0; 4];
+        let report = analyzer.analyze_with_dimensions(&b, &a, &crops, 1280, 720);
+        for stat in &report.frame_stats {
+            assert_eq!(stat.quality, StabilizationQuality::Excellent);
+        }
     }
 }

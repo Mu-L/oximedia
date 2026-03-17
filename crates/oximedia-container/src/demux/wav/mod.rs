@@ -114,7 +114,7 @@ impl<R> WavDemuxer<R> {
     ///
     /// Returns `None` if format info is not available or byte rate is zero.
     #[must_use]
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss, clippy::manual_checked_ops)]
     pub fn duration_seconds(&self) -> Option<f64> {
         let fmt = self.fmt.as_ref()?;
         if fmt.byte_rate == 0 {
@@ -129,10 +129,7 @@ impl<R> WavDemuxer<R> {
     #[must_use]
     pub fn total_samples(&self) -> Option<u64> {
         let fmt = self.fmt.as_ref()?;
-        if fmt.block_align == 0 {
-            return None;
-        }
-        Some(self.data_size / u64::from(fmt.block_align))
+        self.data_size.checked_div(u64::from(fmt.block_align))
     }
 
     /// Returns the number of bytes remaining in the data chunk.
@@ -257,11 +254,10 @@ impl<R: oximedia_io::MediaSource> WavDemuxer<R> {
             CodecParams::audio(fmt.sample_rate, u8::try_from(fmt.channels).unwrap_or(2));
 
         // Calculate duration in samples
-        let duration = if fmt.block_align > 0 {
-            Some(i64::try_from(self.data_size / u64::from(fmt.block_align)).unwrap_or(0))
-        } else {
-            None
-        };
+        let duration = self
+            .data_size
+            .checked_div(u64::from(fmt.block_align))
+            .and_then(|v| i64::try_from(v).ok());
 
         // Timebase is 1/sample_rate for sample-accurate timing
         let timebase = Rational::new(1, i64::from(fmt.sample_rate));
@@ -339,11 +335,7 @@ impl<R: oximedia_io::MediaSource> Demuxer for WavDemuxer<R> {
 
         // Calculate timestamp
         let pts = i64::try_from(self.samples_read).unwrap_or(0);
-        let samples_in_packet = if bytes_per_sample > 0 {
-            read as u64 / bytes_per_sample
-        } else {
-            0
-        };
+        let samples_in_packet = (read as u64).checked_div(bytes_per_sample).unwrap_or(0);
         let duration = i64::try_from(samples_in_packet).ok();
 
         let timebase = Rational::new(1, i64::from(fmt.sample_rate));

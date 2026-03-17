@@ -75,6 +75,25 @@ pub struct BufferStats {
     pub underrun_count: u64,
 }
 
+/// Strategy to use when a frame pop encounters an empty buffer (underrun).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameDropRecovery {
+    /// Return `None` — the caller must handle the gap.
+    None,
+    /// Repeat the last successfully delivered frame.
+    RepeatLast,
+    /// Generate a black (all-zero) frame with the same dimensions as the last frame.
+    Black,
+    /// Generate a mid-grey slate frame (Y=128 for 8-bit) as a visual "signal lost" indicator.
+    Slate,
+}
+
+impl Default for FrameDropRecovery {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 /// Configuration for the frame ring buffer.
 #[derive(Debug, Clone)]
 pub struct FrameBufferConfig {
@@ -82,6 +101,8 @@ pub struct FrameBufferConfig {
     pub capacity: usize,
     /// Number of frames that must be buffered before playout may begin.
     pub pre_roll: usize,
+    /// Strategy when a pop encounters an empty buffer.
+    pub drop_recovery: FrameDropRecovery,
 }
 
 impl Default for FrameBufferConfig {
@@ -89,6 +110,7 @@ impl Default for FrameBufferConfig {
         Self {
             capacity: 30,
             pre_roll: 5,
+            drop_recovery: FrameDropRecovery::None,
         }
     }
 }
@@ -104,6 +126,8 @@ pub struct FrameBuffer {
     ring: VecDeque<BufferedFrame>,
     stats: BufferStats,
     pre_roll_met: bool,
+    /// Last successfully popped frame, kept for recovery strategies.
+    last_frame: Option<BufferedFrame>,
 }
 
 impl FrameBuffer {
@@ -115,6 +139,7 @@ impl FrameBuffer {
             ring: VecDeque::with_capacity(cap),
             stats: BufferStats::default(),
             pre_roll_met: false,
+            last_frame: None,
         }
     }
 
@@ -168,16 +193,52 @@ impl FrameBuffer {
 
     /// Pop the oldest frame from the buffer.
     ///
-    /// Returns `None` and increments the under-run counter if the buffer is
-    /// empty.
+    /// When the buffer is empty the configured [`FrameDropRecovery`] strategy
+    /// is applied:
+    /// - `None` → returns `None` (caller handles the gap).
+    /// - `RepeatLast` → clones the last successfully delivered frame.
+    /// - `Black` → synthesises an all-zero frame matching the last frame's dimensions.
+    /// - `Slate` → synthesises a mid-grey (0x80) frame as a "signal lost" indicator.
+    ///
+    /// In all underrun cases the `underrun_count` statistic is incremented.
     pub fn pop(&mut self) -> Option<BufferedFrame> {
         if let Some(f) = self.ring.pop_front() {
             self.stats.total_popped += 1;
+            self.last_frame = Some(f.clone());
             Some(f)
         } else {
             self.stats.underrun_count += 1;
-            None
+            self.apply_recovery()
         }
+    }
+
+    /// Apply the configured frame-drop recovery strategy.
+    fn apply_recovery(&self) -> Option<BufferedFrame> {
+        match self.config.drop_recovery {
+            FrameDropRecovery::None => None,
+            FrameDropRecovery::RepeatLast => self.last_frame.clone(),
+            FrameDropRecovery::Black => self.synthesize_recovery_frame(0x00),
+            FrameDropRecovery::Slate => self.synthesize_recovery_frame(0x80),
+        }
+    }
+
+    /// Synthesize a solid-fill recovery frame based on the last known frame
+    /// dimensions. Returns `None` if no frame has ever been delivered.
+    fn synthesize_recovery_frame(&self, fill_byte: u8) -> Option<BufferedFrame> {
+        let last = self.last_frame.as_ref()?;
+        let mut frame = last.clone();
+        // Fill pixel data with the requested value
+        for byte in &mut frame.data {
+            *byte = fill_byte;
+        }
+        // Advance the frame index by one so downstream can detect the synthetic frame
+        frame.meta.frame_index = last.meta.frame_index.saturating_add(1);
+        frame.meta.pts_us = last.meta.pts_us.saturating_add(
+            // Estimate one frame period from the previous two indices (fallback 40 ms)
+            40_000,
+        );
+        frame.meta.is_key = false;
+        Some(frame)
     }
 
     /// Peek at the next frame without removing it.
@@ -189,6 +250,7 @@ impl FrameBuffer {
     pub fn flush(&mut self) {
         self.ring.clear();
         self.pre_roll_met = false;
+        self.last_frame = None;
     }
 
     /// Fill percentage as a value in [0.0, 1.0].
@@ -246,6 +308,7 @@ mod tests {
         let cfg = FrameBufferConfig {
             capacity: 3,
             pre_roll: 1,
+            ..Default::default()
         };
         let mut buf = FrameBuffer::new(cfg);
         assert!(buf.push(make_frame(0)));
@@ -267,6 +330,7 @@ mod tests {
         let cfg = FrameBufferConfig {
             capacity: 10,
             pre_roll: 3,
+            ..Default::default()
         };
         let mut buf = FrameBuffer::new(cfg);
         assert!(!buf.pre_roll_ready());
@@ -282,6 +346,7 @@ mod tests {
         let cfg = FrameBufferConfig {
             capacity: 10,
             pre_roll: 2,
+            ..Default::default()
         };
         let mut buf = FrameBuffer::new(cfg);
         buf.push(make_frame(0));
@@ -297,6 +362,7 @@ mod tests {
         let mut buf = FrameBuffer::new(FrameBufferConfig {
             capacity: 10,
             pre_roll: 1,
+            ..Default::default()
         });
         buf.push(make_frame(10));
         buf.push(make_frame(20));
@@ -331,6 +397,7 @@ mod tests {
         let cfg = FrameBufferConfig {
             capacity: 4,
             pre_roll: 1,
+            ..Default::default()
         };
         let mut buf = FrameBuffer::new(cfg);
         assert!((buf.fill_ratio() - 0.0).abs() < f64::EPSILON);
@@ -347,6 +414,7 @@ mod tests {
         let cfg = FrameBufferConfig {
             capacity: 2,
             pre_roll: 1,
+            ..Default::default()
         };
         let mut buf = FrameBuffer::new(cfg);
         assert!(!buf.is_full());
@@ -360,6 +428,7 @@ mod tests {
         let cfg = FrameBufferConfig {
             capacity: 5,
             pre_roll: 1,
+            ..Default::default()
         };
         let mut buf = FrameBuffer::new(cfg);
         buf.push(make_frame(0));
@@ -381,8 +450,145 @@ mod tests {
         let cfg = FrameBufferConfig {
             capacity: 0,
             pre_roll: 0,
+            ..Default::default()
         };
         let buf = FrameBuffer::new(cfg);
         assert!((buf.fill_ratio() - 0.0).abs() < f64::EPSILON);
+    }
+
+    // --- Frame drop recovery tests ---
+
+    #[test]
+    fn test_recovery_none_returns_none() {
+        let cfg = FrameBufferConfig {
+            capacity: 5,
+            pre_roll: 1,
+            drop_recovery: FrameDropRecovery::None,
+        };
+        let mut buf = FrameBuffer::new(cfg);
+        buf.push(make_frame(0));
+        let _ = buf.pop(); // consume the only frame
+        assert!(buf.pop().is_none());
+        assert_eq!(buf.stats().underrun_count, 1);
+    }
+
+    #[test]
+    fn test_recovery_repeat_last() {
+        let cfg = FrameBufferConfig {
+            capacity: 5,
+            pre_roll: 1,
+            drop_recovery: FrameDropRecovery::RepeatLast,
+        };
+        let mut buf = FrameBuffer::new(cfg);
+        buf.push(make_frame(42));
+        let _ = buf.pop(); // consume frame 42
+        let recovered = buf.pop();
+        assert!(recovered.is_some());
+        let f = recovered.expect("recovery should produce a frame");
+        assert_eq!(f.meta.frame_index, 42); // identical clone
+        assert_eq!(buf.stats().underrun_count, 1);
+    }
+
+    #[test]
+    fn test_recovery_repeat_last_no_prior_frame() {
+        let cfg = FrameBufferConfig {
+            capacity: 5,
+            pre_roll: 1,
+            drop_recovery: FrameDropRecovery::RepeatLast,
+        };
+        let mut buf = FrameBuffer::new(cfg);
+        // No frames ever delivered
+        assert!(buf.pop().is_none());
+        assert_eq!(buf.stats().underrun_count, 1);
+    }
+
+    #[test]
+    fn test_recovery_black_frame() {
+        let cfg = FrameBufferConfig {
+            capacity: 5,
+            pre_roll: 1,
+            drop_recovery: FrameDropRecovery::Black,
+        };
+        let mut buf = FrameBuffer::new(cfg);
+        buf.push(make_frame(10));
+        let _ = buf.pop(); // deliver frame 10
+        let recovered = buf.pop();
+        assert!(recovered.is_some());
+        let f = recovered.expect("recovery should produce a frame");
+        assert_eq!(f.meta.frame_index, 11); // advanced by 1
+        assert!(
+            f.data.iter().all(|&b| b == 0x00),
+            "black frame should be all zeros"
+        );
+        assert!(!f.meta.is_key);
+    }
+
+    #[test]
+    fn test_recovery_slate_frame() {
+        let cfg = FrameBufferConfig {
+            capacity: 5,
+            pre_roll: 1,
+            drop_recovery: FrameDropRecovery::Slate,
+        };
+        let mut buf = FrameBuffer::new(cfg);
+        buf.push(make_frame(20));
+        let _ = buf.pop();
+        let recovered = buf.pop();
+        assert!(recovered.is_some());
+        let f = recovered.expect("recovery should produce a frame");
+        assert_eq!(f.meta.frame_index, 21);
+        assert!(
+            f.data.iter().all(|&b| b == 0x80),
+            "slate frame should be 0x80"
+        );
+    }
+
+    #[test]
+    fn test_recovery_preserves_dimensions() {
+        let cfg = FrameBufferConfig {
+            capacity: 5,
+            pre_roll: 1,
+            drop_recovery: FrameDropRecovery::Black,
+        };
+        let mut buf = FrameBuffer::new(cfg);
+        buf.push(make_frame(0));
+        let original = buf.pop().expect("should deliver frame");
+        let recovered = buf.pop().expect("should recover frame");
+        assert_eq!(recovered.meta.width, original.meta.width);
+        assert_eq!(recovered.meta.height, original.meta.height);
+        assert_eq!(recovered.data.len(), original.data.len());
+    }
+
+    #[test]
+    fn test_flush_clears_last_frame_for_recovery() {
+        let cfg = FrameBufferConfig {
+            capacity: 5,
+            pre_roll: 1,
+            drop_recovery: FrameDropRecovery::RepeatLast,
+        };
+        let mut buf = FrameBuffer::new(cfg);
+        buf.push(make_frame(0));
+        let _ = buf.pop();
+        buf.flush();
+        // After flush, recovery should return None since last_frame is cleared
+        assert!(buf.pop().is_none());
+    }
+
+    #[test]
+    fn test_recovery_multiple_underruns() {
+        let cfg = FrameBufferConfig {
+            capacity: 5,
+            pre_roll: 1,
+            drop_recovery: FrameDropRecovery::Slate,
+        };
+        let mut buf = FrameBuffer::new(cfg);
+        buf.push(make_frame(0));
+        let _ = buf.pop();
+        // Multiple underruns in a row
+        for i in 1..=5 {
+            let r = buf.pop();
+            assert!(r.is_some());
+            assert_eq!(buf.stats().underrun_count, i);
+        }
     }
 }

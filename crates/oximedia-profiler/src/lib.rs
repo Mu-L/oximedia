@@ -34,8 +34,10 @@
 pub mod allocation_tracker;
 pub mod benchmark;
 pub mod bottleneck;
+pub mod bottleneck_analysis;
 pub mod cache;
 pub mod call_graph;
+pub mod chrome_trace;
 pub mod codec_profiler;
 pub mod cpu;
 pub mod event_trace;
@@ -57,6 +59,8 @@ pub mod report;
 pub mod report_format;
 pub mod resource;
 pub mod sampling_profiler;
+pub mod span;
+pub mod span_bottleneck;
 pub mod thread;
 pub mod throughput_profiler;
 

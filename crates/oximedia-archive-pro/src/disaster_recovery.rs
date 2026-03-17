@@ -333,6 +333,386 @@ impl RiskMatrix {
 }
 
 // ─────────────────────────────────────────────────────────────
+// BackupRecord
+// ─────────────────────────────────────────────────────────────
+
+/// A record of a backup that exists for disaster recovery purposes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupRecord {
+    /// Human-readable label for the backup
+    pub label: String,
+    /// Location or URI of the backup
+    pub location: String,
+    /// Number of files in the backup
+    pub file_count: usize,
+    /// Total size in bytes
+    pub total_size_bytes: u64,
+    /// Age of the backup in hours
+    pub age_hours: u32,
+    /// Whether the backup has been verified (fixity checked) recently
+    pub verified: bool,
+    /// Scenarios this backup is designed to protect against
+    pub covers_scenarios: Vec<DisasterScenario>,
+    /// Whether the backup is geographically separated from the primary site
+    pub geographically_separated: bool,
+}
+
+// ─────────────────────────────────────────────────────────────
+// ValidationSeverity
+// ─────────────────────────────────────────────────────────────
+
+/// Severity of a DR validation finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DrValidationSeverity {
+    /// Informational: best practice recommendation.
+    Info,
+    /// Warning: potential gap that should be addressed.
+    Warning,
+    /// Critical: a significant gap that threatens recoverability.
+    Critical,
+}
+
+impl DrValidationSeverity {
+    /// Returns a label string.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Info => "INFO",
+            Self::Warning => "WARNING",
+            Self::Critical => "CRITICAL",
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// ValidationFinding
+// ─────────────────────────────────────────────────────────────
+
+/// A single finding from DR plan validation.
+#[derive(Debug, Clone)]
+pub struct DrValidationFinding {
+    /// Severity of the finding.
+    pub severity: DrValidationSeverity,
+    /// Short code.
+    pub code: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Recommendation for remediation.
+    pub recommendation: String,
+}
+
+// ─────────────────────────────────────────────────────────────
+// DrValidationReport
+// ─────────────────────────────────────────────────────────────
+
+/// Overall DR readiness assessment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrReadiness {
+    /// Fully ready: all critical checks pass, RTO/RPO met.
+    Ready,
+    /// Ready with concerns: no critical issues but warnings exist.
+    ReadyWithWarnings,
+    /// Not ready: critical gaps exist.
+    NotReady,
+}
+
+/// Comprehensive report from DR plan validation.
+#[derive(Debug, Clone)]
+pub struct DrValidationReport {
+    /// Overall readiness assessment.
+    pub readiness: DrReadiness,
+    /// All findings.
+    pub findings: Vec<DrValidationFinding>,
+    /// Whether the plan meets its RTO target.
+    pub meets_rto: bool,
+    /// Whether the plan meets its RPO target.
+    pub meets_rpo: bool,
+    /// Percentage of disaster scenarios covered by backups (0.0 - 1.0).
+    pub scenario_coverage: f64,
+    /// Whether at least one backup is geographically separated.
+    pub has_geographic_separation: bool,
+    /// Number of verified backups.
+    pub verified_backup_count: usize,
+    /// Total backup count.
+    pub total_backup_count: usize,
+}
+
+impl DrValidationReport {
+    /// Returns the number of critical findings.
+    #[must_use]
+    pub fn critical_count(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|f| f.severity == DrValidationSeverity::Critical)
+            .count()
+    }
+
+    /// Returns the number of warning findings.
+    #[must_use]
+    pub fn warning_count(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|f| f.severity == DrValidationSeverity::Warning)
+            .count()
+    }
+
+    /// Returns a summary string.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        format!(
+            "DR Readiness: {:?} | RTO: {} | RPO: {} | Coverage: {:.0}% | Backups: {}/{} verified | Criticals: {} | Warnings: {}",
+            self.readiness,
+            if self.meets_rto { "PASS" } else { "FAIL" },
+            if self.meets_rpo { "PASS" } else { "FAIL" },
+            self.scenario_coverage * 100.0,
+            self.verified_backup_count,
+            self.total_backup_count,
+            self.critical_count(),
+            self.warning_count(),
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// DrPlanValidator
+// ─────────────────────────────────────────────────────────────
+
+/// Validates a disaster recovery plan for completeness and recoverability.
+///
+/// Checks include:
+/// - Whether the plan's RTO/RPO targets can be met
+/// - Whether all identified disaster scenarios have backup coverage
+/// - Whether backups are verified and recent
+/// - Whether geographic separation exists
+/// - Whether the plan has sufficient recovery steps
+/// - Whether step dependencies form a valid DAG
+pub struct DrPlanValidator {
+    /// Maximum acceptable backup age in hours before a warning is raised.
+    pub max_backup_age_hours: u32,
+    /// Required minimum number of backups.
+    pub min_backup_count: usize,
+    /// Whether geographic separation is required.
+    pub require_geographic_separation: bool,
+}
+
+impl Default for DrPlanValidator {
+    fn default() -> Self {
+        Self {
+            max_backup_age_hours: 24,
+            min_backup_count: 2,
+            require_geographic_separation: true,
+        }
+    }
+}
+
+impl DrPlanValidator {
+    /// Create a validator with default settings.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Validate a disaster recovery plan against a set of backup records and
+    /// recovery objectives.
+    ///
+    /// This performs comprehensive validation including:
+    /// 1. RTO feasibility (critical path vs target)
+    /// 2. RPO feasibility (backup age vs target)
+    /// 3. Scenario coverage (are all scenarios covered by at least one backup?)
+    /// 4. Backup verification status
+    /// 5. Geographic separation
+    /// 6. Step dependency validation (no cycles, no missing deps)
+    /// 7. Minimum backup count
+    #[must_use]
+    pub fn validate(
+        &self,
+        plan: &RecoveryPlan,
+        backups: &[BackupRecord],
+        objective: &RecoveryObjective,
+    ) -> DrValidationReport {
+        let mut findings = Vec::new();
+
+        // 1. RTO check: can the plan complete within the RTO target?
+        let critical_path = plan.critical_path_hours();
+        let meets_rto = critical_path <= objective.rto_hours as f32;
+        if !meets_rto {
+            findings.push(DrValidationFinding {
+                severity: DrValidationSeverity::Critical,
+                code: "RTO_EXCEEDED".to_string(),
+                message: format!(
+                    "Plan critical path ({:.1}h) exceeds RTO target ({}h)",
+                    critical_path, objective.rto_hours
+                ),
+                recommendation: "Reduce recovery step durations or parallelize steps".to_string(),
+            });
+        }
+
+        // 2. RPO check: is the most recent backup within the RPO window?
+        let min_backup_age = backups
+            .iter()
+            .map(|b| b.age_hours)
+            .min()
+            .unwrap_or(u32::MAX);
+        let meets_rpo = min_backup_age <= objective.rpo_hours;
+        if !meets_rpo {
+            findings.push(DrValidationFinding {
+                severity: DrValidationSeverity::Critical,
+                code: "RPO_EXCEEDED".to_string(),
+                message: format!(
+                    "Most recent backup is {}h old, exceeding RPO target of {}h",
+                    min_backup_age, objective.rpo_hours
+                ),
+                recommendation: "Increase backup frequency to meet RPO target".to_string(),
+            });
+        }
+
+        // 3. Scenario coverage
+        let all_scenarios = [
+            DisasterScenario::DataCenter,
+            DisasterScenario::Network,
+            DisasterScenario::Ransomware,
+            DisasterScenario::NaturalDisaster,
+            DisasterScenario::HardwareFailure,
+        ];
+        let covered_scenarios: std::collections::HashSet<_> = backups
+            .iter()
+            .flat_map(|b| b.covers_scenarios.iter().copied())
+            .collect();
+        let coverage = if all_scenarios.is_empty() {
+            1.0
+        } else {
+            covered_scenarios.len() as f64 / all_scenarios.len() as f64
+        };
+        let uncovered: Vec<_> = all_scenarios
+            .iter()
+            .filter(|s| !covered_scenarios.contains(s))
+            .collect();
+        if !uncovered.is_empty() {
+            let names: Vec<&str> = uncovered.iter().map(|s| s.name()).collect();
+            findings.push(DrValidationFinding {
+                severity: DrValidationSeverity::Warning,
+                code: "SCENARIO_GAP".to_string(),
+                message: format!("Uncovered disaster scenarios: {}", names.join(", ")),
+                recommendation: "Add backup strategies that cover these scenarios".to_string(),
+            });
+        }
+
+        // 4. Backup verification status
+        let verified_count = backups.iter().filter(|b| b.verified).count();
+        let unverified_count = backups.len() - verified_count;
+        if unverified_count > 0 {
+            findings.push(DrValidationFinding {
+                severity: DrValidationSeverity::Warning,
+                code: "UNVERIFIED_BACKUPS".to_string(),
+                message: format!(
+                    "{} of {} backups have not been verified recently",
+                    unverified_count,
+                    backups.len()
+                ),
+                recommendation: "Run fixity checks on all backups".to_string(),
+            });
+        }
+
+        // 5. Geographic separation
+        let has_geo_sep = backups.iter().any(|b| b.geographically_separated);
+        if self.require_geographic_separation && !has_geo_sep {
+            findings.push(DrValidationFinding {
+                severity: DrValidationSeverity::Critical,
+                code: "NO_GEO_SEPARATION".to_string(),
+                message: "No geographically separated backup exists".to_string(),
+                recommendation:
+                    "Establish at least one off-site backup in a different geographic region"
+                        .to_string(),
+            });
+        }
+
+        // 6. Backup age warnings
+        for backup in backups {
+            if backup.age_hours > self.max_backup_age_hours {
+                findings.push(DrValidationFinding {
+                    severity: DrValidationSeverity::Warning,
+                    code: "STALE_BACKUP".to_string(),
+                    message: format!(
+                        "Backup '{}' is {}h old (threshold: {}h)",
+                        backup.label, backup.age_hours, self.max_backup_age_hours
+                    ),
+                    recommendation: "Refresh this backup".to_string(),
+                });
+            }
+        }
+
+        // 7. Minimum backup count
+        if backups.len() < self.min_backup_count {
+            findings.push(DrValidationFinding {
+                severity: DrValidationSeverity::Critical,
+                code: "INSUFFICIENT_BACKUPS".to_string(),
+                message: format!(
+                    "Only {} backup(s) exist; minimum required is {}",
+                    backups.len(),
+                    self.min_backup_count
+                ),
+                recommendation: "Create additional backups".to_string(),
+            });
+        }
+
+        // 8. Step dependency validation
+        let step_ids: std::collections::HashSet<u32> = plan.steps.iter().map(|s| s.order).collect();
+        for step in &plan.steps {
+            for &req in &step.requires {
+                if !step_ids.contains(&req) {
+                    findings.push(DrValidationFinding {
+                        severity: DrValidationSeverity::Critical,
+                        code: "MISSING_DEPENDENCY".to_string(),
+                        message: format!(
+                            "Step {} '{}' depends on non-existent step {}",
+                            step.order, step.name, req
+                        ),
+                        recommendation: "Fix step dependencies".to_string(),
+                    });
+                }
+            }
+        }
+
+        // 9. Empty plan check
+        if plan.steps.is_empty() {
+            findings.push(DrValidationFinding {
+                severity: DrValidationSeverity::Critical,
+                code: "EMPTY_PLAN".to_string(),
+                message: "Recovery plan has no steps".to_string(),
+                recommendation: "Define recovery steps".to_string(),
+            });
+        }
+
+        // Determine readiness
+        let has_critical = findings
+            .iter()
+            .any(|f| f.severity == DrValidationSeverity::Critical);
+        let has_warning = findings
+            .iter()
+            .any(|f| f.severity == DrValidationSeverity::Warning);
+
+        let readiness = if has_critical {
+            DrReadiness::NotReady
+        } else if has_warning {
+            DrReadiness::ReadyWithWarnings
+        } else {
+            DrReadiness::Ready
+        };
+
+        DrValidationReport {
+            readiness,
+            findings,
+            meets_rto,
+            meets_rpo,
+            scenario_coverage: coverage,
+            has_geographic_separation: has_geo_sep,
+            verified_backup_count: verified_count,
+            total_backup_count: backups.len(),
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Unit tests
 // ─────────────────────────────────────────────────────────────
 
@@ -508,5 +888,281 @@ mod tests {
     fn test_risk_matrix_empty() {
         let matrix = RiskMatrix::new(vec![]);
         assert!(matrix.highest_risk().is_none());
+    }
+
+    // ── DrPlanValidator tests ────────────────────────────────────
+
+    fn make_complete_backups() -> Vec<BackupRecord> {
+        vec![
+            BackupRecord {
+                label: "Primary Backup".to_string(),
+                location: "s3://primary-backup/".to_string(),
+                file_count: 1000,
+                total_size_bytes: 1024 * 1024 * 1024 * 10, // 10 GiB
+                age_hours: 4,
+                verified: true,
+                covers_scenarios: vec![
+                    DisasterScenario::HardwareFailure,
+                    DisasterScenario::Network,
+                    DisasterScenario::Ransomware,
+                ],
+                geographically_separated: false,
+            },
+            BackupRecord {
+                label: "Off-site Backup".to_string(),
+                location: "s3://offsite-eu/".to_string(),
+                file_count: 1000,
+                total_size_bytes: 1024 * 1024 * 1024 * 10,
+                age_hours: 12,
+                verified: true,
+                covers_scenarios: vec![
+                    DisasterScenario::DataCenter,
+                    DisasterScenario::NaturalDisaster,
+                ],
+                geographically_separated: true,
+            },
+        ]
+    }
+
+    fn make_objective() -> RecoveryObjective {
+        RecoveryObjective::new(8, 24)
+    }
+
+    #[test]
+    fn test_validate_fully_ready() {
+        let plan = make_simple_plan();
+        let backups = make_complete_backups();
+        let obj = make_objective();
+
+        let validator = DrPlanValidator::new();
+        let report = validator.validate(&plan, &backups, &obj);
+
+        assert_eq!(report.readiness, DrReadiness::Ready);
+        assert!(report.meets_rto);
+        assert!(report.meets_rpo);
+        assert!((report.scenario_coverage - 1.0).abs() < 1e-10);
+        assert!(report.has_geographic_separation);
+        assert_eq!(report.critical_count(), 0);
+    }
+
+    #[test]
+    fn test_validate_rto_exceeded() {
+        let mut plan = make_simple_plan();
+        plan.steps[1].duration_hours = 20.0; // Exceed RTO of 8h
+        let backups = make_complete_backups();
+        let obj = make_objective();
+
+        let validator = DrPlanValidator::new();
+        let report = validator.validate(&plan, &backups, &obj);
+
+        assert!(!report.meets_rto);
+        assert_eq!(report.readiness, DrReadiness::NotReady);
+        assert!(report.findings.iter().any(|f| f.code == "RTO_EXCEEDED"));
+    }
+
+    #[test]
+    fn test_validate_rpo_exceeded() {
+        let plan = make_simple_plan();
+        let mut backups = make_complete_backups();
+        // Make all backups older than RPO
+        for b in &mut backups {
+            b.age_hours = 48;
+        }
+        let obj = make_objective(); // RPO = 24h
+
+        let validator = DrPlanValidator::new();
+        let report = validator.validate(&plan, &backups, &obj);
+
+        assert!(!report.meets_rpo);
+        assert!(report.findings.iter().any(|f| f.code == "RPO_EXCEEDED"));
+    }
+
+    #[test]
+    fn test_validate_no_geo_separation() {
+        let plan = make_simple_plan();
+        let mut backups = make_complete_backups();
+        // Remove geographic separation
+        for b in &mut backups {
+            b.geographically_separated = false;
+        }
+        // Ensure full scenario coverage
+        backups[0].covers_scenarios = vec![
+            DisasterScenario::HardwareFailure,
+            DisasterScenario::Network,
+            DisasterScenario::Ransomware,
+            DisasterScenario::DataCenter,
+            DisasterScenario::NaturalDisaster,
+        ];
+        let obj = make_objective();
+
+        let validator = DrPlanValidator::new();
+        let report = validator.validate(&plan, &backups, &obj);
+
+        assert!(!report.has_geographic_separation);
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.code == "NO_GEO_SEPARATION"));
+    }
+
+    #[test]
+    fn test_validate_unverified_backups() {
+        let plan = make_simple_plan();
+        let mut backups = make_complete_backups();
+        backups[0].verified = false;
+        let obj = make_objective();
+
+        let validator = DrPlanValidator::new();
+        let report = validator.validate(&plan, &backups, &obj);
+
+        assert_eq!(report.verified_backup_count, 1);
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.code == "UNVERIFIED_BACKUPS"));
+    }
+
+    #[test]
+    fn test_validate_insufficient_backups() {
+        let plan = make_simple_plan();
+        let backups = vec![make_complete_backups().remove(0)];
+        let obj = make_objective();
+
+        let validator = DrPlanValidator::new();
+        let report = validator.validate(&plan, &backups, &obj);
+
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.code == "INSUFFICIENT_BACKUPS"));
+    }
+
+    #[test]
+    fn test_validate_scenario_gap() {
+        let plan = make_simple_plan();
+        let mut backups = make_complete_backups();
+        // Only cover one scenario
+        backups[0].covers_scenarios = vec![DisasterScenario::HardwareFailure];
+        backups[1].covers_scenarios = vec![];
+        let obj = make_objective();
+
+        let validator = DrPlanValidator::new();
+        let report = validator.validate(&plan, &backups, &obj);
+
+        assert!(report.scenario_coverage < 1.0);
+        assert!(report.findings.iter().any(|f| f.code == "SCENARIO_GAP"));
+    }
+
+    #[test]
+    fn test_validate_stale_backup() {
+        let plan = make_simple_plan();
+        let mut backups = make_complete_backups();
+        backups[0].age_hours = 48; // Over default 24h threshold
+        let obj = RecoveryObjective::new(8, 72); // RPO large enough to pass
+
+        let validator = DrPlanValidator::new();
+        let report = validator.validate(&plan, &backups, &obj);
+
+        assert!(report.findings.iter().any(|f| f.code == "STALE_BACKUP"));
+    }
+
+    #[test]
+    fn test_validate_missing_dependency() {
+        let plan = RecoveryPlan {
+            scenario: DisasterScenario::HardwareFailure,
+            steps: vec![RecoveryStep {
+                order: 1,
+                name: "Restore".to_string(),
+                duration_hours: 2.0,
+                requires: vec![99], // Step 99 does not exist
+                responsible_team: "IT".to_string(),
+            }],
+            total_time_hours: 2.0,
+            success_probability: 0.95,
+        };
+        let backups = make_complete_backups();
+        let obj = make_objective();
+
+        let validator = DrPlanValidator::new();
+        let report = validator.validate(&plan, &backups, &obj);
+
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.code == "MISSING_DEPENDENCY"));
+    }
+
+    #[test]
+    fn test_validate_empty_plan() {
+        let plan = RecoveryPlan {
+            scenario: DisasterScenario::DataCenter,
+            steps: vec![],
+            total_time_hours: 0.0,
+            success_probability: 0.0,
+        };
+        let backups = make_complete_backups();
+        let obj = make_objective();
+
+        let validator = DrPlanValidator::new();
+        let report = validator.validate(&plan, &backups, &obj);
+
+        assert!(report.findings.iter().any(|f| f.code == "EMPTY_PLAN"));
+        assert_eq!(report.readiness, DrReadiness::NotReady);
+    }
+
+    #[test]
+    fn test_validation_report_summary() {
+        let plan = make_simple_plan();
+        let backups = make_complete_backups();
+        let obj = make_objective();
+
+        let validator = DrPlanValidator::new();
+        let report = validator.validate(&plan, &backups, &obj);
+
+        let summary = report.summary();
+        assert!(summary.contains("DR Readiness"));
+        assert!(summary.contains("RTO"));
+        assert!(summary.contains("RPO"));
+    }
+
+    #[test]
+    fn test_dr_validation_severity_ordering() {
+        assert!(DrValidationSeverity::Info < DrValidationSeverity::Warning);
+        assert!(DrValidationSeverity::Warning < DrValidationSeverity::Critical);
+    }
+
+    #[test]
+    fn test_validation_no_backups_at_all() {
+        let plan = make_simple_plan();
+        let backups: Vec<BackupRecord> = vec![];
+        let obj = make_objective();
+
+        let validator = DrPlanValidator::new();
+        let report = validator.validate(&plan, &backups, &obj);
+
+        assert_eq!(report.readiness, DrReadiness::NotReady);
+        assert!(!report.meets_rpo);
+        assert_eq!(report.total_backup_count, 0);
+    }
+
+    #[test]
+    fn test_validate_custom_validator_config() {
+        let plan = make_simple_plan();
+        let backups = make_complete_backups();
+        let obj = make_objective();
+
+        let validator = DrPlanValidator {
+            max_backup_age_hours: 1, // Very strict: 1 hour
+            min_backup_count: 5,     // Require 5 backups
+            require_geographic_separation: false,
+        };
+        let report = validator.validate(&plan, &backups, &obj);
+
+        // Should have findings for stale backups and insufficient count
+        assert!(report.findings.iter().any(|f| f.code == "STALE_BACKUP"));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.code == "INSUFFICIENT_BACKUPS"));
     }
 }

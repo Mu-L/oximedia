@@ -148,14 +148,13 @@ impl MigrationStep {
     }
 
     /// Apply this migration step to a workflow definition (key-value map).
-    pub fn apply(
-        &self,
-        definition: &mut HashMap<String, String>,
-    ) -> Result<(), MigrationError> {
+    pub fn apply(&self, definition: &mut HashMap<String, String>) -> Result<(), MigrationError> {
         for change in &self.changes {
             match change {
                 FieldChange::AddField { name, default } => {
-                    definition.entry(name.clone()).or_insert_with(|| default.clone());
+                    definition
+                        .entry(name.clone())
+                        .or_insert_with(|| default.clone());
                 }
                 FieldChange::RemoveField { name } => {
                     definition.remove(name);
@@ -165,7 +164,10 @@ impl MigrationStep {
                         definition.insert(to.clone(), value);
                     }
                 }
-                FieldChange::ChangeType { name, description: _ } => {
+                FieldChange::ChangeType {
+                    name,
+                    description: _,
+                } => {
                     if !definition.contains_key(name) {
                         return Err(MigrationError::StepFailed {
                             step: self.description.clone(),
@@ -315,8 +317,14 @@ mod tests {
         let mut def = HashMap::new();
         def.insert("name".into(), "test".into());
         step.apply(&mut def).expect("should succeed in test");
-        assert_eq!(def.get("priority").expect("should succeed in test"), "normal");
-        assert_eq!(def.get("_schema_version").expect("should succeed in test"), "1.1.0");
+        assert_eq!(
+            def.get("priority").expect("should succeed in test"),
+            "normal"
+        );
+        assert_eq!(
+            def.get("_schema_version").expect("should succeed in test"),
+            "1.1.0"
+        );
     }
 
     #[test]
@@ -344,7 +352,10 @@ mod tests {
         def.insert("old_name".into(), "value".into());
         step.apply(&mut def).expect("should succeed in test");
         assert!(!def.contains_key("old_name"));
-        assert_eq!(def.get("new_name").expect("should succeed in test"), "value");
+        assert_eq!(
+            def.get("new_name").expect("should succeed in test"),
+            "value"
+        );
     }
 
     #[test]
@@ -366,7 +377,9 @@ mod tests {
         reg.register(MigrationStep::new(v(1, 0, 0), v(1, 1, 0), "step1"));
         reg.register(MigrationStep::new(v(1, 1, 0), v(1, 2, 0), "step2"));
 
-        let path = reg.find_path(&v(1, 0, 0), &v(1, 2, 0)).expect("should succeed in test");
+        let path = reg
+            .find_path(&v(1, 0, 0), &v(1, 2, 0))
+            .expect("should succeed in test");
         assert_eq!(path.len(), 2);
         assert_eq!(path[0].description, "step1");
         assert_eq!(path[1].description, "step2");
@@ -414,10 +427,15 @@ mod tests {
         def.insert("name".into(), "wf1".into());
         def.insert("dest".into(), "/out".into());
 
-        let descs = reg.migrate(&mut def, &v(1, 0, 0), &v(1, 2, 0)).expect("should succeed in test");
+        let descs = reg
+            .migrate(&mut def, &v(1, 0, 0), &v(1, 2, 0))
+            .expect("should succeed in test");
         assert_eq!(descs.len(), 2);
         assert_eq!(def.get("timeout").expect("should succeed in test"), "30");
-        assert_eq!(def.get("output_path").expect("should succeed in test"), "/out");
+        assert_eq!(
+            def.get("output_path").expect("should succeed in test"),
+            "/out"
+        );
         assert!(!def.contains_key("dest"));
     }
 

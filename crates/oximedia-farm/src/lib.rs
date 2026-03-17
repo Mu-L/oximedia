@@ -52,19 +52,32 @@
 //! # }
 //! ```
 
+pub mod auto_scaler;
 pub mod capacity_planner;
 pub mod checkpoint;
+/// S3/GCS/Azure cloud object storage integration with pure-Rust AWS SigV4 signing.
+pub mod cloud_storage;
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub mod communication;
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub mod coordinator;
+/// HTTP/1.1 dashboard API handler for farm status endpoints.
+pub mod dashboard_api;
 pub mod dependency;
 pub mod farm_config;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod fault_tolerance;
 pub mod health;
+pub mod job_distribution;
 pub mod job_queue;
 pub mod job_template;
+pub mod load_balancer;
 pub mod metrics;
 pub mod node_affinity;
 pub mod node_monitor;
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
+pub mod output_validator;
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub mod persistence;
 pub mod priority_queue;
 pub mod render_stats;
@@ -72,7 +85,9 @@ pub mod resource_manager;
 pub mod scheduler;
 pub mod task_allocator;
 pub mod task_preemption;
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub mod worker;
+pub mod worker_health;
 pub mod worker_pool;
 
 use std::fmt;
@@ -81,6 +96,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 /// Re-export protobuf generated code
+#[cfg(not(target_arch = "wasm32"))]
 pub mod pb {
     tonic::include_proto!("oximedia.farm");
 }
@@ -103,11 +119,23 @@ pub enum FarmError {
     #[error("Task error: {0}")]
     Task(String),
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Network error: {0}")]
     Network(#[from] tonic::transport::Error),
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("gRPC status error: {0}")]
     Status(#[from] tonic::Status),
+
+    /// Network error (wasm32 variant)
+    #[cfg(target_arch = "wasm32")]
+    #[error("Network error: {0}")]
+    Network(String),
+
+    /// gRPC status error (wasm32 variant)
+    #[cfg(target_arch = "wasm32")]
+    #[error("gRPC status error: {0}")]
+    Status(String),
 
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -115,8 +143,14 @@ pub enum FarmError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
+
+    /// Database error (non-sqlite or wasm32 variant)
+    #[cfg(any(target_arch = "wasm32", not(feature = "sqlite")))]
+    #[error("Database error: {0}")]
+    Database(String),
 
     #[error("Scheduling error: {0}")]
     Scheduling(String),
@@ -545,8 +579,13 @@ impl Default for WorkerConfig {
 }
 
 // Re-export main types
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub use coordinator::Coordinator;
+#[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]
 pub use worker::Worker;
+
+pub use auto_scaler::{AutoScaleConfig, AutoScaler, ScaleDecision};
+pub use farm_config::load_farm_config_from_toml;
 
 #[cfg(test)]
 mod tests {

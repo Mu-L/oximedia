@@ -203,12 +203,14 @@ impl TaskGraph {
 
         self.tasks
             .get_mut(&task)
-            .expect("task guaranteed to exist after contains_key check")
+            .unwrap_or_else(|| unreachable!("task guaranteed to exist after contains_key check"))
             .dependencies
             .insert(dependency);
         self.tasks
             .get_mut(&dependency)
-            .expect("dependency guaranteed to exist after contains_key check")
+            .unwrap_or_else(|| {
+                unreachable!("dependency guaranteed to exist after contains_key check")
+            })
             .dependents
             .insert(task);
         Ok(())

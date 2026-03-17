@@ -58,14 +58,20 @@
 #![allow(clippy::similar_names)]
 #![allow(clippy::too_many_lines)]
 
+pub mod ab_comparison;
+pub mod audio_bench;
 pub mod baseline;
+pub mod bd_rate;
 pub mod bench_suite;
 pub mod codec_bench;
 pub mod comparison;
+pub mod container_bench;
 pub mod cpu_profile;
 pub mod examples;
+pub mod flamegraph_integration;
 pub mod gpu_bench;
 pub mod hardware_info;
+pub mod historical_db;
 pub mod io_bench;
 pub mod latency;
 pub mod memory;
@@ -73,6 +79,7 @@ pub mod metrics;
 pub mod percentile_tracker;
 pub mod perf_comparison;
 pub mod pipeline_bench;
+pub mod rate_distortion;
 pub mod regression;
 pub mod regression_bench;
 pub mod regression_detect;
@@ -83,6 +90,7 @@ pub mod scalability_bench;
 pub mod sequences;
 pub mod statistical;
 pub mod stats;
+pub mod system_fingerprint;
 pub mod throughput;
 pub mod warmup_strategy;
 
@@ -642,7 +650,7 @@ fn num_cpus() -> usize {
         .unwrap_or(1)
 }
 
-/// Format a timestamp in RFC3339 format.
+/// Format a timestamp in RFC3339 format using correct Gregorian calendar math.
 fn format_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -653,21 +661,27 @@ fn format_timestamp() -> String {
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
 
-    // Simple ISO 8601 / RFC3339-like format
-    let days = secs / 86400;
     let hours = (secs % 86400) / 3600;
     let minutes = (secs % 3600) / 60;
     let seconds = secs % 60;
 
-    // Approximate year/month/day calculation (good enough for benchmarking)
-    let years = 1970 + (days / 365);
-    let day_of_year = days % 365;
-    let month = (day_of_year / 30).min(11) + 1;
-    let day = (day_of_year % 30) + 1;
+    // Proper Gregorian calendar calculation from Unix epoch day count.
+    // Algorithm: civil_from_days (Howard Hinnant's algorithm, public domain).
+    // https://howardhinnant.github.io/date_algorithms.html#civil_from_days
+    let z = (secs / 86400) as i64 + 719_468_i64;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // month of year [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
+    let yr = if m <= 2 { y + 1 } else { y };
 
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
-        years, month, day, hours, minutes, seconds, nanos
+        yr, m, d, hours, minutes, seconds, nanos
     )
 }
 
@@ -1020,6 +1034,9 @@ impl BenchmarkUtils {
 }
 
 /// Benchmark filter for filtering results based on criteria.
+///
+/// Supports filtering by codec, quality metrics, encoding speed, and
+/// optionally by timestamp range for historical comparison.
 #[derive(Debug, Clone, Default)]
 pub struct BenchmarkFilter {
     min_encoding_fps: Option<f64>,
@@ -1029,6 +1046,14 @@ pub struct BenchmarkFilter {
     min_ssim: Option<f64>,
     max_ssim: Option<f64>,
     codec_ids: Vec<CodecId>,
+    /// Inclusive lower bound on the result timestamp (ISO-8601 prefix, e.g. `"2024-01-01"`).
+    date_from: Option<String>,
+    /// Inclusive upper bound on the result timestamp (ISO-8601 prefix).
+    date_to: Option<String>,
+    /// Only include results with at least this many sequence results.
+    min_sequence_count: Option<usize>,
+    /// Only include results with a preset matching one of these strings.
+    presets: Vec<String>,
 }
 
 impl BenchmarkFilter {
@@ -1087,9 +1112,54 @@ impl BenchmarkFilter {
         self
     }
 
+    /// Set the inclusive lower bound on the result timestamp for historical filtering.
+    ///
+    /// The timestamp is matched as a prefix (e.g. `"2024-01"` matches any January 2024 run).
+    #[must_use]
+    pub fn with_date_from(mut self, date_from: impl Into<String>) -> Self {
+        self.date_from = Some(date_from.into());
+        self
+    }
+
+    /// Set the inclusive upper bound on the result timestamp for historical filtering.
+    #[must_use]
+    pub fn with_date_to(mut self, date_to: impl Into<String>) -> Self {
+        self.date_to = Some(date_to.into());
+        self
+    }
+
+    /// Only include codec results with at least `count` sequence results.
+    #[must_use]
+    pub fn with_min_sequence_count(mut self, count: usize) -> Self {
+        self.min_sequence_count = Some(count);
+        self
+    }
+
+    /// Only include codec results whose preset is one of `presets`.
+    #[must_use]
+    pub fn with_presets(mut self, presets: Vec<String>) -> Self {
+        self.presets = presets;
+        self
+    }
+
     /// Apply filter to results.
+    ///
+    /// The `timestamp` on [`BenchmarkResults`] is used for date-range checks.
     #[must_use]
     pub fn apply<'a>(&self, results: &'a BenchmarkResults) -> Vec<&'a CodecBenchmarkResult> {
+        // Date-range check applies to the whole result set.
+        if let Some(ref from) = self.date_from {
+            if results.timestamp.as_str() < from.as_str() {
+                return Vec::new();
+            }
+        }
+        if let Some(ref to) = self.date_to {
+            // Inclusive: allow timestamps that are <= date_to (prefix compare).
+            if results.timestamp.as_str() > to.as_str() {
+                return Vec::new();
+            }
+        }
+
         results
             .codec_results
             .iter()
@@ -1101,6 +1171,25 @@ impl BenchmarkFilter {
         // Check codec ID
         if !self.codec_ids.is_empty() && !self.codec_ids.contains(&result.codec_id) {
             return false;
+        }
+
+        // Check preset filter
+        if !self.presets.is_empty() {
+            let preset_match = result
+                .preset
+                .as_deref()
+                .map(|p| self.presets.iter().any(|fp| fp == p))
+                .unwrap_or(false);
+            if !preset_match {
+                return false;
+            }
+        }
+
+        // Check minimum sequence count
+        if let Some(min_count) = self.min_sequence_count {
+            if result.sequence_results.len() < min_count {
+                return false;
+            }
         }
 
         // Check encoding FPS

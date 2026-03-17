@@ -27,6 +27,7 @@ pub fn low_latency_720p() -> PresetConfig {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -43,6 +44,7 @@ pub fn low_latency_1080p() -> PresetConfig {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -59,6 +61,7 @@ pub fn cmaf() -> PresetConfig {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -88,6 +91,7 @@ pub fn twitch_1080p60() -> PresetConfig {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 
@@ -104,6 +108,7 @@ pub fn twitch_720p60() -> PresetConfig {
         frame_rate: Some((60, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mp4".to_string()),
+        audio_channel_layout: None,
     }
 }
 

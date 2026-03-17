@@ -153,7 +153,10 @@ impl RenderCheckpoint {
     /// Returns the number of fully completed frames.
     #[must_use]
     pub fn completed_frame_count(&self) -> usize {
-        self.frame_progress.iter().filter(|f| f.is_complete()).count()
+        self.frame_progress
+            .iter()
+            .filter(|f| f.is_complete())
+            .count()
     }
 
     /// Returns the overall completion percentage.
@@ -296,7 +299,9 @@ impl CheckpointManager {
         let complete_count = self
             .checkpoints
             .iter()
-            .filter(|c| c.state == CheckpointState::Complete || c.state == CheckpointState::Superseded)
+            .filter(|c| {
+                c.state == CheckpointState::Complete || c.state == CheckpointState::Superseded
+            })
             .count();
         if complete_count > max {
             let to_remove = complete_count - max;

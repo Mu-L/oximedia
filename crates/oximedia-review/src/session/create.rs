@@ -119,7 +119,8 @@ mod tests {
             .title("Test Session")
             .content_id("video-123")
             .workflow_type(WorkflowType::Simple)
-            .build();
+            .build()
+            .expect("valid config");
 
         let session = create_session(config)
             .await
@@ -133,7 +134,8 @@ mod tests {
         let config = SessionConfig::builder()
             .title("Test Session")
             .content_id("video-123")
-            .build();
+            .build()
+            .expect("valid config");
 
         let creator = User {
             id: "user-1".to_string(),
@@ -153,15 +155,16 @@ mod tests {
         let valid_config = SessionConfig::builder()
             .title("Test")
             .content_id("video-123")
-            .build();
+            .build()
+            .expect("valid config");
 
         assert!(validate_config(&valid_config).is_ok());
 
-        let invalid_config = SessionConfig::builder()
+        // build() itself now validates: empty title yields an error
+        let invalid_result = SessionConfig::builder()
             .title("")
             .content_id("video-123")
             .build();
-
-        assert!(validate_config(&invalid_config).is_err());
+        assert!(invalid_result.is_err());
     }
 }

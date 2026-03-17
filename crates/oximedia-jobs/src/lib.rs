@@ -86,6 +86,10 @@
 //! ```
 
 pub mod batch;
+/// Cron-expression parser and scheduler for recurring job execution.
+pub mod cron_scheduler;
+/// Dead letter queue for jobs that permanently exceed their retry limit.
+pub mod dead_letter_queue;
 pub mod dependency;
 pub mod dependency_graph;
 pub mod event_log;
@@ -101,8 +105,12 @@ pub mod job_priority_boost;
 pub mod job_tags;
 /// Reusable, parameterised job templates with placeholder substitution and a template registry.
 pub mod job_template;
+/// Job timeout management with deadline tracking, escalation policies, and grace periods.
+pub mod job_timeout;
 pub mod metrics;
 pub mod persistence;
+/// Low-level pipeline stage status tracking.
+pub mod pipeline;
 pub mod priority;
 pub mod queue;
 pub mod quota;
@@ -115,12 +123,18 @@ pub mod resource_limits;
 pub mod retry;
 /// Retry policy configuration with backoff strategies, circuit breakers, and per-error-class behavior.
 pub mod retry_policy;
+/// Schedule entry primitives — FIFO/Priority/EDF/RoundRobin policies and time windows.
+pub mod sched_entry;
 pub mod scheduler;
 /// Scheduling rules for time-window constraints, resource-aware dispatch, and affinity/anti-affinity.
 pub mod scheduling_rule;
 pub mod telemetry;
 /// Real-time throughput tracking and reporting for the job queue.
 pub mod throughput_tracker;
+/// File-backed, append-only write-ahead log for durable job persistence.
+pub mod wal;
+/// Webhook notifier — POST job completion/failure events to registered HTTP endpoints.
+pub mod webhook_notifier;
 pub mod worker;
 /// Worker pool management — worker state, utilization tracking, and job assignment.
 pub mod worker_pool;

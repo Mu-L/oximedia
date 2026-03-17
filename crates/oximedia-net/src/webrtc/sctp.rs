@@ -276,7 +276,7 @@ impl Association {
     /// Creates a new association.
     #[must_use]
     pub fn new(local_port: u16, remote_port: u16) -> Self {
-        use rand::Rng;
+        use rand::RngExt;
         let local_tag = rand::rng().random::<u32>();
 
         Self {

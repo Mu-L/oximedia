@@ -16,12 +16,19 @@
 #![warn(missing_docs)]
 
 pub mod audit;
+pub mod automated_takedown;
+pub mod batch_lookup;
 pub mod clearance;
+pub mod ddex;
+pub mod royalty_statement;
 
 // Rights holder registry, usage reporting, and distribution rights
 pub mod clearance_workflow;
 pub mod compliance;
+pub mod conflict_resolution;
+pub mod content_id;
 pub mod contract;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod database;
 pub mod distribution_rights;
 pub mod distribution_window;
@@ -30,26 +37,39 @@ pub mod embargo;
 pub mod embargo_policy;
 pub mod embargo_window;
 pub mod expiration;
+pub mod gantt_export;
 pub mod license;
 pub mod license_template;
 pub mod licensing_model;
 pub mod licensing_terms;
+pub mod metadata_standards;
+pub mod platform_embargo;
 pub mod registry;
 pub mod rights;
+pub mod rights_api;
 pub mod rights_audit_trail;
 pub mod rights_bundle;
+pub mod rights_calendar;
 pub mod rights_check;
 pub mod rights_conflict;
 pub mod rights_database;
+pub mod rights_export;
 pub mod rights_holder;
+pub mod rights_import;
+pub mod rights_manager_wasm;
 pub mod rights_negotiation;
+pub mod rights_search;
 pub mod rights_timeline;
 pub mod royalty;
 pub mod royalty_calc;
+pub mod royalty_engine;
 pub mod royalty_schedule;
+pub mod sub_licensing;
 pub mod sync_rights;
 pub mod syndication;
 pub mod territory;
+pub mod territory_hierarchy;
+pub mod tiered_royalty;
 pub mod usage;
 pub mod usage_report;
 pub mod usage_rights;
@@ -64,6 +84,7 @@ pub type Result<T> = std::result::Result<T, RightsError>;
 #[derive(Error, Debug)]
 pub enum RightsError {
     /// Database error
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
 
@@ -121,10 +142,12 @@ pub enum RightsError {
 }
 
 /// Main rights management system
+#[cfg(not(target_arch = "wasm32"))]
 pub struct RightsManager {
     db: database::RightsDatabase,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl RightsManager {
     /// Create a new rights manager with the specified database path
     pub async fn new(database_path: &str) -> Result<Self> {

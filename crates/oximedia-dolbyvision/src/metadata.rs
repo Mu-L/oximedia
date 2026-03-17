@@ -283,6 +283,219 @@ impl Level9Metadata {
     }
 }
 
+/// Level 4 metadata: Global dimming data.
+///
+/// Describes the anchor luminance for backward-compatible (HDR10) rendering
+/// when a Dolby Vision display management pipeline is not available.
+/// The anchor PQ code represents the reference level at which the base layer
+/// was graded, enabling global dimming compensation.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Level4Metadata {
+    /// Anchor PQ code value (0-4095) representing the dimming anchor luminance.
+    pub anchor_pq: u16,
+    /// Anchor power gain (fixed-point, scaled by 2^12, default 4096 = 1.0).
+    pub anchor_power: u16,
+    /// Active area flag: when true, dimming only applies to the active area.
+    pub active_area_flag: bool,
+}
+
+impl Level4Metadata {
+    /// Create Level 4 metadata with a typical SDR-like anchor (100 nits).
+    #[must_use]
+    pub fn sdr_anchor() -> Self {
+        Self {
+            anchor_pq: nits_to_pq(100),
+            anchor_power: 1 << 12, // 1.0 in fixed-point
+            active_area_flag: false,
+        }
+    }
+
+    /// Create Level 4 metadata for a high-brightness mastering anchor (1000 nits).
+    #[must_use]
+    pub fn hdr_anchor() -> Self {
+        Self {
+            anchor_pq: nits_to_pq(1000),
+            anchor_power: 1 << 12,
+            active_area_flag: false,
+        }
+    }
+
+    /// Create Level 4 metadata for a custom anchor luminance in nits.
+    #[must_use]
+    pub fn custom_anchor(nits: u16, power_gain: f32) -> Self {
+        let anchor_power = (power_gain * (1 << 12) as f32).clamp(0.0, 65535.0) as u16;
+        Self {
+            anchor_pq: nits_to_pq(nits),
+            anchor_power,
+            active_area_flag: false,
+        }
+    }
+
+    /// Return the anchor power as a floating-point multiplier.
+    #[must_use]
+    pub fn anchor_power_f32(&self) -> f32 {
+        f32::from(self.anchor_power) / (1 << 12) as f32
+    }
+
+    /// Return the anchor luminance in nits.
+    #[must_use]
+    pub fn anchor_nits(&self) -> u16 {
+        pq_to_nits(self.anchor_pq)
+    }
+
+    /// Validate that the metadata fields are within specification ranges.
+    ///
+    /// Returns a list of error descriptions; empty means valid.
+    #[must_use]
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.anchor_pq > 4095 {
+            errors.push(format!("anchor_pq {} exceeds maximum 4095", self.anchor_pq));
+        }
+        if self.anchor_power == 0 {
+            errors.push("anchor_power must be > 0".to_string());
+        }
+        errors
+    }
+}
+
+/// Level 7 metadata: Source display color volume.
+///
+/// Describes the color volume (gamut and luminance range) of the mastering display
+/// used for content creation. This allows receivers to understand the intended
+/// color volume and perform appropriate gamut mapping.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Level7Metadata {
+    /// Source display minimum PQ code value (0-4095).
+    pub source_min_pq: u16,
+    /// Source display maximum PQ code value (0-4095).
+    pub source_max_pq: u16,
+    /// Source display color primaries index (0 = BT.2020, 1 = DCI-P3, 2 = BT.709).
+    pub source_primary_index: u8,
+    /// Source display primaries: red (x, y) in 0.00002 units.
+    pub red_primary: [u16; 2],
+    /// Source display primaries: green (x, y) in 0.00002 units.
+    pub green_primary: [u16; 2],
+    /// Source display primaries: blue (x, y) in 0.00002 units.
+    pub blue_primary: [u16; 2],
+    /// Source display white point (x, y) in 0.00002 units.
+    pub white_point: [u16; 2],
+}
+
+impl Level7Metadata {
+    /// Create Level 7 metadata for BT.2020 primaries with 1000-nit peak.
+    #[must_use]
+    pub fn bt2020_1000nits() -> Self {
+        Self {
+            source_min_pq: 62, // ~0.005 nits
+            source_max_pq: nits_to_pq(1000),
+            source_primary_index: 0,
+            red_primary: [34000, 16000],   // (0.680, 0.320)
+            green_primary: [13250, 34500], // (0.265, 0.690)
+            blue_primary: [7500, 3000],    // (0.150, 0.060)
+            white_point: [15635, 16450],   // D65
+        }
+    }
+
+    /// Create Level 7 metadata for BT.2020 primaries with 4000-nit peak.
+    #[must_use]
+    pub fn bt2020_4000nits() -> Self {
+        Self {
+            source_min_pq: 62,
+            source_max_pq: nits_to_pq(4000),
+            source_primary_index: 0,
+            red_primary: [34000, 16000],
+            green_primary: [13250, 34500],
+            blue_primary: [7500, 3000],
+            white_point: [15635, 16450],
+        }
+    }
+
+    /// Create Level 7 metadata for DCI-P3 primaries with 1000-nit peak.
+    #[must_use]
+    pub fn dci_p3_1000nits() -> Self {
+        Self {
+            source_min_pq: 62,
+            source_max_pq: nits_to_pq(1000),
+            source_primary_index: 1,
+            red_primary: [34000, 15500],   // (0.680, 0.310)
+            green_primary: [16500, 35000], // (0.330, 0.700)
+            blue_primary: [7500, 3000],    // (0.150, 0.060)
+            white_point: [15635, 16450],   // D65
+        }
+    }
+
+    /// Create Level 7 metadata for BT.709 primaries with 100-nit peak (SDR mastering).
+    #[must_use]
+    pub fn bt709_100nits() -> Self {
+        Self {
+            source_min_pq: 62,
+            source_max_pq: nits_to_pq(100),
+            source_primary_index: 2,
+            red_primary: [32000, 16500],   // (0.640, 0.330)
+            green_primary: [15000, 30000], // (0.300, 0.600)
+            blue_primary: [7500, 3000],    // (0.150, 0.060)
+            white_point: [15635, 16450],   // D65
+        }
+    }
+
+    /// Return the source display minimum luminance in nits.
+    #[must_use]
+    pub fn source_min_nits(&self) -> u16 {
+        pq_to_nits(self.source_min_pq)
+    }
+
+    /// Return the source display maximum luminance in nits.
+    #[must_use]
+    pub fn source_max_nits(&self) -> u16 {
+        pq_to_nits(self.source_max_pq)
+    }
+
+    /// Return the primary name as a string.
+    #[must_use]
+    pub fn primary_name(&self) -> &str {
+        match self.source_primary_index {
+            0 => "BT.2020",
+            1 => "DCI-P3",
+            2 => "BT.709",
+            _ => "Unknown",
+        }
+    }
+
+    /// Validate that the metadata fields are within specification ranges.
+    #[must_use]
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.source_min_pq > 4095 {
+            errors.push(format!(
+                "source_min_pq {} exceeds maximum 4095",
+                self.source_min_pq
+            ));
+        }
+        if self.source_max_pq > 4095 {
+            errors.push(format!(
+                "source_max_pq {} exceeds maximum 4095",
+                self.source_max_pq
+            ));
+        }
+        if self.source_min_pq >= self.source_max_pq {
+            errors.push(format!(
+                "source_min_pq ({}) >= source_max_pq ({})",
+                self.source_min_pq, self.source_max_pq
+            ));
+        }
+        if self.source_primary_index > 2 {
+            errors.push(format!(
+                "source_primary_index {} is out of range (0-2)",
+                self.source_primary_index
+            ));
+        }
+        errors
+    }
+}
+
 /// Level 10 metadata: Reserved for future use.
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

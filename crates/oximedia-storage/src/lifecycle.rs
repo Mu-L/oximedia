@@ -48,8 +48,8 @@ impl StorageTier {
         match self {
             StorageTier::Hot => Duration::from_millis(50),
             StorageTier::Warm => Duration::from_secs(1),
-            StorageTier::Cold => Duration::from_secs(60),
-            StorageTier::Archive => Duration::from_secs(4 * 3600),
+            StorageTier::Cold => Duration::from_mins(1),
+            StorageTier::Archive => Duration::from_hours(4),
         }
     }
 }
@@ -353,34 +353,34 @@ mod tests {
 
     #[test]
     fn test_transition_rule_applies_by_age() {
-        let rule = TransitionRule::new(Duration::from_secs(30 * 86400), StorageTier::Warm);
-        assert!(!rule.applies(Duration::from_secs(10 * 86400), &no_tags()));
-        assert!(rule.applies(Duration::from_secs(30 * 86400), &no_tags()));
-        assert!(rule.applies(Duration::from_secs(60 * 86400), &no_tags()));
+        let rule = TransitionRule::new(Duration::from_hours(720), StorageTier::Warm);
+        assert!(!rule.applies(Duration::from_hours(240), &no_tags()));
+        assert!(rule.applies(Duration::from_hours(720), &no_tags()));
+        assert!(rule.applies(Duration::from_hours(1440), &no_tags()));
     }
 
     #[test]
     fn test_transition_rule_tag_filter() {
-        let rule = TransitionRule::new(Duration::from_secs(86400), StorageTier::Cold)
+        let rule = TransitionRule::new(Duration::from_hours(24), StorageTier::Cold)
             .with_tag("env", "staging");
-        assert!(!rule.applies(Duration::from_secs(2 * 86400), &no_tags()));
-        assert!(rule.applies(Duration::from_secs(2 * 86400), &tags("env", "staging")));
-        assert!(!rule.applies(Duration::from_secs(2 * 86400), &tags("env", "prod")));
+        assert!(!rule.applies(Duration::from_hours(48), &no_tags()));
+        assert!(rule.applies(Duration::from_hours(48), &tags("env", "staging")));
+        assert!(!rule.applies(Duration::from_hours(48), &tags("env", "prod")));
     }
 
     #[test]
     fn test_expiration_rule_permanent() {
-        let rule = ExpirationRule::permanent(Duration::from_secs(365 * 86400));
+        let rule = ExpirationRule::permanent(Duration::from_hours(8760));
         assert!(rule.permanent);
-        assert!(!rule.applies(Duration::from_secs(100 * 86400), &no_tags()));
-        assert!(rule.applies(Duration::from_secs(400 * 86400), &no_tags()));
+        assert!(!rule.applies(Duration::from_hours(2400), &no_tags()));
+        assert!(rule.applies(Duration::from_hours(9600), &no_tags()));
     }
 
     #[test]
     fn test_expiration_rule_soft_delete() {
-        let rule = ExpirationRule::soft_delete(Duration::from_secs(90 * 86400));
+        let rule = ExpirationRule::soft_delete(Duration::from_hours(2160));
         assert!(!rule.permanent);
-        assert!(rule.applies(Duration::from_secs(100 * 86400), &no_tags()));
+        assert!(rule.applies(Duration::from_hours(2400), &no_tags()));
     }
 
     #[test]
@@ -394,17 +394,17 @@ mod tests {
     fn test_lifecycle_policy_evaluate_transition() {
         let policy = LifecyclePolicy::new("p1", "test")
             .add_transition(TransitionRule::new(
-                Duration::from_secs(30 * 86400),
+                Duration::from_hours(720),
                 StorageTier::Warm,
             ))
             .add_transition(TransitionRule::new(
-                Duration::from_secs(90 * 86400),
+                Duration::from_hours(2160),
                 StorageTier::Cold,
             ));
 
         let action = policy.evaluate(
             "file.mp4",
-            Duration::from_secs(60 * 86400),
+            Duration::from_hours(1440),
             StorageTier::Hot,
             &no_tags(),
         );
@@ -419,11 +419,11 @@ mod tests {
     #[test]
     fn test_lifecycle_policy_evaluate_expiration() {
         let policy = LifecyclePolicy::new("p1", "expire old")
-            .with_expiration(ExpirationRule::permanent(Duration::from_secs(365 * 86400)));
+            .with_expiration(ExpirationRule::permanent(Duration::from_hours(8760)));
 
         let action = policy.evaluate(
             "file.mp4",
-            Duration::from_secs(400 * 86400),
+            Duration::from_hours(9600),
             StorageTier::Cold,
             &no_tags(),
         );
@@ -433,13 +433,13 @@ mod tests {
     #[test]
     fn test_lifecycle_policy_evaluate_no_op() {
         let policy = LifecyclePolicy::new("p1", "test").add_transition(TransitionRule::new(
-            Duration::from_secs(90 * 86400),
+            Duration::from_hours(2160),
             StorageTier::Warm,
         ));
 
         let action = policy.evaluate(
             "file.mp4",
-            Duration::from_secs(10 * 86400),
+            Duration::from_hours(240),
             StorageTier::Hot,
             &no_tags(),
         );
@@ -469,17 +469,16 @@ mod tests {
         let mgr =
             LifecyclePolicyManager::new()
                 .register(LifecyclePolicy::new("p1", "transition").add_transition(
-                    TransitionRule::new(Duration::from_secs(30 * 86400), StorageTier::Warm),
+                    TransitionRule::new(Duration::from_hours(720), StorageTier::Warm),
                 ))
                 .register(
-                    LifecyclePolicy::new("p2", "expire").with_expiration(
-                        ExpirationRule::permanent(Duration::from_secs(365 * 86400)),
-                    ),
+                    LifecyclePolicy::new("p2", "expire")
+                        .with_expiration(ExpirationRule::permanent(Duration::from_hours(8760))),
                 );
 
         let action = mgr.evaluate_all(
             "x.mp4",
-            Duration::from_secs(60 * 86400),
+            Duration::from_hours(1440),
             StorageTier::Hot,
             &no_tags(),
         );

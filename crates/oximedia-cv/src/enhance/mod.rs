@@ -36,11 +36,14 @@
 //! ```
 //! use oximedia_cv::enhance::{SuperResolutionEnhancer, UpscaleMode};
 //!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // CPU-based bicubic upscaling (no ONNX required)
 //! let input = vec![128u8; 64 * 64 * 3];
 //! let enhancer = SuperResolutionEnhancer::new(UpscaleMode::Bicubic2x);
 //! let upscaled = enhancer.upscale(&input, 64, 64)?;
 //! assert_eq!(upscaled.len(), 128 * 128 * 3);
+//! Ok(())
+//! }
 //! ```
 //!
 //! ```no_run
@@ -68,6 +71,7 @@ pub mod denoising;
 pub mod sharpening;
 #[cfg(feature = "onnx")]
 pub mod super_resolution;
+pub mod temporal_denoising;
 
 // Re-export CPU upscaling items (always available)
 pub use cpu_upscale::{

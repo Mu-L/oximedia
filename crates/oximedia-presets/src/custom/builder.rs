@@ -144,6 +144,7 @@ impl PresetBuilder {
             frame_rate: self.frame_rate,
             quality_mode: self.quality_mode,
             container: self.container,
+            audio_channel_layout: None,
         };
 
         Preset::new(metadata, config)

@@ -52,11 +52,7 @@ impl RigidTransform {
 
     /// Create a pure translation (no rotation).
     pub fn translation(tx: f64, ty: f64) -> Self {
-        Self {
-            theta: 0.0,
-            tx,
-            ty,
-        }
+        Self { theta: 0.0, tx, ty }
     }
 
     /// Create a pure rotation about the origin (no translation).
@@ -101,7 +97,7 @@ impl RigidTransform {
 
     /// Normalise the angle to `[-PI, PI)`.
     pub fn normalize_angle(&mut self) {
-        self.theta = ((self.theta + PI) % (2.0 * PI) + 2.0 * PI) % (2.0 * PI) - PI;
+        self.theta = (self.theta + PI).rem_euclid(2.0 * PI) - PI;
     }
 
     /// Return the rotation angle in degrees.
@@ -276,7 +272,12 @@ mod tests {
     fn test_normalize_angle() {
         let mut t = RigidTransform::rotation(3.0 * PI);
         t.normalize_angle();
-        assert!((t.theta - PI).abs() < 1e-6);
+        // 3*PI normalises to either PI or -PI (both represent the same angle).
+        assert!(
+            (t.theta - PI).abs() < 1e-6 || (t.theta + PI).abs() < 1e-6,
+            "expected ±PI, got {}",
+            t.theta
+        );
     }
 
     #[test]

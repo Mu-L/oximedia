@@ -33,6 +33,7 @@ pub mod classification;
 pub mod edge;
 pub mod histogram;
 pub mod motion;
+pub mod transition_detect;
 
 use crate::error::{CvError, CvResult};
 use oximedia_codec::VideoFrame;

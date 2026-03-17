@@ -116,6 +116,18 @@ impl SqliteStorage {
             [],
         )?;
 
+        // Enable WAL mode for better concurrent read/write performance.
+        // WAL allows readers and the writer to proceed concurrently, which is
+        // important when high-frequency metric writes occur alongside dashboard queries.
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+
+        // Set a busy timeout so that write contention results in a retry rather
+        // than an immediate SQLITE_BUSY error.
+        conn.execute_batch("PRAGMA busy_timeout=5000;")?;
+
+        // Increase the page cache to reduce I/O for time-series scans.
+        conn.execute_batch("PRAGMA cache_size=-8000;")?; // 8 MB
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -143,12 +155,21 @@ impl SqliteStorage {
         Ok(())
     }
 
-    /// Insert multiple time series points in a transaction.
+    /// Insert multiple time series points in a single transaction.
+    ///
+    /// Batching writes into a single transaction is significantly faster than
+    /// issuing individual `INSERT` statements because SQLite acquires the write
+    /// lock only once and writes the WAL only once per `COMMIT`.  Use this
+    /// method whenever more than a handful of points are available.
     ///
     /// # Errors
     ///
-    /// Returns an error if insertion fails.
+    /// Returns an error if insertion or the commit fails.  On error the
+    /// transaction is automatically rolled back.
     pub fn insert_batch(&self, points: &[TimeSeriesPoint]) -> MonitorResult<()> {
+        if points.is_empty() {
+            return Ok(());
+        }
         let conn = self.conn.lock();
 
         let tx = conn.unchecked_transaction()?;
@@ -168,6 +189,76 @@ impl SqliteStorage {
 
         tx.commit()?;
 
+        Ok(())
+    }
+
+    /// Insert multiple downsampled aggregate rows into the 1-minute table in
+    /// a single transaction.
+    ///
+    /// This is the recommended write path for the metric downsampler when
+    /// flushing minute-level aggregates to persistent storage.  All rows are
+    /// committed atomically; if any row fails the entire batch is rolled back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if insertion or the commit fails.
+    pub fn insert_1min_batch(&self, rows: &[AggregateRow]) -> MonitorResult<()> {
+        self.insert_aggregate_batch("metrics_1min", rows)
+    }
+
+    /// Insert multiple downsampled aggregate rows into the 1-hour table in
+    /// a single transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if insertion or the commit fails.
+    pub fn insert_1hour_batch(&self, rows: &[AggregateRow]) -> MonitorResult<()> {
+        self.insert_aggregate_batch("metrics_1hour", rows)
+    }
+
+    /// Insert multiple downsampled aggregate rows into the 1-day table in
+    /// a single transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if insertion or the commit fails.
+    pub fn insert_1day_batch(&self, rows: &[AggregateRow]) -> MonitorResult<()> {
+        self.insert_aggregate_batch("metrics_1day", rows)
+    }
+
+    /// Internal helper: batch INSERT into any aggregate table within a single
+    /// transaction.
+    fn insert_aggregate_batch(&self, table: &str, rows: &[AggregateRow]) -> MonitorResult<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let conn = self.conn.lock();
+        let tx = conn.unchecked_transaction()?;
+
+        let sql = format!(
+            "INSERT OR REPLACE INTO {table}
+             (metric_name, timestamp, min_value, max_value, avg_value, sum_value, count, labels)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        );
+
+        for row in rows {
+            tx.execute(
+                &sql,
+                params![
+                    row.metric_name,
+                    row.timestamp.timestamp(),
+                    row.min_value,
+                    row.max_value,
+                    row.avg_value,
+                    row.sum_value,
+                    row.count,
+                    row.labels,
+                ],
+            )?;
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -558,5 +649,177 @@ mod tests {
         let storage = SqliteStorage::new(&db_path).expect("failed to create");
 
         storage.vacuum().expect("vacuum should succeed");
+    }
+
+    #[test]
+    fn test_insert_batch_empty_is_noop() {
+        let dir = tempdir().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::new(&db_path).expect("failed to create");
+        // Should not error on an empty slice.
+        storage
+            .insert_batch(&[])
+            .expect("empty batch should succeed");
+        let count = storage.count().expect("count should succeed");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_insert_1min_batch() {
+        let dir = tempdir().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::new(&db_path).expect("failed to create");
+
+        let now = Utc::now();
+        let rows: Vec<AggregateRow> = (0..5)
+            .map(|i| AggregateRow {
+                metric_name: "encoding.fps".to_string(),
+                timestamp: now + chrono::Duration::seconds(i * 60),
+                min_value: 28.0 + i as f64,
+                max_value: 32.0 + i as f64,
+                avg_value: 30.0 + i as f64,
+                sum_value: (30.0 + i as f64) * 60.0,
+                count: 60,
+                labels: None,
+            })
+            .collect();
+
+        storage
+            .insert_1min_batch(&rows)
+            .expect("insert_1min_batch should succeed");
+
+        // Query and verify all 5 rows are present.
+        let start = now - chrono::Duration::seconds(1);
+        let end = now + chrono::Duration::seconds(5 * 60 + 1);
+        let retrieved = storage
+            .query_1min_aggregates("encoding.fps", start, end)
+            .expect("query should succeed");
+
+        assert_eq!(
+            retrieved.len(),
+            5,
+            "expected 5 aggregate rows, got {}",
+            retrieved.len()
+        );
+        // Verify ordering by timestamp ascending.
+        for w in retrieved.windows(2) {
+            assert!(
+                w[0].timestamp <= w[1].timestamp,
+                "rows should be ordered by timestamp"
+            );
+        }
+    }
+
+    #[test]
+    fn test_insert_1min_batch_empty_is_noop() {
+        let dir = tempdir().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::new(&db_path).expect("failed to create");
+        storage
+            .insert_1min_batch(&[])
+            .expect("empty 1min batch should succeed");
+    }
+
+    #[test]
+    fn test_insert_1hour_batch() {
+        let dir = tempdir().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::new(&db_path).expect("failed to create");
+
+        let now = Utc::now();
+        let rows: Vec<AggregateRow> = (0..3)
+            .map(|i| AggregateRow {
+                metric_name: "cpu.usage".to_string(),
+                timestamp: now + chrono::Duration::hours(i),
+                min_value: 10.0,
+                max_value: 90.0,
+                avg_value: 50.0,
+                sum_value: 50.0 * 3600.0,
+                count: 3600,
+                labels: None,
+            })
+            .collect();
+
+        storage
+            .insert_1hour_batch(&rows)
+            .expect("insert_1hour_batch should succeed");
+
+        let start = now - chrono::Duration::seconds(1);
+        let end = now + chrono::Duration::hours(4);
+        let retrieved = storage
+            .query_1hour_aggregates("cpu.usage", start, end)
+            .expect("query should succeed");
+
+        assert_eq!(retrieved.len(), 3, "expected 3 hourly rows");
+    }
+
+    #[test]
+    fn test_insert_1day_batch() {
+        let dir = tempdir().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::new(&db_path).expect("failed to create");
+
+        let now = Utc::now();
+        let rows: Vec<AggregateRow> = (0..2)
+            .map(|i| AggregateRow {
+                metric_name: "memory.used".to_string(),
+                timestamp: now + chrono::Duration::days(i),
+                min_value: 4_000.0,
+                max_value: 8_000.0,
+                avg_value: 6_000.0,
+                sum_value: 6_000.0 * 86_400.0,
+                count: 86_400,
+                labels: None,
+            })
+            .collect();
+
+        storage
+            .insert_1day_batch(&rows)
+            .expect("insert_1day_batch should succeed");
+
+        let start = now - chrono::Duration::seconds(1);
+        let end = now + chrono::Duration::days(3);
+        let retrieved = storage
+            .query_1day_aggregates("memory.used", start, end)
+            .expect("query should succeed");
+
+        assert_eq!(retrieved.len(), 2, "expected 2 daily rows");
+    }
+
+    #[test]
+    fn test_batch_write_multi_metric_single_transaction() {
+        // Verifies that multiple different metrics can be inserted in one batch.
+        let dir = tempdir().expect("failed to create temp dir");
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::new(&db_path).expect("failed to create");
+
+        let now = Utc::now();
+        let points = vec![
+            TimeSeriesPoint {
+                metric_name: "cpu.usage".to_string(),
+                timestamp: now,
+                value: 55.0,
+                labels: None,
+            },
+            TimeSeriesPoint {
+                metric_name: "memory.used_mb".to_string(),
+                timestamp: now,
+                value: 4096.0,
+                labels: None,
+            },
+            TimeSeriesPoint {
+                metric_name: "encoding.fps".to_string(),
+                timestamp: now,
+                value: 29.97,
+                labels: None,
+            },
+        ];
+
+        storage
+            .insert_batch(&points)
+            .expect("multi-metric batch should succeed");
+
+        let count = storage.count().expect("count should succeed");
+        assert_eq!(count, 3, "all 3 metrics should be stored");
     }
 }

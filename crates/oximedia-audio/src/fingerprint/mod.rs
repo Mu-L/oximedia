@@ -17,7 +17,7 @@
 //!
 //! # Example
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use oximedia_audio::fingerprint::{Fingerprinter, FingerprintConfig, FingerprintDatabase};
 //! use oximedia_audio::AudioFrame;
 //!

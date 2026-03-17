@@ -92,12 +92,15 @@ pub use batch::{BatchJob, BatchProcessor, BatchResult, BatchStatistics};
 pub use config::ConformConfig;
 pub use error::{ConformError, ConformResult};
 pub use exporters::report::{AmbiguousMatch, MatchReport, MatchStatistics};
+pub use importers::aaf::{AafImporter, AafMob, AafParser, AafProject, AafSlot};
+pub use importers::fcpxml::{FcpxmlClip, FcpxmlParser, FcpxmlSequence};
 pub use media::{MediaCatalog, MediaScanner, ScanProgress};
 pub use progress::{ProgressInfo, ProgressStage, ProgressTracker};
 pub use session::{ConformSession, SessionStatus};
 pub use timeline::{Timeline, TimelineClip, Track, TrackKind};
 pub use types::{
-    ClipMatch, ClipReference, FrameRate, MatchMethod, MediaFile, OutputFormat, Timecode, TrackType,
+    ClipMatch, ClipReference, ConformClip, ConformProject, ConformSequence, FrameRate, MatchMethod,
+    MediaFile, OutputFormat, Timecode, TrackType,
 };
 
 /// Library version.

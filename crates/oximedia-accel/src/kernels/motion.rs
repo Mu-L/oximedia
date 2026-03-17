@@ -59,11 +59,12 @@ impl MotionKernel {
             AccelError::ShaderCompilation(format!("Motion estimation shader: {e:?}"))
         })?;
 
-        let stage = PipelineShaderStageCreateInfo::new(
-            shader
-                .entry_point("main")
-                .expect("shader entry point 'main' not found"),
-        );
+        let stage =
+            PipelineShaderStageCreateInfo::new(shader.entry_point("main").ok_or_else(|| {
+                AccelError::ShaderCompilation(
+                    "Motion estimation shader: entry point 'main' not found".to_string(),
+                )
+            })?);
 
         let layout = PipelineLayout::new(
             device.clone(),

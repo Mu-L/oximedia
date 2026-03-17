@@ -2,9 +2,14 @@
 //!
 //! This module implements feature detection and tracking algorithms for
 //! estimating camera motion between consecutive frames.
+//!
+//! Feature tracking across consecutive frame pairs is parallelised with
+//! [`rayon`] where possible.  Each feature point is tracked independently so
+//! the work per pixel is embarrassingly parallel.
 
 use crate::error::{StabilizeError, StabilizeResult};
 use crate::Frame;
+use rayon::prelude::*;
 use scirs2_core::ndarray::Array2;
 use std::collections::HashMap;
 
@@ -275,21 +280,27 @@ impl MotionTracker {
     }
 
     /// Track existing features from one frame to the next using optical flow.
+    ///
+    /// Each feature is tracked independently via `track_single_feature`, making
+    /// the operation embarrassingly parallel.  We use rayon's `par_iter` to
+    /// spread the work across available CPU cores.
     fn track_features(
         &self,
         prev_frame: &Frame,
         curr_frame: &Frame,
         features: &[Feature],
     ) -> StabilizeResult<Vec<Feature>> {
-        let mut tracked_features = Vec::new();
-
-        for feature in features {
-            if let Some(new_pos) = self.track_single_feature(prev_frame, curr_frame, feature) {
+        let tracked_features: Vec<Feature> = features
+            .par_iter()
+            .filter_map(|feature| {
+                let new_pos = self.track_single_feature(prev_frame, curr_frame, feature)?;
                 if new_pos.is_valid(curr_frame.width, curr_frame.height) {
-                    tracked_features.push(new_pos);
+                    Some(new_pos)
+                } else {
+                    None
                 }
-            }
-        }
+            })
+            .collect();
 
         Ok(tracked_features)
     }

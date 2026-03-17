@@ -13,21 +13,45 @@ use std::fmt;
 use thiserror::Error;
 use uuid::Uuid;
 
+// Hardcoded DRM system UUIDs as compile-time constants (no parsing, no panics).
+const WIDEVINE_UUID: Uuid = Uuid::from_bytes([
+    0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed,
+]);
+const PLAYREADY_UUID: Uuid = Uuid::from_bytes([
+    0x9a, 0x04, 0xf0, 0x79, 0x98, 0x40, 0x42, 0x86, 0xab, 0x92, 0xe6, 0x5b, 0xe0, 0x88, 0x5f, 0x95,
+]);
+const FAIRPLAY_UUID: Uuid = Uuid::from_bytes([
+    0x94, 0xce, 0x86, 0xfb, 0x07, 0xff, 0x4f, 0x43, 0xad, 0xb8, 0x93, 0xd2, 0xfa, 0x96, 0x8c, 0xa2,
+]);
+const CLEARKEY_UUID: Uuid = Uuid::from_bytes([
+    0x10, 0x77, 0xef, 0xec, 0xc0, 0xb2, 0x4d, 0x02, 0xac, 0xe3, 0x3c, 0x1e, 0x52, 0xe2, 0xfb, 0x4b,
+]);
+
 pub mod access_grant;
+pub mod aes_cbc;
+pub mod aes_ctr;
 pub mod analytics;
 pub mod audit_trail;
+pub mod buf_pool;
 pub mod cenc;
+pub mod cmaf_encrypt;
 pub mod compliance;
 pub mod content_key;
+pub mod cpix;
 pub mod device_auth;
 pub mod device_registry;
 pub mod entitlement;
 pub mod geo_fence;
+pub mod hw_key_store;
+pub mod key_lifecycle;
 pub mod key_management;
 pub mod key_rotation;
 pub mod key_rotation_schedule;
 pub mod license_chain;
 pub mod license_server;
+pub mod license_validator;
+pub mod managed_license;
+pub mod multi_drm;
 pub mod multi_key;
 pub mod offline;
 pub mod output_control;
@@ -36,8 +60,10 @@ pub mod playback_rules;
 pub mod policy;
 pub mod policy_engine;
 pub mod pssh;
+pub mod rate_limit;
 pub mod session_token;
 pub mod token;
+pub mod watermark_detect;
 pub mod watermark_embed;
 
 #[cfg(feature = "clearkey")]
@@ -95,7 +121,7 @@ pub enum DrmError {
 pub type Result<T> = std::result::Result<T, DrmError>;
 
 /// DRM system identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DrmSystem {
     /// Widevine DRM (Google)
     Widevine,
@@ -111,39 +137,22 @@ impl DrmSystem {
     /// Get the system ID UUID for this DRM system
     pub fn system_id(&self) -> Uuid {
         match self {
-            // Widevine: edef8ba9-79d6-4ace-a3c8-27dcd51d21ed
-            DrmSystem::Widevine => Uuid::parse_str("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")
-                .expect("hardcoded Widevine system UUID is valid"),
-            // PlayReady: 9a04f079-9840-4286-ab92-e65be0885f95
-            DrmSystem::PlayReady => Uuid::parse_str("9a04f079-9840-4286-ab92-e65be0885f95")
-                .expect("hardcoded PlayReady system UUID is valid"),
-            // FairPlay: 94ce86fb-07ff-4f43-adb8-93d2fa968ca2
-            DrmSystem::FairPlay => Uuid::parse_str("94ce86fb-07ff-4f43-adb8-93d2fa968ca2")
-                .expect("hardcoded FairPlay system UUID is valid"),
-            // ClearKey: 1077efec-c0b2-4d02-ace3-3c1e52e2fb4b
-            DrmSystem::ClearKey => Uuid::parse_str("1077efec-c0b2-4d02-ace3-3c1e52e2fb4b")
-                .expect("hardcoded ClearKey system UUID is valid"),
+            DrmSystem::Widevine => WIDEVINE_UUID,
+            DrmSystem::PlayReady => PLAYREADY_UUID,
+            DrmSystem::FairPlay => FAIRPLAY_UUID,
+            DrmSystem::ClearKey => CLEARKEY_UUID,
         }
     }
 
     /// Get DRM system from UUID
     pub fn from_uuid(uuid: &Uuid) -> Option<Self> {
-        let widevine = Uuid::parse_str("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")
-            .expect("hardcoded Widevine system UUID is valid");
-        let playready = Uuid::parse_str("9a04f079-9840-4286-ab92-e65be0885f95")
-            .expect("hardcoded PlayReady system UUID is valid");
-        let fairplay = Uuid::parse_str("94ce86fb-07ff-4f43-adb8-93d2fa968ca2")
-            .expect("hardcoded FairPlay system UUID is valid");
-        let clearkey = Uuid::parse_str("1077efec-c0b2-4d02-ace3-3c1e52e2fb4b")
-            .expect("hardcoded ClearKey system UUID is valid");
-
-        if *uuid == widevine {
+        if *uuid == WIDEVINE_UUID {
             Some(DrmSystem::Widevine)
-        } else if *uuid == playready {
+        } else if *uuid == PLAYREADY_UUID {
             Some(DrmSystem::PlayReady)
-        } else if *uuid == fairplay {
+        } else if *uuid == FAIRPLAY_UUID {
             Some(DrmSystem::FairPlay)
-        } else if *uuid == clearkey {
+        } else if *uuid == CLEARKEY_UUID {
             Some(DrmSystem::ClearKey)
         } else {
             None

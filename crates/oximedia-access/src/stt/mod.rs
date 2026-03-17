@@ -6,7 +6,7 @@ pub mod transcribe;
 
 pub use accuracy::{AccuracyImprover, TranscriptionAccuracy};
 pub use language::SttLanguageModel;
-pub use transcribe::SpeechToText;
+pub use transcribe::{ChunkTranscriptionResult, IncrementalSttProcessor, SpeechToText};
 
 use serde::{Deserialize, Serialize};
 

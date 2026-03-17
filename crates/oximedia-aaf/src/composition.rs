@@ -132,6 +132,103 @@ impl CompositionMob {
     pub fn set_usage_code(&mut self, code: UsageCode) {
         self.usage_code = Some(code);
     }
+
+    // ─── Track re-ordering and insertion APIs ─────────────────────────────────
+
+    /// Return mutable `Track` objects — changes are applied to the underlying slots.
+    ///
+    /// Converts each slot to a `Track`, applies `f`, then writes back.
+    pub fn tracks_mut(&mut self) -> Vec<&mut MobSlot> {
+        self.mob.slots.iter_mut().collect()
+    }
+
+    /// Insert a new track at the given position (0-based index).
+    ///
+    /// All existing tracks at or after `index` are shifted right.
+    /// If `index` is greater than the current track count the track is appended.
+    pub fn insert_track_at(&mut self, index: usize, track: Track) {
+        let slot = track.into_mob_slot();
+        let len = self.mob.slots.len();
+        let idx = index.min(len);
+        self.mob.slots.insert(idx, slot);
+    }
+
+    /// Remove and return the track at the given slot index (position in the internal list).
+    ///
+    /// Returns `None` if `index` is out of bounds.
+    pub fn remove_track_at(&mut self, index: usize) -> Option<Track> {
+        if index >= self.mob.slots.len() {
+            None
+        } else {
+            Some(Track::from_mob_slot(self.mob.slots.remove(index)))
+        }
+    }
+
+    /// Move the track currently at `from_index` to `to_index`.
+    ///
+    /// Both indices are positions in the internal slot list.
+    /// If either index is out of bounds the operation is a no-op and
+    /// `false` is returned; otherwise `true`.
+    pub fn move_track(&mut self, from_index: usize, to_index: usize) -> bool {
+        let len = self.mob.slots.len();
+        if from_index >= len || to_index >= len || from_index == to_index {
+            return false;
+        }
+        let slot = self.mob.slots.remove(from_index);
+        // After removal the target index may have shifted
+        let adjusted_to = if to_index > from_index {
+            to_index - 1
+        } else {
+            to_index
+        };
+        self.mob.slots.insert(adjusted_to, slot);
+        true
+    }
+
+    /// Re-order all tracks according to a permutation vector.
+    ///
+    /// `order` must be a permutation of `0..track_count()`.  Each element
+    /// gives the *current* index of the track that should occupy that output
+    /// position.
+    ///
+    /// Returns `Ok(())` on success, or `AafError::TimelineError` if `order`
+    /// is not a valid permutation.
+    pub fn reorder_tracks(&mut self, order: &[usize]) -> crate::Result<()> {
+        let len = self.mob.slots.len();
+        if order.len() != len {
+            return Err(crate::AafError::TimelineError(format!(
+                "reorder_tracks: order length {} != track count {}",
+                order.len(),
+                len
+            )));
+        }
+        // Validate permutation
+        let mut seen = vec![false; len];
+        for &idx in order {
+            if idx >= len {
+                return Err(crate::AafError::TimelineError(format!(
+                    "reorder_tracks: index {idx} out of bounds (len={len})"
+                )));
+            }
+            if seen[idx] {
+                return Err(crate::AafError::TimelineError(format!(
+                    "reorder_tracks: duplicate index {idx}"
+                )));
+            }
+            seen[idx] = true;
+        }
+        let old_slots = self.mob.slots.clone();
+        for (pos, &src_idx) in order.iter().enumerate() {
+            self.mob.slots[pos] = old_slots[src_idx].clone();
+        }
+        Ok(())
+    }
+
+    /// Get the number of tracks (slots)
+    #[must_use]
+    pub fn track_count(&self) -> usize {
+        self.mob.slots.len()
+    }
 }
 
 /// Fade type

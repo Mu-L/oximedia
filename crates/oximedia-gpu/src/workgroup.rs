@@ -198,6 +198,7 @@ impl WorkgroupPlanner {
 
     /// Estimate efficiency ratio of a dispatch (useful work / total work).
     #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::manual_checked_ops)]
     #[must_use]
     pub fn efficiency(
         problem_size: (u32, u32),
@@ -216,6 +217,215 @@ impl WorkgroupPlanner {
 /// Integer ceiling division.
 fn div_ceil(a: u32, b: u32) -> u32 {
     a.div_ceil(b)
+}
+
+// ============================================================================
+// Device-aware auto-tuning
+// ============================================================================
+
+/// GPU device limits relevant to workgroup sizing.
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceLimits {
+    /// Maximum workgroup size per dimension.
+    pub max_workgroup_size_per_dim: u32,
+    /// Maximum total invocations per workgroup.
+    pub max_workgroup_total_invocations: u32,
+    /// Maximum shared memory per workgroup in bytes.
+    pub max_shared_memory_bytes: u32,
+    /// Preferred warp/wavefront size (0 = unknown).
+    pub subgroup_size: u32,
+    /// Maximum dispatch groups per dimension.
+    pub max_dispatch_per_dim: u32,
+}
+
+impl Default for DeviceLimits {
+    fn default() -> Self {
+        Self {
+            max_workgroup_size_per_dim: MAX_WORKGROUP_DIM,
+            max_workgroup_total_invocations: MAX_WORKGROUP_TOTAL,
+            max_shared_memory_bytes: 49152, // 48 KB
+            subgroup_size: WARP_SIZE,
+            max_dispatch_per_dim: 65535,
+        }
+    }
+}
+
+impl DeviceLimits {
+    /// Create `DeviceLimits` from `wgpu::Limits`.
+    #[must_use]
+    pub fn from_wgpu(limits: &wgpu::Limits) -> Self {
+        Self {
+            max_workgroup_size_per_dim: limits
+                .max_compute_workgroup_size_x
+                .min(limits.max_compute_workgroup_size_y)
+                .min(limits.max_compute_workgroup_size_z),
+            max_workgroup_total_invocations: limits.max_compute_invocations_per_workgroup,
+            max_shared_memory_bytes: limits.max_compute_workgroup_storage_size,
+            subgroup_size: WARP_SIZE, // wgpu doesn't expose this directly
+            max_dispatch_per_dim: limits.max_compute_workgroups_per_dimension,
+        }
+    }
+}
+
+/// Auto-tuner that selects optimal workgroup sizes based on device limits.
+pub struct WorkgroupAutoTuner {
+    limits: DeviceLimits,
+}
+
+impl WorkgroupAutoTuner {
+    /// Create a new auto-tuner with the given device limits.
+    #[must_use]
+    pub fn new(limits: DeviceLimits) -> Self {
+        Self { limits }
+    }
+
+    /// Create a new auto-tuner with default limits.
+    #[must_use]
+    pub fn with_defaults() -> Self {
+        Self::new(DeviceLimits::default())
+    }
+
+    /// Get the device limits.
+    #[must_use]
+    pub fn limits(&self) -> &DeviceLimits {
+        &self.limits
+    }
+
+    /// Auto-tune a 1D workgroup size for a linear problem.
+    ///
+    /// Picks the largest warp-aligned size that fits within device limits.
+    #[must_use]
+    pub fn tune_1d(&self, total_elements: u32) -> (WorkgroupSize, DispatchDimensions) {
+        let subgroup = self.limits.subgroup_size.max(1);
+        let max_total = self.limits.max_workgroup_total_invocations;
+        let max_dim = self.limits.max_workgroup_size_per_dim;
+
+        // Start from 256, clamp to device limits, align to subgroup size.
+        let mut size = 256u32.min(max_total).min(max_dim);
+        // Round down to subgroup alignment.
+        if let Some(aligned) = size.checked_div(subgroup) {
+            size = aligned * subgroup;
+        }
+        size = size.max(subgroup).max(1);
+
+        // If problem is small, use smaller workgroups.
+        if total_elements < size * 4 {
+            let smaller = (total_elements.div_ceil(subgroup.max(1))) * subgroup.max(1);
+            size = smaller.max(subgroup.max(1)).min(size);
+        }
+
+        let wg = WorkgroupSize::linear(size);
+        let groups = div_ceil(total_elements, size).min(self.limits.max_dispatch_per_dim);
+        (wg, DispatchDimensions::linear(groups))
+    }
+
+    /// Auto-tune a 2D workgroup size for an image-like problem.
+    ///
+    /// Balances squareness with warp alignment and device limits.
+    #[must_use]
+    #[allow(clippy::manual_checked_ops)]
+    pub fn tune_2d(&self, width: u32, height: u32) -> (WorkgroupSize, DispatchDimensions) {
+        let max_total = self.limits.max_workgroup_total_invocations;
+        let max_dim = self.limits.max_workgroup_size_per_dim;
+        let subgroup = self.limits.subgroup_size.max(1);
+
+        // Candidate workgroup sizes (prefer multiples of subgroup_size).
+        let candidates: [(u32, u32); 6] = [
+            (16, 16), // 256 threads — good default
+            (32, 8),  // 256 threads — wide, good for row-major access
+            (8, 32),  // 256 threads — tall
+            (16, 8),  // 128 threads — smaller
+            (8, 8),   // 64 threads — small
+            (32, 16), // 512 threads — large
+        ];
+
+        let mut best_wg = WorkgroupSize::flat(8, 8);
+        let mut best_efficiency = 0.0_f64;
+
+        for &(wx, wy) in &candidates {
+            if wx > max_dim || wy > max_dim || wx * wy > max_total {
+                continue;
+            }
+            // Prefer warp-aligned total.
+            let total = wx * wy;
+            if total % subgroup != 0 {
+                continue;
+            }
+
+            let gx = div_ceil(width, wx).min(self.limits.max_dispatch_per_dim);
+            let gy = div_ceil(height, wy).min(self.limits.max_dispatch_per_dim);
+            let total_invocations = (gx as u64) * (gy as u64) * (total as u64);
+            let useful = (width as u64) * (height as u64);
+            let eff = if total_invocations > 0 {
+                useful as f64 / total_invocations as f64
+            } else {
+                0.0
+            };
+
+            if eff > best_efficiency {
+                best_efficiency = eff;
+                best_wg = WorkgroupSize::flat(wx, wy);
+            }
+        }
+
+        let gx = div_ceil(width, best_wg.x).min(self.limits.max_dispatch_per_dim);
+        let gy = div_ceil(height, best_wg.y).min(self.limits.max_dispatch_per_dim);
+        (best_wg, DispatchDimensions::new(gx, gy, 1))
+    }
+
+    /// Auto-tune for a 2D problem with shared memory requirements.
+    ///
+    /// Takes into account the per-pixel shared memory usage and ensures
+    /// the workgroup's shared memory fits within device limits.
+    #[must_use]
+    pub fn tune_2d_with_shared_memory(
+        &self,
+        width: u32,
+        height: u32,
+        shared_bytes_per_pixel: u32,
+    ) -> (WorkgroupSize, DispatchDimensions) {
+        let max_shared = self.limits.max_shared_memory_bytes;
+        let max_total = self.limits.max_workgroup_total_invocations;
+        let max_dim = self.limits.max_workgroup_size_per_dim;
+        let subgroup = self.limits.subgroup_size.max(1);
+
+        // Find largest square-ish workgroup whose shared mem fits.
+        let mut best_side = 8u32;
+        for candidate_side in &[32u32, 24, 16, 12, 8] {
+            let side = *candidate_side;
+            let total = side * side;
+            if total > max_total || side > max_dim {
+                continue;
+            }
+            if total % subgroup != 0 {
+                continue;
+            }
+            let shared_needed = total * shared_bytes_per_pixel;
+            if shared_needed <= max_shared {
+                best_side = side;
+                break;
+            }
+        }
+
+        let wg = WorkgroupSize::flat(best_side, best_side);
+        let gx = div_ceil(width, best_side).min(self.limits.max_dispatch_per_dim);
+        let gy = div_ceil(height, best_side).min(self.limits.max_dispatch_per_dim);
+        (wg, DispatchDimensions::new(gx, gy, 1))
+    }
+
+    /// Estimate the efficiency of a given configuration.
+    #[must_use]
+    pub fn estimate_efficiency(
+        &self,
+        problem_width: u32,
+        problem_height: u32,
+        workgroup: &WorkgroupSize,
+    ) -> f64 {
+        let gx = div_ceil(problem_width, workgroup.x);
+        let gy = div_ceil(problem_height, workgroup.y);
+        let dispatch = DispatchDimensions::new(gx, gy, 1);
+        WorkgroupPlanner::efficiency((problem_width, problem_height), workgroup, &dispatch)
+    }
 }
 
 /// Shared memory layout descriptor for a workgroup.
@@ -424,5 +634,130 @@ mod tests {
         assert!(wg.is_warp_aligned());
         let wg2 = WorkgroupSize::linear(33);
         assert!(!wg2.is_warp_aligned());
+    }
+
+    // --- Auto-tuner tests ---
+
+    #[test]
+    fn test_auto_tuner_1d_default_limits() {
+        let tuner = WorkgroupAutoTuner::with_defaults();
+        let (wg, dispatch) = tuner.tune_1d(10000);
+        assert!(wg.is_valid(), "workgroup must be valid");
+        assert!(wg.is_warp_aligned(), "should be warp-aligned");
+        assert!(dispatch.groups_x * wg.x >= 10000, "must cover all elements");
+    }
+
+    #[test]
+    fn test_auto_tuner_1d_small_problem() {
+        let tuner = WorkgroupAutoTuner::with_defaults();
+        let (wg, dispatch) = tuner.tune_1d(64);
+        assert!(wg.is_valid());
+        assert!(dispatch.groups_x * wg.x >= 64);
+    }
+
+    #[test]
+    fn test_auto_tuner_2d_1080p() {
+        let tuner = WorkgroupAutoTuner::with_defaults();
+        let (wg, dispatch) = tuner.tune_2d(1920, 1080);
+        assert!(wg.is_valid());
+        assert!(wg.is_warp_aligned());
+        assert!(dispatch.groups_x * wg.x >= 1920);
+        assert!(dispatch.groups_y * wg.y >= 1080);
+    }
+
+    #[test]
+    fn test_auto_tuner_2d_4k() {
+        let tuner = WorkgroupAutoTuner::with_defaults();
+        let (wg, dispatch) = tuner.tune_2d(3840, 2160);
+        assert!(wg.is_valid());
+        assert!(dispatch.groups_x * wg.x >= 3840);
+        assert!(dispatch.groups_y * wg.y >= 2160);
+    }
+
+    #[test]
+    fn test_auto_tuner_2d_small_image() {
+        let tuner = WorkgroupAutoTuner::with_defaults();
+        let (wg, dispatch) = tuner.tune_2d(16, 16);
+        assert!(wg.is_valid());
+        assert!(dispatch.groups_x * wg.x >= 16);
+        assert!(dispatch.groups_y * wg.y >= 16);
+    }
+
+    #[test]
+    fn test_auto_tuner_2d_non_square() {
+        let tuner = WorkgroupAutoTuner::with_defaults();
+        let (wg, dispatch) = tuner.tune_2d(4096, 32);
+        assert!(wg.is_valid());
+        assert!(dispatch.groups_x * wg.x >= 4096);
+        assert!(dispatch.groups_y * wg.y >= 32);
+    }
+
+    #[test]
+    fn test_auto_tuner_with_shared_memory() {
+        let tuner = WorkgroupAutoTuner::with_defaults();
+        // 64 bytes per pixel shared memory — should pick smaller workgroup.
+        let (wg, dispatch) = tuner.tune_2d_with_shared_memory(1920, 1080, 64);
+        let shared_used = wg.total() * 64;
+        assert!(
+            shared_used <= tuner.limits().max_shared_memory_bytes,
+            "shared memory {} must fit in {} bytes",
+            shared_used,
+            tuner.limits().max_shared_memory_bytes
+        );
+        assert!(dispatch.groups_x * wg.x >= 1920);
+        assert!(dispatch.groups_y * wg.y >= 1080);
+    }
+
+    #[test]
+    fn test_auto_tuner_with_large_shared_memory() {
+        let tuner = WorkgroupAutoTuner::with_defaults();
+        // Very large per-pixel shared memory — should fall back to small workgroup.
+        let (wg, dispatch) = tuner.tune_2d_with_shared_memory(256, 256, 512);
+        let shared_used = wg.total() * 512;
+        assert!(shared_used <= tuner.limits().max_shared_memory_bytes);
+        assert!(dispatch.groups_x * wg.x >= 256);
+    }
+
+    #[test]
+    fn test_auto_tuner_respects_constrained_limits() {
+        let limits = DeviceLimits {
+            max_workgroup_size_per_dim: 128,
+            max_workgroup_total_invocations: 128,
+            max_shared_memory_bytes: 16384,
+            subgroup_size: 16,
+            max_dispatch_per_dim: 32768,
+        };
+        let tuner = WorkgroupAutoTuner::new(limits);
+        let (wg, _) = tuner.tune_2d(1920, 1080);
+        assert!(wg.x <= 128);
+        assert!(wg.y <= 128);
+        assert!(wg.total() <= 128);
+    }
+
+    #[test]
+    fn test_auto_tuner_efficiency_estimate() {
+        let tuner = WorkgroupAutoTuner::with_defaults();
+        let wg = WorkgroupSize::flat(16, 16);
+        let eff = tuner.estimate_efficiency(32, 32, &wg);
+        assert!(
+            (eff - 1.0).abs() < 1e-9,
+            "perfect fit should have efficiency 1.0"
+        );
+
+        let eff2 = tuner.estimate_efficiency(17, 17, &wg);
+        assert!(
+            eff2 < 1.0,
+            "non-aligned problem should have < 1.0 efficiency"
+        );
+        assert!(eff2 > 0.0);
+    }
+
+    #[test]
+    fn test_device_limits_default() {
+        let limits = DeviceLimits::default();
+        assert_eq!(limits.max_workgroup_size_per_dim, 1024);
+        assert_eq!(limits.max_workgroup_total_invocations, 1024);
+        assert_eq!(limits.max_shared_memory_bytes, 49152);
+        assert_eq!(limits.subgroup_size, 32);
     }
 }

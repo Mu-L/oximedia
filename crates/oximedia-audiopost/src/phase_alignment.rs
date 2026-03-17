@@ -349,12 +349,7 @@ mod tests {
     fn test_phase_aligner_relations() {
         let signal: Vec<f64> = (0..100).map(|i| (i as f64 * 0.1).sin()).collect();
         let mut aligner = PhaseAligner::new(48000.0, 10);
-        aligner.detect(
-            ChannelId::new("a"),
-            ChannelId::new("b"),
-            &signal,
-            &signal,
-        );
+        aligner.detect(ChannelId::new("a"), ChannelId::new("b"), &signal, &signal);
         assert_eq!(aligner.relations().len(), 1);
         aligner.clear();
         assert_eq!(aligner.relations().len(), 0);

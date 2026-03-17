@@ -109,14 +109,13 @@ impl EntryScheduler {
         }
         let idx = match self.policy {
             SchedulePolicy::Fifo => 0,
-            SchedulePolicy::Priority => {
-                self.queue
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|(pos, e)| (e.priority, u64::MAX - *pos as u64))
-                    .map(|(i, _)| i)
-                    .unwrap_or(0)
-            }
+            SchedulePolicy::Priority => self
+                .queue
+                .iter()
+                .enumerate()
+                .max_by_key(|(pos, e)| (e.priority, u64::MAX - *pos as u64))
+                .map(|(i, _)| i)
+                .unwrap_or(0),
             SchedulePolicy::Edf => {
                 // Entries with deadlines come first; among them the earliest deadline wins.
                 // Entries without deadlines are treated as if their deadline is u64::MAX.

@@ -144,11 +144,14 @@ impl ResizeConfig {
 /// ```
 /// use oximedia_cv::image::resize::{resize_image, ResizeConfig, ResizeMethod};
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // Create a simple 2x2 grayscale image
 /// let src = vec![0u8, 64, 128, 255];
 /// let config = ResizeConfig::new(4, 4, ResizeMethod::Bilinear, 1);
 /// let result = resize_image(&src, 2, 2, &config)?;
 /// assert_eq!(result.len(), 16);
+/// Ok(())
+/// }
 /// ```
 pub fn resize_image(
     src: &[u8],

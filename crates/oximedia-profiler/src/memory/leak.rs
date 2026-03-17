@@ -161,7 +161,7 @@ impl LeakDetector {
 
 impl Default for LeakDetector {
     fn default() -> Self {
-        Self::new(Duration::from_secs(60), 1_000_000)
+        Self::new(Duration::from_mins(1), 1_000_000)
     }
 }
 
@@ -173,8 +173,8 @@ mod tests {
     fn test_memory_leak_severity() {
         let small_new = MemoryLeak::new(1, 1000, Duration::from_secs(1));
         let large_new = MemoryLeak::new(2, 10_000_000, Duration::from_secs(1));
-        let small_old = MemoryLeak::new(3, 1000, Duration::from_secs(120));
-        let large_old = MemoryLeak::new(4, 10_000_000, Duration::from_secs(120));
+        let small_old = MemoryLeak::new(3, 1000, Duration::from_mins(2));
+        let large_old = MemoryLeak::new(4, 10_000_000, Duration::from_mins(2));
 
         assert!(large_old.severity > large_new.severity);
         assert!(large_old.severity > small_old.severity);
@@ -183,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_leak_criticality() {
-        let critical = MemoryLeak::new(1, 10_000_000, Duration::from_secs(120));
+        let critical = MemoryLeak::new(1, 10_000_000, Duration::from_mins(2));
         assert!(critical.is_critical());
 
         let minor = MemoryLeak::new(2, 100, Duration::from_secs(1));

@@ -50,14 +50,19 @@ fn fps_to_frame_rate(fps: f64, drop_frame: Option<bool>) -> PyResult<FrameRate> 
 fn frame_rate_name(fr: FrameRate) -> String {
     match fr {
         FrameRate::Fps23976 => "23.976 fps".to_string(),
+        FrameRate::Fps23976DF => "23.976 fps DF".to_string(),
         FrameRate::Fps24 => "24 fps".to_string(),
         FrameRate::Fps25 => "25 fps (PAL)".to_string(),
         FrameRate::Fps2997DF => "29.97 fps DF (NTSC)".to_string(),
         FrameRate::Fps2997NDF => "29.97 fps NDF (NTSC)".to_string(),
         FrameRate::Fps30 => "30 fps".to_string(),
+        FrameRate::Fps47952 => "47.952 fps".to_string(),
+        FrameRate::Fps47952DF => "47.952 fps DF".to_string(),
         FrameRate::Fps50 => "50 fps".to_string(),
         FrameRate::Fps5994 => "59.94 fps".to_string(),
+        FrameRate::Fps5994DF => "59.94 fps DF".to_string(),
         FrameRate::Fps60 => "60 fps".to_string(),
+        FrameRate::Fps120 => "120 fps".to_string(),
     }
 }
 

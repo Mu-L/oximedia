@@ -365,6 +365,286 @@ impl Default for SourceCameraResult {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PRNU fingerprint extraction and matching
+// ---------------------------------------------------------------------------
+
+/// Configuration for PRNU fingerprint extraction.
+#[derive(Debug, Clone)]
+pub struct PrnuConfig {
+    /// Denoising filter kernel radius (pixels).
+    pub denoise_radius: usize,
+    /// Minimum images required to build a reliable fingerprint.
+    pub min_images: usize,
+    /// Correlation threshold for positive camera match.
+    pub match_threshold: f64,
+}
+
+impl Default for PrnuConfig {
+    fn default() -> Self {
+        Self {
+            denoise_radius: 2,
+            min_images: 1,
+            match_threshold: 0.45,
+        }
+    }
+}
+
+/// A PRNU fingerprint with metadata and matching capabilities.
+#[derive(Debug, Clone)]
+pub struct PrnuCameraFingerprint {
+    /// Width of the fingerprint.
+    pub width: usize,
+    /// Height of the fingerprint.
+    pub height: usize,
+    /// PRNU noise residual pattern (row-major, one value per pixel).
+    pub pattern: Vec<f64>,
+    /// Camera identifier.
+    pub camera_id: String,
+    /// Number of images used to build this fingerprint.
+    pub num_images: usize,
+}
+
+impl PrnuCameraFingerprint {
+    /// Create a new empty fingerprint for a given camera.
+    #[must_use]
+    pub fn new(width: usize, height: usize, camera_id: &str) -> Self {
+        Self {
+            width,
+            height,
+            pattern: vec![0.0; width * height],
+            camera_id: camera_id.to_string(),
+            num_images: 0,
+        }
+    }
+
+    /// Normalized cross-correlation with another fingerprint.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn correlate(&self, other: &Self) -> f64 {
+        if self.pattern.len() != other.pattern.len() || self.pattern.is_empty() {
+            return 0.0;
+        }
+        let n = self.pattern.len() as f64;
+        let mean_a: f64 = self.pattern.iter().sum::<f64>() / n;
+        let mean_b: f64 = other.pattern.iter().sum::<f64>() / n;
+
+        let mut cov = 0.0;
+        let mut var_a = 0.0;
+        let mut var_b = 0.0;
+        for (a, b) in self.pattern.iter().zip(other.pattern.iter()) {
+            let da = a - mean_a;
+            let db = b - mean_b;
+            cov += da * db;
+            var_a += da * da;
+            var_b += db * db;
+        }
+        let denom = (var_a * var_b).sqrt();
+        if denom < 1e-15 {
+            0.0
+        } else {
+            cov / denom
+        }
+    }
+
+    /// Check whether this fingerprint matches another above a given threshold.
+    #[must_use]
+    pub fn matches(&self, other: &Self, threshold: f64) -> bool {
+        self.correlate(other) >= threshold
+    }
+}
+
+/// Extract a noise residual from a single image (grayscale pixel rows).
+///
+/// The residual is `original - denoised`. The denoising uses a simple
+/// local mean filter with the given kernel `radius`.
+#[allow(clippy::cast_precision_loss)]
+#[must_use]
+pub fn extract_noise_residual(pixel_rows: &[Vec<f64>], radius: usize) -> Vec<f64> {
+    let height = pixel_rows.len();
+    if height == 0 {
+        return Vec::new();
+    }
+    let width = pixel_rows[0].len();
+    let mut residual = Vec::with_capacity(height * width);
+
+    for y in 0..height {
+        for x in 0..width {
+            let original = pixel_rows[y][x];
+            // Local mean filter.
+            let mut sum = 0.0;
+            let mut count = 0u32;
+            let y_start = y.saturating_sub(radius);
+            let y_end = (y + radius + 1).min(height);
+            let x_start = x.saturating_sub(radius);
+            let x_end = (x + radius + 1).min(width);
+            for ry in y_start..y_end {
+                for rx in x_start..x_end {
+                    if rx < pixel_rows[ry].len() {
+                        sum += pixel_rows[ry][rx];
+                        count += 1;
+                    }
+                }
+            }
+            let denoised = if count > 0 { sum / count as f64 } else { 0.0 };
+            residual.push(original - denoised);
+        }
+    }
+
+    residual
+}
+
+/// Build a PRNU camera fingerprint by averaging noise residuals from
+/// multiple images taken by the same camera.
+///
+/// Each entry in `images` is a set of grayscale pixel rows.
+/// All images must have the same dimensions.
+#[allow(clippy::cast_precision_loss)]
+pub fn build_prnu_fingerprint(
+    images: &[Vec<Vec<f64>>],
+    camera_id: &str,
+    config: &PrnuConfig,
+) -> Result<PrnuCameraFingerprint, &'static str> {
+    if images.is_empty() {
+        return Err("at least one image is required");
+    }
+    if images.len() < config.min_images {
+        return Err("not enough images for reliable fingerprint");
+    }
+
+    let height = images[0].len();
+    if height == 0 {
+        return Err("image has zero height");
+    }
+    let width = images[0][0].len();
+
+    let pixel_count = height * width;
+    let mut accumulated = vec![0.0f64; pixel_count];
+
+    for img in images {
+        if img.len() != height {
+            return Err("image dimensions do not match");
+        }
+        let residual = extract_noise_residual(img, config.denoise_radius);
+        if residual.len() != pixel_count {
+            return Err("image dimensions do not match");
+        }
+        for (acc, &r) in accumulated.iter_mut().zip(residual.iter()) {
+            *acc += r;
+        }
+    }
+
+    let n = images.len() as f64;
+    for v in &mut accumulated {
+        *v /= n;
+    }
+
+    Ok(PrnuCameraFingerprint {
+        width,
+        height,
+        pattern: accumulated,
+        camera_id: camera_id.to_string(),
+        num_images: images.len(),
+    })
+}
+
+/// A database of PRNU camera fingerprints for matching query images.
+#[derive(Debug, Clone, Default)]
+pub struct PrnuDatabase {
+    fingerprints: Vec<PrnuCameraFingerprint>,
+}
+
+/// Result of a PRNU database query.
+#[derive(Debug, Clone)]
+pub struct PrnuMatchResult {
+    /// Camera ID of the best match.
+    pub camera_id: String,
+    /// Correlation score of the best match.
+    pub correlation: f64,
+    /// Whether the correlation exceeds the threshold.
+    pub is_match: bool,
+}
+
+impl PrnuDatabase {
+    /// Create a new empty database.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            fingerprints: Vec::new(),
+        }
+    }
+
+    /// Add a fingerprint to the database.
+    pub fn add_fingerprint(&mut self, fp: PrnuCameraFingerprint) {
+        self.fingerprints.push(fp);
+    }
+
+    /// Number of fingerprints in the database.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.fingerprints.len()
+    }
+
+    /// Whether the database is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.fingerprints.is_empty()
+    }
+
+    /// Query the database with a noise residual to find the best matching camera.
+    #[must_use]
+    pub fn query(&self, query_residual: &[f64], threshold: f64) -> Option<PrnuMatchResult> {
+        let mut best: Option<PrnuMatchResult> = None;
+
+        // Build a temporary fingerprint for correlation.
+        for fp in &self.fingerprints {
+            if fp.pattern.len() != query_residual.len() {
+                continue;
+            }
+            // Compute NCC inline.
+            let n = fp.pattern.len() as f64;
+            if n < 1.0 {
+                continue;
+            }
+            let mean_a: f64 = fp.pattern.iter().sum::<f64>() / n;
+            let mean_b: f64 = query_residual.iter().sum::<f64>() / n;
+
+            let mut cov = 0.0;
+            let mut var_a = 0.0;
+            let mut var_b = 0.0;
+            for (a, b) in fp.pattern.iter().zip(query_residual.iter()) {
+                let da = a - mean_a;
+                let db = b - mean_b;
+                cov += da * db;
+                var_a += da * da;
+                var_b += db * db;
+            }
+            let denom = (var_a * var_b).sqrt();
+            let corr = if denom < 1e-15 { 0.0 } else { cov / denom };
+
+            let should_replace = match &best {
+                Some(current) => corr > current.correlation,
+                None => true,
+            };
+            if should_replace {
+                best = Some(PrnuMatchResult {
+                    camera_id: fp.camera_id.clone(),
+                    correlation: corr,
+                    is_match: corr >= threshold,
+                });
+            }
+        }
+
+        best
+    }
+
+    /// Query with default threshold from `PrnuConfig::default().match_threshold`.
+    #[must_use]
+    pub fn query_default(&self, query_residual: &[f64]) -> Option<PrnuMatchResult> {
+        self.query(query_residual, PrnuConfig::default().match_threshold)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,5 +782,171 @@ mod tests {
         result.add_finding("CFA pattern detected: Bayer RGGB");
         result.add_finding("Lens distortion matches Canon 24-70mm");
         assert_eq!(result.findings.len(), 2);
+    }
+
+    // ---- PRNU fingerprint tests ----
+
+    #[test]
+    fn test_extract_noise_residual_empty() {
+        let residual = extract_noise_residual(&[], 2);
+        assert!(residual.is_empty());
+    }
+
+    #[test]
+    fn test_extract_noise_residual_uniform() {
+        let rows: Vec<Vec<f64>> = (0..8).map(|_| vec![128.0; 8]).collect();
+        let residual = extract_noise_residual(&rows, 2);
+        assert_eq!(residual.len(), 64);
+        // Uniform image: residuals should be very close to zero.
+        for &v in &residual {
+            assert!(v.abs() < 1e-10, "residual should be ~0 for uniform image");
+        }
+    }
+
+    #[test]
+    fn test_extract_noise_residual_gradient() {
+        let rows: Vec<Vec<f64>> = (0..8)
+            .map(|y| (0..8).map(|x| (x + y) as f64 * 10.0).collect())
+            .collect();
+        let residual = extract_noise_residual(&rows, 1);
+        assert_eq!(residual.len(), 64);
+    }
+
+    #[test]
+    fn test_build_prnu_fingerprint_single_image() {
+        let img: Vec<Vec<f64>> = (0..4)
+            .map(|y| (0..4).map(|x| ((x * 7 + y * 13) % 256) as f64).collect())
+            .collect();
+        let config = PrnuConfig {
+            denoise_radius: 1,
+            min_images: 1,
+            match_threshold: 0.45,
+        };
+        let fp = build_prnu_fingerprint(&[img], "cam-A", &config);
+        assert!(fp.is_ok());
+        let fp = fp.expect("should succeed");
+        assert_eq!(fp.camera_id, "cam-A");
+        assert_eq!(fp.num_images, 1);
+        assert_eq!(fp.pattern.len(), 16);
+    }
+
+    #[test]
+    fn test_build_prnu_fingerprint_no_images() {
+        let config = PrnuConfig::default();
+        let result = build_prnu_fingerprint(&[], "cam-X", &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_prnu_fingerprint_self_correlation() {
+        let img: Vec<Vec<f64>> = (0..8)
+            .map(|y| (0..8).map(|x| ((x * 3 + y * 5 + 7) % 200) as f64).collect())
+            .collect();
+        let config = PrnuConfig {
+            denoise_radius: 1,
+            min_images: 1,
+            match_threshold: 0.45,
+        };
+        let fp = build_prnu_fingerprint(&[img], "cam-B", &config).expect("should succeed");
+        let corr = fp.correlate(&fp);
+        assert!(
+            (corr - 1.0).abs() < 1e-10,
+            "self correlation should be 1.0, got {corr}"
+        );
+    }
+
+    #[test]
+    fn test_prnu_fingerprint_matches() {
+        let img: Vec<Vec<f64>> = (0..4)
+            .map(|y| (0..4).map(|x| ((x + y * 2) % 128) as f64 + 50.0).collect())
+            .collect();
+        let config = PrnuConfig {
+            denoise_radius: 1,
+            min_images: 1,
+            match_threshold: 0.9,
+        };
+        let fp = build_prnu_fingerprint(&[img], "cam-C", &config).expect("should succeed");
+        assert!(fp.matches(&fp, 0.9));
+    }
+
+    #[test]
+    fn test_prnu_database_add_and_query() {
+        let img1: Vec<Vec<f64>> = (0..4)
+            .map(|y| (0..4).map(|x| ((x * 3 + y * 7) % 200) as f64).collect())
+            .collect();
+        let config = PrnuConfig {
+            denoise_radius: 1,
+            min_images: 1,
+            match_threshold: 0.45,
+        };
+        let fp = build_prnu_fingerprint(std::slice::from_ref(&img1), "cam-D", &config)
+            .expect("should succeed");
+
+        let mut db = PrnuDatabase::new();
+        assert!(db.is_empty());
+        db.add_fingerprint(fp);
+        assert_eq!(db.len(), 1);
+
+        // Query with the same image residual.
+        let residual = extract_noise_residual(&img1, 1);
+        let result = db.query(&residual, 0.3);
+        assert!(result.is_some());
+        let m = result.expect("should match");
+        assert_eq!(m.camera_id, "cam-D");
+        assert!(m.correlation > 0.3);
+    }
+
+    #[test]
+    fn test_prnu_database_query_no_match() {
+        let db = PrnuDatabase::new();
+        let residual = vec![1.0, 2.0, 3.0];
+        assert!(db.query(&residual, 0.5).is_none());
+    }
+
+    #[test]
+    fn test_prnu_database_size_mismatch() {
+        let img: Vec<Vec<f64>> = (0..4)
+            .map(|y| (0..4).map(|x| (x + y) as f64).collect())
+            .collect();
+        let config = PrnuConfig {
+            denoise_radius: 1,
+            min_images: 1,
+            match_threshold: 0.45,
+        };
+        let fp = build_prnu_fingerprint(&[img], "cam-E", &config).expect("should succeed");
+        let mut db = PrnuDatabase::new();
+        db.add_fingerprint(fp);
+
+        // Query with wrong size residual.
+        let residual = vec![1.0, 2.0, 3.0]; // 3 != 16
+        let result = db.query(&residual, 0.3);
+        // Should return None since no fingerprint matches the size.
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_prnu_config_default() {
+        let cfg = PrnuConfig::default();
+        assert_eq!(cfg.denoise_radius, 2);
+        assert_eq!(cfg.min_images, 1);
+        assert!((cfg.match_threshold - 0.45).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_prnu_multiple_images_averaging() {
+        let img1: Vec<Vec<f64>> = (0..4)
+            .map(|y| (0..4).map(|x| ((x + y) * 10) as f64).collect())
+            .collect();
+        let img2: Vec<Vec<f64>> = (0..4)
+            .map(|y| (0..4).map(|x| ((x + y) * 10 + 5) as f64).collect())
+            .collect();
+        let config = PrnuConfig {
+            denoise_radius: 1,
+            min_images: 1,
+            match_threshold: 0.45,
+        };
+        let fp = build_prnu_fingerprint(&[img1, img2], "cam-F", &config).expect("should succeed");
+        assert_eq!(fp.num_images, 2);
+        assert_eq!(fp.pattern.len(), 16);
     }
 }

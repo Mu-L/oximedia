@@ -564,6 +564,279 @@ impl WorkflowTemplate {
 }
 
 // ---------------------------------------------------------------------------
+// Conditional branching
+// ---------------------------------------------------------------------------
+
+/// Type of branch node for conditional execution paths.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BranchType {
+    /// If-else: evaluate condition on predecessor output, choose `then_branch`
+    /// or `else_branch` node.
+    IfElse {
+        /// Condition expression evaluated against the predecessor's outputs.
+        condition: String,
+        /// Node to execute when condition is true.
+        then_branch: NodeId,
+        /// Node to execute when condition is false.
+        else_branch: NodeId,
+    },
+    /// Switch-case: match a key against multiple values, each mapping to a
+    /// different successor node.
+    Switch {
+        /// The output key whose value is inspected.
+        key: String,
+        /// Mapping from expected string value to target node.
+        cases: HashMap<String, NodeId>,
+        /// Fallback node if no case matches.
+        default: Option<NodeId>,
+    },
+}
+
+/// A branch node that selects which successor(s) to execute.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchNode {
+    /// The node ID of this branch decision point.
+    pub node_id: NodeId,
+    /// Which predecessor's output to evaluate.
+    pub predecessor: NodeId,
+    /// Branch logic.
+    pub branch_type: BranchType,
+}
+
+/// Evaluator for branch conditions.
+pub struct BranchEvaluator;
+
+impl BranchEvaluator {
+    /// Evaluate a simple condition expression against a set of outputs.
+    ///
+    /// Supported expressions:
+    /// - `key == value`  (string equality)
+    /// - `key != value`
+    /// - `key > number`  (numeric comparison)
+    /// - `key >= number`
+    /// - `key < number`
+    /// - `key <= number`
+    /// - `key exists`    (key is present)
+    /// - `key not_exists` (key is absent)
+    ///
+    /// Returns `None` if the expression cannot be parsed.
+    #[must_use]
+    pub fn evaluate_condition(
+        condition: &str,
+        outputs: &HashMap<String, serde_json::Value>,
+    ) -> Option<bool> {
+        let parts: Vec<&str> = condition.trim().splitn(3, ' ').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+
+        let key = parts[0];
+
+        // Unary operators
+        if parts.len() == 2 {
+            return match parts[1] {
+                "exists" => Some(outputs.contains_key(key)),
+                "not_exists" => Some(!outputs.contains_key(key)),
+                _ => None,
+            };
+        }
+
+        let op = parts[1];
+        let rhs = parts[2];
+        let lhs_val = outputs.get(key)?;
+
+        match op {
+            "==" => {
+                let rhs_trimmed = rhs.trim_matches('"');
+                if let Some(s) = lhs_val.as_str() {
+                    Some(s == rhs_trimmed)
+                } else if let Some(n) = lhs_val.as_f64() {
+                    rhs.parse::<f64>()
+                        .ok()
+                        .map(|r| (n - r).abs() < f64::EPSILON)
+                } else if let Some(b) = lhs_val.as_bool() {
+                    rhs.parse::<bool>().ok().map(|r| b == r)
+                } else {
+                    None
+                }
+            }
+            "!=" => {
+                let eq = Self::evaluate_condition(&format!("{key} == {rhs}"), outputs)?;
+                Some(!eq)
+            }
+            ">" | ">=" | "<" | "<=" => {
+                let lhs_num = lhs_val.as_f64()?;
+                let rhs_num = rhs.parse::<f64>().ok()?;
+                Some(match op {
+                    ">" => lhs_num > rhs_num,
+                    ">=" => lhs_num >= rhs_num,
+                    "<" => lhs_num < rhs_num,
+                    "<=" => lhs_num <= rhs_num,
+                    _ => return None,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve which node(s) should be activated based on a branch node
+    /// and the predecessor's outputs.
+    #[must_use]
+    pub fn resolve_branch(
+        branch: &BranchNode,
+        predecessor_outputs: &HashMap<String, serde_json::Value>,
+    ) -> Vec<NodeId> {
+        match &branch.branch_type {
+            BranchType::IfElse {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let result =
+                    Self::evaluate_condition(condition, predecessor_outputs).unwrap_or(false);
+                if result {
+                    vec![*then_branch]
+                } else {
+                    vec![*else_branch]
+                }
+            }
+            BranchType::Switch {
+                key,
+                cases,
+                default,
+            } => {
+                if let Some(val) = predecessor_outputs.get(key) {
+                    let val_str = if let Some(s) = val.as_str() {
+                        s.to_string()
+                    } else {
+                        val.to_string()
+                    };
+                    if let Some(&target) = cases.get(&val_str) {
+                        return vec![target];
+                    }
+                }
+                default.map_or_else(Vec::new, |d| vec![d])
+            }
+        }
+    }
+}
+
+impl WorkflowDag {
+    /// Execute the DAG with branch support.
+    ///
+    /// For each branch node found (identified by node IDs in `branches`),
+    /// only the selected successor path is activated; the other paths'
+    /// nodes are marked `Skipped`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DagError` if the DAG contains a cycle.
+    pub fn execute_with_branches(
+        &mut self,
+        branches: &HashMap<NodeId, BranchNode>,
+        executor: Option<&dyn Fn(&mut WorkflowNode) -> Result<(), String>>,
+    ) -> Result<DagRunStatus, DagError> {
+        let order = self.topological_sort()?;
+
+        let mut statuses: HashMap<NodeId, NodeStatus> = HashMap::new();
+        let mut nodes_executed = 0usize;
+        let mut nodes_failed = 0usize;
+        let mut skipped_nodes: HashSet<NodeId> = HashSet::new();
+
+        for &node_id in &order {
+            // Skip nodes that have been excluded by branch decisions
+            if skipped_nodes.contains(&node_id) {
+                if let Some(node) = self.nodes.get_mut(&node_id) {
+                    node.status = NodeStatus::Skipped;
+                }
+                statuses.insert(node_id, NodeStatus::Skipped);
+                continue;
+            }
+
+            let Some(node) = self.nodes.get_mut(&node_id) else {
+                continue;
+            };
+
+            node.status = NodeStatus::Running;
+            statuses.insert(node_id, NodeStatus::Running);
+
+            let result = if let Some(exec) = &executor {
+                exec(node)
+            } else {
+                Ok(())
+            };
+
+            match result {
+                Ok(()) => {
+                    node.status = NodeStatus::Completed;
+                    statuses.insert(node_id, NodeStatus::Completed);
+                    nodes_executed += 1;
+
+                    // Check if this node is a branch decision point
+                    if let Some(branch) = branches.get(&node_id) {
+                        let predecessor_outputs = self
+                            .nodes
+                            .get(&branch.predecessor)
+                            .map(|n| n.outputs.clone())
+                            .unwrap_or_default();
+                        let selected =
+                            BranchEvaluator::resolve_branch(branch, &predecessor_outputs);
+
+                        // Mark non-selected successors for skipping
+                        let all_successors = self.successors(node_id);
+                        for succ_id in &all_successors {
+                            if !selected.contains(succ_id) {
+                                Self::collect_descendants_static(
+                                    &self.edges,
+                                    *succ_id,
+                                    &mut skipped_nodes,
+                                );
+                                skipped_nodes.insert(*succ_id);
+                            }
+                        }
+                    }
+                }
+                Err(msg) => {
+                    node.status = NodeStatus::Failed(msg.clone());
+                    statuses.insert(node_id, NodeStatus::Failed(msg));
+                    nodes_failed += 1;
+                }
+            }
+        }
+
+        let succeeded = nodes_failed == 0;
+        Ok(DagRunStatus {
+            node_statuses: statuses,
+            succeeded,
+            nodes_executed,
+            nodes_failed,
+        })
+    }
+
+    /// Collect all transitive descendants of a node.
+    fn collect_descendants_static(
+        edges: &[WorkflowEdge],
+        node_id: NodeId,
+        result: &mut HashSet<NodeId>,
+    ) {
+        for edge in edges {
+            if edge.from_node == node_id && !result.contains(&edge.to_node) {
+                result.insert(edge.to_node);
+                Self::collect_descendants_static(edges, edge.to_node, result);
+            }
+        }
+    }
+
+    /// Return all transitive descendants of the given node.
+    #[must_use]
+    pub fn descendants(&self, node_id: NodeId) -> HashSet<NodeId> {
+        let mut result = HashSet::new();
+        Self::collect_descendants_static(&self.edges, node_id, &mut result);
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Pre-built templates
 // ---------------------------------------------------------------------------
 
@@ -964,6 +1237,294 @@ mod tests {
         let ghost = NodeId::new();
         let result = dag.add_edge(WorkflowEdge::new(a, ghost, "x"));
         assert!(matches!(result, Err(DagError::NodeNotFound(_))));
+    }
+
+    // --- BranchEvaluator ---
+
+    #[test]
+    fn test_branch_evaluator_equality() {
+        let mut outputs = HashMap::new();
+        outputs.insert("codec".to_string(), serde_json::json!("h264"));
+
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("codec == h264", &outputs),
+            Some(true)
+        );
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("codec == vp9", &outputs),
+            Some(false)
+        );
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("codec != vp9", &outputs),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_branch_evaluator_numeric_comparison() {
+        let mut outputs = HashMap::new();
+        outputs.insert("bitrate".to_string(), serde_json::json!(5000.0));
+
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("bitrate > 3000", &outputs),
+            Some(true)
+        );
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("bitrate < 3000", &outputs),
+            Some(false)
+        );
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("bitrate >= 5000", &outputs),
+            Some(true)
+        );
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("bitrate <= 5000", &outputs),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_branch_evaluator_exists() {
+        let mut outputs = HashMap::new();
+        outputs.insert("result".to_string(), serde_json::json!(42));
+
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("result exists", &outputs),
+            Some(true)
+        );
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("missing not_exists", &outputs),
+            Some(true)
+        );
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("result not_exists", &outputs),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_branch_evaluator_boolean() {
+        let mut outputs = HashMap::new();
+        outputs.insert("success".to_string(), serde_json::json!(true));
+
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("success == true", &outputs),
+            Some(true)
+        );
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("success == false", &outputs),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_branch_evaluator_numeric_equality() {
+        let mut outputs = HashMap::new();
+        outputs.insert("count".to_string(), serde_json::json!(42.0));
+
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("count == 42", &outputs),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_branch_evaluator_invalid_expression() {
+        let outputs = HashMap::new();
+        assert_eq!(BranchEvaluator::evaluate_condition("", &outputs), None);
+        assert_eq!(
+            BranchEvaluator::evaluate_condition("single", &outputs),
+            None
+        );
+    }
+
+    #[test]
+    fn test_resolve_branch_if_else_true() {
+        let then_id = NodeId::new();
+        let else_id = NodeId::new();
+        let pred_id = NodeId::new();
+        let branch_id = NodeId::new();
+
+        let branch = BranchNode {
+            node_id: branch_id,
+            predecessor: pred_id,
+            branch_type: BranchType::IfElse {
+                condition: "quality > 90".to_string(),
+                then_branch: then_id,
+                else_branch: else_id,
+            },
+        };
+
+        let mut outputs = HashMap::new();
+        outputs.insert("quality".to_string(), serde_json::json!(95.0));
+
+        let result = BranchEvaluator::resolve_branch(&branch, &outputs);
+        assert_eq!(result, vec![then_id]);
+    }
+
+    #[test]
+    fn test_resolve_branch_if_else_false() {
+        let then_id = NodeId::new();
+        let else_id = NodeId::new();
+        let pred_id = NodeId::new();
+        let branch_id = NodeId::new();
+
+        let branch = BranchNode {
+            node_id: branch_id,
+            predecessor: pred_id,
+            branch_type: BranchType::IfElse {
+                condition: "quality > 90".to_string(),
+                then_branch: then_id,
+                else_branch: else_id,
+            },
+        };
+
+        let mut outputs = HashMap::new();
+        outputs.insert("quality".to_string(), serde_json::json!(50.0));
+
+        let result = BranchEvaluator::resolve_branch(&branch, &outputs);
+        assert_eq!(result, vec![else_id]);
+    }
+
+    #[test]
+    fn test_resolve_branch_switch() {
+        let av1_id = NodeId::new();
+        let h264_id = NodeId::new();
+        let default_id = NodeId::new();
+        let pred_id = NodeId::new();
+        let branch_id = NodeId::new();
+
+        let mut cases = HashMap::new();
+        cases.insert("av1".to_string(), av1_id);
+        cases.insert("h264".to_string(), h264_id);
+
+        let branch = BranchNode {
+            node_id: branch_id,
+            predecessor: pred_id,
+            branch_type: BranchType::Switch {
+                key: "codec".to_string(),
+                cases,
+                default: Some(default_id),
+            },
+        };
+
+        let mut outputs = HashMap::new();
+        outputs.insert("codec".to_string(), serde_json::json!("av1"));
+        assert_eq!(
+            BranchEvaluator::resolve_branch(&branch, &outputs),
+            vec![av1_id]
+        );
+
+        outputs.insert("codec".to_string(), serde_json::json!("h264"));
+        assert_eq!(
+            BranchEvaluator::resolve_branch(&branch, &outputs),
+            vec![h264_id]
+        );
+
+        outputs.insert("codec".to_string(), serde_json::json!("vp9"));
+        assert_eq!(
+            BranchEvaluator::resolve_branch(&branch, &outputs),
+            vec![default_id]
+        );
+    }
+
+    #[test]
+    fn test_resolve_branch_switch_no_default() {
+        let av1_id = NodeId::new();
+        let pred_id = NodeId::new();
+        let branch_id = NodeId::new();
+
+        let mut cases = HashMap::new();
+        cases.insert("av1".to_string(), av1_id);
+
+        let branch = BranchNode {
+            node_id: branch_id,
+            predecessor: pred_id,
+            branch_type: BranchType::Switch {
+                key: "codec".to_string(),
+                cases,
+                default: None,
+            },
+        };
+
+        let mut outputs = HashMap::new();
+        outputs.insert("codec".to_string(), serde_json::json!("vp9"));
+        assert!(BranchEvaluator::resolve_branch(&branch, &outputs).is_empty());
+    }
+
+    #[test]
+    fn test_execute_with_branches_if_else() {
+        // Build DAG: probe -> branch_decision
+        //   branch_decision -> high_res_encode
+        //   branch_decision -> low_res_encode
+        let mut dag = WorkflowDag::new();
+        let probe = dag.add_node(make_node("probe")).expect("add node");
+        let decision = dag.add_node(make_node("branch")).expect("add node");
+        let high = dag.add_node(make_node("high_res")).expect("add node");
+        let low = dag.add_node(make_node("low_res")).expect("add node");
+
+        dag.add_edge(WorkflowEdge::new(probe, decision, "media_info"))
+            .expect("add edge");
+        dag.add_edge(WorkflowEdge::new(decision, high, "video"))
+            .expect("add edge");
+        dag.add_edge(WorkflowEdge::new(decision, low, "video"))
+            .expect("add edge");
+
+        let branch = BranchNode {
+            node_id: decision,
+            predecessor: probe,
+            branch_type: BranchType::IfElse {
+                condition: "resolution > 1080".to_string(),
+                then_branch: high,
+                else_branch: low,
+            },
+        };
+
+        let mut branches = HashMap::new();
+        branches.insert(decision, branch);
+
+        // Executor that sets probe output to resolution=4000
+        let result = dag
+            .execute_with_branches(
+                &branches,
+                Some(&|node: &mut WorkflowNode| {
+                    if node.task_type == "probe" {
+                        node.set_output("resolution", serde_json::json!(4000.0));
+                    }
+                    Ok(())
+                }),
+            )
+            .expect("execute");
+
+        assert!(result.succeeded);
+        assert_eq!(
+            result.node_statuses.get(&high),
+            Some(&NodeStatus::Completed)
+        );
+        assert_eq!(result.node_statuses.get(&low), Some(&NodeStatus::Skipped));
+    }
+
+    #[test]
+    fn test_descendants() {
+        let mut dag = WorkflowDag::new();
+        let a = dag.add_node(make_node("a")).expect("add node");
+        let b = dag.add_node(make_node("b")).expect("add node");
+        let c = dag.add_node(make_node("c")).expect("add node");
+        let d = dag.add_node(make_node("d")).expect("add node");
+
+        dag.add_edge(WorkflowEdge::new(a, b, "x")).expect("edge");
+        dag.add_edge(WorkflowEdge::new(b, c, "x")).expect("edge");
+        dag.add_edge(WorkflowEdge::new(b, d, "x")).expect("edge");
+
+        let desc = dag.descendants(a);
+        assert_eq!(desc.len(), 3);
+        assert!(desc.contains(&b));
+        assert!(desc.contains(&c));
+        assert!(desc.contains(&d));
+
+        let desc_b = dag.descendants(b);
+        assert_eq!(desc_b.len(), 2);
+        assert!(!desc_b.contains(&a));
     }
 
     #[test]

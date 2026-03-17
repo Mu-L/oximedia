@@ -16,6 +16,7 @@
 //! # Quick Start
 //!
 //! ```no_run
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use oximedia_gpu::accelerator::{AcceleratorBuilder, GpuAccelerator};
 //!
 //! let acc = AcceleratorBuilder::new().build()?;
@@ -25,6 +26,8 @@
 //! let rgb  = vec![0u8; 1920 * 1080 * 4];
 //! let mut yuv = vec![0u8; 1920 * 1080 * 4];
 //! acc.rgb_to_yuv(&rgb, &mut yuv, 1920, 1080)?;
+//! # Ok(())
+//! # }
 //! ```
 
 #![allow(clippy::cast_possible_truncation)]
@@ -846,14 +849,16 @@ impl GpuAccelerator for WgpuAccelerator {
 /// # Example
 ///
 /// ```no_run
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// use oximedia_gpu::accelerator::AcceleratorBuilder;
 ///
 /// let acc = AcceleratorBuilder::new()
 ///     .prefer_gpu(true)
-///     .build()
-///     ?;
+///     .build()?;
 ///
 /// println!("Active backend: {}", acc.name());
+/// # Ok(())
+/// # }
 /// ```
 pub struct AcceleratorBuilder {
     prefer_gpu: bool,

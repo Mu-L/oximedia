@@ -4,15 +4,15 @@
 //! Photo Response Non-Uniformity (PRNU) is a unique sensor fingerprint
 //! that can be used to detect splicing and cloning.
 
+use crate::flat_array2::{FlatArray2, FlatArray3};
 use crate::{ForensicTest, ForensicsError, ForensicsResult};
 use image::RgbImage;
-use ndarray::{Array2, Array3};
 
 /// PRNU noise pattern
 #[derive(Debug, Clone)]
 pub struct PrnuPattern {
-    /// Noise pattern for each color channel
-    pub pattern: Array3<f64>,
+    /// Noise pattern for each color channel (height × width × 3)
+    pub pattern: FlatArray3<f64>,
     /// Pattern strength
     pub strength: f64,
 }
@@ -84,9 +84,9 @@ fn extract_prnu_pattern(image: &RgbImage) -> ForensicsResult<PrnuPattern> {
     let (width, height) = image.dimensions();
 
     // Convert to float arrays
-    let mut r_channel = Array2::zeros((height as usize, width as usize));
-    let mut g_channel = Array2::zeros((height as usize, width as usize));
-    let mut b_channel = Array2::zeros((height as usize, width as usize));
+    let mut r_channel = FlatArray2::zeros((height as usize, width as usize));
+    let mut g_channel = FlatArray2::zeros((height as usize, width as usize));
+    let mut b_channel = FlatArray2::zeros((height as usize, width as usize));
 
     for (x, y, pixel) in image.enumerate_pixels() {
         r_channel[[y as usize, x as usize]] = pixel[0] as f64;
@@ -100,7 +100,7 @@ fn extract_prnu_pattern(image: &RgbImage) -> ForensicsResult<PrnuPattern> {
     let b_denoised = wiener_filter(&b_channel);
 
     // Extract noise residual (PRNU)
-    let mut pattern = Array3::zeros((height as usize, width as usize, 3));
+    let mut pattern = FlatArray3::zeros(height as usize, width as usize, 3);
     let mut strength_sum = 0.0;
     let mut count = 0;
 
@@ -129,7 +129,7 @@ fn extract_prnu_pattern(image: &RgbImage) -> ForensicsResult<PrnuPattern> {
 }
 
 /// Wiener filter for denoising (simplified version)
-fn wiener_filter(channel: &Array2<f64>) -> Array2<f64> {
+fn wiener_filter(channel: &FlatArray2<f64>) -> FlatArray2<f64> {
     let (height, width) = channel.dim();
     let mut filtered = channel.clone();
 
@@ -318,7 +318,7 @@ fn detect_cloning_via_noise(image: &RgbImage) -> ForensicsResult<bool> {
 
 /// Compute correlation between two noise patches
 fn compute_patch_correlation(
-    pattern: &Array3<f64>,
+    pattern: &FlatArray3<f64>,
     x1: usize,
     y1: usize,
     x2: usize,
@@ -371,9 +371,9 @@ fn compute_patch_correlation(
 fn create_noise_anomaly_map(
     image: &RgbImage,
     inconsistency: &NoiseInconsistency,
-) -> ForensicsResult<Array2<f64>> {
+) -> ForensicsResult<FlatArray2<f64>> {
     let (width, height) = image.dimensions();
-    let mut anomaly_map = Array2::zeros((height as usize, width as usize));
+    let mut anomaly_map = FlatArray2::zeros((height as usize, width as usize));
 
     // Mark inconsistent regions
     for (x, y, w, h) in &inconsistency.inconsistent_regions {
@@ -438,14 +438,15 @@ pub fn detect_splicing_prnu(
 }
 
 /// Compute PRNU strength in a region
-fn compute_region_prnu_strength(pattern: &Array3<f64>, x: usize, y: usize, size: usize) -> f64 {
+fn compute_region_prnu_strength(pattern: &FlatArray3<f64>, x: usize, y: usize, size: usize) -> f64 {
     let mut sum = 0.0;
     let mut count = 0;
+    let (d0, d1, _) = pattern.dim();
 
     for dy in 0..size {
         for dx in 0..size {
             for c in 0..3 {
-                if y + dy < pattern.shape()[0] && x + dx < pattern.shape()[1] {
+                if y + dy < d0 && x + dx < d1 {
                     let val = pattern[[y + dy, x + dx, c]];
                     sum += val * val;
                     count += 1;
@@ -476,13 +477,22 @@ pub fn extract_sensor_fingerprint(images: &[RgbImage]) -> ForensicsResult<PrnuPa
         .collect::<Result<Vec<_>, _>>()?;
 
     let (height, width, _) = prnu_patterns[0].pattern.dim();
-    let mut averaged_pattern = Array3::zeros((height, width, 3));
+    let mut averaged_pattern = FlatArray3::zeros(height, width, 3);
+    let n_patterns = prnu_patterns.len() as f64;
 
     for prnu in &prnu_patterns {
-        averaged_pattern += &prnu.pattern;
+        for dy in 0..height {
+            for dx in 0..width {
+                for c in 0..3 {
+                    averaged_pattern[[dy, dx, c]] += prnu.pattern[[dy, dx, c]];
+                }
+            }
+        }
     }
 
-    averaged_pattern /= prnu_patterns.len() as f64;
+    for v in averaged_pattern.iter_mut() {
+        *v /= n_patterns;
+    }
 
     let strength =
         prnu_patterns.iter().map(|p| p.strength).sum::<f64>() / prnu_patterns.len() as f64;
@@ -507,7 +517,7 @@ pub fn verify_with_fingerprint(
 }
 
 /// Compute correlation between two PRNU patterns
-fn compute_pattern_correlation(pattern1: &Array3<f64>, pattern2: &Array3<f64>) -> f64 {
+fn compute_pattern_correlation(pattern1: &FlatArray3<f64>, pattern2: &FlatArray3<f64>) -> f64 {
     let (height, width, channels) = pattern1.dim();
 
     let mut sum1 = 0.0;
@@ -575,14 +585,14 @@ mod tests {
 
     #[test]
     fn test_wiener_filter() {
-        let channel = Array2::from_elem((10, 10), 100.0);
+        let channel = FlatArray2::from_elem(10, 10, 100.0_f64);
         let filtered = wiener_filter(&channel);
         assert_eq!(filtered.dim(), channel.dim());
     }
 
     #[test]
     fn test_patch_correlation() {
-        let pattern = Array3::zeros((64, 64, 3));
+        let pattern = FlatArray3::zeros(64, 64, 3);
         let corr = compute_patch_correlation(&pattern, 0, 0, 16, 16, 8);
         assert!(corr >= -1.0 && corr <= 1.0);
     }

@@ -113,17 +113,13 @@ impl LabelSelector {
         match &self.operator {
             MatchOperator::Exists => labels.contains_key(&self.key),
             MatchOperator::Equals => labels.get(&self.key).map_or(false, |v| *v == self.value),
-            MatchOperator::NotEquals => {
-                labels.get(&self.key).map_or(true, |v| *v != self.value)
-            }
+            MatchOperator::NotEquals => labels.get(&self.key).map_or(true, |v| *v != self.value),
             MatchOperator::In(allowed) => {
                 labels.get(&self.key).map_or(false, |v| allowed.contains(v))
             }
-            MatchOperator::NotIn(disallowed) => {
-                labels
-                    .get(&self.key)
-                    .map_or(true, |v| !disallowed.contains(v))
-            }
+            MatchOperator::NotIn(disallowed) => labels
+                .get(&self.key)
+                .map_or(true, |v| !disallowed.contains(v)),
         }
     }
 }
@@ -342,10 +338,7 @@ mod tests {
 
     #[test]
     fn test_selector_in() {
-        let sel = LabelSelector::is_in(
-            "gpu",
-            vec!["a100".to_string(), "h100".to_string()],
-        );
+        let sel = LabelSelector::is_in("gpu", vec!["a100".to_string(), "h100".to_string()]);
         let labels = make_labels(&[("gpu", "a100")]);
         assert!(sel.matches(&labels));
         let labels2 = make_labels(&[("gpu", "rtx3090")]);

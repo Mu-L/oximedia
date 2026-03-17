@@ -1,8 +1,11 @@
 //! Asset rights management
 
-use crate::{database::RightsDatabase, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::database::RightsDatabase;
+use crate::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -91,6 +94,7 @@ impl Asset {
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save asset to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
         sqlx::query(
@@ -116,6 +120,7 @@ impl Asset {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Load asset from database by ID
     pub async fn load(db: &RightsDatabase, id: &str) -> Result<Option<Self>> {
         let row = sqlx::query(
@@ -151,6 +156,7 @@ impl Asset {
         .transpose()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// List all assets
     pub async fn list(db: &RightsDatabase) -> Result<Vec<Self>> {
         let rows = sqlx::query(
@@ -187,6 +193,7 @@ impl Asset {
             .collect()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Delete asset from database
     pub async fn delete(db: &RightsDatabase, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM assets WHERE id = ?")

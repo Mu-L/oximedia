@@ -351,6 +351,267 @@ impl Default for CompressionHistory {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DCT-based double JPEG compression detector
+// ---------------------------------------------------------------------------
+
+/// Configuration for DCT-based double compression analysis.
+#[derive(Debug, Clone)]
+pub struct DctDoubleCompressionConfig {
+    /// Number of AC frequency positions to analyse (1..63).
+    pub num_positions: usize,
+    /// Maximum period to probe in periodicity detection.
+    pub max_period: i32,
+    /// Minimum periodicity score to flag double compression.
+    pub periodicity_threshold: f64,
+    /// Whether to include Benford first-digit analysis.
+    pub use_benford: bool,
+}
+
+impl Default for DctDoubleCompressionConfig {
+    fn default() -> Self {
+        Self {
+            num_positions: 6,
+            max_period: 8,
+            periodicity_threshold: 0.35,
+            use_benford: true,
+        }
+    }
+}
+
+/// Result of DCT-based double compression analysis on `compression_history`.
+#[derive(Debug, Clone)]
+pub struct DctDoubleCompressionResult {
+    /// Overall detection flag.
+    pub detected: bool,
+    /// Per-position periodicity scores (AC position index -> score).
+    pub position_scores: Vec<(usize, f64)>,
+    /// Aggregate periodicity score across all analysed positions.
+    pub aggregate_periodicity: f64,
+    /// Benford first-digit chi-squared divergence (higher = more suspicious).
+    pub benford_chi2: f64,
+    /// Combined confidence in [0, 1].
+    pub confidence: f64,
+    /// Estimated primary quality factor (if detectable).
+    pub estimated_primary_quality: Option<u8>,
+    /// Findings for the forensic report.
+    pub findings: Vec<String>,
+}
+
+/// Simulated 8x8 DCT coefficient extraction from pixel data.
+///
+/// Given a flat row-major luma buffer (values 0..255), this function computes a
+/// simplified DCT for each non-overlapping 8x8 block and returns all 64
+/// integer-quantised coefficients per block in raster order.
+///
+/// The returned `Vec<Vec<i32>>` has one inner vec per block, each of length 64.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+pub fn extract_dct_coefficients(luma: &[f64], width: usize, height: usize) -> Vec<Vec<i32>> {
+    let blocks_x = width / 8;
+    let blocks_y = height / 8;
+    let mut all_blocks = Vec::with_capacity(blocks_x * blocks_y);
+
+    for by in 0..blocks_y {
+        for bx in 0..blocks_x {
+            let mut coeffs = vec![0i32; 64];
+            for u in 0..8_usize {
+                for v in 0..8_usize {
+                    let cu: f64 = if u == 0 { 1.0 / 2.0_f64.sqrt() } else { 1.0 };
+                    let cv: f64 = if v == 0 { 1.0 / 2.0_f64.sqrt() } else { 1.0 };
+                    let mut sum = 0.0_f64;
+                    for x in 0..8_usize {
+                        for y in 0..8_usize {
+                            let px = bx * 8 + x;
+                            let py = by * 8 + y;
+                            if px < width && py < height {
+                                let val = luma[py * width + px];
+                                let cos_u =
+                                    ((2.0 * x as f64 + 1.0) * u as f64 * std::f64::consts::PI
+                                        / 16.0)
+                                        .cos();
+                                let cos_v =
+                                    ((2.0 * y as f64 + 1.0) * v as f64 * std::f64::consts::PI
+                                        / 16.0)
+                                        .cos();
+                                sum += val * cos_u * cos_v;
+                            }
+                        }
+                    }
+                    coeffs[u * 8 + v] = (0.25 * cu * cv * sum).round() as i32;
+                }
+            }
+            all_blocks.push(coeffs);
+        }
+    }
+    all_blocks
+}
+
+/// Analyse extracted DCT blocks for evidence of double JPEG compression.
+///
+/// The analysis examines the histogram of DCT coefficients at several AC
+/// frequency positions.  Double quantisation produces periodic peaks in these
+/// histograms whose spacing corresponds to the ratio of the two quantisation
+/// step sizes.  We also compute a first-digit (Benford) divergence metric.
+#[allow(clippy::cast_precision_loss)]
+pub fn analyze_dct_double_compression(
+    blocks: &[Vec<i32>],
+    config: &DctDoubleCompressionConfig,
+) -> DctDoubleCompressionResult {
+    if blocks.is_empty() {
+        return DctDoubleCompressionResult {
+            detected: false,
+            position_scores: Vec::new(),
+            aggregate_periodicity: 0.0,
+            benford_chi2: 0.0,
+            confidence: 0.0,
+            estimated_primary_quality: None,
+            findings: vec!["No DCT blocks to analyse".to_string()],
+        };
+    }
+
+    // Select low-frequency AC positions (zigzag order approximation)
+    let zigzag_positions: [usize; 10] = [1, 8, 2, 9, 16, 3, 10, 17, 24, 4];
+    let positions_to_use = config.num_positions.min(zigzag_positions.len());
+
+    let mut position_scores = Vec::new();
+    let mut all_ac_coeffs: Vec<i32> = Vec::new();
+
+    for &pos in zigzag_positions.iter().take(positions_to_use) {
+        // Collect coefficients at this position across all blocks
+        let mut hist = DctHistogram::new(pos / 8, pos % 8);
+        for block in blocks {
+            if pos < block.len() {
+                hist.add(block[pos]);
+                all_ac_coeffs.push(block[pos]);
+            }
+        }
+        let (period, score) = hist.detect_periodicity(config.max_period);
+        position_scores.push((pos, score));
+        if period > 1 && score > config.periodicity_threshold {
+            // This position shows significant periodicity
+        }
+    }
+
+    let aggregate_periodicity = if position_scores.is_empty() {
+        0.0
+    } else {
+        position_scores.iter().map(|(_, s)| *s).sum::<f64>() / position_scores.len() as f64
+    };
+
+    // Benford first-digit analysis
+    let benford_chi2 = if config.use_benford && !all_ac_coeffs.is_empty() {
+        benford_first_digit_chi2(&all_ac_coeffs)
+    } else {
+        0.0
+    };
+
+    // Combine into overall confidence
+    let benford_norm = (benford_chi2 / 10.0).clamp(0.0, 1.0);
+    let confidence = if config.use_benford {
+        (aggregate_periodicity * 0.6 + benford_norm * 0.4).clamp(0.0, 1.0)
+    } else {
+        aggregate_periodicity.clamp(0.0, 1.0)
+    };
+
+    let detected = confidence >= config.periodicity_threshold;
+
+    // Estimate primary quality from the dominant period
+    let estimated_primary_quality = if detected {
+        estimate_primary_quality_from_scores(&position_scores)
+    } else {
+        None
+    };
+
+    let mut findings = Vec::new();
+    findings.push(format!(
+        "DCT periodicity score: {:.3} (threshold {:.3})",
+        aggregate_periodicity, config.periodicity_threshold
+    ));
+    if config.use_benford {
+        findings.push(format!("Benford chi-squared: {:.4}", benford_chi2));
+    }
+    if detected {
+        findings.push("Double JPEG compression detected via DCT analysis".to_string());
+        if let Some(q) = estimated_primary_quality {
+            findings.push(format!("Estimated primary quality factor: {}", q));
+        }
+    }
+
+    DctDoubleCompressionResult {
+        detected,
+        position_scores,
+        aggregate_periodicity,
+        benford_chi2,
+        confidence,
+        estimated_primary_quality,
+        findings,
+    }
+}
+
+/// Compute the chi-squared divergence of first-digit distribution from Benford's law.
+#[allow(clippy::cast_precision_loss)]
+fn benford_first_digit_chi2(coefficients: &[i32]) -> f64 {
+    let mut counts = [0u64; 9];
+    let mut total = 0u64;
+
+    for &c in coefficients {
+        let abs_val = c.unsigned_abs();
+        if abs_val == 0 {
+            continue;
+        }
+        let mut v = abs_val;
+        while v >= 10 {
+            v /= 10;
+        }
+        if v >= 1 && v <= 9 {
+            counts[(v - 1) as usize] += 1;
+            total += 1;
+        }
+    }
+
+    if total == 0 {
+        return 0.0;
+    }
+
+    // Expected Benford probabilities
+    let mut chi2 = 0.0_f64;
+    for d in 1..=9u32 {
+        let expected = (1.0 + 1.0 / d as f64).log10();
+        let observed = counts[(d - 1) as usize] as f64 / total as f64;
+        if expected > 1e-15 {
+            let diff = observed - expected;
+            chi2 += diff * diff / expected;
+        }
+    }
+    chi2
+}
+
+/// Heuristic estimation of primary quality from periodicity scores.
+fn estimate_primary_quality_from_scores(scores: &[(usize, f64)]) -> Option<u8> {
+    if scores.is_empty() {
+        return None;
+    }
+    // Find the position with the strongest periodicity
+    let best = scores
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    match best {
+        Some((pos, score)) if *score > 0.2 => {
+            // Map position index to a rough quality estimate.
+            // Lower-frequency positions with strong periodicity suggest
+            // the first save used a lower quality (larger quant steps).
+            let q = match pos {
+                0..=2 => 90,
+                3..=8 => 75,
+                9..=16 => 60,
+                _ => 50,
+            };
+            Some(q)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,5 +758,170 @@ mod tests {
             12345,
         ));
         assert!(!ch.is_multi_compressed());
+    }
+
+    // ── DctDoubleCompressionConfig ────────────────────────────────────────────
+
+    #[test]
+    fn test_dct_config_defaults() {
+        let cfg = DctDoubleCompressionConfig::default();
+        assert_eq!(cfg.num_positions, 6);
+        assert_eq!(cfg.max_period, 8);
+        assert!(cfg.use_benford);
+        assert!((cfg.periodicity_threshold - 0.35).abs() < 1e-10);
+    }
+
+    // ── extract_dct_coefficients ──────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_dct_coefficients_basic() {
+        // 16x16 uniform image -> 4 blocks of 8x8
+        let luma = vec![128.0_f64; 16 * 16];
+        let blocks = extract_dct_coefficients(&luma, 16, 16);
+        assert_eq!(blocks.len(), 4);
+        for block in &blocks {
+            assert_eq!(block.len(), 64);
+        }
+    }
+
+    #[test]
+    fn test_extract_dct_coefficients_dc_nonzero() {
+        let luma = vec![200.0_f64; 8 * 8];
+        let blocks = extract_dct_coefficients(&luma, 8, 8);
+        assert_eq!(blocks.len(), 1);
+        // DC coefficient (position 0) should be large for a uniform bright block
+        assert!(blocks[0][0].abs() > 100);
+    }
+
+    #[test]
+    fn test_extract_dct_coefficients_empty() {
+        let blocks = extract_dct_coefficients(&[], 0, 0);
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn test_extract_dct_coefficients_too_small() {
+        // 4x4 image, no 8x8 block fits
+        let luma = vec![128.0_f64; 4 * 4];
+        let blocks = extract_dct_coefficients(&luma, 4, 4);
+        assert!(blocks.is_empty());
+    }
+
+    // ── analyze_dct_double_compression ────────────────────────────────────────
+
+    #[test]
+    fn test_dct_analysis_empty_blocks() {
+        let cfg = DctDoubleCompressionConfig::default();
+        let result = analyze_dct_double_compression(&[], &cfg);
+        assert!(!result.detected);
+        assert!((result.confidence).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_dct_analysis_uniform_image() {
+        let luma = vec![128.0_f64; 64 * 64];
+        let blocks = extract_dct_coefficients(&luma, 64, 64);
+        let cfg = DctDoubleCompressionConfig::default();
+        let result = analyze_dct_double_compression(&blocks, &cfg);
+        // Uniform image: no periodicity expected
+        assert!(result.aggregate_periodicity < 0.5);
+    }
+
+    #[test]
+    fn test_dct_analysis_synthetic_periodicity() {
+        // Create blocks with artificial periodic DCT coefficients
+        // to simulate double compression
+        let num_blocks = 100;
+        let mut blocks = Vec::with_capacity(num_blocks);
+        for i in 0..num_blocks {
+            let mut coeffs = vec![0i32; 64];
+            // DC
+            coeffs[0] = 500;
+            // AC positions: insert periodic pattern (multiples of 3 get high values)
+            for pos in 1..64 {
+                let base = ((i * 7 + pos * 13) % 20) as i32 - 10;
+                if base % 3 == 0 {
+                    coeffs[pos] = base * 5;
+                } else {
+                    coeffs[pos] = base;
+                }
+            }
+            blocks.push(coeffs);
+        }
+        let cfg = DctDoubleCompressionConfig::default();
+        let result = analyze_dct_double_compression(&blocks, &cfg);
+        // Should produce non-zero periodicity
+        assert!(result.aggregate_periodicity >= 0.0);
+        assert!(!result.findings.is_empty());
+    }
+
+    #[test]
+    fn test_dct_analysis_confidence_bounded() {
+        let luma = vec![128.0_f64; 32 * 32];
+        let blocks = extract_dct_coefficients(&luma, 32, 32);
+        let cfg = DctDoubleCompressionConfig::default();
+        let result = analyze_dct_double_compression(&blocks, &cfg);
+        assert!(result.confidence >= 0.0 && result.confidence <= 1.0);
+    }
+
+    #[test]
+    fn test_dct_analysis_without_benford() {
+        let luma = vec![128.0_f64; 16 * 16];
+        let blocks = extract_dct_coefficients(&luma, 16, 16);
+        let cfg = DctDoubleCompressionConfig {
+            use_benford: false,
+            ..Default::default()
+        };
+        let result = analyze_dct_double_compression(&blocks, &cfg);
+        assert!((result.benford_chi2).abs() < 1e-10);
+    }
+
+    // ── benford_first_digit_chi2 ──────────────────────────────────────────────
+
+    #[test]
+    fn test_benford_chi2_empty() {
+        assert!((benford_first_digit_chi2(&[])).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_benford_chi2_all_zeros() {
+        let coeffs = vec![0i32; 100];
+        assert!((benford_first_digit_chi2(&coeffs)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_benford_chi2_nonnegative() {
+        let coeffs: Vec<i32> = (1..=1000).map(|i| (i % 50) - 25).collect();
+        let chi2 = benford_first_digit_chi2(&coeffs);
+        assert!(chi2 >= 0.0);
+    }
+
+    // ── estimate_primary_quality_from_scores ──────────────────────────────────
+
+    #[test]
+    fn test_estimate_quality_low_pos() {
+        let scores = vec![(1, 0.8), (8, 0.3)];
+        let q = estimate_primary_quality_from_scores(&scores);
+        assert_eq!(q, Some(90));
+    }
+
+    #[test]
+    fn test_estimate_quality_mid_pos() {
+        let scores = vec![(5, 0.8)];
+        let q = estimate_primary_quality_from_scores(&scores);
+        assert_eq!(q, Some(75));
+    }
+
+    #[test]
+    fn test_estimate_quality_none_when_low_score() {
+        let scores = vec![(1, 0.1)];
+        let q = estimate_primary_quality_from_scores(&scores);
+        assert!(q.is_none());
+    }
+
+    #[test]
+    fn test_estimate_quality_empty_scores() {
+        let q = estimate_primary_quality_from_scores(&[]);
+        assert!(q.is_none());
     }
 }

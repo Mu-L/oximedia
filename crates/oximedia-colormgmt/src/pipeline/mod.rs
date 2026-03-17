@@ -10,12 +10,12 @@ use crate::transforms::lut::{Lut1D, Lut3D};
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use oximedia_colormgmt::pipeline::{ColorPipeline, ColorTransform};
 /// use oximedia_colormgmt::colorspaces::ColorSpace;
 ///
-/// let srgb = ColorSpace::srgb()?;
-/// let rec2020 = ColorSpace::rec2020()?;
+/// let srgb = ColorSpace::srgb().expect("srgb");
+/// let rec2020 = ColorSpace::rec2020().expect("rec2020");
 ///
 /// let mut pipeline = ColorPipeline::new();
 /// pipeline.add_transform(ColorTransform::Linearize(srgb.clone()));

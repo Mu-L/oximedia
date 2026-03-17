@@ -84,8 +84,8 @@ impl ChannelLayout {
                 let height_w = 10.0_f64.powf(1.5 / 10.0);
                 // L, R, C, LFE, Ls, Rs, Lrs, Rrs, TFL, TFR, TBL, TBR
                 vec![
-                    1.0, 1.0, 1.0, 0.0, surround_w, surround_w, surround_w, surround_w,
-                    height_w, height_w, height_w, height_w,
+                    1.0, 1.0, 1.0, 0.0, surround_w, surround_w, surround_w, surround_w, height_w,
+                    height_w, height_w, height_w,
                 ]
             }
         }
@@ -540,8 +540,7 @@ mod tests {
         // Generate a stereo sine wave
         let mut samples = Vec::with_capacity(2 * 48000);
         for i in 0..48000 {
-            let s =
-                (0.5 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48000.0).sin()) as f32;
+            let s = (0.5 * (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / 48000.0).sin()) as f32;
             samples.push(s); // L
             samples.push(s); // R
         }

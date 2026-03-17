@@ -151,6 +151,7 @@ pub fn forward_dct_scalar(input: &[i16], output: &mut [i16], size: DctSize) -> R
         DctSize::Dct8x8 => 8,
         DctSize::Dct16x16 => 16,
         DctSize::Dct32x32 => 32,
+        DctSize::Dct64x64 => 64,
     };
     forward_dct_2d_generic(input, output, n);
     Ok(())
@@ -164,9 +165,99 @@ pub fn inverse_dct_scalar(input: &[i16], output: &mut [i16], size: DctSize) -> R
         DctSize::Dct8x8 => 8,
         DctSize::Dct16x16 => 16,
         DctSize::Dct32x32 => 32,
+        DctSize::Dct64x64 => 64,
     };
     inverse_dct_2d_generic(input, output, n);
     Ok(())
+}
+
+// ── Hadamard transform ──────────────────────────────────────────────────────
+
+/// 1-D Hadamard–Walsh transform of length N (must be a power of 2).
+///
+/// The transform is applied in-place via the fast butterfly algorithm.
+/// The un-normalised WHT satisfies `WHT(WHT(x)) = N * x`, so callers that
+/// need energy-preserving round-trips must divide by N.
+///
+/// `work` must have length exactly `n` (power-of-two).
+pub fn hadamard_1d(work: &mut [i32]) {
+    let n = work.len();
+    debug_assert!(n.is_power_of_two(), "Hadamard length must be power of two");
+
+    let mut step = 1usize;
+    while step < n {
+        let mut i = 0;
+        while i < n {
+            for j in i..i + step {
+                let a = work[j];
+                let b = work[j + step];
+                work[j] = a + b;
+                work[j + step] = a - b;
+            }
+            i += 2 * step;
+        }
+        step *= 2;
+    }
+}
+
+/// 2-D separable Hadamard–Walsh transform for an `n × n` block (in-place).
+///
+/// Applies 1-D WHT to each row, then to each column.  The result contains
+/// un-normalised WHT coefficients (`divide by n²` to recover original energy).
+///
+/// `block` must have exactly `n * n` elements.  `n` must be a power of two.
+pub fn hadamard_2d(block: &mut [i32], n: usize) {
+    debug_assert_eq!(block.len(), n * n);
+    debug_assert!(n.is_power_of_two());
+
+    // Row transforms
+    let mut row_buf = vec![0i32; n];
+    for r in 0..n {
+        row_buf.copy_from_slice(&block[r * n..(r + 1) * n]);
+        hadamard_1d(&mut row_buf);
+        block[r * n..(r + 1) * n].copy_from_slice(&row_buf);
+    }
+
+    // Column transforms
+    let mut col_buf = vec![0i32; n];
+    for c in 0..n {
+        for r in 0..n {
+            col_buf[r] = block[r * n + c];
+        }
+        hadamard_1d(&mut col_buf);
+        for r in 0..n {
+            block[r * n + c] = col_buf[r];
+        }
+    }
+}
+
+/// Compute SATD for two `n × n` pixel blocks using the Hadamard transform.
+///
+/// SATD = (1 / n) × Σ |WHT(src - ref_)|  (sum over all WHT coefficients).
+/// This is a perceptually better motion-estimation cost than plain SAD because
+/// it is insensitive to DC bias.
+///
+/// Both `src` and `ref_` must have at least `n * n` elements.  `n` must be a
+/// power of two (4 or 8 are the most common values in codec practice).
+///
+/// Returns the SATD value (un-normalised; comparable to SAD for the same N).
+pub fn satd_scalar_nxn(src: &[u8], ref_: &[u8], n: usize) -> u32 {
+    debug_assert!(n.is_power_of_two());
+    debug_assert!(src.len() >= n * n);
+    debug_assert!(ref_.len() >= n * n);
+
+    let mut diff = vec![0i32; n * n];
+    for (d, (&s, &r)) in diff
+        .iter_mut()
+        .zip(src[..n * n].iter().zip(ref_[..n * n].iter()))
+    {
+        *d = i32::from(s) - i32::from(r);
+    }
+
+    hadamard_2d(&mut diff, n);
+
+    // Sum of absolute WHT coefficients (un-normalised)
+    diff.iter().map(|&v| v.unsigned_abs()).sum()
 }
 
 // ── Interpolation ──────────────────────────────────────────────────────────
@@ -280,11 +371,7 @@ fn interpolate_bicubic_scalar(
 
     let max_x = (width as i32).saturating_sub(1).max(0);
     // Estimate max_y from the source buffer size
-    let src_height = if src_stride > 0 {
-        src.len() / src_stride
-    } else {
-        height
-    };
+    let src_height = src.len().checked_div(src_stride).unwrap_or(height);
     let max_y = (src_height as i32).saturating_sub(1).max(0);
 
     for row in 0..height {
@@ -357,11 +444,7 @@ fn interpolate_8tap_scalar(
     let filter_h = &EIGHT_TAP_FILTERS[phase_x];
     let filter_v = &EIGHT_TAP_FILTERS[phase_y];
 
-    let src_height = if src_stride > 0 {
-        src.len() / src_stride
-    } else {
-        height
-    };
+    let src_height = src.len().checked_div(src_stride).unwrap_or(height);
 
     // Intermediate buffer: apply horizontal filter first.
     // We need 8 extra rows (3 above + 4 below) for the vertical pass.
@@ -519,6 +602,63 @@ mod tests {
                 "sample {i}: orig={orig} recovered={recovered} diff={diff}"
             );
         }
+    }
+
+    #[test]
+    fn test_dct_64x64_roundtrip() {
+        // Smaller value range to keep i16 headroom through the full 64×64 DCT.
+        let input: Vec<i16> = (0..4096).map(|i| ((i % 50) as i16) - 25).collect();
+        let mut dct_out = vec![0i16; 4096];
+        let mut idct_out = vec![0i16; 4096];
+
+        forward_dct_scalar(&input, &mut dct_out, DctSize::Dct64x64)
+            .expect("forward DCT64 should succeed");
+        inverse_dct_scalar(&dct_out, &mut idct_out, DctSize::Dct64x64)
+            .expect("inverse DCT64 should succeed");
+
+        // Round-trip tolerance is slightly larger for 64×64 due to accumulated
+        // floating-point error across 64 butterfly stages.
+        for (i, (&orig, &recovered)) in input.iter().zip(idct_out.iter()).enumerate() {
+            let diff = (i32::from(orig) - i32::from(recovered)).abs();
+            assert!(
+                diff <= 4,
+                "sample {i}: orig={orig} recovered={recovered} diff={diff}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hadamard_1d_power_of_two() {
+        // WHT of length 4: known values
+        let mut buf = [1i32, 2, 3, 4];
+        hadamard_1d(&mut buf);
+        // WHT([1,2,3,4]) = [10, -2, -4, 0] (standard butterfly)
+        assert_eq!(buf[0], 10, "DC coefficient");
+        assert_eq!(buf[1], -2);
+        assert_eq!(buf[2], -4);
+        assert_eq!(buf[3], 0);
+    }
+
+    #[test]
+    fn test_hadamard_2d_zero_is_zero() {
+        let mut buf = vec![0i32; 16];
+        hadamard_2d(&mut buf, 4);
+        assert!(buf.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn test_satd_scalar_identical_is_zero() {
+        let block = vec![100u8; 64];
+        let result = satd_scalar_nxn(&block, &block, 8);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_satd_scalar_nonzero_for_different_blocks() {
+        let a = vec![100u8; 64];
+        let b = vec![200u8; 64];
+        let result = satd_scalar_nxn(&a, &b, 8);
+        assert!(result > 0, "SATD should be non-zero for different blocks");
     }
 
     #[test]

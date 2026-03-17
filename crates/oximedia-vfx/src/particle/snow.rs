@@ -2,7 +2,7 @@
 
 use super::{Particle, ParticleSystem};
 use crate::{Color, EffectParams, Frame, VfxResult, VideoEffect};
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 /// Snow style.

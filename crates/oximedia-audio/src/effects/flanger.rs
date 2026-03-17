@@ -301,6 +301,19 @@ impl MonoFlanger {
         }
     }
 
+    /// Set the wet/dry mix (0.0 = fully dry, 1.0 = fully wet).
+    pub fn set_mix(&mut self, mix: f64) {
+        let clamped = mix.clamp(0.0, 1.0);
+        self.config.mix = clamped;
+        self.mix_smoother.set_target(clamped);
+    }
+
+    /// Get the current wet/dry mix value.
+    #[must_use]
+    pub fn mix(&self) -> f64 {
+        self.config.mix
+    }
+
     /// Reset the effect state.
     pub fn reset(&mut self) {
         self.delay_line.reset();
@@ -461,6 +474,19 @@ impl StereoFlanger {
         let right_out = right_in * (1.0 - mix) + right_wet * mix;
 
         (left_out, right_out)
+    }
+
+    /// Set the wet/dry mix (0.0 = fully dry, 1.0 = fully wet).
+    pub fn set_mix(&mut self, mix: f64) {
+        let clamped = mix.clamp(0.0, 1.0);
+        self.config.mix = clamped;
+        self.mix_smoother.set_target(clamped);
+    }
+
+    /// Get the current wet/dry mix value.
+    #[must_use]
+    pub fn mix(&self) -> f64 {
+        self.config.mix
     }
 
     /// Reset the effect state.

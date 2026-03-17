@@ -4,7 +4,131 @@
 
 use crate::{metadata::*, rpu::*, DolbyVisionError, DolbyVisionRpu, Profile, Result};
 use bitstream_io::{BigEndian, BitRead, BitReader};
+use std::collections::HashMap;
 use std::io::Cursor;
+use std::sync::{Arc, Mutex, OnceLock};
+
+// ── RPU Parse Cache ───────────────────────────────────────────────────────────
+
+/// Cache key for RPU parse deduplication.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RpuCacheKey {
+    /// FNV-1a hash of the NAL unit data for fast deduplication.
+    hash: u64,
+    /// Length of the data (used as secondary discriminator).
+    len: usize,
+}
+
+impl RpuCacheKey {
+    fn from_data(data: &[u8]) -> Self {
+        // FNV-1a hash (64-bit)
+        const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
+        const FNV_PRIME: u64 = 1_099_511_628_211;
+        let mut hash = FNV_OFFSET;
+        for &byte in data {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        Self {
+            hash,
+            len: data.len(),
+        }
+    }
+}
+
+/// Maximum number of entries kept in the RPU parse cache.
+const RPU_CACHE_MAX_ENTRIES: usize = 256;
+
+/// Process-global RPU bitstream parse cache.
+static RPU_CACHE: OnceLock<Mutex<HashMap<RpuCacheKey, Arc<DolbyVisionRpu>>>> = OnceLock::new();
+
+fn get_rpu_cache() -> &'static Mutex<HashMap<RpuCacheKey, Arc<DolbyVisionRpu>>> {
+    RPU_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Parse a NAL unit, returning a cached result if the byte sequence was seen recently.
+///
+/// # Errors
+///
+/// Returns error if parsing fails.
+pub fn parse_nal_unit_cached(data: &[u8]) -> Result<DolbyVisionRpu> {
+    let key = RpuCacheKey::from_data(data);
+    let cache_ref = get_rpu_cache();
+
+    // Check cache first
+    if let Ok(cache) = cache_ref.lock() {
+        if let Some(cached) = cache.get(&key) {
+            return Ok((**cached).clone());
+        }
+    }
+
+    // Parse and insert into cache
+    let rpu = parse_nal_unit(data)?;
+
+    if let Ok(mut cache) = cache_ref.lock() {
+        if cache.len() >= RPU_CACHE_MAX_ENTRIES {
+            // Evict one arbitrary entry (simple strategy: clear oldest half)
+            let keys: Vec<_> = cache
+                .keys()
+                .take(RPU_CACHE_MAX_ENTRIES / 2)
+                .cloned()
+                .collect();
+            for k in keys {
+                cache.remove(&k);
+            }
+        }
+        cache.insert(key, Arc::new(rpu.clone()));
+    }
+
+    Ok(rpu)
+}
+
+/// Parse a bitstream, returning a cached result if the byte sequence was seen recently.
+///
+/// # Errors
+///
+/// Returns error if parsing fails.
+pub fn parse_rpu_bitstream_cached(data: &[u8]) -> Result<DolbyVisionRpu> {
+    let key = RpuCacheKey::from_data(data);
+    let cache_ref = get_rpu_cache();
+
+    if let Ok(cache) = cache_ref.lock() {
+        if let Some(cached) = cache.get(&key) {
+            return Ok((**cached).clone());
+        }
+    }
+
+    let rpu = parse_rpu_bitstream(data)?;
+
+    if let Ok(mut cache) = cache_ref.lock() {
+        if cache.len() >= RPU_CACHE_MAX_ENTRIES {
+            let keys: Vec<_> = cache
+                .keys()
+                .take(RPU_CACHE_MAX_ENTRIES / 2)
+                .cloned()
+                .collect();
+            for k in keys {
+                cache.remove(&k);
+            }
+        }
+        cache.insert(key, Arc::new(rpu.clone()));
+    }
+
+    Ok(rpu)
+}
+
+/// Clear the global RPU parse cache.
+pub fn clear_rpu_cache() {
+    if let Ok(mut cache) = get_rpu_cache().lock() {
+        cache.clear();
+    }
+}
+
+/// Return the number of entries currently in the RPU parse cache.
+#[must_use]
+pub fn rpu_cache_len() -> usize {
+    get_rpu_cache().lock().map(|c| c.len()).unwrap_or(0)
+}
 
 /// HEVC NAL unit types for Dolby Vision.
 pub mod nal_type {
@@ -137,6 +261,73 @@ fn parse_sei_payload(data: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
+/// Automatically detect the Dolby Vision profile from RPU header fields.
+///
+/// Uses a multi-factor heuristic combining:
+/// - `ycbcr_to_rgb_flag` (true → signal is in RGB/YCbCr, false → IPT-PQ, i.e. Profile 5)
+/// - `mapping_color_space` (2 = IPT → Profile 5)
+/// - `bl_bit_depth` and `el_bit_depth` (el > 0 with full depth → Profile 7 MEL)
+/// - `mapping_chroma_format` for HLG detection
+///
+/// Returns the most likely `Profile` or `Profile::Profile8` as safe default.
+#[must_use]
+pub fn detect_profile_from_header(header: &RpuHeader) -> Profile {
+    if header.vdr_seq_info_present {
+        if let Some(ref seq_info) = header.vdr_seq_info {
+            return detect_profile_from_seq_info(seq_info, header);
+        }
+    }
+    Profile::Profile8
+}
+
+/// Inner helper — determine profile from seq_info and header.
+fn detect_profile_from_seq_info(seq_info: &VdrSeqInfo, header: &RpuHeader) -> Profile {
+    // Profile 5: IPT-PQ color space; no YCbCr-to-RGB conversion; mapping_color_space == 2
+    if !seq_info.ycbcr_to_rgb_flag || header.mapping_color_space == 2 {
+        return Profile::Profile5;
+    }
+
+    // Profile 7: dual-layer (MEL) — enhancement layer present with significant depth
+    //   Heuristic: el_bit_depth > 0 and bl_bit_depth >= 10 and el_bit_depth >= 8
+    if seq_info.el_bit_depth >= 8 && seq_info.bl_bit_depth >= 10 {
+        // Additional check: if VDR DM metadata ID != 0 it's a MEL profile
+        if seq_info.vdr_dm_metadata_id != 0 {
+            return Profile::Profile7;
+        }
+    }
+
+    // Profile 8.4: HLG base layer
+    // Heuristic: signal_eotf indicates HLG (0x0F = HLG OETF in DV spec)
+    // We detect this from chroma format + BL depth = 10 bit + source depth = 10 bit
+    // and ycbcr_to_rgb_flag = true (HLG BT.2020 color space).
+    // The signal_eotf is in VdrDmData, not available here, so we use the secondary
+    // indicator: coef_log2_denom == 14 and mapping_chroma_format == 0 (4:2:0)
+    if header.mapping_chroma_format == 0
+        && seq_info.coef_log2_denom == 14
+        && seq_info.el_bit_depth == 0
+    {
+        // Could be Profile 8.4 (HLG); without signal_eotf we cannot confirm,
+        // but we can use coef_data_type == 0 and source_bit_depth == 10 as extra signal
+        if seq_info.source_bit_depth == 10 && seq_info.bl_bit_depth == 10 {
+            // Only Profile 8.4 carries HLG; Profile 8 uses PQ.
+            // Without explicit HLG signal, default to Profile 8 (safest choice)
+            // but emit Profile 8.4 if el_bit_depth == 0 and vdr_dm_metadata_id == 0
+            if seq_info.vdr_dm_metadata_id == 0 && seq_info.scene_refresh_flag == 0 {
+                // Ambiguous: could be Profile 8 or 8.4; default to Profile 8
+                // (callers may override via explicit profile hint)
+                return Profile::Profile8;
+            }
+        }
+    }
+
+    // Profile 8.1: low-latency variant.
+    // Heuristic: same as Profile 8 but with vdr_dm_metadata_id == 1
+    // (implementation may expose this as a hint in the header).
+    // Without explicit signalling we cannot reliably distinguish 8 vs 8.1.
+
+    Profile::Profile8
+}
+
 /// Parse RPU from raw bitstream.
 ///
 /// # Errors
@@ -150,25 +341,8 @@ pub fn parse_rpu_bitstream(data: &[u8]) -> Result<DolbyVisionRpu> {
     // Parse RPU header
     let header = parse_rpu_header(&mut reader)?;
 
-    // Determine profile from header
-    let profile = if header.vdr_seq_info_present {
-        if let Some(ref seq_info) = header.vdr_seq_info {
-            // Infer profile from characteristics
-            if seq_info.ycbcr_to_rgb_flag {
-                if seq_info.bl_bit_depth == 10 {
-                    Profile::Profile8
-                } else {
-                    Profile::Profile7
-                }
-            } else {
-                Profile::Profile5
-            }
-        } else {
-            Profile::Profile8
-        }
-    } else {
-        Profile::Profile8
-    };
+    // Determine profile from header using automatic detection heuristics
+    let profile = detect_profile_from_header(&header);
 
     let mut rpu = DolbyVisionRpu::new(profile);
     rpu.header = header;
@@ -593,45 +767,298 @@ fn parse_level1_metadata<R: std::io::Read>(
 
 /// Parse Level 2 metadata.
 fn parse_level2_metadata<R: std::io::Read>(
-    _reader: &mut BitReader<R, BigEndian>,
+    reader: &mut BitReader<R, BigEndian>,
 ) -> Result<Option<Level2Metadata>> {
-    // Level 2 parsing is complex and optional
-    Ok(None)
+    let present: bool = reader.read_bit().unwrap_or(false);
+    if !present {
+        return Ok(None);
+    }
+
+    let target_display_index: u8 = reader
+        .read(8)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let trim_slope: i16 = reader
+        .read_signed(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let trim_offset: i16 = reader
+        .read_signed(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let trim_power: i16 = reader
+        .read_signed(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let trim_chroma_weight: i16 = reader
+        .read_signed(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let trim_saturation_gain: i16 = reader
+        .read_signed(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let ms_weight: i16 = reader
+        .read_signed(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let target_mid_contrast: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let clip_trim: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    // Saturation and hue vector fields are not written by the current writer
+    // (write_level2_metadata only writes the basic fields). Return empty vecs.
+    Ok(Some(Level2Metadata {
+        target_display_index,
+        trim_slope,
+        trim_offset,
+        trim_power,
+        trim_chroma_weight,
+        trim_saturation_gain,
+        ms_weight,
+        target_mid_contrast,
+        clip_trim,
+        saturation_vector_field: Vec::new(),
+        hue_vector_field: Vec::new(),
+    }))
 }
 
 /// Parse Level 5 metadata.
 fn parse_level5_metadata<R: std::io::Read>(
-    _reader: &mut BitReader<R, BigEndian>,
+    reader: &mut BitReader<R, BigEndian>,
 ) -> Result<Option<Level5Metadata>> {
-    Ok(None)
+    let present: bool = reader.read_bit().unwrap_or(false);
+    if !present {
+        return Ok(None);
+    }
+
+    let active_area_left_offset: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let active_area_right_offset: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let active_area_top_offset: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let active_area_bottom_offset: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    Ok(Some(Level5Metadata {
+        active_area_left_offset,
+        active_area_right_offset,
+        active_area_top_offset,
+        active_area_bottom_offset,
+    }))
 }
 
 /// Parse Level 6 metadata.
 fn parse_level6_metadata<R: std::io::Read>(
-    _reader: &mut BitReader<R, BigEndian>,
+    reader: &mut BitReader<R, BigEndian>,
 ) -> Result<Option<Level6Metadata>> {
-    Ok(None)
+    let present: bool = reader.read_bit().unwrap_or(false);
+    if !present {
+        return Ok(None);
+    }
+
+    let max_cll: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let max_fall: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let min_display_mastering_luminance: u32 = reader
+        .read(32)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let max_display_mastering_luminance: u32 = reader
+        .read(32)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let mut master_display_primaries = [[0u16; 2]; 3];
+    for primary in &mut master_display_primaries {
+        primary[0] = reader
+            .read(16)
+            .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+        primary[1] = reader
+            .read(16)
+            .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+    }
+
+    let white_x: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+    let white_y: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    Ok(Some(Level6Metadata {
+        max_cll,
+        max_fall,
+        min_display_mastering_luminance,
+        max_display_mastering_luminance,
+        master_display_primaries,
+        master_display_white_point: [white_x, white_y],
+    }))
 }
 
 /// Parse Level 8 metadata.
 fn parse_level8_metadata<R: std::io::Read>(
-    _reader: &mut BitReader<R, BigEndian>,
+    reader: &mut BitReader<R, BigEndian>,
 ) -> Result<Option<Level8Metadata>> {
-    Ok(None)
+    let present: bool = reader.read_bit().unwrap_or(false);
+    if !present {
+        return Ok(None);
+    }
+
+    let target_display_index: u8 = reader
+        .read(8)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let target_max_pq: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let target_min_pq: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let target_primary_index: u8 = reader
+        .read(8)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let target_eotf: u8 = reader
+        .read(8)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let diagonal_size: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let peak_luminance: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let diffuse_white_luminance: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let ambient_luminance: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let surround_reflection: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    Ok(Some(Level8Metadata {
+        target_display_index,
+        target_max_pq,
+        target_min_pq,
+        target_primary_index,
+        target_eotf,
+        diagonal_size,
+        peak_luminance,
+        diffuse_white_luminance,
+        ambient_luminance,
+        surround_reflection,
+    }))
 }
 
 /// Parse Level 9 metadata.
 fn parse_level9_metadata<R: std::io::Read>(
-    _reader: &mut BitReader<R, BigEndian>,
+    reader: &mut BitReader<R, BigEndian>,
 ) -> Result<Option<Level9Metadata>> {
-    Ok(None)
+    let present: bool = reader.read_bit().unwrap_or(false);
+    if !present {
+        return Ok(None);
+    }
+
+    let source_primary_index: u8 = reader
+        .read(8)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let source_max_pq: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let source_min_pq: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let source_diagonal: u16 = reader
+        .read(16)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    Ok(Some(Level9Metadata {
+        source_primary_index,
+        source_max_pq,
+        source_min_pq,
+        source_diagonal,
+    }))
 }
 
 /// Parse Level 11 metadata.
 fn parse_level11_metadata<R: std::io::Read>(
-    _reader: &mut BitReader<R, BigEndian>,
+    reader: &mut BitReader<R, BigEndian>,
 ) -> Result<Option<Level11Metadata>> {
-    Ok(None)
+    let present: bool = reader.read_bit().unwrap_or(false);
+    if !present {
+        return Ok(None);
+    }
+
+    let content_type_byte: u8 = reader
+        .read(8)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let whitepoint: u8 = reader
+        .read(8)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let reference_mode_flag: bool = reader
+        .read_bit()
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let sharpness: u8 = reader
+        .read(8)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let noise_reduction: u8 = reader
+        .read(8)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let mpeg_noise_reduction: u8 = reader
+        .read(8)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let frame_rate: u8 = reader
+        .read(8)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    let temporal_filter_strength: u8 = reader
+        .read(8)
+        .map_err(|e| DolbyVisionError::InvalidPayload(e.to_string()))?;
+
+    Ok(Some(Level11Metadata {
+        content_type: ContentType::from_u8(content_type_byte),
+        whitepoint,
+        reference_mode_flag,
+        sharpness,
+        noise_reduction,
+        mpeg_noise_reduction,
+        frame_rate,
+        temporal_filter_strength,
+    }))
 }
 
 #[cfg(test)]
@@ -662,5 +1089,107 @@ mod tests {
         let nal = vec![0x00, 0x00]; // Invalid NAL type
         let result = parse_nal_unit(&nal);
         assert!(result.is_err());
+    }
+
+    // ── Profile detection tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_profile_ipt_color_space() {
+        // mapping_color_space == 2 → Profile 5 (IPT)
+        let header = crate::rpu::RpuHeader {
+            rpu_type: 0,
+            rpu_format: 0,
+            vdr_seq_info_present: true,
+            vdr_seq_info: Some(VdrSeqInfo {
+                vdr_dm_metadata_id: 0,
+                scene_refresh_flag: 0,
+                ycbcr_to_rgb_flag: false,
+                coef_data_type: 0,
+                coef_log2_denom: 14,
+                vdr_bit_depth: 12,
+                bl_bit_depth: 10,
+                el_bit_depth: 0,
+                source_bit_depth: 10,
+            }),
+            picture_index: 0,
+            change_flags: crate::rpu::ChangeFlags::empty(),
+            nlq_param_pred_flag: false,
+            num_nlq_param_predictors: 0,
+            component_order: 2,
+            coef_data_type: 0,
+            coef_log2_denom: 14,
+            mapping_color_space: 2,
+            mapping_chroma_format: 2,
+            num_pivots_minus_2: 0,
+            pred_pivot_value: 0,
+        };
+        assert_eq!(detect_profile_from_header(&header), Profile::Profile5);
+    }
+
+    #[test]
+    fn test_detect_profile_no_seq_info() {
+        let header = crate::rpu::RpuHeader {
+            rpu_type: 0,
+            rpu_format: 0,
+            vdr_seq_info_present: false,
+            vdr_seq_info: None,
+            picture_index: 0,
+            change_flags: crate::rpu::ChangeFlags::empty(),
+            nlq_param_pred_flag: false,
+            num_nlq_param_predictors: 0,
+            component_order: 0,
+            coef_data_type: 0,
+            coef_log2_denom: 14,
+            mapping_color_space: 1,
+            mapping_chroma_format: 2,
+            num_pivots_minus_2: 0,
+            pred_pivot_value: 0,
+        };
+        assert_eq!(detect_profile_from_header(&header), Profile::Profile8);
+    }
+
+    // ── RPU cache tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_rpu_cache_key_deterministic() {
+        let data = b"hello world";
+        let k1 = RpuCacheKey::from_data(data);
+        let k2 = RpuCacheKey::from_data(data);
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn test_rpu_cache_key_different_data() {
+        let k1 = RpuCacheKey::from_data(b"hello");
+        let k2 = RpuCacheKey::from_data(b"world");
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn test_clear_rpu_cache() {
+        // Should not panic
+        clear_rpu_cache();
+        assert_eq!(rpu_cache_len(), 0);
+    }
+
+    #[test]
+    fn test_cached_parse_invalid_input() {
+        let result = parse_nal_unit_cached(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cached_bitstream_valid() {
+        use crate::{DolbyVisionRpu, Profile};
+        let rpu = DolbyVisionRpu::new(Profile::Profile8);
+        let bits = crate::writer::write_rpu_bitstream(&rpu).expect("write failed");
+
+        clear_rpu_cache();
+        let result1 = parse_rpu_bitstream_cached(&bits);
+        let result2 = parse_rpu_bitstream_cached(&bits);
+        assert!(result1.is_ok(), "first parse should succeed");
+        assert!(result2.is_ok(), "cached parse should succeed");
+        // Cache should have one entry for this data
+        assert!(rpu_cache_len() <= 1);
     }
 }

@@ -347,13 +347,46 @@ impl MatroskaDemuxer {
             .collect())
     }
 
+    /// Context manager __enter__: return self.
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Context manager __exit__: drop the inner demuxer (close file handle).
+    #[pyo3(signature = (_exc_type, _exc_val, _exc_tb))]
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_val: Option<Py<PyAny>>,
+        _exc_tb: Option<Py<PyAny>>,
+    ) -> PyResult<bool> {
+        self.demuxer = None;
+        Ok(false)
+    }
+
+    /// Close the demuxer explicitly.
+    fn close(&mut self) {
+        self.demuxer = None;
+    }
+
+    /// Iterator protocol: return self.
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Iterator protocol: read next packet or raise StopIteration.
+    fn __next__(mut slf: PyRefMut<'_, Self>) -> PyResult<Packet> {
+        slf.read_packet()
+    }
+
     fn __str__(&self) -> String {
         "MatroskaDemuxer".to_string()
     }
 
     fn __repr__(&self) -> String {
         let stream_count = self.demuxer.as_ref().map_or(0, |d| d.streams().len());
-        format!("MatroskaDemuxer(streams={stream_count})")
+        let closed = self.demuxer.is_none();
+        format!("MatroskaDemuxer(streams={stream_count}, closed={closed})")
     }
 }
 
@@ -462,13 +495,46 @@ impl OggDemuxer {
             .collect())
     }
 
+    /// Context manager __enter__: return self.
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Context manager __exit__: close file handle.
+    #[pyo3(signature = (_exc_type, _exc_val, _exc_tb))]
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_val: Option<Py<PyAny>>,
+        _exc_tb: Option<Py<PyAny>>,
+    ) -> PyResult<bool> {
+        self.demuxer = None;
+        Ok(false)
+    }
+
+    /// Close the demuxer explicitly.
+    fn close(&mut self) {
+        self.demuxer = None;
+    }
+
+    /// Iterator protocol: return self.
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Iterator protocol: read next packet or raise StopIteration.
+    fn __next__(mut slf: PyRefMut<'_, Self>) -> PyResult<Packet> {
+        slf.read_packet()
+    }
+
     fn __str__(&self) -> String {
         "OggDemuxer".to_string()
     }
 
     fn __repr__(&self) -> String {
         let stream_count = self.demuxer.as_ref().map_or(0, |d| d.streams().len());
-        format!("OggDemuxer(streams={stream_count})")
+        let closed = self.demuxer.is_none();
+        format!("OggDemuxer(streams={stream_count}, closed={closed})")
     }
 }
 
@@ -600,12 +666,46 @@ impl MatroskaMuxer {
             .map_err(crate::error::from_oxi_error)
     }
 
+    /// Context manager __enter__: return self.
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Context manager __exit__: write trailer and close.
+    ///
+    /// Automatically calls `write_trailer()` before releasing resources if the
+    /// muxer was still open (no exception propagation from trailer errors to
+    /// avoid masking the original exception).
+    #[pyo3(signature = (_exc_type, _exc_val, _exc_tb))]
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_val: Option<Py<PyAny>>,
+        _exc_tb: Option<Py<PyAny>>,
+    ) -> PyResult<bool> {
+        // Attempt to write trailer; ignore errors on context manager exit.
+        let _ = self.write_trailer();
+        self.muxer = None;
+        Ok(false)
+    }
+
+    /// Close the muxer explicitly (writes trailer first).
+    fn close(&mut self) -> PyOxiResult<()> {
+        let result = self.write_trailer();
+        self.muxer = None;
+        result
+    }
+
     fn __str__(&self) -> String {
         "MatroskaMuxer".to_string()
     }
 
     fn __repr__(&self) -> String {
-        format!("MatroskaMuxer(title={:?})", self.config.title)
+        let closed = self.muxer.is_none();
+        format!(
+            "MatroskaMuxer(title={:?}, closed={closed})",
+            self.config.title
+        )
     }
 }
 
@@ -727,11 +827,37 @@ impl OggMuxer {
             .map_err(crate::error::from_oxi_error)
     }
 
+    /// Context manager __enter__: return self.
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Context manager __exit__: write trailer and close.
+    #[pyo3(signature = (_exc_type, _exc_val, _exc_tb))]
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_val: Option<Py<PyAny>>,
+        _exc_tb: Option<Py<PyAny>>,
+    ) -> PyResult<bool> {
+        let _ = self.write_trailer();
+        self.muxer = None;
+        Ok(false)
+    }
+
+    /// Close the muxer explicitly.
+    fn close(&mut self) -> PyOxiResult<()> {
+        let result = self.write_trailer();
+        self.muxer = None;
+        result
+    }
+
     fn __str__(&self) -> String {
         "OggMuxer".to_string()
     }
 
     fn __repr__(&self) -> String {
-        "OggMuxer".to_string()
+        let closed = self.muxer.is_none();
+        format!("OggMuxer(closed={closed})")
     }
 }

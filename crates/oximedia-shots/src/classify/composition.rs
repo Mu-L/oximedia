@@ -4,6 +4,27 @@ use crate::error::{ShotError, ShotResult};
 use crate::frame_buffer::{FloatImage, FrameBuffer, GrayImage};
 use crate::types::CompositionAnalysis;
 
+/// Extended composition analysis with golden ratio and phi grid scores.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExtendedComposition {
+    /// Standard composition analysis.
+    pub base: CompositionAnalysis,
+    /// Golden ratio compliance (0.0-1.0). Measures how well key visual
+    /// elements align with the golden ratio (1.618:1) divisions.
+    pub golden_ratio: f32,
+    /// Phi grid compliance (0.0-1.0). The phi grid places lines at 1/phi
+    /// (~0.382) and 1 - 1/phi (~0.618) of each dimension, a tighter
+    /// alternative to the rule of thirds.
+    pub phi_grid: f32,
+    /// Golden spiral conformity (0.0-1.0). Measures how well salient
+    /// regions follow a logarithmic spiral based on the golden ratio.
+    pub golden_spiral: f32,
+    /// Diagonal dominance score (0.0-1.0). Measures alignment with the
+    /// baroque (lower-left to upper-right) and sinister (upper-left to
+    /// lower-right) diagonals.
+    pub diagonal_dominance: f32,
+}
+
 /// Composition analyzer.
 pub struct CompositionAnalyzer;
 
@@ -40,6 +61,230 @@ impl CompositionAnalyzer {
             leading_lines,
             depth,
         })
+    }
+
+    /// Perform extended composition analysis including golden ratio and phi grid.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if frame is invalid.
+    pub fn analyze_extended(&self, frame: &FrameBuffer) -> ShotResult<ExtendedComposition> {
+        let base = self.analyze(frame)?;
+        let golden_ratio = self.analyze_golden_ratio(frame)?;
+        let phi_grid = self.analyze_phi_grid(frame)?;
+        let golden_spiral = self.analyze_golden_spiral(frame)?;
+        let diagonal_dominance = self.analyze_diagonal_dominance(frame)?;
+
+        Ok(ExtendedComposition {
+            base,
+            golden_ratio,
+            phi_grid,
+            golden_spiral,
+            diagonal_dominance,
+        })
+    }
+
+    /// Analyse golden ratio compliance.
+    ///
+    /// Divides the frame at 1:phi and phi:1 ratios (approximately 38.2%
+    /// and 61.8%) on both axes, then measures saliency concentration near
+    /// the four intersection points.
+    fn analyze_golden_ratio(&self, frame: &FrameBuffer) -> ShotResult<f32> {
+        let shape = frame.dim();
+        let height = shape.0;
+        let width = shape.1;
+        let phi_inv: f32 = 1.0 / 1.618_034;
+
+        // Golden ratio division points
+        let gx1 = (width as f32 * phi_inv) as usize;
+        let gx2 = (width as f32 * (1.0 - phi_inv)) as usize;
+        let gy1 = (height as f32 * phi_inv) as usize;
+        let gy2 = (height as f32 * (1.0 - phi_inv)) as usize;
+
+        let intersections = [(gx1, gy1), (gx2, gy1), (gx1, gy2), (gx2, gy2)];
+        let saliency = self.calculate_saliency(frame)?;
+
+        let window = (width.min(height) / 10).max(3);
+        let mut score = 0.0_f32;
+
+        for (ix, iy) in intersections {
+            let mut local_sal = 0.0_f32;
+            let mut count = 0u32;
+            let y_start = iy.saturating_sub(window);
+            let y_end = (iy + window).min(height);
+            let x_start = ix.saturating_sub(window);
+            let x_end = (ix + window).min(width);
+
+            for y in y_start..y_end {
+                for x in x_start..x_end {
+                    local_sal += saliency.get(y, x);
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                score += local_sal / count as f32;
+            }
+        }
+        Ok((score / 4.0).min(1.0))
+    }
+
+    /// Analyse phi grid compliance.
+    ///
+    /// The phi grid lines sit at ~38.2% and ~61.8% (exactly 1/phi and
+    /// 1-1/phi). This measures how much edge energy concentrates along
+    /// those four lines.
+    fn analyze_phi_grid(&self, frame: &FrameBuffer) -> ShotResult<f32> {
+        let gray = self.to_grayscale(frame);
+        let edges = self.detect_edges(&gray);
+        let (h, w) = edges.dim();
+        let phi_inv: f32 = 1.0 / 1.618_034;
+
+        let line_positions_x = [
+            (w as f32 * phi_inv) as usize,
+            (w as f32 * (1.0 - phi_inv)) as usize,
+        ];
+        let line_positions_y = [
+            (h as f32 * phi_inv) as usize,
+            (h as f32 * (1.0 - phi_inv)) as usize,
+        ];
+
+        let tolerance = (w.min(h) / 20).max(2);
+        let mut on_grid_energy = 0.0_f64;
+        let mut total_energy = 0.0_f64;
+
+        for y in 0..h {
+            for x in 0..w {
+                let e = f64::from(edges.get(y, x));
+                total_energy += e;
+
+                let near_v = line_positions_x
+                    .iter()
+                    .any(|&lx| x.abs_diff(lx) <= tolerance);
+                let near_h = line_positions_y
+                    .iter()
+                    .any(|&ly| y.abs_diff(ly) <= tolerance);
+
+                if near_v || near_h {
+                    on_grid_energy += e;
+                }
+            }
+        }
+
+        if total_energy < 1.0 {
+            return Ok(0.0);
+        }
+        // Normalise: ideal fraction of area covered by grid tolerance bands
+        let grid_area_fraction = {
+            let band_v = 2 * tolerance * h * line_positions_x.len();
+            let band_h = 2 * tolerance * w * line_positions_y.len();
+            (band_v + band_h) as f64 / (w * h).max(1) as f64
+        };
+        let energy_fraction = on_grid_energy / total_energy;
+        let ratio = if grid_area_fraction > 0.0 {
+            (energy_fraction / grid_area_fraction) as f32
+        } else {
+            0.0
+        };
+        // A ratio > 1 means edges concentrate on the grid more than random
+        Ok(((ratio - 1.0).max(0.0) / 2.0).min(1.0) + (energy_fraction as f32).min(0.5))
+    }
+
+    /// Analyse golden spiral conformity.
+    ///
+    /// Approximates a golden spiral using quarter-circle arcs in
+    /// progressively smaller golden rectangles. Measures how much
+    /// saliency sits near the spiral path.
+    fn analyze_golden_spiral(&self, frame: &FrameBuffer) -> ShotResult<f32> {
+        let shape = frame.dim();
+        let height = shape.0;
+        let width = shape.1;
+        let saliency = self.calculate_saliency(frame)?;
+
+        let phi: f64 = 1.618_033_988_749_895;
+        let mut spiral_points: Vec<(usize, usize)> = Vec::with_capacity(200);
+
+        // Generate spiral points via successive golden rectangle subdivisions
+        let cx = width as f64 / 2.0;
+        let cy = height as f64 / 2.0;
+        let mut radius = (width.min(height) as f64) / 2.0;
+        let mut angle = 0.0_f64;
+
+        for _ in 0..80 {
+            let px = cx + radius * angle.cos();
+            let py = cy + radius * angle.sin();
+            let ix = (px as usize).min(width.saturating_sub(1));
+            let iy = (py as usize).min(height.saturating_sub(1));
+            spiral_points.push((ix, iy));
+            angle += std::f64::consts::PI / 12.0;
+            radius /= phi.powf(1.0 / 6.0);
+        }
+
+        let tolerance = (width.min(height) / 15).max(3);
+        let mut spiral_sal = 0.0_f32;
+        let mut total_sal = 0.0_f32;
+
+        for y in 0..height {
+            for x in 0..width {
+                let s = saliency.get(y, x);
+                total_sal += s;
+                let near_spiral = spiral_points
+                    .iter()
+                    .any(|&(sx, sy)| x.abs_diff(sx) <= tolerance && y.abs_diff(sy) <= tolerance);
+                if near_spiral {
+                    spiral_sal += s;
+                }
+            }
+        }
+
+        if total_sal < f32::EPSILON {
+            return Ok(0.0);
+        }
+        Ok((spiral_sal / total_sal).min(1.0))
+    }
+
+    /// Analyse diagonal dominance.
+    ///
+    /// Measures how strongly edges align with the two main diagonals:
+    /// baroque (lower-left to upper-right) and sinister (upper-left to
+    /// lower-right).
+    fn analyze_diagonal_dominance(&self, frame: &FrameBuffer) -> ShotResult<f32> {
+        let gray = self.to_grayscale(frame);
+        let edges = self.detect_edges(&gray);
+        let (h, w) = edges.dim();
+        if h == 0 || w == 0 {
+            return Ok(0.0);
+        }
+
+        let tolerance = (w.min(h) / 20).max(2);
+        let mut diag_energy = 0.0_f64;
+        let mut total_energy = 0.0_f64;
+
+        for y in 0..h {
+            for x in 0..w {
+                let e = f64::from(edges.get(y, x));
+                total_energy += e;
+
+                // Sinister diagonal: y/h ~ x/w  =>  y*w ~ x*h
+                let sinister_dist = ((y * w) as i64 - (x * h) as i64).unsigned_abs();
+                let sinister_norm = sinister_dist as f64 / (w * h).max(1) as f64;
+
+                // Baroque diagonal: y/h ~ 1 - x/w  =>  y*w + x*h ~ w*h
+                let baroque_val = (y * w + x * h) as f64;
+                let baroque_dist = (baroque_val - (w * h) as f64).abs();
+                let baroque_norm = baroque_dist / (w * h).max(1) as f64;
+
+                let near = sinister_norm < (tolerance as f64 / h.max(1) as f64)
+                    || baroque_norm < (tolerance as f64 / h.max(1) as f64);
+                if near {
+                    diag_energy += e;
+                }
+            }
+        }
+
+        if total_energy < 1.0 {
+            return Ok(0.0);
+        }
+        Ok((diag_energy / total_energy).min(1.0) as f32)
     }
 
     /// Analyze rule of thirds compliance.

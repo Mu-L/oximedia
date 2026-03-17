@@ -78,6 +78,34 @@ impl BeatGrid {
     }
 }
 
+/// The metrical position of a beat within a bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeatPosition {
+    /// Beat 1 of the bar (strongest, "downbeat").
+    Downbeat,
+    /// Beat 3 in 4/4 time (strong off-beat).
+    StrongUpbeat,
+    /// Beat 2 or 4 in 4/4 time (upbeat / back-beat).
+    Upbeat,
+    /// Beat subdivision (e.g. "and" between beats in 8th-note mode).
+    Subdivision,
+}
+
+impl BeatPosition {
+    /// Priority weight for edit point selection.
+    ///
+    /// Higher = more preferred for placing a cut.
+    #[must_use]
+    pub const fn cut_priority(&self) -> f32 {
+        match self {
+            Self::Downbeat => 1.0,
+            Self::StrongUpbeat => 0.75,
+            Self::Upbeat => 0.55,
+            Self::Subdivision => 0.30,
+        }
+    }
+}
+
 /// A candidate cut point aligned to the music.
 #[derive(Debug, Clone)]
 pub struct CutPoint {
@@ -85,17 +113,42 @@ pub struct CutPoint {
     pub time_ms: u64,
     /// True if this cut lands on a bar downbeat.
     pub is_downbeat: bool,
+    /// Metrical position of this beat within the bar.
+    pub beat_position: BeatPosition,
     /// Energy level at this point in the music (0.0–1.0).
     pub energy: f32,
+    /// Composite priority for edit selection (higher = more preferred).
+    pub priority: f32,
 }
 
 impl CutPoint {
     /// Create a new cut point.
     pub fn new(time_ms: u64, is_downbeat: bool, energy: f32) -> Self {
+        let beat_position = if is_downbeat {
+            BeatPosition::Downbeat
+        } else {
+            BeatPosition::Upbeat
+        };
+        let priority = beat_position.cut_priority() * energy;
         Self {
             time_ms,
             is_downbeat,
+            beat_position,
             energy,
+            priority,
+        }
+    }
+
+    /// Create a cut point with an explicit beat position.
+    pub fn with_beat_position(time_ms: u64, beat_position: BeatPosition, energy: f32) -> Self {
+        let is_downbeat = matches!(beat_position, BeatPosition::Downbeat);
+        let priority = beat_position.cut_priority() * energy;
+        Self {
+            time_ms,
+            is_downbeat,
+            beat_position,
+            energy,
+            priority,
         }
     }
 }
@@ -111,6 +164,10 @@ pub struct MusicSyncConfig {
     pub max_clip_duration_beats: f32,
     /// If true, match clip energy to beat energy.
     pub energy_match: bool,
+    /// Number of beats per bar (default: 4 for 4/4 time).
+    pub beats_per_bar: u32,
+    /// Only generate cut points on beats with priority >= this threshold (0.0-1.0).
+    pub min_cut_priority: f32,
 }
 
 impl Default for MusicSyncConfig {
@@ -120,6 +177,8 @@ impl Default for MusicSyncConfig {
             cut_on_downbeat: true,
             max_clip_duration_beats: 4.0,
             energy_match: true,
+            beats_per_bar: 4,
+            min_cut_priority: 0.0,
         }
     }
 }
@@ -132,17 +191,41 @@ impl MusicSyncEditor {
     ///
     /// `cuts_per_bar` controls the cutting density: 1.0 = one cut per bar,
     /// 2.0 = one cut per two beats, 0.5 = one cut per two bars, etc.
+    ///
+    /// Each [`CutPoint`] now carries a [`BeatPosition`] (downbeat, strong
+    /// upbeat, upbeat, or subdivision) and a composite `priority` score that
+    /// can be used to select the most musically appropriate edit points.
     pub fn generate_cut_points(
         grid: &BeatGrid,
         duration_ms: u64,
         cuts_per_bar: f32,
     ) -> Vec<CutPoint> {
+        Self::generate_cut_points_with_config(
+            grid,
+            duration_ms,
+            cuts_per_bar,
+            &MusicSyncConfig::default(),
+        )
+    }
+
+    /// Generate cut points with explicit configuration.
+    ///
+    /// This variant assigns [`BeatPosition`] labels and filters by
+    /// `config.min_cut_priority`, giving callers fine-grained control over
+    /// which beats are promoted to edit points.
+    pub fn generate_cut_points_with_config(
+        grid: &BeatGrid,
+        duration_ms: u64,
+        cuts_per_bar: f32,
+        config: &MusicSyncConfig,
+    ) -> Vec<CutPoint> {
         if grid.beats_ms.is_empty() || cuts_per_bar <= 0.0 {
             return Vec::new();
         }
 
-        // Determine the step size in beats (4 beats per bar)
-        let step_beats = (4.0 / cuts_per_bar).max(1.0) as usize;
+        let beats_per_bar = config.beats_per_bar.max(1) as usize;
+        // Determine the step size in beats
+        let step_beats = ((beats_per_bar as f32 / cuts_per_bar).max(1.0)) as usize;
 
         let downbeat_set: std::collections::HashSet<u64> =
             grid.downbeats_ms.iter().copied().collect();
@@ -151,14 +234,65 @@ impl MusicSyncEditor {
             .iter()
             .enumerate()
             .filter(|(i, &t)| i % step_beats == 0 && t < duration_ms)
-            .map(|(_, &t)| {
-                let is_downbeat = downbeat_set.contains(&t);
+            .filter_map(|(i, &t)| {
+                // Classify beat position within the bar
+                let beat_in_bar = i % beats_per_bar;
+                let beat_position = if downbeat_set.contains(&t) {
+                    BeatPosition::Downbeat
+                } else if beat_in_bar == beats_per_bar / 2 {
+                    BeatPosition::StrongUpbeat
+                } else if beat_in_bar % 2 == 0 {
+                    BeatPosition::Upbeat
+                } else {
+                    BeatPosition::Upbeat
+                };
+
                 // Simple ramp: energy increases towards the middle of the track
                 let progress = t as f32 / duration_ms.max(1) as f32;
-                let energy = 1.0 - (progress - 0.5).abs() * 2.0; // peaks at 0.5
-                CutPoint::new(t, is_downbeat, energy.clamp(0.0, 1.0))
+                let energy = 1.0 - (progress - 0.5).abs() * 2.0;
+                let energy = energy.clamp(0.0, 1.0);
+
+                let cut = CutPoint::with_beat_position(t, beat_position, energy);
+
+                // Filter by minimum priority if configured
+                if cut.priority >= config.min_cut_priority {
+                    Some(cut)
+                } else {
+                    None
+                }
             })
             .collect()
+    }
+
+    /// From a list of cut points, return only the downbeat cuts.
+    #[must_use]
+    pub fn downbeat_cuts(cuts: &[CutPoint]) -> Vec<&CutPoint> {
+        cuts.iter()
+            .filter(|c| c.beat_position == BeatPosition::Downbeat)
+            .collect()
+    }
+
+    /// From a list of cut points, return only the upbeat cuts.
+    #[must_use]
+    pub fn upbeat_cuts(cuts: &[CutPoint]) -> Vec<&CutPoint> {
+        cuts.iter()
+            .filter(|c| !matches!(c.beat_position, BeatPosition::Downbeat))
+            .collect()
+    }
+
+    /// Select the best `n` cut points by priority score.
+    #[must_use]
+    pub fn top_cuts(cuts: &[CutPoint], n: usize) -> Vec<&CutPoint> {
+        let mut sorted: Vec<&CutPoint> = cuts.iter().collect();
+        sorted.sort_by(|a, b| {
+            b.priority
+                .partial_cmp(&a.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        sorted.truncate(n);
+        // Re-sort by timestamp for chronological output
+        sorted.sort_by_key(|c| c.time_ms);
+        sorted
     }
 }
 

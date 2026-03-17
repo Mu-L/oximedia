@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 homepage.workspace = true
 repository.workspace = true
-authors = ["OxiMedia Contributors"]
+authors.workspace = true
 description = "Professional audio post-production suite: ADR, Foley, sound design, mixing, restoration"
 keywords = ["audio", "post-production", "mixing", "adr", "foley"]
 categories = ["multimedia::audio", "multimedia::encoding"]
@@ -22,11 +22,10 @@ oximedia-timeline = { workspace = true }
 oximedia-metering = { workspace = true }
 oximedia-timecode = { workspace = true }
 thiserror = { workspace = true }
-rustfft = "6"
+oxifft = { workspace = true }
 rubato = "1.0"
-rand = { workspace = true }
+scirs2-core = { workspace = true }
 rayon = { workspace = true }
-ndarray = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }

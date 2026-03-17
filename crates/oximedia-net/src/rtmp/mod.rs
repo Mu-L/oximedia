@@ -33,9 +33,12 @@
 
 mod amf;
 mod chunk;
+pub mod chunk_optimizer;
 mod client;
+pub mod enhanced;
 mod handshake;
 mod message;
+pub mod rtmp_ext;
 mod server;
 
 pub use amf::{AmfDecoder, AmfEncoder, AmfValue};
@@ -43,13 +46,21 @@ pub use chunk::{
     Amf0Value, AssembledMessage, ChunkDecoder, ChunkEncoder, ChunkHeader, ChunkHeaderType,
     ChunkStream, MessageHeader,
 };
+pub use chunk_optimizer::{
+    RtmpChunkOptimizer, RtmpSessionStats, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE, MIN_CHUNK_SIZE,
+};
 pub use client::{
     ConnectionState, RtmpClient, RtmpClientBuilder, RtmpClientConfig, RtmpUrl, SessionInfo,
+};
+pub use enhanced::{
+    EnhancedAudioPacketType, EnhancedAudioTag, EnhancedFrameType, EnhancedRtmpCapabilities,
+    EnhancedVideoPacketType, EnhancedVideoTag, FourCC,
 };
 pub use handshake::{Handshake, HandshakeState};
 pub use message::{
     CommandMessage, ControlMessage, DataMessage, MessageType, RtmpMessage, UserControlEvent,
 };
+pub use rtmp_ext::{ExVideoHeader, ExVideoPacketType, RtmpExtendedCodec, RtmpExtendedPacket};
 pub use server::{
     ActiveStream, AllowAllAuth, AuthHandler, AuthResult, ConnectionInfo, MediaPacket,
     MediaPacketType, OutgoingMessage, PublishType, RtmpServer, RtmpServerBuilder, RtmpServerConfig,

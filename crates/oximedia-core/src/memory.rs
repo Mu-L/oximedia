@@ -19,13 +19,13 @@
 //!
 //! // Pool
 //! let mut pool = MemoryPool::new(4, 1024, 16);
-//! let idx = pool.allocate(512)?;
+//! let idx = pool.allocate(512).expect("pool has space");
 //! pool.deallocate(idx);
 //! assert_eq!(pool.available(), 4);
 //!
 //! // Ring allocator
 //! let mut ring = RingAllocator::new(256);
-//! let offset = ring.allocate(64)?;
+//! let offset = ring.allocate(64).expect("ring has space");
 //! assert_eq!(offset, 0);
 //! ```
 

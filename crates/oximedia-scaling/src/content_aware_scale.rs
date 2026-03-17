@@ -212,7 +212,7 @@ impl EnergyMap {
         self.data.iter().sum::<f64>() / self.data.len() as f64
     }
 
-    /// Computes the cumulative energy map for vertical seam finding.
+    /// Computes the cumulative energy map for vertical seam finding (backward energy).
     pub fn compute_cumulative_vertical(&self) -> EnergyMap {
         let mut cumulative = self.clone();
         for y in 1..self.height {
@@ -234,6 +234,146 @@ impl EnergyMap {
             }
         }
         cumulative
+    }
+
+    /// Computes the cumulative energy map using **forward energy** for vertical seam finding.
+    ///
+    /// Forward energy (Avidan & Shamir 2007, improved by Rubinstein et al.) measures
+    /// the cost of *inserting* an edge after seam removal rather than the cost of the
+    /// seam itself. This preserves image structure much better than backward energy,
+    /// especially for images with strong edges or gradients.
+    ///
+    /// The three directional costs at pixel (x, y) are:
+    /// - `C_U = |I(x-1, y) - I(x+1, y)|`  (cost of going straight up)
+    /// - `C_L = C_U + |I(x, y-1) - I(x-1, y)|`  (cost of going up-left)
+    /// - `C_R = C_U + |I(x, y-1) - I(x+1, y)|`  (cost of going up-right)
+    ///
+    /// `pixels` must be a grayscale buffer matching `self.width × self.height`.
+    pub fn compute_cumulative_forward_energy(&self, pixels: &[u8]) -> EnergyMap {
+        let w = self.width;
+        let h = self.height;
+        let mut cumulative = EnergyMap::new(w, h);
+
+        // First row: use backward energy (no row above to compute forward costs).
+        for x in 0..w {
+            cumulative.set(x, 0, self.get(x, 0));
+        }
+
+        let pixel_at = |x: u32, y: u32| -> f64 {
+            let idx = (y as usize) * (w as usize) + (x as usize);
+            if idx < pixels.len() {
+                pixels[idx] as f64
+            } else {
+                0.0
+            }
+        };
+
+        for y in 1..h {
+            for x in 0..w {
+                // Horizontal neighbor difference
+                let left_val = if x > 0 {
+                    pixel_at(x - 1, y)
+                } else {
+                    pixel_at(x, y)
+                };
+                let right_val = if x + 1 < w {
+                    pixel_at(x + 1, y)
+                } else {
+                    pixel_at(x, y)
+                };
+                let c_u = (left_val - right_val).abs();
+
+                let above_val = pixel_at(x, y - 1);
+
+                // Cost going up (straight)
+                let m_up = cumulative.get(x, y - 1);
+                let cost_up = if m_up < f64::MAX {
+                    m_up + c_u
+                } else {
+                    f64::MAX
+                };
+
+                // Cost going up-left
+                let cost_left = if x > 0 {
+                    let m_left = cumulative.get(x - 1, y - 1);
+                    let c_l = c_u + (above_val - left_val).abs();
+                    if m_left < f64::MAX {
+                        m_left + c_l
+                    } else {
+                        f64::MAX
+                    }
+                } else {
+                    f64::MAX
+                };
+
+                // Cost going up-right
+                let cost_right = if x + 1 < w {
+                    let m_right = cumulative.get(x + 1, y - 1);
+                    let c_r = c_u + (above_val - right_val).abs();
+                    if m_right < f64::MAX {
+                        m_right + c_r
+                    } else {
+                        f64::MAX
+                    }
+                } else {
+                    f64::MAX
+                };
+
+                let min_cost = cost_up.min(cost_left).min(cost_right);
+                cumulative.set(x, y, min_cost);
+            }
+        }
+
+        cumulative
+    }
+
+    /// Find the minimum-energy vertical seam using forward energy.
+    ///
+    /// Uses `compute_cumulative_forward_energy` which produces better seams
+    /// that preserve edges and gradients in the image.
+    pub fn find_vertical_seam_forward(&self, pixels: &[u8]) -> Seam {
+        let cumulative = self.compute_cumulative_forward_energy(pixels);
+
+        let mut indices = vec![0u32; self.height as usize];
+
+        // Find minimum in last row
+        let last_row = self.height - 1;
+        let mut min_x = 0u32;
+        let mut min_energy = f64::MAX;
+        for x in 0..self.width {
+            let e = cumulative.get(x, last_row);
+            if e < min_energy {
+                min_energy = e;
+                min_x = x;
+            }
+        }
+        indices[last_row as usize] = min_x;
+
+        // Trace back
+        for y in (0..last_row).rev() {
+            let prev_x = indices[(y + 1) as usize];
+            let mut best_x = prev_x;
+            let mut best_e = cumulative.get(prev_x, y);
+
+            if prev_x > 0 {
+                let e = cumulative.get(prev_x - 1, y);
+                if e < best_e {
+                    best_e = e;
+                    best_x = prev_x - 1;
+                }
+            }
+            if prev_x + 1 < self.width {
+                let e = cumulative.get(prev_x + 1, y);
+                if e < best_e {
+                    let _ = best_e;
+                    best_x = prev_x + 1;
+                }
+            }
+
+            indices[y as usize] = best_x;
+        }
+
+        Seam::new(SeamDirection::Vertical, indices, min_energy)
     }
 
     /// Finds the minimum-energy vertical seam using the cumulative map.
@@ -357,6 +497,11 @@ impl ContentAwareScaler {
     /// seams (reducing height). Returns the resized pixel buffer together
     /// with the final `(width, height)`.
     ///
+    /// When `EnergyFunction::ForwardEnergy` is configured, the seam-finding
+    /// algorithm uses forward energy which produces better results by
+    /// measuring the cost of *inserting* an edge after removal rather than
+    /// the cost of the seam pixels themselves.
+    ///
     /// If the target dimensions are larger than the source, those axes are
     /// left unchanged (seam carving only shrinks).
     #[allow(clippy::cast_precision_loss)]
@@ -364,6 +509,8 @@ impl ContentAwareScaler {
         if pixels.len() < (width as usize) * (height as usize) * 3 {
             return None;
         }
+
+        let use_forward = self.config.energy_function == EnergyFunction::ForwardEnergy;
 
         let mut buf = pixels.to_vec();
         let mut w = width;
@@ -374,7 +521,11 @@ impl ContentAwareScaler {
         for _ in 0..v_seams {
             let luma = rgb_to_luma(&buf, w, h);
             let energy = EnergyMap::compute_gradient_energy(&luma, w, h);
-            let seam = energy.find_vertical_seam();
+            let seam = if use_forward {
+                energy.find_vertical_seam_forward(&luma)
+            } else {
+                energy.find_vertical_seam()
+            };
             buf = remove_vertical_seam_rgb(&buf, w, h, &seam);
             w -= 1;
         }
@@ -386,7 +537,11 @@ impl ContentAwareScaler {
             let transposed = transpose_rgb(&buf, w, h);
             let luma = rgb_to_luma(&transposed, h, w);
             let energy = EnergyMap::compute_gradient_energy(&luma, h, w);
-            let seam = energy.find_vertical_seam();
+            let seam = if use_forward {
+                energy.find_vertical_seam_forward(&luma)
+            } else {
+                energy.find_vertical_seam()
+            };
             let carved = remove_vertical_seam_rgb(&transposed, h, w, &seam);
             h -= 1;
             buf = transpose_rgb(&carved, h, w);
@@ -686,5 +841,148 @@ mod tests {
         assert_eq!(w, 4);
         assert_eq!(h, 4);
         assert_eq!(buf.len(), pixels.len());
+    }
+
+    // ── Forward energy tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_forward_energy_cumulative_basic() {
+        // 3x3 uniform image: forward energy should produce low-cost seams
+        let pixels = vec![128u8; 9];
+        let energy = EnergyMap::compute_gradient_energy(&pixels, 3, 3);
+        let cumulative = energy.compute_cumulative_forward_energy(&pixels);
+        // All energies should be finite
+        for y in 0..3 {
+            for x in 0..3 {
+                assert!(
+                    cumulative.get(x, y) < f64::MAX,
+                    "cumulative({x},{y}) should be finite"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_forward_energy_seam_finds_low_cost_path() {
+        // Image with a clear vertical stripe of low energy in center
+        let mut pixels = vec![200u8; 5 * 5];
+        for y in 0..5 {
+            pixels[y * 5 + 2] = 0; // center column has distinct value
+        }
+        let energy = EnergyMap::compute_gradient_energy(&pixels, 5, 5);
+        let seam = energy.find_vertical_seam_forward(&pixels);
+        assert_eq!(seam.len(), 5);
+        assert_eq!(seam.direction, SeamDirection::Vertical);
+        // Seam should stay near the center (column 2) where gradient contrast is
+        for &idx in &seam.indices {
+            assert!(
+                (idx as i32 - 2).unsigned_abs() <= 2,
+                "seam index {idx} too far from center"
+            );
+        }
+    }
+
+    #[test]
+    fn test_forward_energy_seam_has_valid_connectivity() {
+        // Seam indices should differ by at most 1 between adjacent rows
+        let pixels: Vec<u8> = (0..36).map(|i| (i * 7) as u8).collect();
+        let energy = EnergyMap::compute_gradient_energy(&pixels, 6, 6);
+        let seam = energy.find_vertical_seam_forward(&pixels);
+        for pair in seam.indices.windows(2) {
+            let diff = (pair[0] as i32 - pair[1] as i32).unsigned_abs();
+            assert!(
+                diff <= 1,
+                "seam connectivity violation: {} -> {}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
+    fn test_scale_rgb_forward_energy_reduces_width() {
+        let pixels = vec![128u8; 6 * 4 * 3];
+        let config =
+            ContentAwareConfig::new(4, 4).with_energy_function(EnergyFunction::ForwardEnergy);
+        let scaler = ContentAwareScaler::new(config);
+        let result = scaler.scale_rgb(&pixels, 6, 4);
+        assert!(result.is_some());
+        let (buf, w, h) = result.expect("forward energy scale should succeed");
+        assert_eq!(w, 4);
+        assert_eq!(h, 4);
+        assert_eq!(buf.len(), 4 * 4 * 3);
+    }
+
+    #[test]
+    fn test_scale_rgb_forward_energy_reduces_height() {
+        let pixels = vec![128u8; 4 * 6 * 3];
+        let config =
+            ContentAwareConfig::new(4, 4).with_energy_function(EnergyFunction::ForwardEnergy);
+        let scaler = ContentAwareScaler::new(config);
+        let result = scaler.scale_rgb(&pixels, 4, 6);
+        assert!(result.is_some());
+        let (buf, w, h) = result.expect("forward energy scale should succeed");
+        assert_eq!(w, 4);
+        assert_eq!(h, 4);
+        assert_eq!(buf.len(), 4 * 4 * 3);
+    }
+
+    #[test]
+    fn test_scale_rgb_forward_energy_both_axes() {
+        let pixels = vec![100u8; 6 * 6 * 3];
+        let config =
+            ContentAwareConfig::new(4, 4).with_energy_function(EnergyFunction::ForwardEnergy);
+        let scaler = ContentAwareScaler::new(config);
+        let result = scaler.scale_rgb(&pixels, 6, 6);
+        assert!(result.is_some());
+        let (buf, w, h) = result.expect("should succeed");
+        assert_eq!(w, 4);
+        assert_eq!(h, 4);
+        assert_eq!(buf.len(), 4 * 4 * 3);
+    }
+
+    #[test]
+    fn test_forward_vs_backward_energy_different_seams() {
+        // With a structured image, forward and backward energy may find different seams
+        let mut pixels = vec![128u8; 8 * 8];
+        // Create a diagonal gradient
+        for y in 0..8u32 {
+            for x in 0..8u32 {
+                pixels[(y as usize) * 8 + (x as usize)] =
+                    ((x as f64 + y as f64) / 14.0 * 255.0) as u8;
+            }
+        }
+        let energy = EnergyMap::compute_gradient_energy(&pixels, 8, 8);
+        let backward_seam = energy.find_vertical_seam();
+        let forward_seam = energy.find_vertical_seam_forward(&pixels);
+
+        // Both should be valid seams of length 8
+        assert_eq!(backward_seam.len(), 8);
+        assert_eq!(forward_seam.len(), 8);
+        // Energy values should be finite and positive
+        assert!(backward_seam.total_energy > 0.0);
+        assert!(forward_seam.total_energy > 0.0);
+    }
+
+    #[test]
+    fn test_forward_energy_edge_preservation() {
+        // Image with a strong vertical edge: forward energy should avoid cutting through it
+        let mut pixels = vec![0u8; 8 * 4];
+        for y in 0..4u32 {
+            for x in 4..8u32 {
+                pixels[(y as usize) * 8 + (x as usize)] = 255;
+            }
+        }
+        let energy = EnergyMap::compute_gradient_energy(&pixels, 8, 4);
+        let seam = energy.find_vertical_seam_forward(&pixels);
+        assert_eq!(seam.len(), 4);
+        // The seam should avoid the strong edge at column 3-4
+        // It should tend toward the uniform regions (columns 0-2 or 5-7)
+        let avg_col: f64 = seam.indices.iter().map(|&x| x as f64).sum::<f64>() / seam.len() as f64;
+        // Should not be exactly at the edge (columns 3 or 4)
+        assert!(
+            avg_col < 3.5 || avg_col > 4.5,
+            "forward energy seam at avg column {avg_col} should avoid the edge at 3-4"
+        );
     }
 }

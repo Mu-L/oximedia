@@ -4,10 +4,14 @@
 //! Provides high-level session lifecycle management, state tracking,
 //! and metrics for active collaboration sessions.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{BufWriter, Write};
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// State of a collaboration session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SessionState {
     /// Session is being initialized.
     Initializing,
@@ -51,7 +55,7 @@ impl std::fmt::Display for SessionState {
 }
 
 /// Unique session identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
 
 impl SessionId {
@@ -73,7 +77,7 @@ impl std::fmt::Display for SessionId {
 }
 
 /// A collaboration session entry tracked by the manager.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollabSession {
     /// Unique identifier for this session.
     pub id: SessionId,
@@ -237,6 +241,59 @@ impl SessionManager {
             }
         }
     }
+
+    /// Persist all sessions to a JSON snapshot file at `path`.
+    ///
+    /// The file is written atomically to a temporary path first, then renamed.
+    pub fn persist_snapshot(&self, path: &Path) -> std::io::Result<()> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let sessions: Vec<&CollabSession> = self.sessions.values().collect();
+        let snapshot = SessionSnapshot {
+            timestamp,
+            sessions: sessions.into_iter().cloned().collect(),
+        };
+
+        // Write to a temp file alongside the target, then rename for atomicity.
+        let tmp_path = path.with_extension("tmp");
+        {
+            let file = std::fs::File::create(&tmp_path)?;
+            let mut writer = BufWriter::new(file);
+            let json = serde_json::to_string(&snapshot)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            writer.write_all(json.as_bytes())?;
+            writer.flush()?;
+        }
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    }
+
+    /// Restore a `SessionManager` from a JSON snapshot file at `path`.
+    pub fn restore_snapshot(path: &Path) -> std::io::Result<Self> {
+        let data = std::fs::read(path)?;
+        let snapshot: SessionSnapshot = serde_json::from_slice(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        let mut manager = Self::new();
+        for session in snapshot.sessions {
+            manager.sessions.insert(session.id.clone(), session);
+        }
+        Ok(manager)
+    }
+}
+
+/// A point-in-time snapshot of all sessions tracked by a [`SessionManager`].
+///
+/// Used for session persistence and recovery across server restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSnapshot {
+    /// Unix timestamp (seconds) when this snapshot was taken.
+    pub timestamp: u64,
+    /// All sessions captured at snapshot time.
+    pub sessions: Vec<CollabSession>,
 }
 
 #[cfg(test)]
@@ -406,5 +463,33 @@ mod tests {
         assert!(s.has_capacity());
         s.add_participant();
         assert!(!s.has_capacity());
+    }
+
+    #[test]
+    fn test_session_snapshot_roundtrip() {
+        let mut mgr = SessionManager::new();
+        let mut s1 = make_session("snap-1", 5);
+        s1.activate();
+        s1.add_participant();
+        let s2 = make_session("snap-2", 10);
+        mgr.register(s1);
+        mgr.register(s2);
+
+        let tmp = std::env::temp_dir().join("oximedia_collab_session_snapshot_test.json");
+        mgr.persist_snapshot(&tmp).expect("persist should succeed");
+
+        let restored = SessionManager::restore_snapshot(&tmp).expect("restore should succeed");
+        assert_eq!(restored.total_count(), 2);
+
+        let id1 = SessionId::new("snap-1");
+        let loaded = restored
+            .get(&id1)
+            .expect("session snap-1 should be present");
+        assert_eq!(loaded.state, SessionState::Active);
+        assert_eq!(loaded.participant_count, 1);
+        assert_eq!(loaded.max_participants, 5);
+
+        // Clean up.
+        let _ = std::fs::remove_file(&tmp);
     }
 }

@@ -2,6 +2,7 @@
 name = "oximedia-renderfarm"
 description = "Distributed render farm management and job scheduling"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -58,15 +59,15 @@ sha2 = { workspace = true }
 lz4 = "1.28"
 zstd = "0.13"
 walkdir = "2"
-notify = "7"
+notify = "8"
 crossbeam-channel = "0.5"
 crossbeam = "0.8"
 num_cpus = "1.17"
-sysinfo = "0.36"
+sysinfo = "0.38"
 
 [dev-dependencies]
-tempfile = "3"
-criterion = "0.5"
+tempfile.workspace = true
+criterion = "0.8"
 
 [[bench]]
 name = "scheduler"

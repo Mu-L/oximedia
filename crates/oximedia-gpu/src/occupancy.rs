@@ -144,6 +144,7 @@ pub struct OccupancyCalculator;
 impl OccupancyCalculator {
     /// Calculate occupancy for a given GPU spec and kernel configuration.
     #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::manual_checked_ops)]
     #[must_use]
     pub fn calculate(spec: &GpuSpec, kernel: &KernelResources) -> OccupancyResult {
         if kernel.threads_per_block == 0 || spec.warp_size == 0 {
@@ -163,30 +164,23 @@ impl OccupancyCalculator {
         let blocks_by_count = spec.max_blocks_per_sm;
 
         // Limit by thread count
-        let blocks_by_threads = if warps_per_block > 0 {
-            max_warps / warps_per_block
-        } else {
-            0
-        };
+        let blocks_by_threads = max_warps.checked_div(warps_per_block).unwrap_or(0);
 
         // Limit by registers
         let blocks_by_registers = if kernel.registers_per_thread > 0 {
             let regs_per_block = kernel.registers_per_thread * kernel.threads_per_block;
-            if regs_per_block > 0 {
-                spec.max_registers_per_sm / regs_per_block
-            } else {
-                blocks_by_count
-            }
+            spec.max_registers_per_sm
+                .checked_div(regs_per_block)
+                .unwrap_or(blocks_by_count)
         } else {
             blocks_by_count
         };
 
         // Limit by shared memory
-        let blocks_by_shared = if kernel.shared_memory_per_block > 0 {
-            spec.max_shared_memory_per_sm / kernel.shared_memory_per_block
-        } else {
-            blocks_by_count
-        };
+        let blocks_by_shared = spec
+            .max_shared_memory_per_sm
+            .checked_div(kernel.shared_memory_per_block)
+            .unwrap_or(blocks_by_count);
 
         // Find limiting factor
         let active_blocks = blocks_by_count

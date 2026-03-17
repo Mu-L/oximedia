@@ -7,7 +7,7 @@
 use crate::{DrmError, DrmSystem, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use ring::rand::{SecureRandom, SystemRandom};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -175,9 +175,6 @@ pub struct FairPlayKeyServer {
     /// Application secret key
     #[allow(dead_code)]
     app_secret_key: Vec<u8>,
-    /// Random number generator
-    #[allow(dead_code)]
-    rng: SystemRandom,
 }
 
 impl FairPlayKeyServer {
@@ -186,7 +183,6 @@ impl FairPlayKeyServer {
         Self {
             keys: HashMap::new(),
             app_secret_key,
-            rng: SystemRandom::new(),
         }
     }
 
@@ -256,16 +252,12 @@ impl FairPlayKeyServer {
 }
 
 /// FairPlay SPC generator (simplified)
-pub struct FairPlaySpcGenerator {
-    rng: SystemRandom,
-}
+pub struct FairPlaySpcGenerator;
 
 impl FairPlaySpcGenerator {
     /// Create a new SPC generator
     pub fn new() -> Self {
-        Self {
-            rng: SystemRandom::new(),
-        }
+        Self
     }
 
     /// Generate an SPC (Server Playback Context)
@@ -287,9 +279,7 @@ impl FairPlaySpcGenerator {
 
         // Random session ID
         let mut session_id = vec![0u8; 16];
-        self.rng.fill(&mut session_id).map_err(|e| {
-            DrmError::EncryptionError(format!("Failed to generate session ID: {:?}", e))
-        })?;
+        rand::rng().fill_bytes(&mut session_id);
         spc.extend_from_slice(&session_id);
 
         // Asset ID length and data

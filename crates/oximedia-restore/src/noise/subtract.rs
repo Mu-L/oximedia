@@ -25,6 +25,9 @@ impl Default for SpectralSubtractionConfig {
     }
 }
 
+/// Number of frames used when estimating the noise floor from initial silence.
+const INITIAL_SILENCE_FRAMES: usize = 8;
+
 /// Spectral subtraction processor.
 #[derive(Debug)]
 pub struct SpectralSubtraction {
@@ -57,6 +60,64 @@ impl SpectralSubtraction {
             hop_size,
             prev_gain: vec![1.0; spectrum_size],
         }
+    }
+
+    /// Construct a `SpectralSubtraction` by **estimating the noise floor automatically**
+    /// from the initial silence at the start of `samples`.
+    ///
+    /// The estimator:
+    /// 1. Scans the first `INITIAL_SILENCE_FRAMES` × `fft_size` samples.
+    /// 2. Computes the per-bin average magnitude spectrum across those frames.
+    /// 3. Applies a gentle over-estimation factor (`1.05×`) so that the subtracted
+    ///    profile is slightly conservative, avoiding musical noise artefacts when the
+    ///    true signal-to-noise ratio is high.
+    ///
+    /// If the initial segment is too short for even one FFT frame, this falls back
+    /// to an empty (flat-zero) profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `samples` - Full audio buffer; the initial silence must be at the front
+    /// * `fft_size` - FFT frame size (power of two recommended)
+    /// * `hop_size` - Hop size between frames used during processing
+    /// * `config` - Spectral subtraction configuration
+    pub fn new_from_initial_silence(
+        samples: &[f32],
+        fft_size: usize,
+        hop_size: usize,
+        config: SpectralSubtractionConfig,
+    ) -> crate::error::RestoreResult<Self> {
+        let spectrum_size = fft_size / 2 + 1;
+
+        // How many samples to use for the initial-silence noise estimate
+        let silence_region_len = (INITIAL_SILENCE_FRAMES * fft_size).min(samples.len());
+
+        let noise_profile = if silence_region_len >= fft_size {
+            let silence_samples = &samples[..silence_region_len];
+            let silence_hop = fft_size / 2;
+            let mut profile = NoiseProfile::learn(silence_samples, fft_size, silence_hop)?;
+
+            // Apply a conservative over-estimation factor to reduce musical noise
+            const OVER_EST: f32 = 1.05;
+            for m in &mut profile.magnitude {
+                *m *= OVER_EST;
+            }
+            for p in &mut profile.power {
+                *p *= OVER_EST * OVER_EST;
+            }
+            profile
+        } else {
+            // Not enough data — empty flat profile (no subtraction)
+            NoiseProfile::new(fft_size)
+        };
+
+        Ok(Self {
+            config,
+            fft_size: noise_profile.fft_size,
+            noise_profile,
+            hop_size,
+            prev_gain: vec![1.0; spectrum_size],
+        })
     }
 
     /// Process samples to remove noise.
@@ -280,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_spectral_subtraction() {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         // Create noise profile
@@ -309,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_adaptive_spectral_subtraction() {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         let noise_samples: Vec<f32> = (0..8192).map(|_| rng.random_range(-0.1..0.1)).collect();
@@ -340,5 +401,54 @@ mod tests {
         let config = SpectralSubtractionConfig::default();
         assert!(config.oversubtraction_factor > 1.0);
         assert!(config.spectral_floor_db < 0.0);
+    }
+
+    #[test]
+    fn test_spectral_subtraction_from_initial_silence() {
+        use rand::RngExt;
+        let mut rng = rand::rng();
+
+        // Build a signal: first 8 × 2048 = 16384 samples are near-silence noise,
+        // the rest is a 440 Hz tone buried in lighter noise.
+        let fft_size = 2048_usize;
+        let silence_len = 8 * fft_size; // = 16384
+
+        let mut signal = Vec::with_capacity(silence_len + 8192);
+        for _ in 0..silence_len {
+            signal.push(rng.random_range(-0.05_f32..0.05));
+        }
+        for i in 0..8192_usize {
+            use std::f32::consts::PI;
+            let t = i as f32 / 44100.0;
+            signal.push((2.0 * PI * 440.0 * t).sin() + rng.random_range(-0.05..0.05));
+        }
+
+        let mut processor = SpectralSubtraction::new_from_initial_silence(
+            &signal,
+            fft_size,
+            fft_size / 2,
+            SpectralSubtractionConfig::default(),
+        )
+        .expect("should succeed");
+
+        let output = processor.process(&signal).expect("process should succeed");
+        assert_eq!(output.len(), signal.len());
+    }
+
+    #[test]
+    fn test_spectral_subtraction_from_initial_silence_too_short() {
+        // Buffer shorter than one FFT frame — should create an empty profile gracefully
+        let short_samples = vec![0.01_f32; 512];
+        let mut processor = SpectralSubtraction::new_from_initial_silence(
+            &short_samples,
+            2048,
+            1024,
+            SpectralSubtractionConfig::default(),
+        )
+        .expect("should succeed even with short input");
+        let output = processor
+            .process(&short_samples)
+            .expect("process should succeed");
+        assert_eq!(output.len(), short_samples.len());
     }
 }

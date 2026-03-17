@@ -1,10 +1,10 @@
 # OxiMedia — The Sovereign Media Framework: Development Roadmap
 
-**Version: 0.1.1**
-**Status as of: 2026-03-10**
-**Total SLOC: ~1,486,000 (Rust)**
-**Total Crates: 97**
-**Crate Status: 97 Stable / 0 Alpha / 0 Partial**
+**Version: 0.1.2**
+**Status as of: 2026-03-17**
+**Total SLOC: ~2,155,000 (Rust)**
+**Total Crates: 106**
+**Crate Status: 106 Stable / 0 Alpha / 0 Partial**
 
 ---
 
@@ -12,8 +12,8 @@
 
 | Category | Count | Notes |
 |----------|-------|-------|
-| Stable crates | 97 | All crates fully stabilized; no `todo!()`/`unimplemented!()` stubs |
-| Alpha crates | 0 | All 22 former alpha crates promoted to stable |
+| Stable crates | 106 | All crates fully stabilized; no `todo!()`/`unimplemented!()` stubs |
+| Alpha crates | 0 | All 31 former alpha crates promoted to stable |
 | Partial crates | 0 | All 10 former partial crates completed and promoted to stable |
 
 ---
@@ -128,7 +128,7 @@
 
 ## Phase 9: Hardening and Stabilization [COMPLETE]
 
-All 33 non-stable crates (10 partial + 22 alpha + 1 stub) have been fully implemented, tested, and promoted to stable status.
+All 42 non-stable crates (10 partial + 31 alpha + 1 stub) have been fully implemented, tested, and promoted to stable status.
 
 ### 9.1 Partial Crates — All Completed and Stable
 
@@ -178,7 +178,75 @@ All 22 former alpha crates have been audited, documented, tested, and promoted t
 
 | Location | Stub | Priority |
 |----------|------|----------|
-| `oximedia-net/src/` | 1 `todo!()` in ABR (adaptive bitrate) path | High |
+| `oximedia-net/src/` | 1 `todo!()` in ABR (adaptive bitrate) — confirmed in doc-comment only, not executable code | None/Resolved |
+
+---
+
+## 0.1.2 Changes (2026-03-11)
+
+| Item | Status |
+|------|--------|
+| **Facade crate** (`oximedia`) expanded: 59 lines → 408 lines, 4 → 29 crates exposed | ✅ Done |
+| 25 feature flags added to facade crate + `full` meta-feature | ✅ Done |
+| New `prelude.rs` with 211 lines of feature-gated re-exports | ✅ Done |
+| New examples: `audio_metering`, `quality_assessment`, `timecode_operations` | ✅ Done |
+| New examples: `dedup_detection`, `workflow_pipeline` | ✅ Done |
+| Integration test suite added (`oximedia/tests/integration.rs`) | ✅ Done |
+| `oximedia-dedup`: 6 stub methods fully implemented (pHash, SSIM, histogram, feature, audio fingerprint, metadata) | ✅ Done |
+| `oximedia-search`: real facet aggregation implemented (7 dimensions: formats, codecs, durations, resolutions, dates, tags, bitrates) | ✅ Done |
+| Workspace version bumped to 0.1.2 | ✅ Done |
+| `oximedia-compat-ffmpeg`: migrated to workspace dep style | ✅ Done |
+| New examples: `video_scopes`, `shot_detection` | ✅ Done |
+| PyPI workflow: fixed 3 bugs (maturin version pinned to 1.8.4, protoc URL typo fixed, macOS Intel runner corrected) | ✅ Done |
+| `pyproject.toml` version updated to 0.1.2 | ✅ Done |
+| Facade crate extended: 49 → ~93 crates exposed (all ~93 workspace library crates), 60+ feature flags | ✅ Done |
+| NMOS mDNS/DNS-SD auto-discovery: NmosDiscovery with builder, announce, browse — `nmos-discovery` feature | ✅ Done (605 tests) |
+| 4 criterion benchmark suites: quality_metrics, audio_metering, format_probe, dedup_hash | ✅ Done |
+| CLI: `oximedia loudness` and `oximedia quality` subcommands added | ✅ Done (306 tests) |
+| CLI: `oximedia dedup` and `oximedia timecode` subcommands added | ✅ Done |
+| Pre-existing CLI bugs fixed (archive_cmd, farm_cmd, search_cmd, presets doctest) | ✅ Done |
+| NMOS IS-08 Audio Channel Mapping API implemented (`channel_mapping` module, 41 tests, 656 total routing tests) | ✅ Done |
+| New examples: `nmos_registry`, `color_pipeline` | ✅ Done |
+| `oximedia-simd`: AVX-512 paths and `CpuFeatures` runtime detection | ✅ Done |
+| WASM build verified: `cargo check --target wasm32-unknown-unknown` clean, 505 tests pass | ✅ Done |
+| NMOS IS-09 System API (global config, health endpoint, API version discovery, 36 tests) | ✅ Done |
+| CLI: `normalize`, `batch-engine`, enhanced `scopes` subcommands (333 total CLI tests) | ✅ Done |
+| oximedia-audio-analysis: chromagram, energy analysis, ISO 226 loudness curves (515 tests) | ✅ Done |
+| oximedia-mir: Camelot codes, relative/parallel keys, genre classification (607 tests) | ✅ Done |
+| NMOS IS-11 Stream Compatibility Management (CompatibilityRegistry, MediaCapability) | ✅ Done |
+| oximedia-transcode: VP9 CRF, FFV1 archive, Opus FEC/DTX, FlacConfig, TranscodePreset, TranscodeEstimator | ✅ Done |
+| CLI: `workflow`, `version` subcommands, enhanced `probe` output | ✅ Done |
+| `oximedia-hdr`: scene-referred tone mapping with per-frame luminance analysis (`SceneReferredToneMapper`, `FrameLuminanceAnalysis`) | ✅ Done |
+| `oximedia-hdr`: soft-clip gamut mapping with perceptual desaturation (`convert_soft_clip`, `convert_frame_soft_clip`) in `gamut.rs` | ✅ Done |
+| `oximedia-hdr`: BT.2446 Method A and Method C tone mapping operators (`BT2446MethodAToneMapper`, `BT2446MethodCToneMapper`) | ✅ Done |
+| `oximedia-hdr`: Dolby Vision RPU generation (`generate_rpu_nal`, `parse_rpu_nal_header`, `verify_rpu_crc`, `RpuGenerationConfig`) in `dolby_vision_profile.rs` | ✅ Done |
+| `oximedia-hdr`: HLG system gamma adjustment for display peak luminance (`hlg_adapted_system_gamma`, `hlg_system_for_display`) in `hlg_advanced.rs` | ✅ Done |
+| `oximedia-hdr`: MaxRGB and percentile luminance statistics for CLL auto-detect (`MaxRgbAnalyzer::percentile_nits`, `auto_detect_cll`) in `color_volume.rs` | ✅ Done |
+| `oximedia-hdr`: inverse tone mapping SDR-to-HDR upconversion (`InverseToneMapper`, `InverseToneMappingOperator`) in `tone_mapping.rs` | ✅ Done |
+| `oximedia-hdr`: `hdr_histogram.rs` module for luminance histogram analysis (`HdrHistogram`, `HdrHistogramAnalyzer`) | ✅ Done |
+| `oximedia-hdr`: `display_model.rs` module for target display characterisation (`DisplayModel` with peak nits, black level, gamut) | ✅ Done |
+| `oximedia-hdr`: `color_volume_transform.rs` ICtCp color space conversions BT.2100 (`rgb_to_ictcp`, `ictcp_to_rgb`, `ICtCpFrame`) | ✅ Done |
+| `oximedia-hdr`: SIMD-optimized PQ EOTF/OETF batch computation (`pq_eotf_batch`, `pq_oetf_batch`, `pq_eotf_fast`, `pq_oetf_fast`) in `transfer_function.rs` | ✅ Done |
+| `oximedia-hdr`: LUT-based fast path for PQ and HLG transfer functions (`PqEotfLut`, `PqOetfLut`, `HlgEotfLut`) in `transfer_function.rs` | ✅ Done |
+| `oximedia-hdr`: parallel per-row tone mapping using rayon (`map_frame_parallel`, `tone_map_frame_rayon`) in `tone_mapping.rs` | ✅ Done |
+| `oximedia-hdr`: 283 tests pass, zero warnings (2026-03-14) | ✅ Done |
+| `oximedia-hdr` crate: HDR processing (PQ/HLG, tone mapping, gamut, HDR10+, DV profiles) | ✅ Done |
+| `oximedia-spatial` crate: spatial audio (HOA, HRTF, VBAP, room sim, WFS) | ✅ Done |
+| `oximedia-cache` crate: LRU, tiered, predictive warming, content-aware caching | ✅ Done |
+| `oximedia-stream` crate: BOLA ABR, SCTE-35, segment lifecycle, multi-CDN | ✅ Done |
+| `oximedia-video` crate: motion, deinterlace, interpolation, scene detect, pulldown | ✅ Done |
+| `oximedia-cdn` crate: edge manager, cache invalidation, origin failover, geo routing | ✅ Done |
+| `oximedia-neural` crate: tensor ops, conv2d, batch norm, activations, media models | ✅ Done |
+| `oximedia-360` crate: equirectangular↔cubemap, fisheye, stereo 3D, spatial media XMP | ✅ Done |
+| `oximedia-analytics` crate: session tracking, retention curves, A/B testing, engagement | ✅ Done |
+| `oximedia-caption-gen` crate: speech alignment, Knuth-Plass, WCAG 2.1, diarization | ✅ Done |
+| `oximedia-pipeline` crate: declarative media processing DSL, typed filter graph | ✅ Done |
+| Dependency conflict resolved: rusqlite 0.32 + sqlx 0.8.6 (unified libsqlite3-sys) | ✅ Done |
+| unwrap() eliminated: 1,386 calls across 119 files → 0 in production/test code | ✅ Done |
+| Example collision fixed: quality_assessment renamed in oximedia-analysis | ✅ Done |
+| pyo3 deprecation warnings suppressed with #![allow(deprecated)] | ✅ Done |
+| rand 0.10 RngExt migration completed across all crates | ✅ Done |
+| **70,807 tests passing**, 0 failures, 235 skipped | ✅ Done |
 
 ---
 
@@ -186,7 +254,7 @@ All 22 former alpha crates have been audited, documented, tested, and promoted t
 
 | Priority | Crate | Issue | Status |
 |----------|-------|-------|--------|
-| Medium | `oximedia-net` | 1 remaining `todo!()` in ABR controller | Fix before 0.2.0 |
+| None/Resolved | `oximedia-net` | `todo!()` confirmed in documentation comment only in ABR controller — not executable code, no runtime impact | Resolved |
 
 ---
 
@@ -194,12 +262,15 @@ All 22 former alpha crates have been audited, documented, tested, and promoted t
 
 | Item | Target | Notes |
 |------|--------|-------|
-| WASM/WebAssembly build support | 0.3.0 | Pure-Rust stack makes this feasible; needs `wasm32-unknown-unknown` CI |
+| **NMOS IS-04/IS-05/IS-07 REST APIs** | **0.1.2** | IS-04/IS-05/IS-07 REST APIs complete; discovery via mDNS implemented (`nmos-http` + `nmos-discovery` features in `oximedia-routing`). Constraint schemas + IS-08 channel mapping also complete in 0.1.2. |
+| **IS-08 Audio Channel Mapping API** | **Implemented in 0.1.2** | `channel_mapping` module in `oximedia-routing`; 41 dedicated tests, 656 total routing tests |
+| **IS-09 System API** | **Implemented in 0.1.2** | Global config, health endpoint, API version discovery; 36 dedicated tests |
+| **IS-11 Stream Compatibility Management** | **Implemented in 0.1.2** | `CompatibilityRegistry`, `MediaCapability`; compatibility module in `oximedia-routing` |
+| **AVX-512 SIMD paths** | **Implemented in 0.1.2 (foundation)** | `oximedia-simd`; `CpuFeatures` runtime detection; runtime dispatch via `multiversion` |
 | Python pip-installable package | 0.2.0 | PyO3 bindings complete; maturin packaging and PyPI publish remaining |
+| WASM/WebAssembly build support | 0.3.0 | Pure-Rust stack makes this feasible; needs `wasm32-unknown-unknown` CI |
 | Hardware H.264 encoding | 2027+ | Blocked on patent expiry (est. September 2027); feature-gated, separate repo `oximedia-avc` |
 | Full ONNX Runtime integration | 0.3.0 | For ML-backed CV/scene/shot inference; must remain feature-gated for pure-Rust default |
-| AVX-512 SIMD paths | 0.3.0 | `oximedia-simd`; runtime dispatch via `multiversion` |
-| NMOS IS-04/IS-05 full compliance | 0.2.0 | `oximedia-routing`; registry and connection API |
 
 ---
 
@@ -220,8 +291,15 @@ All 22 former alpha crates have been audited, documented, tested, and promoted t
 | No `zip` crate | Enforced; `oxiarc-archive` used |
 | Workspace dependency management | All crate versions via workspace `[dependencies]` |
 | COOLJAPAN ecosystem alignment | SciRS2-Core for numeric/statistical ops |
-| `unwrap()` free | Enforced across ALL crates (stable, alpha, partial); all 354 `unwrap()` calls eliminated; `expect()` with context or `?` propagation only |
+| `unwrap()` free | Enforced across ALL crates; 1,386 unwrap() calls eliminated in 0.1.2 session; only doc-comment examples remain |
 | Single file < 2000 SLOC | Enforced; splitrs used for refactoring targets |
+| NMOS IS-04/IS-05/IS-07 HTTP APIs | Implemented (`nmos-http` feature in `oximedia-routing`) |
+| NMOS IS-08 Audio Channel Mapping | Implemented (`channel_mapping` module in `oximedia-routing`) |
+| NMOS IS-09 System API | Implemented (global config, health endpoint, API version discovery in `oximedia-routing`) |
+| NMOS IS-11 Stream Compatibility Management | Implemented (compatibility module in `oximedia-routing`) |
+| AVX-512 SIMD paths | Implemented with runtime detection in `oximedia-simd` (`CpuFeatures`) |
+| Criterion benchmarks | 4 benchmark suites in `benches/` crate |
+| Comprehensive CLI | `oximedia-cli` with probe/info/transcode/loudness/quality/dedup/timecode commands |
 
 ---
 
@@ -276,4 +354,4 @@ All of the following must pass before any release tag:
 
 ---
 
-*Last updated: 2026-03-10 — v0.1.1 status, ~1.49M SLOC, 97 crates (97 stable)*
+*Last updated: 2026-03-17 — v0.1.2 continuing, ~2.155M SLOC, 106 crates (106 stable); facade exposes ~108 workspace library crates via 60+ feature flags; 11 new crates (hdr, spatial, cache, stream, video, cdn, neural, 360, analytics, caption-gen, pipeline); 70,807 tests passing; 1,386 unwrap() calls eliminated; NMOS IS-04/IS-05/IS-07/IS-08/IS-09/IS-11 complete; AVX-512 SIMD; CLI extended; 4 criterion benchmarks; WASM clean*

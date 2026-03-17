@@ -1,8 +1,15 @@
 //! Threaded comment system for collaborative video review.
 //!
 //! Supports threaded replies, emoji reactions, comment resolution, and full-text search.
+//!
+//! Two comment models are provided:
+//! - [`Comment`] / [`CommentThread`]: classic `u64`-keyed comments used by [`CommentStore`].
+//! - [`UuidComment`] / [`UuidCommentThread`]: UUID-keyed model suitable for distributed
+//!   environments where globally unique IDs are required without central coordination.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// Strongly-typed comment identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -237,6 +244,148 @@ impl Default for CommentStore {
 }
 
 // ---------------------------------------------------------------------------
+// UUID-keyed comment model
+// ---------------------------------------------------------------------------
+
+/// A comment with a globally unique UUID identifier.
+///
+/// This model is suitable for distributed environments where multiple nodes
+/// create comments concurrently without a central ID authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UuidComment {
+    /// Globally unique identifier for this comment.
+    pub id: Uuid,
+    /// ID of the parent comment, or `None` for a root comment.
+    pub parent_id: Option<Uuid>,
+    /// Display name of the comment author.
+    pub author: String,
+    /// Comment body text.
+    pub body: String,
+    /// Unix timestamp (milliseconds) when this comment was created.
+    pub timestamp: u64,
+    /// Whether this comment has been resolved.
+    pub resolved: bool,
+}
+
+impl UuidComment {
+    /// Create a new root comment (no parent).
+    pub fn new(author: impl Into<String>, body: impl Into<String>, timestamp: u64) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            parent_id: None,
+            author: author.into(),
+            body: body.into(),
+            timestamp,
+            resolved: false,
+        }
+    }
+
+    /// Create a reply to an existing comment.
+    pub fn reply(
+        parent_id: Uuid,
+        author: impl Into<String>,
+        body: impl Into<String>,
+        timestamp: u64,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            parent_id: Some(parent_id),
+            author: author.into(),
+            body: body.into(),
+            timestamp,
+            resolved: false,
+        }
+    }
+}
+
+/// A comment thread anchored at a root [`UuidComment`].
+///
+/// Stores the root comment and all replies in a flat list while preserving
+/// the tree structure through `parent_id` links.
+pub struct UuidCommentThread {
+    /// ID of the root (anchor) comment.
+    pub root: Uuid,
+    /// All comments in this thread, including the root.
+    pub comments: Vec<UuidComment>,
+}
+
+impl UuidCommentThread {
+    /// Create a new thread with a root comment.
+    pub fn new(root: UuidComment) -> Self {
+        let root_id = root.id;
+        Self {
+            root: root_id,
+            comments: vec![root],
+        }
+    }
+
+    /// Add a comment to the thread.
+    ///
+    /// The comment's `parent_id` should reference a comment already in the thread,
+    /// but this is not strictly enforced to allow optimistic concurrent inserts.
+    pub fn add(&mut self, comment: UuidComment) {
+        self.comments.push(comment);
+    }
+
+    /// Return all direct replies to the comment with `parent_id == id`.
+    pub fn replies_to(&self, id: Uuid) -> Vec<&UuidComment> {
+        self.comments
+            .iter()
+            .filter(|c| c.parent_id == Some(id))
+            .collect()
+    }
+
+    /// Return the root comment.
+    pub fn root_comment(&self) -> Option<&UuidComment> {
+        self.comments.iter().find(|c| c.id == self.root)
+    }
+
+    /// Resolve this comment (mark as resolved).
+    pub fn resolve(&mut self, id: Uuid) -> bool {
+        if let Some(c) = self.comments.iter_mut().find(|c| c.id == id) {
+            c.resolved = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Unresolve a previously resolved comment.
+    pub fn unresolve(&mut self, id: Uuid) -> bool {
+        if let Some(c) = self.comments.iter_mut().find(|c| c.id == id) {
+            c.resolved = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Mark the entire thread as resolved.
+    pub fn resolve_thread(&mut self) {
+        for c in self.comments.iter_mut() {
+            c.resolved = true;
+        }
+    }
+
+    /// Unresolve all comments in the thread.
+    pub fn unresolve_thread(&mut self) {
+        for c in self.comments.iter_mut() {
+            c.resolved = false;
+        }
+    }
+
+    /// Returns `true` when every comment in the thread is resolved.
+    pub fn is_resolved(&self) -> bool {
+        self.comments.iter().all(|c| c.resolved)
+    }
+
+    /// Returns `true` when no comments in the thread are resolved.
+    pub fn is_unresolved(&self) -> bool {
+        self.comments.iter().all(|c| !c.resolved)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -363,5 +512,72 @@ mod tests {
         let id2 = store.next_id();
         assert_ne!(id1, id2);
         assert_eq!(id2.0, id1.0 + 1);
+    }
+
+    // ---- UuidComment / UuidCommentThread tests ----
+
+    #[test]
+    fn test_comment_thread_resolve() {
+        let root = UuidComment::new("alice", "I found a colour issue here.", 1_000);
+        let root_id = root.id;
+        let mut thread = UuidCommentThread::new(root);
+
+        let reply = UuidComment::reply(root_id, "bob", "I agree, let me fix it.", 2_000);
+        thread.add(reply);
+
+        assert!(!thread.is_resolved(), "thread starts unresolved");
+        thread.resolve_thread();
+        assert!(thread.is_resolved(), "thread should be fully resolved");
+    }
+
+    #[test]
+    fn test_uuid_comment_resolve_unresolve_single() {
+        let root = UuidComment::new("alice", "Root", 1_000);
+        let root_id = root.id;
+        let mut thread = UuidCommentThread::new(root);
+
+        assert!(!thread.is_resolved());
+
+        assert!(thread.resolve(root_id));
+        assert!(thread.root_comment().expect("root must exist").resolved);
+
+        assert!(thread.unresolve(root_id));
+        assert!(!thread.root_comment().expect("root must exist").resolved);
+    }
+
+    #[test]
+    fn test_uuid_thread_replies_to() {
+        let root = UuidComment::new("alice", "Root comment", 1_000);
+        let root_id = root.id;
+        let mut thread = UuidCommentThread::new(root);
+
+        let reply1 = UuidComment::reply(root_id, "bob", "Reply 1", 2_000);
+        let reply2 = UuidComment::reply(root_id, "carol", "Reply 2", 3_000);
+        thread.add(reply1);
+        thread.add(reply2);
+
+        let replies = thread.replies_to(root_id);
+        assert_eq!(replies.len(), 2);
+    }
+
+    #[test]
+    fn test_uuid_thread_unresolve_thread() {
+        let root = UuidComment::new("alice", "Root", 1_000);
+        let mut thread = UuidCommentThread::new(root);
+        thread.resolve_thread();
+        assert!(thread.is_resolved());
+        thread.unresolve_thread();
+        assert!(thread.is_unresolved());
+    }
+
+    #[test]
+    fn test_uuid_comment_serde_roundtrip() {
+        let c = UuidComment::new("alice", "Hello", 42_000);
+        let json = serde_json::to_string(&c).expect("serialize");
+        let c2: UuidComment = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(c.id, c2.id);
+        assert_eq!(c.author, c2.author);
+        assert_eq!(c.body, c2.body);
+        assert_eq!(c.timestamp, c2.timestamp);
     }
 }

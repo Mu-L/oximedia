@@ -616,3 +616,433 @@ mod spec_tests {
         assert!((recovered - nits).abs() < 1.0, "recovered={recovered}");
     }
 }
+
+// ── CM v4.0 Advanced Types ────────────────────────────────────────────────────
+
+/// Trim mode controlling how a Dolby Vision display mapping is applied.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub enum TrimMode {
+    /// Automatically select optimal trim based on content analysis.
+    Auto,
+    /// Manually specified lift/gain/gamma tone curve.
+    Manual {
+        /// Shadow lift (0.0 = no lift)
+        lift: f32,
+        /// Highlight gain (1.0 = unity)
+        gain: f32,
+        /// Mid-tone gamma adjustment (1.0 = unity)
+        gamma: f32,
+    },
+    /// Pure saturation scaling.
+    Saturation {
+        /// Saturation gain multiplier (1.0 = unity)
+        sat_gain: f32,
+    },
+    /// Color primaries conversion via a 3x3 floating-point matrix.
+    ColorPrimaries {
+        /// 3x3 color transformation matrix
+        matrix: [[f32; 3]; 3],
+    },
+}
+
+/// Configuration for content mapping analysis.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct CmAnalysisConfig {
+    /// Peak luminance of the target display in nits.
+    pub target_display_nits: f32,
+    /// Reference white level in nits (typically 100–203).
+    pub reference_white_nits: f32,
+    /// Trim mode to apply.
+    pub trim_mode: TrimMode,
+}
+
+impl Default for CmAnalysisConfig {
+    fn default() -> Self {
+        Self {
+            target_display_nits: 1000.0,
+            reference_white_nits: 203.0,
+            trim_mode: TrimMode::Auto,
+        }
+    }
+}
+
+/// Per-channel tone curve slope/offset/power triplet for CM v4.0 trim.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub struct TrimSlop {
+    /// Multiplicative slope applied to the PQ signal.
+    pub slope: f32,
+    /// Additive offset applied after slope.
+    pub offset: f32,
+    /// Exponent (power) applied to the PQ signal before slope.
+    pub power: f32,
+}
+
+impl TrimSlop {
+    /// Identity transform: pass through unchanged.
+    #[must_use]
+    pub fn identity() -> Self {
+        Self {
+            slope: 1.0,
+            offset: 0.0,
+            power: 1.0,
+        }
+    }
+}
+
+/// CM v4.0 metadata block targeting a specific display peak luminance.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct CmV40Metadata {
+    /// Target display peak PQ code (0–4095).
+    pub target_max_pq: u32,
+    /// Per-channel (R, G, B) tone curve parameters.
+    pub trim_slops: Vec<TrimSlop>,
+    /// Per-channel chroma weighting factors `[r, g, b]`.
+    pub chroma_weights: [f32; 3],
+}
+
+impl CmV40Metadata {
+    /// Create a neutral (identity) CM v4.0 metadata block for the given target PQ.
+    #[must_use]
+    pub fn neutral(target_max_pq: u32) -> Self {
+        Self {
+            target_max_pq,
+            trim_slops: vec![
+                TrimSlop::identity(),
+                TrimSlop::identity(),
+                TrimSlop::identity(),
+            ],
+            chroma_weights: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
+/// Apply a single-channel piecewise tone curve defined by a `TrimSlop`.
+///
+/// Formula: `slope * pq_value^power + offset`
+#[must_use]
+#[inline]
+pub fn apply_tone_curve(pq_value: f32, slop: &TrimSlop) -> f32 {
+    let powered = pq_value.max(0.0).powf(slop.power);
+    (slop.slope * powered + slop.offset).clamp(0.0, 1.0)
+}
+
+/// Analyze a 1024-bin luma histogram and derive three `TrimSlop` entries
+/// that approximate a 3-segment tone curve mapping to `target_nits`.
+///
+/// The strategy uses cumulative distribution to identify:
+/// - Shadow region (0–10th percentile)
+/// - Mid-tone region (10th–90th percentile)
+/// - Highlight region (90th–100th percentile)
+///
+/// Each region receives slope/power adjustments relative to a neutral curve
+/// scaled by the ratio of target luminance to reference peak (10 000 nits).
+#[must_use]
+pub fn compute_trim_slops(src_luma_hist: &[u32; 1024], target_nits: f32) -> Vec<TrimSlop> {
+    let total: u64 = src_luma_hist.iter().map(|&v| v as u64).sum();
+    if total == 0 {
+        return vec![TrimSlop::identity(); 3];
+    }
+
+    // Find percentile bin indices from the 1024-bin histogram
+    let find_percentile = |p: f64| -> usize {
+        let target_count = (p / 100.0 * total as f64).ceil() as u64;
+        let mut cumulative: u64 = 0;
+        for (i, &count) in src_luma_hist.iter().enumerate() {
+            cumulative += count as u64;
+            if cumulative >= target_count {
+                return i;
+            }
+        }
+        1023
+    };
+
+    let p10_bin = find_percentile(10.0) as f32 / 1023.0;
+    let p90_bin = find_percentile(90.0) as f32 / 1023.0;
+
+    // Compute gain factor: ratio of target to reference peak
+    let gain_factor = (target_nits / 10_000.0_f32).clamp(0.001, 1.0);
+
+    // Shadow region: slight lift to avoid crushed blacks
+    let shadow_slop = TrimSlop {
+        slope: gain_factor * (1.0 + (1.0 - p10_bin) * 0.1),
+        offset: p10_bin * 0.02,
+        power: 1.05,
+    };
+
+    // Mid-tone region: primary tone curve driven by gain factor
+    let mid_slop = TrimSlop {
+        slope: gain_factor * 1.05,
+        offset: 0.0,
+        power: 1.0 - (1.0 - gain_factor) * 0.15,
+    };
+
+    // Highlight region: compression of peaks above target
+    let highlight_slop = TrimSlop {
+        slope: gain_factor * (1.0 - (1.0 - p90_bin) * 0.2),
+        offset: 0.0,
+        power: 0.9 + gain_factor * 0.1,
+    };
+
+    vec![shadow_slop, mid_slop, highlight_slop]
+}
+
+/// Gamut compressor using smooth sigmoid clamping.
+///
+/// Values in [0, 1] pass through unchanged; values outside this range
+/// are smoothly compressed back using a sigmoid-like rolloff.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct GamutCompressor {
+    /// Saturation roll-off threshold (values above this are compressed).
+    pub primary_saturation: f32,
+}
+
+impl GamutCompressor {
+    /// Create a new gamut compressor with the given saturation threshold.
+    #[must_use]
+    pub fn new(primary_saturation: f32) -> Self {
+        Self { primary_saturation }
+    }
+
+    /// Compress a single channel value using sigmoid rolloff.
+    #[must_use]
+    fn compress_channel(value: f32, threshold: f32) -> f32 {
+        if value <= threshold {
+            return value;
+        }
+        // Sigmoid compression: maps (threshold, ∞) → (threshold, 1.0)
+        let excess = value - threshold;
+        let headroom = 1.0 - threshold;
+        if headroom < f32::EPSILON {
+            return threshold;
+        }
+        // smooth sigmoid: 1 - headroom * exp(-excess/headroom)
+        threshold + headroom * (1.0 - (-excess / headroom).exp())
+    }
+
+    /// Compress out-of-gamut RGB colors using smooth sigmoid approach.
+    #[must_use]
+    pub fn compress(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+        let threshold = self.primary_saturation.clamp(0.0, 1.0);
+        let r_out = Self::compress_channel(r, threshold);
+        let g_out = Self::compress_channel(g, threshold);
+        let b_out = Self::compress_channel(b, threshold);
+        (r_out.max(0.0), g_out.max(0.0), b_out.max(0.0))
+    }
+}
+
+/// Saturation deployment in IPT-PQ space.
+///
+/// Scales the P and T chroma channels by a gain factor while leaving
+/// the I (intensity) channel unchanged.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+pub struct SaturationDeployment;
+
+impl SaturationDeployment {
+    /// Apply saturation scaling to IPT-PQ values.
+    ///
+    /// `gain > 1.0` increases saturation; `gain < 1.0` decreases it.
+    /// `gain = 0.0` produces a fully desaturated (achromatic) result.
+    #[must_use]
+    pub fn apply_saturation(i: f32, p: f32, t: f32, gain: f32) -> (f32, f32, f32) {
+        let gain = gain.max(0.0);
+        (i, p * gain, t * gain)
+    }
+}
+
+#[cfg(test)]
+mod cm_v40_tests {
+    use super::*;
+
+    #[test]
+    fn test_trim_mode_auto_variant() {
+        let mode = TrimMode::Auto;
+        assert_eq!(mode, TrimMode::Auto);
+    }
+
+    #[test]
+    fn test_trim_mode_manual_fields() {
+        let mode = TrimMode::Manual {
+            lift: 0.1,
+            gain: 1.2,
+            gamma: 0.95,
+        };
+        if let TrimMode::Manual { lift, gain, gamma } = mode {
+            assert!((lift - 0.1).abs() < 1e-6);
+            assert!((gain - 1.2).abs() < 1e-6);
+            assert!((gamma - 0.95).abs() < 1e-6);
+        } else {
+            panic!("Expected Manual variant");
+        }
+    }
+
+    #[test]
+    fn test_trim_mode_saturation_variant() {
+        let mode = TrimMode::Saturation { sat_gain: 1.5 };
+        if let TrimMode::Saturation { sat_gain } = mode {
+            assert!((sat_gain - 1.5).abs() < 1e-6);
+        } else {
+            panic!("Expected Saturation variant");
+        }
+    }
+
+    #[test]
+    fn test_trim_slop_identity() {
+        let id = TrimSlop::identity();
+        assert!((id.slope - 1.0).abs() < 1e-6);
+        assert!((id.offset).abs() < 1e-6);
+        assert!((id.power - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cm_v40_metadata_neutral() {
+        let meta = CmV40Metadata::neutral(2081);
+        assert_eq!(meta.target_max_pq, 2081);
+        assert_eq!(meta.trim_slops.len(), 3);
+        assert!((meta.chroma_weights[0] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_apply_tone_curve_identity() {
+        let slop = TrimSlop::identity();
+        let result = apply_tone_curve(0.5, &slop);
+        assert!((result - 0.5).abs() < 1e-5, "result={result}");
+    }
+
+    #[test]
+    fn test_apply_tone_curve_clamp_high() {
+        let slop = TrimSlop {
+            slope: 5.0,
+            offset: 0.5,
+            power: 1.0,
+        };
+        let result = apply_tone_curve(0.5, &slop);
+        assert!(result <= 1.0, "result={result}");
+    }
+
+    #[test]
+    fn test_apply_tone_curve_clamp_low() {
+        let slop = TrimSlop {
+            slope: 0.0,
+            offset: -1.0,
+            power: 1.0,
+        };
+        let result = apply_tone_curve(0.5, &slop);
+        assert!(result >= 0.0, "result={result}");
+    }
+
+    #[test]
+    fn test_apply_tone_curve_negative_input_clamped() {
+        let slop = TrimSlop::identity();
+        let result = apply_tone_curve(-0.5, &slop);
+        assert!(result >= 0.0, "result={result}");
+    }
+
+    #[test]
+    fn test_compute_trim_slops_empty_histogram() {
+        let hist = [0u32; 1024];
+        let slops = compute_trim_slops(&hist, 1000.0);
+        assert_eq!(slops.len(), 3);
+        for slop in &slops {
+            assert!((slop.slope - 1.0).abs() < 1e-5, "slope={}", slop.slope);
+        }
+    }
+
+    #[test]
+    fn test_compute_trim_slops_uniform_histogram() {
+        let hist = [100u32; 1024];
+        let slops = compute_trim_slops(&hist, 1000.0);
+        assert_eq!(slops.len(), 3);
+        // All slopes should be <= 1.0 for 1000 nit target (downmapping from 10000)
+        for slop in &slops {
+            assert!(
+                slop.slope > 0.0 && slop.slope <= 1.1,
+                "slope={}",
+                slop.slope
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_trim_slops_100_nit_target() {
+        let hist = [100u32; 1024];
+        let slops = compute_trim_slops(&hist, 100.0);
+        // 100 nit target = gain_factor 0.01 — should have lower slopes than 1000 nit
+        let slops_1000 = compute_trim_slops(&hist, 1000.0);
+        assert!(
+            slops[1].slope < slops_1000[1].slope,
+            "expected lower slope for lower target"
+        );
+    }
+
+    #[test]
+    fn test_gamut_compressor_in_range_passthrough() {
+        let gc = GamutCompressor::new(0.8);
+        let (r, g, b) = gc.compress(0.5, 0.3, 0.7);
+        assert!((r - 0.5).abs() < 1e-5);
+        assert!((g - 0.3).abs() < 1e-5);
+        assert!((b - 0.7).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_gamut_compressor_clips_above_one() {
+        let gc = GamutCompressor::new(0.8);
+        let (r, _g, _b) = gc.compress(1.5, 0.0, 0.0);
+        assert!(r <= 1.0, "r={r} must not exceed 1.0");
+        assert!(r > 0.8, "r={r} should remain above threshold");
+    }
+
+    #[test]
+    fn test_gamut_compressor_negative_clamped() {
+        let gc = GamutCompressor::new(0.5);
+        let (r, g, b) = gc.compress(-0.2, -0.1, -0.5);
+        assert!(r >= 0.0, "r={r}");
+        assert!(g >= 0.0, "g={g}");
+        assert!(b >= 0.0, "b={b}");
+    }
+
+    #[test]
+    fn test_saturation_deployment_unity_gain() {
+        let (i, p, t) = SaturationDeployment::apply_saturation(0.5, 0.3, -0.1, 1.0);
+        assert!((i - 0.5).abs() < 1e-6);
+        assert!((p - 0.3).abs() < 1e-6);
+        assert!((t - (-0.1)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_saturation_deployment_desaturate() {
+        let (i, p, t) = SaturationDeployment::apply_saturation(0.5, 0.3, -0.1, 0.0);
+        assert!((i - 0.5).abs() < 1e-6);
+        assert!(p.abs() < 1e-6);
+        assert!(t.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_saturation_deployment_boost() {
+        let (i, p, t) = SaturationDeployment::apply_saturation(0.5, 0.3, 0.2, 2.0);
+        assert!((i - 0.5).abs() < 1e-6);
+        assert!((p - 0.6).abs() < 1e-6);
+        assert!((t - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_saturation_deployment_negative_gain_clamped() {
+        let (_, p, t) = SaturationDeployment::apply_saturation(0.5, 0.3, -0.1, -1.0);
+        // Negative gain clamped to 0 → desaturate
+        assert!(p.abs() < 1e-6);
+        assert!(t.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cm_analysis_config_default() {
+        let cfg = CmAnalysisConfig::default();
+        assert!((cfg.target_display_nits - 1000.0).abs() < 1.0);
+        assert!((cfg.reference_white_nits - 203.0).abs() < 1.0);
+        assert_eq!(cfg.trim_mode, TrimMode::Auto);
+    }
+}

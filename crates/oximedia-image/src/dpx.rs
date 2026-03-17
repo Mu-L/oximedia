@@ -43,6 +43,27 @@ const DPX_MAGIC_BE: u32 = 0x5344_5058; // "SDPX"
 /// DPX magic number (little-endian).
 const DPX_MAGIC_LE: u32 = 0x5850_4453; // "XPDS"
 
+/// 10-bit packing method for DPX format.
+///
+/// SMPTE 268M defines two packing methods for 10-bit data in 32-bit words:
+/// - **Method A**: 3 components packed into one 32-bit word, MSB-aligned, 2-bit padding at LSB.
+///   Layout: `[C0(10) | C1(10) | C2(10) | pad(2)]`
+/// - **Method B**: 3 components packed into one 32-bit word, LSB-aligned, 2-bit padding at MSB.
+///   Layout: `[pad(2) | C0(10) | C1(10) | C2(10)]`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackingMethod {
+    /// Method A: MSB-aligned, 2-bit padding at LSB end.
+    MethodA,
+    /// Method B: LSB-aligned, 2-bit padding at MSB end.
+    MethodB,
+}
+
+impl Default for PackingMethod {
+    fn default() -> Self {
+        Self::MethodA
+    }
+}
+
 /// DPX file header (2048 bytes total).
 #[derive(Debug, Clone, Default)]
 pub struct DpxHeader {
@@ -968,7 +989,7 @@ fn read_packed_data(
     file: &mut File,
     header: &DpxHeader,
     element: &ImageElement,
-    _endian: Endian,
+    endian: Endian,
 ) -> ImageResult<Vec<u8>> {
     let width = header.image.width as usize;
     let height = header.image.height as usize;
@@ -987,16 +1008,23 @@ fn read_packed_data(
             file.read_exact(&mut data)?;
             Ok(data)
         }
-        10 | 12 => {
-            // For 10/12-bit, unpack to 16-bit
-            let packed_size =
-                (width * height * components * element.bit_depth as usize).div_ceil(8);
+        10 => {
+            // 10-bit packed: 3 components per 32-bit word
+            let pixel_count = width * height * components;
+            let words_needed = pixel_count.div_ceil(3);
+            let mut raw = vec![0u8; words_needed * 4];
+            file.read_exact(&mut raw)?;
+
+            let method = determine_packing_method(element);
+            unpack_10bit_packed(&raw, pixel_count, method, endian)
+        }
+        12 => {
+            // For 12-bit, use bitstream unpacking
+            let packed_size = (width * height * components * 12).div_ceil(8);
             let mut packed_data = vec![0u8; packed_size];
             file.read_exact(&mut packed_data)?;
 
-            let unpacked =
-                unpack_10_12_bit(&packed_data, element.bit_depth, width * height * components)?;
-            Ok(unpacked)
+            unpack_12bit(&packed_data, width * height * components)
         }
         16 => {
             let size = width * height * components * 2;
@@ -1009,6 +1037,145 @@ fn read_packed_data(
             element.bit_depth
         ))),
     }
+}
+
+/// Determines the packing method from the element's packing field.
+/// packing == 0 is Method A (MSB-aligned), packing == 5 is Method B (LSB-aligned).
+fn determine_packing_method(element: &ImageElement) -> PackingMethod {
+    if element.packing == 5 {
+        PackingMethod::MethodB
+    } else {
+        PackingMethod::MethodA
+    }
+}
+
+/// Unpacks 10-bit packed data using Method A or Method B.
+///
+/// Method A: 3 components packed MSB-first in 32-bit word.
+///   `[C0(bits 31-22) | C1(bits 21-12) | C2(bits 11-2) | pad(bits 1-0)]`
+///
+/// Method B: 3 components packed LSB-first in 32-bit word.
+///   `[pad(bits 31-30) | C0(bits 29-20) | C1(bits 19-10) | C2(bits 9-0)]`
+pub fn unpack_10bit_packed(
+    packed: &[u8],
+    count: usize,
+    method: PackingMethod,
+    endian: Endian,
+) -> ImageResult<Vec<u8>> {
+    let mut unpacked = vec![0u8; count * 2];
+    let words = packed.len() / 4;
+    let mut out_idx = 0;
+
+    for w in 0..words {
+        if out_idx >= count {
+            break;
+        }
+        let offset = w * 4;
+        let word = match endian {
+            Endian::Big => u32::from_be_bytes([
+                packed[offset],
+                packed[offset + 1],
+                packed[offset + 2],
+                packed[offset + 3],
+            ]),
+            Endian::Little => u32::from_le_bytes([
+                packed[offset],
+                packed[offset + 1],
+                packed[offset + 2],
+                packed[offset + 3],
+            ]),
+        };
+
+        let (c0, c1, c2) = match method {
+            PackingMethod::MethodA => {
+                // MSB-aligned: [C0(31..22) | C1(21..12) | C2(11..2) | pad(1..0)]
+                let v0 = ((word >> 22) & 0x3FF) as u16;
+                let v1 = ((word >> 12) & 0x3FF) as u16;
+                let v2 = ((word >> 2) & 0x3FF) as u16;
+                (v0, v1, v2)
+            }
+            PackingMethod::MethodB => {
+                // LSB-aligned: [pad(31..30) | C0(29..20) | C1(19..10) | C2(9..0)]
+                let v0 = ((word >> 20) & 0x3FF) as u16;
+                let v1 = ((word >> 10) & 0x3FF) as u16;
+                let v2 = (word & 0x3FF) as u16;
+                (v0, v1, v2)
+            }
+        };
+
+        for val in [c0, c1, c2] {
+            if out_idx >= count {
+                break;
+            }
+            unpacked[out_idx * 2] = (val >> 8) as u8;
+            unpacked[out_idx * 2 + 1] = (val & 0xFF) as u8;
+            out_idx += 1;
+        }
+    }
+
+    Ok(unpacked)
+}
+
+/// Packs 10-bit data into 32-bit words using Method A or Method B.
+///
+/// Input: 16-bit big-endian values (only lower 10 bits used).
+/// Output: packed 32-bit words.
+pub fn pack_10bit(
+    data: &[u8],
+    count: usize,
+    method: PackingMethod,
+    endian: Endian,
+) -> ImageResult<Vec<u8>> {
+    let words_needed = count.div_ceil(3);
+    let mut output = vec![0u8; words_needed * 4];
+
+    let mut in_idx = 0;
+    for w in 0..words_needed {
+        let v0 = if in_idx < count {
+            let val = u16::from_be_bytes([
+                data.get(in_idx * 2).copied().unwrap_or(0),
+                data.get(in_idx * 2 + 1).copied().unwrap_or(0),
+            ]);
+            in_idx += 1;
+            u32::from(val & 0x3FF)
+        } else {
+            0
+        };
+        let v1 = if in_idx < count {
+            let val = u16::from_be_bytes([
+                data.get(in_idx * 2).copied().unwrap_or(0),
+                data.get(in_idx * 2 + 1).copied().unwrap_or(0),
+            ]);
+            in_idx += 1;
+            u32::from(val & 0x3FF)
+        } else {
+            0
+        };
+        let v2 = if in_idx < count {
+            let val = u16::from_be_bytes([
+                data.get(in_idx * 2).copied().unwrap_or(0),
+                data.get(in_idx * 2 + 1).copied().unwrap_or(0),
+            ]);
+            in_idx += 1;
+            u32::from(val & 0x3FF)
+        } else {
+            0
+        };
+
+        let word = match method {
+            PackingMethod::MethodA => (v0 << 22) | (v1 << 12) | (v2 << 2),
+            PackingMethod::MethodB => (v0 << 20) | (v1 << 10) | v2,
+        };
+
+        let offset = w * 4;
+        let bytes = match endian {
+            Endian::Big => word.to_be_bytes(),
+            Endian::Little => word.to_le_bytes(),
+        };
+        output[offset..offset + 4].copy_from_slice(&bytes);
+    }
+
+    Ok(output)
 }
 
 fn read_filled_data(
@@ -1047,75 +1214,36 @@ fn read_filled_data(
     Ok(data)
 }
 
-fn unpack_10_12_bit(packed: &[u8], bit_depth: u8, count: usize) -> ImageResult<Vec<u8>> {
+/// Unpacks 12-bit bitstream data to 16-bit values.
+fn unpack_12bit(packed: &[u8], count: usize) -> ImageResult<Vec<u8>> {
     let mut unpacked = vec![0u8; count * 2];
+    let mut bit_pos = 0usize;
 
-    match bit_depth {
-        10 => {
-            // Unpack 10-bit to 16-bit
-            let mut bit_pos = 0;
-            for i in 0..count {
-                let byte_pos = bit_pos / 8;
-                let bit_offset = bit_pos % 8;
+    for i in 0..count {
+        let byte_pos = bit_pos / 8;
+        let bit_offset = bit_pos % 8;
 
-                if byte_pos + 1 >= packed.len() {
-                    break;
-                }
+        if byte_pos + 1 >= packed.len() {
+            break;
+        }
 
-                let value = if bit_offset <= 6 {
-                    let val = (u16::from(packed[byte_pos]) << (8 + bit_offset))
-                        | (u16::from(packed[byte_pos + 1]) << bit_offset);
-                    (val >> 6) & 0x3FF
-                } else {
-                    if byte_pos + 2 >= packed.len() {
-                        break;
-                    }
-                    let val = (u32::from(packed[byte_pos]) << 16)
-                        | (u32::from(packed[byte_pos + 1]) << 8)
-                        | u32::from(packed[byte_pos + 2]);
-                    ((val >> (14 - bit_offset)) & 0x3FF) as u16
-                };
-
-                unpacked[i * 2] = (value >> 8) as u8;
-                unpacked[i * 2 + 1] = (value & 0xFF) as u8;
-                bit_pos += 10;
+        let value = if bit_offset <= 4 {
+            let val = (u16::from(packed[byte_pos]) << (8 + bit_offset as u16))
+                | (u16::from(packed[byte_pos + 1]) << (bit_offset as u16));
+            (val >> 4) & 0xFFF
+        } else {
+            if byte_pos + 2 >= packed.len() {
+                break;
             }
-        }
-        12 => {
-            // Unpack 12-bit to 16-bit
-            let mut bit_pos = 0;
-            for i in 0..count {
-                let byte_pos = bit_pos / 8;
-                let bit_offset = bit_pos % 8;
+            let val = (u32::from(packed[byte_pos]) << 16)
+                | (u32::from(packed[byte_pos + 1]) << 8)
+                | u32::from(packed[byte_pos + 2]);
+            ((val >> (12 - bit_offset)) & 0xFFF) as u16
+        };
 
-                if byte_pos + 1 >= packed.len() {
-                    break;
-                }
-
-                let value = if bit_offset <= 4 {
-                    let val = (u16::from(packed[byte_pos]) << (8 + bit_offset))
-                        | (u16::from(packed[byte_pos + 1]) << bit_offset);
-                    (val >> 4) & 0xFFF
-                } else {
-                    if byte_pos + 2 >= packed.len() {
-                        break;
-                    }
-                    let val = (u32::from(packed[byte_pos]) << 16)
-                        | (u32::from(packed[byte_pos + 1]) << 8)
-                        | u32::from(packed[byte_pos + 2]);
-                    ((val >> (12 - bit_offset)) & 0xFFF) as u16
-                };
-
-                unpacked[i * 2] = (value >> 8) as u8;
-                unpacked[i * 2 + 1] = (value & 0xFF) as u8;
-                bit_pos += 12;
-            }
-        }
-        _ => {
-            return Err(ImageError::unsupported(format!(
-                "Unsupported bit depth: {bit_depth}"
-            )))
-        }
+        unpacked[i * 2] = (value >> 8) as u8;
+        unpacked[i * 2 + 1] = (value & 0xFF) as u8;
+        bit_pos += 12;
     }
 
     Ok(unpacked)
@@ -1537,16 +1665,55 @@ fn write_header_le(file: &mut File, header: &DpxHeader) -> ImageResult<()> {
 }
 
 fn write_packed_data(
-    _file: &mut File,
-    _data: &[u8],
-    _element: &ImageElement,
-    _width: u32,
-    _height: u32,
-    _endian: Endian,
+    file: &mut File,
+    data: &[u8],
+    element: &ImageElement,
+    width: u32,
+    height: u32,
+    endian: Endian,
 ) -> ImageResult<()> {
-    Err(ImageError::unsupported(
-        "Packed DPX writing not yet implemented",
-    ))
+    let components = match element.descriptor {
+        1 | 6 => 1usize,
+        50 => 3,
+        51 | 52 => 4,
+        100 | 102 => 3,
+        _ => 3,
+    };
+    let pixel_count = (width as usize) * (height as usize) * components;
+
+    match element.bit_depth {
+        8 => {
+            let size = pixel_count;
+            if data.len() < size {
+                return Err(ImageError::invalid_format(
+                    "Insufficient data for packed write",
+                ));
+            }
+            file.write_all(&data[..size])?;
+        }
+        10 => {
+            let method = determine_packing_method(element);
+            let packed = pack_10bit(data, pixel_count, method, endian)?;
+            file.write_all(&packed)?;
+        }
+        16 => {
+            let size = pixel_count * 2;
+            if data.len() < size {
+                return Err(ImageError::invalid_format(
+                    "Insufficient data for packed write",
+                ));
+            }
+            file.write_all(&data[..size])?;
+        }
+        _ => {
+            return Err(ImageError::unsupported(format!(
+                "Packed write for bit depth {} not supported",
+                element.bit_depth
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn write_filled_data(
@@ -1573,4 +1740,194 @@ fn write_filled_data(
     }
 
     Ok(())
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- 10-bit packing Method A ---
+
+    #[test]
+    fn test_pack_unpack_10bit_method_a_roundtrip() {
+        // 3 components: 100, 512, 1023
+        let values: Vec<u16> = vec![100, 512, 1023];
+        let mut data = Vec::with_capacity(values.len() * 2);
+        for v in &values {
+            data.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let packed =
+            pack_10bit(&data, 3, PackingMethod::MethodA, Endian::Big).expect("pack should succeed");
+        assert_eq!(packed.len(), 4); // 1 word for 3 components
+
+        let unpacked = unpack_10bit_packed(&packed, 3, PackingMethod::MethodA, Endian::Big)
+            .expect("unpack should succeed");
+
+        for (i, &expected) in values.iter().enumerate() {
+            let got = u16::from_be_bytes([unpacked[i * 2], unpacked[i * 2 + 1]]);
+            assert_eq!(got, expected, "component {i} mismatch");
+        }
+    }
+
+    #[test]
+    fn test_pack_unpack_10bit_method_b_roundtrip() {
+        let values: Vec<u16> = vec![0, 511, 1023];
+        let mut data = Vec::with_capacity(values.len() * 2);
+        for v in &values {
+            data.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let packed =
+            pack_10bit(&data, 3, PackingMethod::MethodB, Endian::Big).expect("pack should succeed");
+        let unpacked = unpack_10bit_packed(&packed, 3, PackingMethod::MethodB, Endian::Big)
+            .expect("unpack should succeed");
+
+        for (i, &expected) in values.iter().enumerate() {
+            let got = u16::from_be_bytes([unpacked[i * 2], unpacked[i * 2 + 1]]);
+            assert_eq!(got, expected, "component {i} mismatch");
+        }
+    }
+
+    #[test]
+    fn test_pack_10bit_method_a_bit_layout() {
+        // Method A: [C0(31..22) | C1(21..12) | C2(11..2) | pad(1..0)]
+        let values: Vec<u16> = vec![0x3FF, 0x000, 0x155]; // all-ones, zero, pattern
+        let mut data = Vec::new();
+        for v in &values {
+            data.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let packed =
+            pack_10bit(&data, 3, PackingMethod::MethodA, Endian::Big).expect("pack should succeed");
+        let word = u32::from_be_bytes([packed[0], packed[1], packed[2], packed[3]]);
+
+        assert_eq!((word >> 22) & 0x3FF, 0x3FF);
+        assert_eq!((word >> 12) & 0x3FF, 0x000);
+        assert_eq!((word >> 2) & 0x3FF, 0x155);
+        assert_eq!(word & 0x3, 0); // padding bits
+    }
+
+    #[test]
+    fn test_pack_10bit_method_b_bit_layout() {
+        // Method B: [pad(31..30) | C0(29..20) | C1(19..10) | C2(9..0)]
+        let values: Vec<u16> = vec![0x3FF, 0x000, 0x155];
+        let mut data = Vec::new();
+        for v in &values {
+            data.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let packed =
+            pack_10bit(&data, 3, PackingMethod::MethodB, Endian::Big).expect("pack should succeed");
+        let word = u32::from_be_bytes([packed[0], packed[1], packed[2], packed[3]]);
+
+        assert_eq!((word >> 30) & 0x3, 0); // padding bits
+        assert_eq!((word >> 20) & 0x3FF, 0x3FF);
+        assert_eq!((word >> 10) & 0x3FF, 0x000);
+        assert_eq!(word & 0x3FF, 0x155);
+    }
+
+    #[test]
+    fn test_pack_unpack_10bit_little_endian() {
+        let values: Vec<u16> = vec![300, 600, 900];
+        let mut data = Vec::new();
+        for v in &values {
+            data.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let packed = pack_10bit(&data, 3, PackingMethod::MethodA, Endian::Little)
+            .expect("pack should succeed");
+        let unpacked = unpack_10bit_packed(&packed, 3, PackingMethod::MethodA, Endian::Little)
+            .expect("unpack should succeed");
+
+        for (i, &expected) in values.iter().enumerate() {
+            let got = u16::from_be_bytes([unpacked[i * 2], unpacked[i * 2 + 1]]);
+            assert_eq!(got, expected, "LE component {i} mismatch");
+        }
+    }
+
+    #[test]
+    fn test_pack_unpack_10bit_multiple_words() {
+        // 9 components = 3 words
+        let values: Vec<u16> = vec![1, 2, 3, 100, 200, 300, 500, 700, 1000];
+        let mut data = Vec::new();
+        for v in &values {
+            data.extend_from_slice(&v.to_be_bytes());
+        }
+
+        for method in [PackingMethod::MethodA, PackingMethod::MethodB] {
+            let packed = pack_10bit(&data, 9, method, Endian::Big).expect("pack should succeed");
+            assert_eq!(packed.len(), 12); // 3 words * 4 bytes
+
+            let unpacked = unpack_10bit_packed(&packed, 9, method, Endian::Big)
+                .expect("unpack should succeed");
+
+            for (i, &expected) in values.iter().enumerate() {
+                let got = u16::from_be_bytes([unpacked[i * 2], unpacked[i * 2 + 1]]);
+                assert_eq!(got, expected, "{method:?} component {i} mismatch");
+            }
+        }
+    }
+
+    #[test]
+    fn test_pack_10bit_partial_word() {
+        // 2 components (not multiple of 3) - last word has padding
+        let values: Vec<u16> = vec![400, 800];
+        let mut data = Vec::new();
+        for v in &values {
+            data.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let packed =
+            pack_10bit(&data, 2, PackingMethod::MethodA, Endian::Big).expect("pack should succeed");
+        let unpacked = unpack_10bit_packed(&packed, 2, PackingMethod::MethodA, Endian::Big)
+            .expect("unpack should succeed");
+
+        for (i, &expected) in values.iter().enumerate() {
+            let got = u16::from_be_bytes([unpacked[i * 2], unpacked[i * 2 + 1]]);
+            assert_eq!(got, expected, "partial word component {i} mismatch");
+        }
+    }
+
+    #[test]
+    fn test_packing_method_default() {
+        assert_eq!(PackingMethod::default(), PackingMethod::MethodA);
+    }
+
+    #[test]
+    fn test_determine_packing_method() {
+        let mut elem = ImageElement::default();
+        elem.packing = 0;
+        assert_eq!(determine_packing_method(&elem), PackingMethod::MethodA);
+
+        elem.packing = 5;
+        assert_eq!(determine_packing_method(&elem), PackingMethod::MethodB);
+    }
+
+    #[test]
+    fn test_pack_10bit_all_zeros() {
+        let data = vec![0u8; 6]; // 3 zero components
+        let packed =
+            pack_10bit(&data, 3, PackingMethod::MethodA, Endian::Big).expect("pack should succeed");
+        assert!(packed.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_pack_10bit_all_max() {
+        let values: Vec<u16> = vec![1023, 1023, 1023];
+        let mut data = Vec::new();
+        for v in &values {
+            data.extend_from_slice(&v.to_be_bytes());
+        }
+
+        let packed =
+            pack_10bit(&data, 3, PackingMethod::MethodA, Endian::Big).expect("pack should succeed");
+        let word = u32::from_be_bytes([packed[0], packed[1], packed[2], packed[3]]);
+        // All component bits should be set, padding 0
+        assert_eq!(word, 0xFFFF_FFFC);
+    }
 }

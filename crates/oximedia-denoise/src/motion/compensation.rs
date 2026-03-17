@@ -144,6 +144,283 @@ pub fn bidirectional_motion_compensate(
     Ok(output)
 }
 
+/// Sub-pixel motion vector (in 1/4-pixel units).
+///
+/// Fractional components are stored as quarter-pixel offsets:
+/// - `dx_qpel = 4 * integer_dx + sub_pixel_offset_x`
+/// - Values are signed 16-bit to match integer motion vector conventions.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SubPixelMv {
+    /// Horizontal displacement in quarter-pixel units.
+    pub dx_qpel: i32,
+    /// Vertical displacement in quarter-pixel units.
+    pub dy_qpel: i32,
+}
+
+impl SubPixelMv {
+    /// Create a sub-pixel MV from integer pixel displacements (no fractional part).
+    #[must_use]
+    pub fn from_integer(dx: i16, dy: i16) -> Self {
+        Self {
+            dx_qpel: i32::from(dx) * 4,
+            dy_qpel: i32::from(dy) * 4,
+        }
+    }
+
+    /// Integer (full-pixel) horizontal displacement.
+    #[must_use]
+    pub fn dx_int(&self) -> i32 {
+        self.dx_qpel / 4
+    }
+
+    /// Integer (full-pixel) vertical displacement.
+    #[must_use]
+    pub fn dy_int(&self) -> i32 {
+        self.dy_qpel / 4
+    }
+
+    /// Sub-pixel fractional horizontal offset in quarter-pixel units (0–3).
+    #[must_use]
+    pub fn dx_frac(&self) -> i32 {
+        self.dx_qpel.rem_euclid(4)
+    }
+
+    /// Sub-pixel fractional vertical offset in quarter-pixel units (0–3).
+    #[must_use]
+    pub fn dy_frac(&self) -> i32 {
+        self.dy_qpel.rem_euclid(4)
+    }
+}
+
+/// Refine integer motion vectors to quarter-pixel accuracy.
+///
+/// For each integer-pixel MV, evaluates the four diagonal quarter-pixel
+/// positions using bilinear interpolation on the reference plane and keeps
+/// the one with the lowest interpolated SAD.
+///
+/// # Arguments
+/// * `reference`      - Reference video frame
+/// * `current`        - Current video frame (to compare against)
+/// * `motion_vectors` - Integer-pixel motion vectors (one per block)
+/// * `block_size`     - Block size in pixels
+///
+/// # Returns
+/// A vector of [`SubPixelMv`] with the same length as `motion_vectors`.
+pub fn refine_to_subpixel(
+    reference: &VideoFrame,
+    current: &VideoFrame,
+    motion_vectors: &[(i16, i16)],
+    block_size: usize,
+) -> DenoiseResult<Vec<SubPixelMv>> {
+    if reference.planes.is_empty() || current.planes.is_empty() {
+        return Err(DenoiseError::ProcessingError(
+            "Frame has no planes".to_string(),
+        ));
+    }
+
+    let ref_plane = &reference.planes[0];
+    let cur_plane = &current.planes[0];
+    let (width, height) = reference.plane_dimensions(0);
+    let w = width as usize;
+    let h = height as usize;
+    let stride = ref_plane.stride;
+
+    let num_blocks_x = w.div_ceil(block_size);
+
+    let sub_mvs: Vec<SubPixelMv> = (0..motion_vectors.len())
+        .into_par_iter()
+        .map(|block_idx| {
+            let (dx_int, dy_int) = motion_vectors[block_idx];
+            let base_bx = (block_idx % num_blocks_x) * block_size;
+            let base_by = (block_idx / num_blocks_x) * block_size;
+
+            if base_bx + block_size > w || base_by + block_size > h {
+                return SubPixelMv::from_integer(dx_int, dy_int);
+            }
+
+            // Quarter-pixel offsets to test: 0, 1, 2, 3 (in both x and y)
+            // This covers all 4×4 = 16 sub-pixel positions in one integer block.
+            let mut best_qx = 0i32;
+            let mut best_qy = 0i32;
+            let mut best_cost = u64::MAX;
+
+            // Test each of the 16 half/quarter-pixel candidate positions
+            for qdy in 0i32..4 {
+                for qdx in 0i32..4 {
+                    let ref_x0 = base_bx as i32 + i32::from(dx_int);
+                    let ref_y0 = base_by as i32 + i32::from(dy_int);
+
+                    // Compute interpolated SAD using bilinear weights
+                    let cost = subpixel_sad(
+                        ref_plane.data.as_ref(),
+                        cur_plane.data.as_ref(),
+                        w,
+                        h,
+                        stride,
+                        cur_plane.stride,
+                        base_bx,
+                        base_by,
+                        ref_x0,
+                        ref_y0,
+                        qdx,
+                        qdy,
+                        block_size,
+                    );
+
+                    if cost < best_cost {
+                        best_cost = cost;
+                        best_qx = qdx;
+                        best_qy = qdy;
+                    }
+                }
+            }
+
+            SubPixelMv {
+                dx_qpel: i32::from(dx_int) * 4 + best_qx,
+                dy_qpel: i32::from(dy_int) * 4 + best_qy,
+            }
+        })
+        .collect();
+
+    Ok(sub_mvs)
+}
+
+/// Apply motion compensation using sub-pixel motion vectors.
+///
+/// Uses bilinear interpolation to reconstruct pixels at fractional positions.
+///
+/// # Arguments
+/// * `reference`  - Reference video frame
+/// * `sub_mvs`    - Sub-pixel motion vectors (in quarter-pixel units)
+/// * `block_size` - Block size in pixels
+///
+/// # Returns
+/// Sub-pixel motion-compensated frame
+pub fn subpixel_motion_compensate(
+    reference: &VideoFrame,
+    sub_mvs: &[SubPixelMv],
+    block_size: usize,
+) -> DenoiseResult<VideoFrame> {
+    if reference.planes.is_empty() {
+        return Err(DenoiseError::ProcessingError(
+            "Frame has no planes".to_string(),
+        ));
+    }
+
+    let mut output = reference.clone();
+
+    for (plane_idx, plane) in output.planes.iter_mut().enumerate() {
+        let ref_plane = &reference.planes[plane_idx];
+        let (width, height) = reference.plane_dimensions(plane_idx);
+        let w = width as usize;
+        let h = height as usize;
+        let stride = plane.stride;
+
+        let num_blocks_x = w.div_ceil(block_size);
+
+        for (block_idx, mv) in sub_mvs.iter().enumerate() {
+            let bx = (block_idx % num_blocks_x) * block_size;
+            let by = (block_idx / num_blocks_x) * block_size;
+
+            for y in 0..block_size {
+                let py = by + y;
+                if py >= h {
+                    break;
+                }
+                for x in 0..block_size {
+                    let px = bx + x;
+                    if px >= w {
+                        break;
+                    }
+
+                    // Source position in quarter-pixel units
+                    let src_qx = (px as i32) * 4 + mv.dx_qpel;
+                    let src_qy = (py as i32) * 4 + mv.dy_qpel;
+
+                    // Integer and fractional parts
+                    let ix = src_qx / 4;
+                    let iy = src_qy / 4;
+                    let fx = src_qx.rem_euclid(4) as f32 / 4.0;
+                    let fy = src_qy.rem_euclid(4) as f32 / 4.0;
+
+                    // Clamp to frame
+                    let ix0 = ix.clamp(0, (w - 1) as i32) as usize;
+                    let ix1 = (ix + 1).clamp(0, (w - 1) as i32) as usize;
+                    let iy0 = iy.clamp(0, (h - 1) as i32) as usize;
+                    let iy1 = (iy + 1).clamp(0, (h - 1) as i32) as usize;
+
+                    // Bilinear interpolation
+                    let p00 = f32::from(ref_plane.data[iy0 * stride + ix0]);
+                    let p10 = f32::from(ref_plane.data[iy0 * stride + ix1]);
+                    let p01 = f32::from(ref_plane.data[iy1 * stride + ix0]);
+                    let p11 = f32::from(ref_plane.data[iy1 * stride + ix1]);
+
+                    let interpolated = p00 * (1.0 - fx) * (1.0 - fy)
+                        + p10 * fx * (1.0 - fy)
+                        + p01 * (1.0 - fx) * fy
+                        + p11 * fx * fy;
+
+                    plane.data[py * stride + px] = interpolated.round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+/// Compute interpolated SAD for a sub-pixel position.
+///
+/// Uses bilinear interpolation on the reference block at the given
+/// quarter-pixel offsets `(qdx, qdy)`.
+#[allow(clippy::too_many_arguments)]
+fn subpixel_sad(
+    reference: &[u8],
+    current: &[u8],
+    ref_w: usize,
+    ref_h: usize,
+    ref_stride: usize,
+    cur_stride: usize,
+    cur_bx: usize,
+    cur_by: usize,
+    ref_x0: i32,
+    ref_y0: i32,
+    qdx: i32,
+    qdy: i32,
+    block_size: usize,
+) -> u64 {
+    let fx = qdx as f32 / 4.0;
+    let fy = qdy as f32 / 4.0;
+    let mut sad = 0u64;
+
+    for y in 0..block_size {
+        let cur_y = cur_by + y;
+        for x in 0..block_size {
+            let cur_x = cur_bx + x;
+
+            let ix0 = (ref_x0 + x as i32).clamp(0, (ref_w - 1) as i32) as usize;
+            let ix1 = (ref_x0 + x as i32 + 1).clamp(0, (ref_w - 1) as i32) as usize;
+            let iy0 = (ref_y0 + y as i32).clamp(0, (ref_h - 1) as i32) as usize;
+            let iy1 = (ref_y0 + y as i32 + 1).clamp(0, (ref_h - 1) as i32) as usize;
+
+            let p00 = f32::from(reference[iy0 * ref_stride + ix0]);
+            let p10 = f32::from(reference[iy0 * ref_stride + ix1]);
+            let p01 = f32::from(reference[iy1 * ref_stride + ix0]);
+            let p11 = f32::from(reference[iy1 * ref_stride + ix1]);
+
+            let interp = p00 * (1.0 - fx) * (1.0 - fy)
+                + p10 * fx * (1.0 - fy)
+                + p01 * (1.0 - fx) * fy
+                + p11 * fx * fy;
+
+            let cur_val = f32::from(current[cur_y * cur_stride + cur_x]);
+            sad += (interp - cur_val).abs() as u64;
+        }
+    }
+
+    sad
+}
+
 /// Weighted motion compensation with confidence values.
 pub fn weighted_motion_compensate(
     reference: &VideoFrame,

@@ -748,16 +748,63 @@ impl EbmlElement {
 }
 
 // ============================================================================
-// VINT Parsing
+// VINT Parsing — Lookup-Table Accelerated
 // ============================================================================
+
+/// Per-byte lookup table for EBML VINT length (1-based byte count).
+///
+/// `VINT_LEN_TABLE[byte]` gives the number of bytes the VINT occupies when
+/// `byte` is the first byte.  A value of 0 means the first byte is invalid
+/// (0x00 is never legal; byte value 0 cannot start a VINT).
+///
+/// The length is determined by the position of the highest set bit:
+/// - `1xxxxxxx` (0x80..=0xFF) → 1 byte
+/// - `01xxxxxx` (0x40..=0x7F) → 2 bytes
+/// - `001xxxxx` (0x20..=0x3F) → 3 bytes
+/// - `0001xxxx` (0x10..=0x1F) → 4 bytes
+/// - `00001xxx` (0x08..=0x0F) → 5 bytes
+/// - `000001xx` (0x04..=0x07) → 6 bytes
+/// - `0000001x` (0x02..=0x03) → 7 bytes
+/// - `00000001` (0x01)         → 8 bytes
+/// - `00000000` (0x00)         → invalid (0)
+const VINT_LEN_TABLE: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut i: usize = 1;
+    while i < 256 {
+        // leading_zeros for a u8: count how many high bits are 0
+        let lz = (i as u8).leading_zeros() as u8;
+        table[i] = lz + 1; // length = leading_zeros + 1
+        i += 1;
+    }
+    table
+};
+
+/// Per-byte mask table: `VINT_MASK_TABLE[byte]` strips the length-marker bit
+/// from the first VINT byte, leaving only the data bits.
+const VINT_MASK_TABLE: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut i: usize = 1;
+    while i < 256 {
+        let lz = (i as u8).leading_zeros() as u8; // 0..=7
+                                                  // The marker bit position from MSB is `lz`.
+                                                  // mask = 0b0111_1111 >> lz  = (1 << (7 - lz)) - 1
+        let mask = if lz >= 7 { 0u8 } else { (1u8 << (7 - lz)) - 1 };
+        table[i] = mask;
+        i += 1;
+    }
+    table
+};
 
 /// Parse an EBML variable-length integer (VINT).
 ///
-/// VINTs use a leading 1-bit to indicate length:
-/// - `1xxxxxxx` = 1 byte (7 bits of data)
-/// - `01xxxxxx xxxxxxxx` = 2 bytes (14 bits of data)
-/// - `001xxxxx ...` = 3 bytes (21 bits of data)
-/// - etc.
+/// Uses O(1) lookup tables to determine VINT length and mask in a single
+/// array access rather than a computed `leading_zeros` call at runtime.
+///
+/// VINTs encode their own byte length via a leading 1-bit marker:
+/// - `1xxxxxxx` = 1 byte (7 data bits)
+/// - `01xxxxxx xxxxxxxx` = 2 bytes (14 data bits)
+/// - `001xxxxx ...` = 3 bytes (21 data bits)
+/// - …up to 8 bytes (56 data bits)
 ///
 /// # Arguments
 ///
@@ -777,12 +824,12 @@ impl EbmlElement {
 /// use oximedia_container::demux::matroska::ebml::parse_vint;
 ///
 /// // Single byte: 0x81 = 1xxxxxxx, value = 1
-/// let (remaining, value) = parse_vint(&[0x81, 0x00])?;
+/// let (remaining, value) = parse_vint(&[0x81, 0x00]).expect("valid vint");
 /// assert_eq!(value, 1);
 /// assert_eq!(remaining, &[0x00]);
 ///
 /// // Two bytes: 0x40 0x01 = 01xxxxxx xxxxxxxx, value = 1
-/// let (remaining, value) = parse_vint(&[0x40, 0x01])?;
+/// let (remaining, value) = parse_vint(&[0x40, 0x01]).expect("valid vint");
 /// assert_eq!(value, 1);
 /// ```
 pub fn parse_vint(input: &[u8]) -> IResult<&[u8], u64> {
@@ -791,15 +838,15 @@ pub fn parse_vint(input: &[u8]) -> IResult<&[u8], u64> {
     }
 
     let first = input[0];
-    if first == 0 {
+
+    // O(1) table lookup: 0x00 maps to length 0 (invalid)
+    let len = VINT_LEN_TABLE[first as usize] as usize;
+    if len == 0 {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Fail,
         )));
     }
-
-    // Count leading zeros to determine length
-    let len = first.leading_zeros() as usize + 1;
     if len > 8 {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -811,10 +858,11 @@ pub fn parse_vint(input: &[u8]) -> IResult<&[u8], u64> {
         return Err(nom::Err::Incomplete(nom::Needed::new(len - input.len())));
     }
 
-    // Extract value, masking off the length marker bit
-    let mask = (1u8 << (8 - len)) - 1;
+    // O(1) table lookup for the data mask
+    let mask = VINT_MASK_TABLE[first as usize];
     let mut value = u64::from(first & mask);
 
+    // Accumulate remaining bytes (1..len)
     for byte in input.iter().take(len).skip(1) {
         value = (value << 8) | u64::from(*byte);
     }
@@ -837,7 +885,7 @@ pub fn parse_vint(input: &[u8]) -> IResult<&[u8], u64> {
 /// use oximedia_container::demux::matroska::ebml::parse_element_id;
 ///
 /// // EBML Header ID: 0x1A 0x45 0xDF 0xA3 = 0x1A45DFA3
-/// let (remaining, id) = parse_element_id(&[0x1A, 0x45, 0xDF, 0xA3, 0x00])?;
+/// let (remaining, id) = parse_element_id(&[0x1A, 0x45, 0xDF, 0xA3, 0x00]).expect("valid id");
 /// assert_eq!(id, 0x1A45DFA3);
 /// ```
 pub fn parse_element_id(input: &[u8]) -> IResult<&[u8], u32> {
@@ -932,7 +980,7 @@ pub fn parse_element_size(input: &[u8]) -> IResult<&[u8], u64> {
 ///
 /// // EBML Header: ID=0x1A45DFA3, Size=0x1F (31 bytes)
 /// let data = [0x1A, 0x45, 0xDF, 0xA3, 0x9F, 0x00];
-/// let (remaining, element) = parse_element_header(&data)?;
+/// let (remaining, element) = parse_element_header(&data).expect("valid element header");
 ///
 /// assert_eq!(element.id, EBML_HEADER);
 /// assert_eq!(element.size, 31);
@@ -1032,7 +1080,7 @@ pub fn read_int(data: &[u8]) -> IResult<&[u8], i64> {
 /// ```
 /// use oximedia_container::demux::matroska::ebml::read_string;
 ///
-/// let result = read_string(b"webm\0\0\0", 4)?;
+/// let result = read_string(b"webm\0\0\0", 4).expect("valid string");
 /// assert_eq!(result, "webm");
 /// ```
 pub fn read_string(data: &[u8], len: usize) -> OxiResult<String> {
@@ -1073,7 +1121,7 @@ pub fn read_string(data: &[u8], len: usize) -> OxiResult<String> {
 ///
 /// // 8-byte double representing 48000.0
 /// let bytes = 48000.0_f64.to_be_bytes();
-/// let result = read_float(&bytes, 8)?;
+/// let result = read_float(&bytes, 8).expect("valid float");
 /// assert!((result - 48000.0).abs() < f64::EPSILON);
 /// ```
 pub fn read_float(data: &[u8], len: usize) -> OxiResult<f64> {
@@ -1123,7 +1171,7 @@ pub fn read_float(data: &[u8], len: usize) -> OxiResult<f64> {
 /// use oximedia_container::demux::matroska::ebml::read_date;
 ///
 /// // Zero timestamp (2001-01-01)
-/// let result = read_date(&[0; 8], 8)?;
+/// let result = read_date(&[0; 8], 8).expect("valid date");
 /// assert_eq!(result, 0);
 /// ```
 pub fn read_date(data: &[u8], len: usize) -> OxiResult<i64> {

@@ -3,19 +3,22 @@
 pub mod channels;
 pub mod conditions;
 pub mod history;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod manager;
 pub mod rules;
 pub mod severity;
 
-pub use channels::{
-    AlertChannel, DiscordChannel, EmailChannel, FileChannel, SlackChannel, SmsChannel,
-    WebhookChannel,
-};
+pub use channels::AlertChannel;
+#[cfg(all(not(target_arch = "wasm32"), feature = "email"))]
+pub use channels::EmailChannel;
+#[cfg(not(target_arch = "wasm32"))]
+pub use channels::{DiscordChannel, FileChannel, SlackChannel, SmsChannel, WebhookChannel};
 pub use conditions::{
     AbsenceCondition, AlertCondition, AnomalyCondition, CompositeCondition, RateCondition,
     ThresholdCondition,
 };
 pub use history::{AlertHistory, AlertRecord};
+#[cfg(not(target_arch = "wasm32"))]
 pub use manager::{AlertDeduplicator, AlertManager};
 pub use rules::{AlertRule, AlertRuleBuilder};
 pub use severity::AlertSeverity;

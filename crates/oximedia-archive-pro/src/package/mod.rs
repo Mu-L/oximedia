@@ -11,8 +11,11 @@ pub mod oais;
 pub mod tar;
 pub mod zip;
 
-pub use bagit::{BagItBuilder, BagItPackage, BagItValidator};
-pub use oais::{OaisBuilder, OaisPackage, OaisPackageType};
+pub use bagit::{
+    verify_bagit_v1_compliance, BagItBuilder, BagItPackage, BagItValidator, BagitComplianceReport,
+    ComplianceFinding, ComplianceLevel,
+};
+pub use oais::{DipGenerationConfig, DipGenerator, OaisBuilder, OaisPackage, OaisPackageType};
 pub use tar::TarArchiver;
 pub use zip::ZipArchiver;
 

@@ -34,6 +34,7 @@ pub fn isdb_t_sd() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -64,6 +65,7 @@ pub fn isdb_t_hd() -> Preset {
         frame_rate: Some((30, 1)),
         quality_mode: Some(QualityMode::High),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)
@@ -94,6 +96,7 @@ pub fn isdb_t_one_seg() -> Preset {
         frame_rate: Some((15, 1)),
         quality_mode: Some(QualityMode::Medium),
         container: Some("mpegts".to_string()),
+        audio_channel_layout: None,
     };
 
     Preset::new(metadata, config)

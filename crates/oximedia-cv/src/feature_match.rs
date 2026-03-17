@@ -205,6 +205,226 @@ impl FeatureMatcher {
     }
 }
 
+/// Sub-pixel refined match result for high-precision registration.
+#[derive(Debug, Clone)]
+pub struct SubPixelMatch {
+    /// Query descriptor index.
+    pub query_idx: usize,
+    /// Train descriptor index.
+    pub train_idx: usize,
+    /// Integer-precision query position (x, y).
+    pub query_pos_int: (f32, f32),
+    /// Integer-precision train position (x, y).
+    pub train_pos_int: (f32, f32),
+    /// Sub-pixel refined query position (x, y).
+    pub query_pos_sub: (f64, f64),
+    /// Sub-pixel refined train position (x, y).
+    pub train_pos_sub: (f64, f64),
+    /// Sub-pixel refinement error (RMS shift from integer position).
+    pub refinement_error: f64,
+    /// Descriptor distance.
+    pub dist: f32,
+}
+
+/// Sub-pixel accuracy refiner using parabolic interpolation on image gradients.
+///
+/// For each coarse feature match, refines the keypoint location to sub-pixel
+/// accuracy using a second-order Taylor expansion of the local image intensity
+/// surface. This is equivalent to the SIFT/SURF sub-pixel localisation step.
+pub struct SubPixelRefiner {
+    /// Half-size of the local analysis window.
+    window_half: usize,
+    /// Maximum allowed sub-pixel displacement for accepting a refined result.
+    max_displacement: f64,
+}
+
+impl SubPixelRefiner {
+    /// Create a sub-pixel refiner with default settings.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            window_half: 3,
+            max_displacement: 1.5,
+        }
+    }
+
+    /// Set the local analysis window half-size (pixels).
+    pub fn set_window_half(&mut self, half: usize) {
+        self.window_half = half.clamp(1, 8);
+    }
+
+    /// Set the maximum allowed refinement displacement.
+    pub fn set_max_displacement(&mut self, max: f64) {
+        self.max_displacement = max.clamp(0.1, 3.0);
+    }
+
+    /// Refine a list of coarse matches to sub-pixel accuracy.
+    ///
+    /// # Arguments
+    ///
+    /// * `matches`   – Coarse matches from `FeatureMatcher`.
+    /// * `kps_query` – Keypoint positions `(x, y)` for the query image.
+    /// * `kps_train` – Keypoint positions `(x, y)` for the train image.
+    /// * `img_query` – Grayscale query image (f32, row-major).
+    /// * `query_w`, `query_h` – Query image dimensions.
+    /// * `img_train` – Grayscale train image (f32, row-major).
+    /// * `train_w`, `train_h` – Train image dimensions.
+    ///
+    /// Returns a vector of `SubPixelMatch` with refined positions.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn refine(
+        &self,
+        matches: &FeatureMatch,
+        kps_query: &[(f32, f32)],
+        kps_train: &[(f32, f32)],
+        img_query: &[f32],
+        query_w: usize,
+        query_h: usize,
+        img_train: &[f32],
+        train_w: usize,
+        train_h: usize,
+    ) -> Vec<SubPixelMatch> {
+        matches
+            .all_matches
+            .iter()
+            .filter_map(|m| {
+                let qi = m.query_idx;
+                let ti = m.train_idx;
+
+                if qi >= kps_query.len() || ti >= kps_train.len() {
+                    return None;
+                }
+
+                let (qx, qy) = kps_query[qi];
+                let (tx, ty) = kps_train[ti];
+
+                let (qxs, qys, q_err) =
+                    self.refine_point(img_query, query_w, query_h, qx as f64, qy as f64);
+                let (txs, tys, t_err) =
+                    self.refine_point(img_train, train_w, train_h, tx as f64, ty as f64);
+
+                let refinement_error = (q_err * q_err + t_err * t_err).sqrt();
+
+                Some(SubPixelMatch {
+                    query_idx: qi,
+                    train_idx: ti,
+                    query_pos_int: (qx, qy),
+                    train_pos_int: (tx, ty),
+                    query_pos_sub: (qxs, qys),
+                    train_pos_sub: (txs, tys),
+                    refinement_error,
+                    dist: m.dist,
+                })
+            })
+            .collect()
+    }
+
+    /// Refine a single point to sub-pixel accuracy using parabolic interpolation.
+    ///
+    /// Returns `(refined_x, refined_y, displacement_magnitude)`.
+    fn refine_point(
+        &self,
+        image: &[f32],
+        width: usize,
+        height: usize,
+        cx: f64,
+        cy: f64,
+    ) -> (f64, f64, f64) {
+        let ix = cx.round() as usize;
+        let iy = cy.round() as usize;
+
+        // Ensure we have room for the window
+        if ix < self.window_half
+            || iy < self.window_half
+            || ix + self.window_half >= width
+            || iy + self.window_half >= height
+        {
+            return (cx, cy, 0.0);
+        }
+
+        // Compute second-order Taylor coefficients from image gradients in a
+        // small neighbourhood (3×3 finite differences).
+        let get = |x: usize, y: usize| image[y * width + x] as f64;
+
+        let c = get(ix, iy);
+        let l = get(ix - 1, iy);
+        let r = get(ix + 1, iy);
+        let u = get(ix, iy - 1);
+        let d = get(ix, iy + 1);
+
+        // Second derivative approximations
+        let dxx = r - 2.0 * c + l;
+        let dyy = d - 2.0 * c + u;
+        // First derivative approximations (central difference)
+        let dx = (r - l) * 0.5;
+        let dy = (d - u) * 0.5;
+
+        // Parabolic sub-pixel shift: delta = -grad / (2 * hessian_diag)
+        let shift_x = if dxx.abs() > 1e-6 {
+            (-dx / (2.0 * dxx)).clamp(-self.max_displacement, self.max_displacement)
+        } else {
+            0.0
+        };
+        let shift_y = if dyy.abs() > 1e-6 {
+            (-dy / (2.0 * dyy)).clamp(-self.max_displacement, self.max_displacement)
+        } else {
+            0.0
+        };
+
+        let refined_x = cx + shift_x;
+        let refined_y = cy + shift_y;
+        let displacement = (shift_x * shift_x + shift_y * shift_y).sqrt();
+
+        (refined_x, refined_y, displacement)
+    }
+}
+
+impl Default for SubPixelRefiner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Compute sub-pixel accurate matches in one step.
+///
+/// Convenience function combining `FeatureMatcher::match_descriptors` and
+/// `SubPixelRefiner::refine`.
+///
+/// # Arguments
+///
+/// * `query`     – Flat query descriptors (n_q × desc_len).
+/// * `train`     – Flat train descriptors (n_t × desc_len).
+/// * `desc_len`  – Descriptor dimensionality.
+/// * `kps_query` – Query keypoint positions.
+/// * `kps_train` – Train keypoint positions.
+/// * `img_query` / `img_train` – Grayscale images as f32 slices.
+/// * `qw`, `qh`, `tw`, `th`   – Image dimensions.
+///
+/// Returns sub-pixel accurate match list.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn match_with_subpixel(
+    query: &[f32],
+    train: &[f32],
+    desc_len: usize,
+    kps_query: &[(f32, f32)],
+    kps_train: &[(f32, f32)],
+    img_query: &[f32],
+    qw: usize,
+    qh: usize,
+    img_train: &[f32],
+    tw: usize,
+    th: usize,
+) -> Vec<SubPixelMatch> {
+    let matcher = FeatureMatcher::new(false, 0.0);
+    let coarse = matcher.match_descriptors(query, train, desc_len);
+    let refiner = SubPixelRefiner::new();
+    refiner.refine(
+        &coarse, kps_query, kps_train, img_query, qw, qh, img_train, tw, th,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +528,66 @@ mod tests {
         let fm = matcher.match_descriptors(&query, &train, 4);
         let passed = matcher.ratio_test(&fm, &query, &train, 4);
         assert_eq!(passed.len(), 0);
+    }
+
+    #[test]
+    fn test_subpixel_refiner_default() {
+        let refiner = SubPixelRefiner::new();
+        assert_eq!(refiner.window_half, 3);
+    }
+
+    #[test]
+    fn test_subpixel_refine_empty_matches() {
+        let refiner = SubPixelRefiner::new();
+        let fm = FeatureMatch::new();
+        let img = vec![0.5f32; 10 * 10];
+        let result = refiner.refine(&fm, &[], &[], &img, 10, 10, &img, 10, 10);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_subpixel_refine_single_match() {
+        let refiner = SubPixelRefiner::new();
+        let mut fm = FeatureMatch::new();
+        fm.all_matches.push(MatchPair::new(0, 0, 0.0));
+        // Uniform image → no gradient → no sub-pixel shift
+        let img = vec![0.5f32; 20 * 20];
+        let kps_q = vec![(10.0f32, 10.0f32)];
+        let kps_t = vec![(10.0f32, 10.0f32)];
+        let result = refiner.refine(&fm, &kps_q, &kps_t, &img, 20, 20, &img, 20, 20);
+        assert_eq!(result.len(), 1);
+        let m = &result[0];
+        assert!((m.query_pos_sub.0 - 10.0).abs() < 0.01);
+        assert!((m.query_pos_sub.1 - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_subpixel_refine_with_gradient() {
+        let refiner = SubPixelRefiner::new();
+        let mut fm = FeatureMatch::new();
+        fm.all_matches.push(MatchPair::new(0, 0, 0.5));
+        // Create a parabolic image peak at (10, 10) to verify sub-pixel shift
+        let w = 20usize;
+        let h = 20usize;
+        let mut img = vec![0.0f32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let dx = x as f32 - 10.0;
+                let dy = y as f32 - 10.0;
+                img[y * w + x] = 1.0 - 0.01 * (dx * dx + dy * dy);
+            }
+        }
+        let kps_q = vec![(10.0f32, 10.0f32)];
+        let kps_t = vec![(10.0f32, 10.0f32)];
+        let result = refiner.refine(&fm, &kps_q, &kps_t, &img, w, h, &img, w, h);
+        assert_eq!(result.len(), 1);
+        // At exact peak, refinement displacement should be near zero
+        assert!(result[0].refinement_error < 0.5);
+    }
+
+    #[test]
+    fn test_match_with_subpixel_empty() {
+        let result = match_with_subpixel(&[], &[], 4, &[], &[], &[], 0, 0, &[], 0, 0);
+        assert!(result.is_empty());
     }
 }

@@ -203,6 +203,209 @@ impl TwoPassEncoder {
     pub fn pass_one_complete(&self) -> bool {
         self.pass_one_result.is_some()
     }
+
+    /// Returns the collected statistics from pass one as a serializable report.
+    #[must_use]
+    pub fn statistics(&self) -> Option<TwoPassStatistics> {
+        let pass_one = self.pass_one_result.as_ref()?;
+        let total_bits = self.config.total_bits();
+
+        Some(TwoPassStatistics::from_pass_one(
+            pass_one,
+            &self.config,
+            total_bits,
+        ))
+    }
+}
+
+/// Comprehensive statistics collected from the two-pass encoding process.
+///
+/// This provides detailed information about the content complexity, bit
+/// allocation, and quality metrics gathered during the first pass that
+/// guides the second pass encoding.
+#[derive(Debug, Clone)]
+pub struct TwoPassStatistics {
+    /// Total number of frames analyzed.
+    pub frame_count: usize,
+    /// Mean complexity score across all frames (0.0-1.0).
+    pub mean_complexity: f64,
+    /// Peak (maximum) complexity observed.
+    pub peak_complexity: f64,
+    /// Minimum complexity observed.
+    pub min_complexity: f64,
+    /// Standard deviation of complexity scores.
+    pub complexity_std_dev: f64,
+    /// Fraction of frames classified as complex regions (0.0-1.0).
+    pub complex_region_fraction: f64,
+    /// Total bit budget in bits.
+    pub total_bit_budget: u64,
+    /// Average bits per frame.
+    pub avg_bits_per_frame: u64,
+    /// Maximum bits allocated to any single frame.
+    pub max_bits_per_frame: u64,
+    /// Minimum bits allocated to any single frame.
+    pub min_bits_per_frame: u64,
+    /// Target bitrate in kbps.
+    pub target_bitrate_kbps: u32,
+    /// Content duration in milliseconds.
+    pub duration_ms: u64,
+    /// Complexity histogram (10 bins covering 0.0-1.0).
+    pub complexity_histogram: [u32; 10],
+    /// Scene change indices (frames where complexity jumps significantly).
+    pub scene_change_indices: Vec<usize>,
+}
+
+impl TwoPassStatistics {
+    /// Constructs statistics from pass one results.
+    fn from_pass_one(pass_one: &PassOneResult, config: &TwoPassConfig, total_bits: u64) -> Self {
+        let n = pass_one.complexity_map.len();
+        let (min_c, max_c, std_dev) = if n == 0 {
+            (0.0, 0.0, 0.0)
+        } else {
+            let min = pass_one
+                .complexity_map
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min);
+            let max = pass_one.peak_complexity;
+            let mean = pass_one.avg_complexity;
+            let variance: f64 = pass_one
+                .complexity_map
+                .iter()
+                .map(|&c| (c - mean).powi(2))
+                .sum::<f64>()
+                / n as f64;
+            (min, max, variance.sqrt())
+        };
+
+        // Compute per-frame bit allocations
+        let mut max_bits: u64 = 0;
+        let mut min_bits: u64 = u64::MAX;
+        for i in 0..n {
+            let bits = pass_one.allocate_bits(i, total_bits);
+            if bits > max_bits {
+                max_bits = bits;
+            }
+            if bits < min_bits {
+                min_bits = bits;
+            }
+        }
+        if n == 0 {
+            min_bits = 0;
+        }
+
+        let avg_bits = if n > 0 { total_bits / n as u64 } else { 0 };
+
+        // Build complexity histogram (10 bins: [0.0-0.1), [0.1-0.2), ... [0.9-1.0])
+        let mut histogram = [0u32; 10];
+        for &c in &pass_one.complexity_map {
+            let bin = ((c * 10.0).floor() as usize).min(9);
+            histogram[bin] += 1;
+        }
+
+        // Detect scene changes: frames where complexity jumps by more than
+        // 2x the standard deviation from the previous frame
+        let scene_changes = Self::detect_scene_changes(&pass_one.complexity_map, std_dev);
+
+        Self {
+            frame_count: n,
+            mean_complexity: pass_one.avg_complexity,
+            peak_complexity: max_c,
+            min_complexity: min_c,
+            complexity_std_dev: std_dev,
+            complex_region_fraction: pass_one.complex_region_fraction(),
+            total_bit_budget: total_bits,
+            avg_bits_per_frame: avg_bits,
+            max_bits_per_frame: max_bits,
+            min_bits_per_frame: min_bits,
+            target_bitrate_kbps: config.target_bitrate_kbps,
+            duration_ms: config.input_duration_ms,
+            complexity_histogram: histogram,
+            scene_change_indices: scene_changes,
+        }
+    }
+
+    /// Detects scene changes by finding frames where complexity changes
+    /// by more than 2 standard deviations from the previous frame.
+    fn detect_scene_changes(complexities: &[f64], std_dev: f64) -> Vec<usize> {
+        let threshold = 2.0 * std_dev;
+        if threshold <= 0.0 || complexities.len() < 2 {
+            return Vec::new();
+        }
+
+        let mut changes = Vec::new();
+        for i in 1..complexities.len() {
+            let delta = (complexities[i] - complexities[i - 1]).abs();
+            if delta > threshold {
+                changes.push(i);
+            }
+        }
+        changes
+    }
+
+    /// Returns the compression ratio (mean complexity / peak complexity).
+    ///
+    /// Values close to 1.0 indicate uniform content; values close to 0.0
+    /// indicate highly variable content that benefits most from two-pass.
+    #[must_use]
+    pub fn content_uniformity(&self) -> f64 {
+        if self.peak_complexity <= 0.0 {
+            return 1.0;
+        }
+        self.mean_complexity / self.peak_complexity
+    }
+
+    /// Returns the bit allocation ratio (max bits / avg bits).
+    ///
+    /// Higher values indicate more aggressive bit redistribution.
+    #[must_use]
+    pub fn bit_allocation_ratio(&self) -> f64 {
+        if self.avg_bits_per_frame == 0 {
+            return 1.0;
+        }
+        self.max_bits_per_frame as f64 / self.avg_bits_per_frame as f64
+    }
+
+    /// Returns `true` if the content would significantly benefit from
+    /// two-pass encoding (high complexity variance).
+    #[must_use]
+    pub fn benefits_from_two_pass(&self) -> bool {
+        // High variance relative to mean indicates benefit
+        if self.mean_complexity <= 0.0 {
+            return false;
+        }
+        let cv = self.complexity_std_dev / self.mean_complexity;
+        cv > 0.3 // coefficient of variation > 30%
+    }
+
+    /// Returns the number of detected scene changes.
+    #[must_use]
+    pub fn scene_change_count(&self) -> usize {
+        self.scene_change_indices.len()
+    }
+
+    /// Returns a human-readable summary of the statistics.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        format!(
+            "Frames: {} | Complexity: mean={:.3}, peak={:.3}, std={:.3} | \
+             Bits: budget={}, avg/frame={}, max/frame={} | \
+             Scene changes: {} | Two-pass benefit: {}",
+            self.frame_count,
+            self.mean_complexity,
+            self.peak_complexity,
+            self.complexity_std_dev,
+            self.total_bit_budget,
+            self.avg_bits_per_frame,
+            self.max_bits_per_frame,
+            self.scene_change_count(),
+            if self.benefits_from_two_pass() {
+                "high"
+            } else {
+                "low"
+            },
+        )
+    }
 }
 
 #[cfg(test)]
@@ -307,5 +510,156 @@ mod tests {
         assert!(result.is_complex_region(0));
         let result_low = PassOneResult::from_complexities(vec![0.2], 1000);
         assert!(!result_low.is_complex_region(0));
+    }
+
+    // ── TwoPassStatistics tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_statistics_basic() {
+        let cfg = TwoPassConfig::new(5000, 10_000);
+        let mut encoder = TwoPassEncoder::new(cfg);
+        encoder.analyze_pass_one(vec![0.2, 0.4, 0.6, 0.8]);
+        let stats = encoder
+            .statistics()
+            .expect("should have stats after pass one");
+        assert_eq!(stats.frame_count, 4);
+        assert!((stats.mean_complexity - 0.5).abs() < 1e-9);
+        assert!((stats.peak_complexity - 0.8).abs() < 1e-9);
+        assert!((stats.min_complexity - 0.2).abs() < 1e-9);
+        assert!(stats.complexity_std_dev > 0.0);
+        assert_eq!(stats.target_bitrate_kbps, 5000);
+        assert_eq!(stats.duration_ms, 10_000);
+    }
+
+    #[test]
+    fn test_statistics_bit_budget() {
+        let cfg = TwoPassConfig::new(5000, 10_000);
+        let mut encoder = TwoPassEncoder::new(cfg);
+        encoder.analyze_pass_one(vec![0.5, 0.5, 0.5, 0.5]);
+        let stats = encoder.statistics().expect("should have stats");
+        assert_eq!(stats.total_bit_budget, 50_000_000);
+        assert_eq!(stats.avg_bits_per_frame, 12_500_000);
+    }
+
+    #[test]
+    fn test_statistics_none_before_pass_one() {
+        let cfg = TwoPassConfig::new(4000, 5000);
+        let encoder = TwoPassEncoder::new(cfg);
+        assert!(encoder.statistics().is_none());
+    }
+
+    #[test]
+    fn test_statistics_content_uniformity_uniform() {
+        let cfg = TwoPassConfig::new(5000, 10_000);
+        let mut encoder = TwoPassEncoder::new(cfg);
+        encoder.analyze_pass_one(vec![0.5, 0.5, 0.5, 0.5]);
+        let stats = encoder.statistics().expect("should have stats");
+        assert!((stats.content_uniformity() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_statistics_content_uniformity_variable() {
+        let cfg = TwoPassConfig::new(5000, 10_000);
+        let mut encoder = TwoPassEncoder::new(cfg);
+        encoder.analyze_pass_one(vec![0.1, 0.1, 0.1, 0.9]);
+        let stats = encoder.statistics().expect("should have stats");
+        assert!(stats.content_uniformity() < 0.5);
+    }
+
+    #[test]
+    fn test_statistics_bit_allocation_ratio_uniform() {
+        let cfg = TwoPassConfig::new(5000, 10_000);
+        let mut encoder = TwoPassEncoder::new(cfg);
+        encoder.analyze_pass_one(vec![0.5, 0.5, 0.5, 0.5]);
+        let stats = encoder.statistics().expect("should have stats");
+        // Uniform content -> equal allocation -> ratio ~1.0
+        assert!((stats.bit_allocation_ratio() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_statistics_bit_allocation_ratio_variable() {
+        let cfg = TwoPassConfig::new(5000, 10_000);
+        let mut encoder = TwoPassEncoder::new(cfg);
+        encoder.analyze_pass_one(vec![0.1, 0.1, 0.1, 0.9]);
+        let stats = encoder.statistics().expect("should have stats");
+        // Complex frame should get more bits -> ratio > 1
+        assert!(stats.bit_allocation_ratio() > 1.5);
+    }
+
+    #[test]
+    fn test_statistics_benefits_from_two_pass_variable() {
+        let cfg = TwoPassConfig::new(5000, 10_000);
+        let mut encoder = TwoPassEncoder::new(cfg);
+        encoder.analyze_pass_one(vec![0.1, 0.1, 0.1, 0.9, 0.1, 0.1, 0.1, 0.9]);
+        let stats = encoder.statistics().expect("should have stats");
+        assert!(stats.benefits_from_two_pass());
+    }
+
+    #[test]
+    fn test_statistics_not_benefits_from_two_pass_uniform() {
+        let cfg = TwoPassConfig::new(5000, 10_000);
+        let mut encoder = TwoPassEncoder::new(cfg);
+        encoder.analyze_pass_one(vec![0.5, 0.5, 0.5, 0.5, 0.5]);
+        let stats = encoder.statistics().expect("should have stats");
+        assert!(!stats.benefits_from_two_pass());
+    }
+
+    #[test]
+    fn test_statistics_complexity_histogram() {
+        let cfg = TwoPassConfig::new(5000, 10_000);
+        let mut encoder = TwoPassEncoder::new(cfg);
+        // 4 frames at 0.15, 1 at 0.85
+        encoder.analyze_pass_one(vec![0.15, 0.15, 0.15, 0.15, 0.85]);
+        let stats = encoder.statistics().expect("should have stats");
+        // Bin 1 (0.1-0.2) should have 4 frames
+        assert_eq!(stats.complexity_histogram[1], 4);
+        // Bin 8 (0.8-0.9) should have 1 frame
+        assert_eq!(stats.complexity_histogram[8], 1);
+    }
+
+    #[test]
+    fn test_statistics_scene_changes() {
+        let cfg = TwoPassConfig::new(5000, 10_000);
+        let mut encoder = TwoPassEncoder::new(cfg);
+        // Clear scene change at index 3 (0.1 -> 0.9)
+        encoder.analyze_pass_one(vec![0.1, 0.1, 0.1, 0.9, 0.9, 0.9, 0.1, 0.1]);
+        let stats = encoder.statistics().expect("should have stats");
+        assert!(stats.scene_change_count() > 0);
+        assert!(stats.scene_change_indices.contains(&3));
+    }
+
+    #[test]
+    fn test_statistics_no_scene_changes_uniform() {
+        let cfg = TwoPassConfig::new(5000, 10_000);
+        let mut encoder = TwoPassEncoder::new(cfg);
+        encoder.analyze_pass_one(vec![0.5, 0.5, 0.5, 0.5]);
+        let stats = encoder.statistics().expect("should have stats");
+        assert_eq!(stats.scene_change_count(), 0);
+    }
+
+    #[test]
+    fn test_statistics_summary_not_empty() {
+        let cfg = TwoPassConfig::new(5000, 10_000);
+        let mut encoder = TwoPassEncoder::new(cfg);
+        encoder.analyze_pass_one(vec![0.2, 0.4, 0.6, 0.8]);
+        let stats = encoder.statistics().expect("should have stats");
+        let summary = stats.summary();
+        assert!(!summary.is_empty());
+        assert!(summary.contains("Frames: 4"));
+        assert!(summary.contains("Scene changes:"));
+    }
+
+    #[test]
+    fn test_statistics_empty_complexities() {
+        let cfg = TwoPassConfig::new(5000, 10_000);
+        let mut encoder = TwoPassEncoder::new(cfg);
+        encoder.analyze_pass_one(vec![]);
+        let stats = encoder.statistics().expect("should have stats");
+        assert_eq!(stats.frame_count, 0);
+        assert_eq!(stats.avg_bits_per_frame, 0);
+        assert_eq!(stats.min_bits_per_frame, 0);
+        assert!((stats.content_uniformity() - 1.0).abs() < 1e-9);
+        assert!((stats.bit_allocation_ratio() - 1.0).abs() < 1e-9);
+        assert!(!stats.benefits_from_two_pass());
     }
 }

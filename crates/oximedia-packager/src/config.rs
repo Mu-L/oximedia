@@ -279,6 +279,12 @@ pub struct PackagerConfig {
     pub low_latency: bool,
     /// Manifest version tracking.
     pub manifest_versioning: bool,
+    /// Optional explicit variant set for multi-variant playlist generation.
+    ///
+    /// When set, `MultivariantPlaylistBuilder` uses this set directly instead
+    /// of deriving variants from the bitrate ladder.
+    #[serde(skip)]
+    pub variant_set: Option<crate::variant_stream::VariantSet>,
 }
 
 impl PackagerConfig {
@@ -330,6 +336,13 @@ impl PackagerConfig {
         self
     }
 
+    /// Set an explicit variant set for multi-variant playlist generation.
+    #[must_use]
+    pub fn with_variant_set(mut self, vs: crate::variant_stream::VariantSet) -> Self {
+        self.variant_set = Some(vs);
+        self
+    }
+
     /// Validate the configuration.
     pub fn validate(&self) -> PackagerResult<()> {
         self.ladder.validate()?;
@@ -337,6 +350,10 @@ impl PackagerConfig {
 
         if self.output.s3_upload && self.output.s3_bucket.is_none() {
             return Err(PackagerError::invalid_config("S3 bucket is required"));
+        }
+
+        if let Some(vs) = &self.variant_set {
+            vs.validate()?;
         }
 
         Ok(())

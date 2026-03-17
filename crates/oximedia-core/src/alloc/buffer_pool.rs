@@ -30,12 +30,12 @@ use std::sync::{Arc, RwLock};
 ///
 /// // Write to the buffer
 /// {
-///     let mut guard = buffer.as_ref()?.write()?;
+///     let mut guard = buffer.as_ref().expect("buffer present").write().expect("lock ok");
 ///     guard[0] = 42;
 /// }
 ///
 /// // Release it back to the pool
-/// pool.release(buffer?);
+/// pool.release(buffer.expect("buffer present"));
 /// ```
 #[derive(Debug)]
 pub struct BufferPool {
@@ -135,7 +135,7 @@ impl BufferPool {
     ///
     /// let pool = BufferPool::new(0, 1024); // Empty pool
     /// let buffer = pool.acquire_or_alloc();
-    /// assert_eq!(buffer.read()?.len(), 1024);
+    /// assert_eq!(buffer.read().expect("lock ok").len(), 1024);
     /// ```
     #[must_use]
     pub fn acquire_or_alloc(&self) -> Arc<RwLock<Vec<u8>>> {
@@ -158,7 +158,7 @@ impl BufferPool {
     /// use oximedia_core::alloc::BufferPool;
     ///
     /// let pool = BufferPool::new(2, 1024);
-    /// let buffer = pool.acquire()?;
+    /// let buffer = pool.acquire().expect("buffer available");
     /// // Use the buffer...
     /// pool.release(buffer);
     /// ```

@@ -238,6 +238,66 @@ impl NdiFrameBuffer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FrameDropStrategy
+// ---------------------------------------------------------------------------
+
+/// Strategies for dropping frames from a [`VecDeque`] when the receiver is
+/// falling behind the sender.
+///
+/// Unlike [`BufferStrategy`] (which is embedded in [`NdiFrameBuffer`] and
+/// controls the *buffer overflow* policy), `FrameDropStrategy` is a
+/// stand-alone enum intended for use with the free function
+/// [`apply_strategy`] that operates directly on any `VecDeque<Frame>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameDropStrategy {
+    /// Always remove the oldest (front) frame.
+    DropOldest,
+    /// Always remove the newest (back) frame.
+    DropNewest,
+    /// Remove frames only when the buffer depth exceeds `threshold_frames`.
+    ///
+    /// If the queue has more than `threshold_frames` items the oldest frame
+    /// is removed; otherwise the queue is left unchanged.
+    DropIfBehind { threshold_frames: u32 },
+}
+
+/// Apply `strategy` to `buffer`, potentially removing one frame.
+///
+/// Returns `true` if a frame was dropped, `false` if the buffer was
+/// unchanged.
+pub fn apply_strategy(
+    buffer: &mut std::collections::VecDeque<NdiBufferedFrame>,
+    strategy: FrameDropStrategy,
+) -> bool {
+    match strategy {
+        FrameDropStrategy::DropOldest => {
+            if buffer.is_empty() {
+                false
+            } else {
+                buffer.pop_front();
+                true
+            }
+        }
+        FrameDropStrategy::DropNewest => {
+            if buffer.is_empty() {
+                false
+            } else {
+                buffer.pop_back();
+                true
+            }
+        }
+        FrameDropStrategy::DropIfBehind { threshold_frames } => {
+            if buffer.len() > threshold_frames as usize {
+                buffer.pop_front();
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,5 +449,81 @@ mod tests {
     fn test_frame_data_len() {
         let f = make_frame(0, 512);
         assert_eq!(f.data_len(), 512);
+    }
+
+    // -----------------------------------------------------------------------
+    // FrameDropStrategy tests
+    // -----------------------------------------------------------------------
+
+    fn make_deque(seqs: &[u64]) -> std::collections::VecDeque<NdiBufferedFrame> {
+        seqs.iter().copied().map(|s| make_frame(s, 16)).collect()
+    }
+
+    #[test]
+    fn test_frame_drop_oldest() {
+        let mut buf = make_deque(&[1, 2, 3]);
+        let dropped = apply_strategy(&mut buf, FrameDropStrategy::DropOldest);
+        assert!(dropped, "a frame should have been dropped");
+        assert_eq!(buf.len(), 2);
+        // The oldest (sequence 1) should be gone; sequence 2 is now front.
+        assert_eq!(
+            buf.front().expect("expected non-empty deque").sequence,
+            2,
+            "oldest frame should have been removed"
+        );
+    }
+
+    #[test]
+    fn test_frame_drop_newest() {
+        let mut buf = make_deque(&[1, 2, 3]);
+        let dropped = apply_strategy(&mut buf, FrameDropStrategy::DropNewest);
+        assert!(dropped);
+        assert_eq!(buf.len(), 2);
+        // The newest (sequence 3) should be gone; sequence 2 is now back.
+        assert_eq!(
+            buf.back().expect("expected non-empty deque").sequence,
+            2,
+            "newest frame should have been removed"
+        );
+    }
+
+    #[test]
+    fn test_frame_drop_if_behind_triggers() {
+        let mut buf = make_deque(&[1, 2, 3, 4, 5]);
+        let strategy = FrameDropStrategy::DropIfBehind {
+            threshold_frames: 3,
+        };
+        let dropped = apply_strategy(&mut buf, strategy);
+        assert!(dropped, "should drop because len(5) > threshold(3)");
+        assert_eq!(buf.len(), 4);
+        // Oldest (1) removed.
+        assert_eq!(buf.front().expect("expected non-empty deque").sequence, 2);
+    }
+
+    #[test]
+    fn test_frame_drop_if_behind_no_trigger() {
+        let mut buf = make_deque(&[1, 2]);
+        let strategy = FrameDropStrategy::DropIfBehind {
+            threshold_frames: 3,
+        };
+        let dropped = apply_strategy(&mut buf, strategy);
+        assert!(!dropped, "should not drop because len(2) <= threshold(3)");
+        assert_eq!(buf.len(), 2);
+    }
+
+    #[test]
+    fn test_frame_drop_oldest_empty() {
+        let mut buf: std::collections::VecDeque<NdiBufferedFrame> =
+            std::collections::VecDeque::new();
+        let dropped = apply_strategy(&mut buf, FrameDropStrategy::DropOldest);
+        assert!(!dropped, "empty buffer: nothing to drop");
+    }
+
+    #[test]
+    fn test_frame_drop_newest_empty() {
+        let mut buf: std::collections::VecDeque<NdiBufferedFrame> =
+            std::collections::VecDeque::new();
+        let dropped = apply_strategy(&mut buf, FrameDropStrategy::DropNewest);
+        assert!(!dropped, "empty buffer: nothing to drop");
     }
 }

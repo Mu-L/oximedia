@@ -67,6 +67,72 @@ impl std::fmt::Display for MusicalKey {
     }
 }
 
+impl MusicalKey {
+    /// Return a human-readable name for this key, e.g. "C major" or "A minor".
+    #[must_use]
+    pub fn name(&self) -> String {
+        self.to_string()
+    }
+
+    /// Return the Camelot Wheel code for this key (DJ-friendly notation).
+    ///
+    /// The Camelot Wheel assigns each key a number (1–12) and a letter:
+    /// - `B` suffix for major keys (outer ring)
+    /// - `A` suffix for minor keys (inner ring)
+    ///
+    /// Harmonically adjacent keys share numbers (±1) or the same number
+    /// (relative major/minor), making it easy to mix tracks in key.
+    #[must_use]
+    pub fn camelot_code(&self) -> String {
+        // Camelot numbers for each pitch class.
+        // Major keys (B suffix): C=8B, G=9B, D=10B, A=11B, E=12B, B=1B,
+        //                        F#=2B, Db=3B, Ab=4B, Eb=5B, Bb=6B, F=7B
+        // Minor keys (A suffix): Am=8A, Em=9A, Bm=10A, F#m=11A, C#m=12A,
+        //                        G#m=1A, Ebm=2A, Bbm=3A, Fm=4A, Cm=5A,
+        //                        Gm=6A, Dm=7A
+        const MAJOR_CAMELOT: [u8; 12] = [8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6, 1];
+        const MINOR_CAMELOT: [u8; 12] = [5, 12, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10];
+
+        let (number, letter) = match self.mode {
+            Mode::Major => (MAJOR_CAMELOT[self.root as usize], 'B'),
+            Mode::Minor => (MINOR_CAMELOT[self.root as usize], 'A'),
+        };
+        format!("{number}{letter}")
+    }
+
+    /// Return the relative key — same key signature, opposite mode.
+    ///
+    /// - Major → relative minor is 3 semitones below (root − 3 mod 12)
+    /// - Minor → relative major is 3 semitones above (root + 3 mod 12)
+    #[must_use]
+    pub fn relative_key(&self) -> MusicalKey {
+        match self.mode {
+            Mode::Major => MusicalKey {
+                root: (self.root as i8 - 3).rem_euclid(12) as u8,
+                mode: Mode::Minor,
+            },
+            Mode::Minor => MusicalKey {
+                root: (self.root as i8 + 3).rem_euclid(12) as u8,
+                mode: Mode::Major,
+            },
+        }
+    }
+
+    /// Return the parallel key — same root pitch, opposite mode.
+    ///
+    /// E.g. C major → C minor, A minor → A major.
+    #[must_use]
+    pub fn parallel_key(&self) -> MusicalKey {
+        MusicalKey {
+            root: self.root,
+            mode: match self.mode {
+                Mode::Major => Mode::Minor,
+                Mode::Minor => Mode::Major,
+            },
+        }
+    }
+}
+
 /// Result of key detection.
 #[derive(Debug, Clone)]
 pub struct KeyDetectionResult {
@@ -359,5 +425,120 @@ mod tests {
         let chroma = chroma_from_spectrum(&spectrum, 44100.0, 2048);
         let sum: f64 = chroma.iter().sum();
         assert!(approx_eq(sum, 0.0, 1e-10));
+    }
+
+    // ── MusicalKey new methods ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_musical_key_name_c_major() {
+        let key = MusicalKey {
+            root: 0,
+            mode: Mode::Major,
+        };
+        assert_eq!(key.name(), "C major");
+    }
+
+    #[test]
+    fn test_musical_key_name_a_minor() {
+        let key = MusicalKey {
+            root: 9,
+            mode: Mode::Minor,
+        };
+        assert_eq!(key.name(), "A minor");
+    }
+
+    #[test]
+    fn test_camelot_code_c_major() {
+        let key = MusicalKey {
+            root: 0,
+            mode: Mode::Major,
+        };
+        assert_eq!(key.camelot_code(), "8B");
+    }
+
+    #[test]
+    fn test_camelot_code_a_minor() {
+        let key = MusicalKey {
+            root: 9,
+            mode: Mode::Minor,
+        };
+        assert_eq!(key.camelot_code(), "8A");
+    }
+
+    #[test]
+    fn test_relative_key_c_major_is_a_minor() {
+        let c_major = MusicalKey {
+            root: 0,
+            mode: Mode::Major,
+        };
+        let rel = c_major.relative_key();
+        assert_eq!(
+            rel.root, 9,
+            "Relative of C major should be A minor (root=9)"
+        );
+        assert_eq!(rel.mode, Mode::Minor);
+    }
+
+    #[test]
+    fn test_relative_key_a_minor_is_c_major() {
+        let a_minor = MusicalKey {
+            root: 9,
+            mode: Mode::Minor,
+        };
+        let rel = a_minor.relative_key();
+        assert_eq!(
+            rel.root, 0,
+            "Relative of A minor should be C major (root=0)"
+        );
+        assert_eq!(rel.mode, Mode::Major);
+    }
+
+    #[test]
+    fn test_parallel_key_c_major_is_c_minor() {
+        let c_major = MusicalKey {
+            root: 0,
+            mode: Mode::Major,
+        };
+        let par = c_major.parallel_key();
+        assert_eq!(
+            par.root, 0,
+            "Parallel of C major should be C minor (root=0)"
+        );
+        assert_eq!(par.mode, Mode::Minor);
+    }
+
+    #[test]
+    fn test_parallel_key_d_major_is_d_minor() {
+        let d_major = MusicalKey {
+            root: 2,
+            mode: Mode::Major,
+        };
+        let par = d_major.parallel_key();
+        assert_eq!(
+            par.root, 2,
+            "Parallel of D major should be D minor (root=2)"
+        );
+        assert_eq!(par.mode, Mode::Minor);
+    }
+
+    #[test]
+    fn test_camelot_code_g_major() {
+        let key = MusicalKey {
+            root: 7,
+            mode: Mode::Major,
+        };
+        assert_eq!(key.camelot_code(), "9B");
+    }
+
+    #[test]
+    fn test_relative_then_relative_returns_original() {
+        // Relative of relative should return the original key
+        let key = MusicalKey {
+            root: 5,
+            mode: Mode::Major,
+        };
+        let rel_rel = key.relative_key().relative_key();
+        assert_eq!(rel_rel.root, key.root);
+        assert_eq!(rel_rel.mode, key.mode);
     }
 }

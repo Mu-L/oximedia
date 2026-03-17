@@ -23,7 +23,7 @@ const DEFAULT_RETRY_ATTEMPTS: u32 = 3;
 const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Maximum backoff duration (60 seconds)
-const MAX_BACKOFF: Duration = Duration::from_secs(60);
+const MAX_BACKOFF: Duration = Duration::from_mins(1);
 
 /// Chunk size for parallel transfers (10 MB)
 const PARALLEL_CHUNK_SIZE: u64 = 10 * 1024 * 1024;

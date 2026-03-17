@@ -52,6 +52,7 @@ mod cdef;
 mod coeff_decode;
 mod coeff_encode;
 mod coefficients;
+pub mod conformance;
 mod decoder;
 mod encoder;
 mod entropy;
@@ -65,6 +66,8 @@ mod loop_filter;
 mod loop_optimization;
 mod mode_decision;
 mod obu;
+mod parallel_tile_decoder;
+pub mod parallel_tile_encoder;
 mod prediction;
 mod quantization;
 mod sequence;
@@ -87,6 +90,7 @@ pub use coeff_encode::{
 pub use coefficients::{
     CoeffBuffer, CoeffContext, CoeffStats, EobContext, EobPt, LevelContext, ScanOrderCache,
 };
+pub use conformance::{ObuValidator, SequenceHeaderValidator, ValidationResult};
 pub use decoder::Av1Decoder;
 pub use encoder::Av1Encoder;
 pub use entropy::{ArithmeticDecoder, SymbolReader, SymbolWriter};
@@ -100,7 +104,10 @@ pub use film_grain::{
     MAX_AR_COEFFS_CHROMA, MAX_AR_COEFFS_LUMA, MAX_AR_LAG, MAX_CHROMA_SCALING_POINTS,
     MAX_LUMA_SCALING_POINTS,
 };
-pub use film_grain_table::{FilmGrainTable, GrainIntensity, GrainPatternBuilder, GrainPreset};
+pub use film_grain_table::{
+    BlockGrainOverride, FilmGrainTable, GrainIntensity, GrainPatternBuilder, GrainPreset,
+    PerBlockGrainTable,
+};
 pub use frame_header::{
     FrameHeader, FrameSize, FrameType, GlobalMotion, InterpolationFilter, ReferenceMode,
     RenderSize, SegmentationParams,
@@ -114,9 +121,17 @@ pub use mode_decision::{
     compute_lambda_from_qp, ModeCandidate, ModeDecision, ModeDecisionConfig, PredictionMode,
 };
 pub use obu::{ObuHeader, ObuType};
+pub use parallel_tile_decoder::{ParallelTileDecoder, TileJob};
+pub use parallel_tile_encoder::{
+    encode_tiles_parallel, EncodedTile, ParallelTileEncoder as RawParallelTileEncoder,
+    TileEncoderConfig as RawTileEncoderConfig, TileRegionInfo,
+};
 pub use prediction::PredictionEngine;
 pub use quantization::QuantizationParams;
-pub use sequence::SequenceHeader;
+pub use sequence::{
+    OperatingPoint, SequenceHeader, SpatialLayerConfig, SvcConfig, SvcReferenceMode,
+    TemporalLayerConfig, MAX_OPERATING_POINTS, MAX_SPATIAL_LAYERS, MAX_TEMPORAL_LAYERS,
+};
 pub use symbols::{MvPredictor, SymbolDecoder, SymbolEncoder};
 pub use tile::{TileData, TileGroup, TileGroupObu, TileInfo};
 pub use tile_encoder::{

@@ -281,9 +281,12 @@ impl Default for Histogram {
 /// ```
 /// use oximedia_cv::image::histogram::histogram_equalization;
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let src = vec![50u8; 100];
 /// let result = histogram_equalization(&src, 10, 10)?;
 /// assert_eq!(result.len(), 100);
+/// Ok(())
+/// }
 /// ```
 pub fn histogram_equalization(src: &[u8], width: u32, height: u32) -> CvResult<Vec<u8>> {
     if width == 0 || height == 0 {
@@ -413,10 +416,13 @@ impl ClaheConfig {
 /// ```
 /// use oximedia_cv::image::histogram::{adaptive_histogram_equalization, ClaheConfig};
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let src = vec![128u8; 256];
 /// let config = ClaheConfig::new(4, 4, 2.0);
 /// let result = adaptive_histogram_equalization(&src, 16, 16, &config)?;
 /// assert_eq!(result.len(), 256);
+/// Ok(())
+/// }
 /// ```
 pub fn adaptive_histogram_equalization(
     src: &[u8],

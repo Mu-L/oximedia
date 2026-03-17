@@ -26,11 +26,9 @@ impl BandwidthSample {
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn from_download(segment_bytes: u64, download_time_ms: u64, timestamp_ms: u64) -> Self {
-        let bandwidth_bps = if download_time_ms > 0 {
-            (segment_bytes * 8 * 1000) / download_time_ms
-        } else {
-            0
-        };
+        let bandwidth_bps = (segment_bytes * 8 * 1000)
+            .checked_div(download_time_ms)
+            .unwrap_or(0);
         Self {
             bandwidth_bps,
             timestamp_ms,
@@ -464,7 +462,7 @@ mod tests {
         let mut tracker = BufferTracker::new(5_000, 30_000);
         assert!(tracker.is_low());
 
-        tracker.add(Duration::from_millis(10_000));
+        tracker.add(Duration::from_secs(10));
         assert_eq!(tracker.level_ms(), 10_000);
         assert!(tracker.is_stable());
     }
@@ -472,8 +470,8 @@ mod tests {
     #[test]
     fn test_buffer_tracker_consume() {
         let mut tracker = BufferTracker::new(5_000, 30_000);
-        tracker.add(Duration::from_millis(20_000));
-        tracker.consume(Duration::from_millis(16_000));
+        tracker.add(Duration::from_secs(20));
+        tracker.consume(Duration::from_secs(16));
         assert_eq!(tracker.level_ms(), 4_000);
         assert!(tracker.is_low());
     }
@@ -481,7 +479,7 @@ mod tests {
     #[test]
     fn test_buffer_tracker_high() {
         let mut tracker = BufferTracker::new(5_000, 30_000);
-        tracker.add(Duration::from_millis(35_000));
+        tracker.add(Duration::from_secs(35));
         assert!(tracker.is_high());
         assert!(!tracker.is_stable());
     }
@@ -489,7 +487,7 @@ mod tests {
     #[test]
     fn test_buffer_tracker_reset() {
         let mut tracker = BufferTracker::default();
-        tracker.add(Duration::from_millis(15_000));
+        tracker.add(Duration::from_secs(15));
         tracker.reset();
         assert_eq!(tracker.level_ms(), 0);
     }
@@ -497,8 +495,8 @@ mod tests {
     #[test]
     fn test_buffer_tracker_underflow_protection() {
         let mut tracker = BufferTracker::new(5_000, 30_000);
-        tracker.add(Duration::from_millis(1_000));
-        tracker.consume(Duration::from_millis(5_000));
+        tracker.add(Duration::from_secs(1));
+        tracker.consume(Duration::from_secs(5));
         assert_eq!(tracker.level_ms(), 0);
     }
 }

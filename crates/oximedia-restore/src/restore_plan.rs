@@ -72,17 +72,17 @@ impl RestoreStep {
     pub fn base_duration_per_minute(&self) -> Duration {
         match self {
             Self::RemoveDcOffset => Duration::from_millis(200),
-            Self::ClickRemoval => Duration::from_millis(3_000),
-            Self::HissReduction => Duration::from_millis(2_000),
+            Self::ClickRemoval => Duration::from_secs(3),
+            Self::HissReduction => Duration::from_secs(2),
             Self::HumRemoval => Duration::from_millis(1_500),
             Self::Declip => Duration::from_millis(2_500),
-            Self::WowFlutterCorrection => Duration::from_millis(4_000),
+            Self::WowFlutterCorrection => Duration::from_secs(4),
             Self::GrainSynthesis => Duration::from_millis(500),
             Self::ColorCorrection => Duration::from_millis(800),
             Self::Deflicker => Duration::from_millis(1_200),
             Self::TelecineDetection => Duration::from_millis(600),
             Self::Deband => Duration::from_millis(700),
-            Self::VideoUpscale => Duration::from_millis(60_000),
+            Self::VideoUpscale => Duration::from_secs(60),
             Self::Custom {
                 estimated_duration, ..
             } => *estimated_duration,

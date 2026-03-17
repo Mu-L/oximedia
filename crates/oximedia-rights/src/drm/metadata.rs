@@ -1,6 +1,8 @@
 //! DRM metadata management
 
-use crate::{database::RightsDatabase, Result};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::database::RightsDatabase;
+use crate::Result;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -72,6 +74,7 @@ impl DrmMetadata {
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// Save to database
     pub async fn save(&self, db: &RightsDatabase) -> Result<()> {
         let metadata_json = serde_json::json!({

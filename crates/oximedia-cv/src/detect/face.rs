@@ -441,7 +441,13 @@ impl HaarCascade {
     }
 
     /// Evaluate cascade at a single location.
-    fn evaluate(&self, integral: &IntegralImage, x: u32, y: u32, scale: f64) -> Option<f64> {
+    pub(crate) fn evaluate(
+        &self,
+        integral: &IntegralImage,
+        x: u32,
+        y: u32,
+        scale: f64,
+    ) -> Option<f64> {
         let scaled_w = (self.window_width as f64 * scale) as u32;
         let scaled_h = (self.window_height as f64 * scale) as u32;
 
@@ -649,7 +655,7 @@ fn group_detections(detections: &[FaceRegion], min_neighbors: u32) -> Vec<FaceRe
 }
 
 /// Calculate overlap ratio between two detections (`IoU`).
-fn detection_overlap(a: &DetectionResult, b: &DetectionResult) -> f64 {
+pub(crate) fn detection_overlap(a: &DetectionResult, b: &DetectionResult) -> f64 {
     let x1 = a.x.max(b.x);
     let y1 = a.y.max(b.y);
     let x2 = (a.x + a.width).min(b.x + b.width);

@@ -175,6 +175,108 @@ pub fn verify_checksum(media: &MediaFile) -> ConformResult<bool> {
     }
 }
 
+// ── Perceptual hash matching ──────────────────────────────────────────────────
+
+/// Compute the Hamming-distance similarity between two perceptual hashes.
+///
+/// Each hash is treated as a 64-bit binary string.  The similarity is:
+///
+/// ```text
+/// similarity = 1.0 - (hamming_distance / 64.0)
+/// ```
+///
+/// Returns a value in \[0.0, 1.0\] where 1.0 means identical hashes.
+#[must_use]
+pub fn perceptual_hash_match(hash_a: u64, hash_b: u64) -> f32 {
+    let hamming = (hash_a ^ hash_b).count_ones() as f32;
+    1.0 - (hamming / 64.0)
+}
+
+/// A matcher that uses perceptual-hash Hamming distance to detect re-encoded
+/// or visually similar source files.
+pub struct PerceptualHashMatcher {
+    /// Minimum similarity threshold to accept a match.
+    threshold: f32,
+}
+
+impl PerceptualHashMatcher {
+    /// Create a new `PerceptualHashMatcher` with the given similarity threshold.
+    ///
+    /// `threshold` should be in \[0.0, 1.0\]; typical values are 0.8–0.95.
+    #[must_use]
+    pub fn new(threshold: f32) -> Self {
+        Self {
+            threshold: threshold.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Find all `MediaFile` candidates whose stored perceptual hash (embedded
+    /// in `metadata` as `{"phash": <u64>}`) matches `query_hash` above the
+    /// configured threshold.
+    ///
+    /// Returns `(media, similarity)` pairs sorted by descending similarity.
+    #[must_use]
+    pub fn find_similar<'a>(
+        &self,
+        query_hash: u64,
+        candidates: &'a [MediaFile],
+    ) -> Vec<(&'a MediaFile, f32)> {
+        let mut results: Vec<(&MediaFile, f32)> = candidates
+            .iter()
+            .filter_map(|m| {
+                let stored_hash = extract_phash_from_metadata(m.metadata.as_deref()?)?;
+                let sim = perceptual_hash_match(query_hash, stored_hash);
+                if sim >= self.threshold {
+                    Some((m, sim))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        results.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        results
+    }
+
+    /// Build [`ClipMatch`] results for `clip` against `candidates` using
+    /// perceptual hash similarity.
+    #[must_use]
+    pub fn match_clip(
+        &self,
+        clip: &ClipReference,
+        query_hash: u64,
+        candidates: &[MediaFile],
+    ) -> Vec<ClipMatch> {
+        self.find_similar(query_hash, candidates)
+            .into_iter()
+            .map(|(media, sim)| ClipMatch {
+                clip: clip.clone(),
+                media: media.clone(),
+                score: f64::from(sim),
+                method: crate::types::MatchMethod::ContentHash,
+                details: format!("Perceptual hash similarity: {sim:.4}"),
+            })
+            .collect()
+    }
+}
+
+/// Extract a perceptual hash integer from a JSON metadata string.
+///
+/// Expected format: `{"phash": 12345678901234567890}`.
+fn extract_phash_from_metadata(meta: &str) -> Option<u64> {
+    // Fast path: look for `"phash"` key and parse the following number.
+    let key_pos = meta.find("\"phash\"")?;
+    let after_key = &meta[key_pos + 7..];
+    let colon_pos = after_key.find(':')?;
+    let after_colon = after_key[colon_pos + 1..].trim_start();
+
+    // Read digits
+    let digit_end = after_colon
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_colon.len());
+    after_colon[..digit_end].parse::<u64>().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +357,110 @@ mod tests {
         media.size = Some(1000);
 
         let matches = file_size_match(&clip, &[media], 1000, 100);
+        assert_eq!(matches.len(), 1);
+        assert!((matches[0].score - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ── Perceptual hash tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_perceptual_hash_match_identical() {
+        let hash: u64 = 0xDEAD_BEEF_CAFE_1234;
+        let sim = perceptual_hash_match(hash, hash);
+        assert!(
+            (sim - 1.0).abs() < f32::EPSILON,
+            "identical hashes must yield similarity 1.0, got {sim}"
+        );
+    }
+
+    #[test]
+    fn test_perceptual_hash_match_all_bits_different() {
+        let sim = perceptual_hash_match(u64::MAX, 0u64);
+        assert!(
+            sim.abs() < f32::EPSILON,
+            "fully inverted hashes must yield similarity 0.0, got {sim}"
+        );
+    }
+
+    #[test]
+    fn test_perceptual_hash_match_half_bits() {
+        // a XOR b has exactly 32 bits set: upper 32 bits are all 1, lower 32 are 0.
+        // a = 0xFFFF_FFFF_0000_0000
+        // b = 0x0000_0000_0000_0000
+        // XOR = 0xFFFF_FFFF_0000_0000 → 32 bits set → similarity = 1 - 32/64 = 0.5
+        let a: u64 = 0xFFFF_FFFF_0000_0000;
+        let b: u64 = 0x0000_0000_0000_0000;
+        let xor = a ^ b;
+        assert_eq!(
+            xor.count_ones(),
+            32,
+            "sanity: XOR must have exactly 32 bits set"
+        );
+        let sim = perceptual_hash_match(a, b);
+        assert!(
+            (sim - 0.5).abs() < f32::EPSILON,
+            "half-bit difference must yield 0.5, got {sim}"
+        );
+    }
+
+    #[test]
+    fn test_perceptual_hash_match_in_range() {
+        let a: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+        let b: u64 = 0xBBBB_BBBB_BBBB_BBBB;
+        let sim = perceptual_hash_match(a, b);
+        assert!(
+            (0.0..=1.0).contains(&sim),
+            "similarity must be in [0, 1], got {sim}"
+        );
+    }
+
+    #[test]
+    fn test_extract_phash_from_metadata_valid() {
+        let meta = r#"{"phash": 12345678901234567}"#;
+        let result = extract_phash_from_metadata(meta);
+        assert_eq!(result, Some(12_345_678_901_234_567u64));
+    }
+
+    #[test]
+    fn test_extract_phash_from_metadata_missing_key() {
+        let meta = r#"{"md5": "abc123"}"#;
+        assert!(extract_phash_from_metadata(meta).is_none());
+    }
+
+    #[test]
+    fn test_perceptual_hash_matcher_find_similar() {
+        let query: u64 = 0xFFFF_FFFF_FFFF_0000;
+        // Very close: 4 bits different
+        let close_hash: u64 = 0xFFFF_FFFF_FFFF_000F;
+        // Far: 32 bits different
+        let far_hash: u64 = 0x0000_0000_FFFF_0000;
+
+        let mut media_close = MediaFile::new(PathBuf::from("/path/close.mov"));
+        media_close.metadata = Some(format!("{{\"phash\": {close_hash}}}"));
+
+        let mut media_far = MediaFile::new(PathBuf::from("/path/far.mov"));
+        media_far.metadata = Some(format!("{{\"phash\": {far_hash}}}"));
+
+        let matcher = PerceptualHashMatcher::new(0.8);
+        let candidates = [media_close, media_far];
+        let results = matcher.find_similar(query, &candidates);
+
+        // Only the close one should pass the 0.8 threshold
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1 >= 0.8);
+    }
+
+    #[test]
+    fn test_perceptual_hash_matcher_match_clip() {
+        let clip = create_test_clip(Timecode::new(1, 0, 0, 0), Timecode::new(1, 0, 10, 0));
+        let query: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+        let same_hash: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+
+        let mut media = MediaFile::new(PathBuf::from("/path/same.mov"));
+        media.metadata = Some(format!("{{\"phash\": {same_hash}}}"));
+
+        let matcher = PerceptualHashMatcher::new(0.9);
+        let matches = matcher.match_clip(&clip, query, &[media]);
         assert_eq!(matches.len(), 1);
         assert!((matches[0].score - 1.0).abs() < f64::EPSILON);
     }

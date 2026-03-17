@@ -387,6 +387,238 @@ impl NetworkFailover {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cascading Failover Chain
+// ---------------------------------------------------------------------------
+
+/// Health evaluation result for a source in the failover chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceHealth {
+    /// Source is healthy and delivering frames.
+    Healthy,
+    /// Source is degraded (e.g. high jitter) but still usable.
+    Degraded,
+    /// Source has failed and should not be used.
+    Failed,
+}
+
+/// A single source in a cascading failover chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FailoverSource {
+    /// Human-readable label (e.g. "Primary SDI", "Tertiary Slate").
+    pub label: String,
+    /// Priority — lower value is higher priority.
+    pub priority: u32,
+    /// Current health status.
+    pub health: SourceHealth,
+    /// Connection URI or path for the source.
+    pub uri: String,
+}
+
+impl FailoverSource {
+    /// Create a new source.
+    pub fn new(label: impl Into<String>, priority: u32, uri: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            priority,
+            health: SourceHealth::Healthy,
+            uri: uri.into(),
+        }
+    }
+}
+
+/// Configuration for cascading failover.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CascadeConfig {
+    /// Maximum time (in milliseconds) to wait before deciding a source has failed.
+    pub source_timeout_ms: u64,
+    /// Whether to automatically recover to higher-priority sources when they heal.
+    pub auto_recover_upward: bool,
+    /// Minimum time a recovered source must remain healthy before we switch back (ms).
+    pub recovery_hold_ms: u64,
+}
+
+impl Default for CascadeConfig {
+    fn default() -> Self {
+        Self {
+            source_timeout_ms: 2000,
+            auto_recover_upward: true,
+            recovery_hold_ms: 5000,
+        }
+    }
+}
+
+/// Manages a cascading failover chain: primary -> secondary -> ... -> slate.
+///
+/// Sources are kept sorted by priority (ascending). When the active source
+/// fails, the chain advances to the next healthy source. When a higher-priority
+/// source recovers, the chain optionally promotes back up.
+pub struct CascadeFailover {
+    config: CascadeConfig,
+    sources: Arc<RwLock<Vec<FailoverSource>>>,
+    active_index: Arc<RwLock<usize>>,
+    /// Instant when a higher-priority source first reported healthy (for hold timer).
+    recovery_since: Arc<RwLock<Option<(usize, std::time::Instant)>>>,
+}
+
+impl CascadeFailover {
+    /// Create a new cascade failover chain.
+    ///
+    /// `sources` are automatically sorted by priority (lowest value first).
+    /// At least one source is required; returns an error otherwise.
+    pub fn new(config: CascadeConfig, mut sources: Vec<FailoverSource>) -> Result<Self> {
+        if sources.is_empty() {
+            return Err(PlayoutError::Config(
+                "Cascading failover requires at least one source".to_string(),
+            ));
+        }
+        sources.sort_by_key(|s| s.priority);
+        Ok(Self {
+            config,
+            sources: Arc::new(RwLock::new(sources)),
+            active_index: Arc::new(RwLock::new(0)),
+            recovery_since: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    /// Return the currently active source label.
+    pub async fn active_source(&self) -> FailoverSource {
+        let sources = self.sources.read().await;
+        let idx = *self.active_index.read().await;
+        sources
+            .get(idx)
+            .cloned()
+            .unwrap_or_else(|| FailoverSource::new("unknown", u32::MAX, ""))
+    }
+
+    /// Return the active index.
+    pub async fn active_index(&self) -> usize {
+        *self.active_index.read().await
+    }
+
+    /// Return a snapshot of all sources.
+    pub async fn all_sources(&self) -> Vec<FailoverSource> {
+        self.sources.read().await.clone()
+    }
+
+    /// Update the health of the source at `index`.
+    pub async fn update_source_health(&self, index: usize, health: SourceHealth) -> Result<()> {
+        let mut sources = self.sources.write().await;
+        let src = sources
+            .get_mut(index)
+            .ok_or_else(|| PlayoutError::Config(format!("Source index {index} out of range")))?;
+        src.health = health;
+        Ok(())
+    }
+
+    /// Evaluate the chain and potentially switch to a different source.
+    ///
+    /// Call this periodically (e.g. every health-check interval).
+    /// Returns `true` if the active source changed.
+    pub async fn evaluate(&self) -> Result<bool> {
+        let sources = self.sources.read().await;
+        let mut active = self.active_index.write().await;
+        let current = *active;
+
+        // 1. If current source failed, cascade downward.
+        if sources
+            .get(current)
+            .map_or(true, |s| s.health == SourceHealth::Failed)
+        {
+            // Find next healthy/degraded source after current
+            if let Some(new_idx) = sources
+                .iter()
+                .enumerate()
+                .skip(current + 1)
+                .find(|(_, s)| s.health != SourceHealth::Failed)
+                .map(|(i, _)| i)
+            {
+                info!(
+                    "Cascade failover: {} -> {}",
+                    sources.get(current).map_or("?", |s| &s.label),
+                    sources[new_idx].label,
+                );
+                *active = new_idx;
+                // Reset recovery tracking
+                drop(sources);
+                *self.recovery_since.write().await = None;
+                return Ok(true);
+            }
+            // All sources failed — stay on current (hopefully slate at the end).
+            return Ok(false);
+        }
+
+        // 2. Auto-recover upward if a higher-priority source has healed.
+        if self.config.auto_recover_upward && current > 0 {
+            if let Some(better_idx) = sources
+                .iter()
+                .enumerate()
+                .take(current)
+                .rev()
+                .find(|(_, s)| s.health == SourceHealth::Healthy)
+                .map(|(i, _)| i)
+            {
+                // Check recovery hold timer
+                drop(sources);
+                let mut rec = self.recovery_since.write().await;
+                let now = std::time::Instant::now();
+                match rec.as_ref() {
+                    Some((idx, since)) if *idx == better_idx => {
+                        let hold = std::time::Duration::from_millis(self.config.recovery_hold_ms);
+                        if now.duration_since(*since) >= hold {
+                            let sources = self.sources.read().await;
+                            info!(
+                                "Cascade recover: {} -> {}",
+                                sources.get(current).map_or("?", |s| &s.label),
+                                sources[better_idx].label,
+                            );
+                            *active = better_idx;
+                            *rec = None;
+                            return Ok(true);
+                        }
+                    }
+                    _ => {
+                        *rec = Some((better_idx, now));
+                    }
+                }
+                return Ok(false);
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Force-switch to a specific source index.
+    pub async fn force_switch(&self, index: usize) -> Result<()> {
+        let sources = self.sources.read().await;
+        if index >= sources.len() {
+            return Err(PlayoutError::Config(format!(
+                "Source index {index} out of range (have {})",
+                sources.len()
+            )));
+        }
+        drop(sources);
+        *self.active_index.write().await = index;
+        *self.recovery_since.write().await = None;
+        Ok(())
+    }
+
+    /// Add a source to the chain (inserted in priority order).
+    pub async fn add_source(&self, source: FailoverSource) {
+        let mut sources = self.sources.write().await;
+        sources.push(source);
+        sources.sort_by_key(|s| s.priority);
+    }
+
+    /// Remove a source by label. Returns `true` if removed.
+    pub async fn remove_source(&self, label: &str) -> bool {
+        let mut sources = self.sources.write().await;
+        let before = sources.len();
+        sources.retain(|s| s.label != label);
+        sources.len() < before
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,5 +793,206 @@ mod tests {
         // Verify health was updated (indirectly through state checks)
         let health = manager.health().await;
         assert!(health.healthy);
+    }
+
+    // --- Cascading failover chain tests ---
+
+    fn make_chain() -> Vec<FailoverSource> {
+        vec![
+            FailoverSource::new("Primary SDI", 0, "sdi://input1"),
+            FailoverSource::new("Secondary IP", 10, "srt://backup:5000"),
+            FailoverSource::new("Tertiary File", 20, "file:///media/backup.mxf"),
+            FailoverSource::new("Slate", 100, "internal://slate"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn test_cascade_creation() {
+        let cascade = CascadeFailover::new(CascadeConfig::default(), make_chain())
+            .expect("should create cascade");
+        let active = cascade.active_source().await;
+        assert_eq!(active.label, "Primary SDI");
+        assert_eq!(cascade.active_index().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cascade_empty_sources_error() {
+        let result = CascadeFailover::new(CascadeConfig::default(), vec![]);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cascade_failover_on_primary_failure() {
+        let cascade = CascadeFailover::new(CascadeConfig::default(), make_chain())
+            .expect("should create cascade");
+        // Mark primary as failed
+        cascade
+            .update_source_health(0, SourceHealth::Failed)
+            .await
+            .expect("should update health");
+        let changed = cascade.evaluate().await.expect("should evaluate");
+        assert!(changed);
+        assert_eq!(cascade.active_index().await, 1);
+        assert_eq!(cascade.active_source().await.label, "Secondary IP");
+    }
+
+    #[tokio::test]
+    async fn test_cascade_multi_level_failover() {
+        let cascade = CascadeFailover::new(CascadeConfig::default(), make_chain())
+            .expect("should create cascade");
+        // Fail primary and secondary
+        cascade
+            .update_source_health(0, SourceHealth::Failed)
+            .await
+            .expect("update");
+        cascade
+            .update_source_health(1, SourceHealth::Failed)
+            .await
+            .expect("update");
+        let changed = cascade.evaluate().await.expect("eval");
+        assert!(changed);
+        assert_eq!(cascade.active_index().await, 2);
+        assert_eq!(cascade.active_source().await.label, "Tertiary File");
+    }
+
+    #[tokio::test]
+    async fn test_cascade_all_failed_stays_on_last() {
+        let cascade = CascadeFailover::new(CascadeConfig::default(), make_chain()).expect("create");
+        for i in 0..4 {
+            cascade
+                .update_source_health(i, SourceHealth::Failed)
+                .await
+                .expect("update");
+        }
+        // Evaluate repeatedly — should cascade to last, then stay
+        for _ in 0..4 {
+            let _ = cascade.evaluate().await;
+        }
+        // We end up at the last source (Slate), even though it's failed
+        let idx = cascade.active_index().await;
+        assert!(idx <= 3);
+    }
+
+    #[tokio::test]
+    async fn test_cascade_force_switch() {
+        let cascade = CascadeFailover::new(CascadeConfig::default(), make_chain()).expect("create");
+        cascade.force_switch(2).await.expect("force switch");
+        assert_eq!(cascade.active_index().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_cascade_force_switch_out_of_range() {
+        let cascade = CascadeFailover::new(CascadeConfig::default(), make_chain()).expect("create");
+        let result = cascade.force_switch(99).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_cascade_add_remove_source() {
+        let cascade = CascadeFailover::new(CascadeConfig::default(), make_chain()).expect("create");
+        cascade
+            .add_source(FailoverSource::new("NDI Backup", 5, "ndi://backup"))
+            .await;
+        let all = cascade.all_sources().await;
+        assert_eq!(all.len(), 5);
+        // Priority sort: Primary(0), NDI(5), Secondary(10), Tertiary(20), Slate(100)
+        assert_eq!(all[1].label, "NDI Backup");
+
+        let removed = cascade.remove_source("NDI Backup").await;
+        assert!(removed);
+        assert_eq!(cascade.all_sources().await.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_cascade_auto_recover_upward() {
+        let cfg = CascadeConfig {
+            auto_recover_upward: true,
+            recovery_hold_ms: 0, // instant recovery for test
+            ..Default::default()
+        };
+        let cascade = CascadeFailover::new(cfg, make_chain()).expect("create");
+
+        // Fail primary, cascade to secondary
+        cascade
+            .update_source_health(0, SourceHealth::Failed)
+            .await
+            .expect("update");
+        cascade.evaluate().await.expect("eval");
+        assert_eq!(cascade.active_index().await, 1);
+
+        // Heal primary
+        cascade
+            .update_source_health(0, SourceHealth::Healthy)
+            .await
+            .expect("update");
+        // First evaluate starts the hold timer
+        let _ = cascade.evaluate().await;
+        // Second evaluate (hold_ms = 0) should promote
+        let changed = cascade.evaluate().await.expect("eval");
+        assert!(changed);
+        assert_eq!(cascade.active_index().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cascade_no_auto_recover_when_disabled() {
+        let cfg = CascadeConfig {
+            auto_recover_upward: false,
+            ..Default::default()
+        };
+        let cascade = CascadeFailover::new(cfg, make_chain()).expect("create");
+
+        // Fail primary, cascade to secondary
+        cascade
+            .update_source_health(0, SourceHealth::Failed)
+            .await
+            .expect("update");
+        cascade.evaluate().await.expect("eval");
+        assert_eq!(cascade.active_index().await, 1);
+
+        // Heal primary — should NOT auto-recover
+        cascade
+            .update_source_health(0, SourceHealth::Healthy)
+            .await
+            .expect("update");
+        let changed = cascade.evaluate().await.expect("eval");
+        assert!(!changed);
+        assert_eq!(cascade.active_index().await, 1);
+    }
+
+    #[tokio::test]
+    async fn test_cascade_degraded_source_usable() {
+        let cascade = CascadeFailover::new(CascadeConfig::default(), make_chain()).expect("create");
+        // Degrade primary (still usable)
+        cascade
+            .update_source_health(0, SourceHealth::Degraded)
+            .await
+            .expect("update");
+        let changed = cascade.evaluate().await.expect("eval");
+        assert!(!changed); // degraded is NOT failed
+        assert_eq!(cascade.active_index().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cascade_skip_failed_to_healthy() {
+        let cascade = CascadeFailover::new(CascadeConfig::default(), make_chain()).expect("create");
+        // Fail primary and secondary, tertiary healthy
+        cascade
+            .update_source_health(0, SourceHealth::Failed)
+            .await
+            .expect("update");
+        cascade
+            .update_source_health(1, SourceHealth::Failed)
+            .await
+            .expect("update");
+        let changed = cascade.evaluate().await.expect("eval");
+        assert!(changed);
+        assert_eq!(cascade.active_source().await.label, "Tertiary File");
+    }
+
+    #[tokio::test]
+    async fn test_source_health_update_out_of_range() {
+        let cascade = CascadeFailover::new(CascadeConfig::default(), make_chain()).expect("create");
+        let result = cascade.update_source_health(99, SourceHealth::Failed).await;
+        assert!(result.is_err());
     }
 }

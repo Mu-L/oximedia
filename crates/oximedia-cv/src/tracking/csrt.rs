@@ -17,6 +17,97 @@ use crate::detect::BoundingBox;
 use crate::error::{CvError, CvResult};
 use std::f64::consts::PI;
 
+/// Occlusion state for the CSRT tracker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OcclusionState {
+    /// Target is fully visible.
+    Visible,
+    /// Target is partially occluded (confidence dropping).
+    PartialOcclusion,
+    /// Target is fully occluded (confidence below threshold).
+    FullOcclusion,
+    /// Target was lost and is being recovered.
+    Recovery,
+}
+
+impl Default for OcclusionState {
+    fn default() -> Self {
+        Self::Visible
+    }
+}
+
+/// Adaptive spatial reliability configuration.
+#[derive(Debug, Clone)]
+pub struct AdaptiveReliabilityConfig {
+    /// Threshold to enter partial occlusion state.
+    pub partial_occlusion_threshold: f64,
+    /// Threshold to enter full occlusion state.
+    pub full_occlusion_threshold: f64,
+    /// Threshold to return to visible state from recovery.
+    pub recovery_threshold: f64,
+    /// Maximum number of frames to maintain model during full occlusion.
+    pub max_occlusion_frames: usize,
+    /// Spatial reliability decay factor during occlusion.
+    pub reliability_decay: f64,
+    /// Learning rate during recovery phase.
+    pub recovery_learning_rate: f64,
+    /// Enable foreground/background segmentation for reliability.
+    pub enable_segmentation: bool,
+    /// Sigma for Gaussian spatial prior on the reliability map.
+    pub spatial_prior_sigma: f64,
+}
+
+impl Default for AdaptiveReliabilityConfig {
+    fn default() -> Self {
+        Self {
+            partial_occlusion_threshold: 0.5,
+            full_occlusion_threshold: 0.25,
+            recovery_threshold: 0.6,
+            max_occlusion_frames: 30,
+            reliability_decay: 0.95,
+            recovery_learning_rate: 0.05,
+            enable_segmentation: true,
+            spatial_prior_sigma: 0.5,
+        }
+    }
+}
+
+impl AdaptiveReliabilityConfig {
+    /// Create a new adaptive reliability configuration.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set partial occlusion threshold.
+    #[must_use]
+    pub fn with_partial_occlusion_threshold(mut self, threshold: f64) -> Self {
+        self.partial_occlusion_threshold = threshold.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Set full occlusion threshold.
+    #[must_use]
+    pub fn with_full_occlusion_threshold(mut self, threshold: f64) -> Self {
+        self.full_occlusion_threshold = threshold.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Set recovery threshold.
+    #[must_use]
+    pub fn with_recovery_threshold(mut self, threshold: f64) -> Self {
+        self.recovery_threshold = threshold.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Set max occlusion frames before giving up.
+    #[must_use]
+    pub const fn with_max_occlusion_frames(mut self, frames: usize) -> Self {
+        self.max_occlusion_frames = frames;
+        self
+    }
+}
+
 /// CSRT tracker configuration.
 #[derive(Debug, Clone)]
 pub struct CsrtTracker {
@@ -42,6 +133,20 @@ pub struct CsrtTracker {
     confidence: f64,
     /// Background suppression factor.
     background_ratio: f64,
+    /// Occlusion handling state.
+    occlusion_state: OcclusionState,
+    /// Number of consecutive frames in current occlusion state.
+    occlusion_frame_count: usize,
+    /// Adaptive reliability configuration.
+    reliability_config: AdaptiveReliabilityConfig,
+    /// Confidence history for trend analysis.
+    confidence_history: Vec<f64>,
+    /// Maximum history length.
+    max_history_len: usize,
+    /// Saved reliability map from last good frame (for occlusion recovery).
+    saved_reliability_map: Vec<f64>,
+    /// Saved filters from last good frame.
+    saved_filters: Vec<Vec<f64>>,
 }
 
 impl CsrtTracker {
@@ -65,10 +170,11 @@ impl CsrtTracker {
         let template_size = (64, 64);
         let num_channels = 9; // Gray + HOG-like features
 
+        let n = template_size.0 * template_size.1;
         Self {
             bbox,
             filters: vec![Vec::new(); num_channels],
-            reliability_map: vec![1.0; template_size.0 * template_size.1],
+            reliability_map: vec![1.0; n],
             channel_weights: vec![1.0; num_channels],
             template_size,
             learning_rate: 0.025,
@@ -77,6 +183,13 @@ impl CsrtTracker {
             scale_window: create_scale_window(),
             confidence: 1.0,
             background_ratio: 0.3,
+            occlusion_state: OcclusionState::default(),
+            occlusion_frame_count: 0,
+            reliability_config: AdaptiveReliabilityConfig::default(),
+            confidence_history: Vec::with_capacity(64),
+            max_history_len: 64,
+            saved_reliability_map: vec![1.0; n],
+            saved_filters: vec![Vec::new(); num_channels],
         }
     }
 
@@ -91,6 +204,13 @@ impl CsrtTracker {
     #[must_use]
     pub const fn with_background_ratio(mut self, ratio: f64) -> Self {
         self.background_ratio = ratio;
+        self
+    }
+
+    /// Set adaptive reliability configuration for occlusion handling.
+    #[must_use]
+    pub fn with_reliability_config(mut self, config: AdaptiveReliabilityConfig) -> Self {
+        self.reliability_config = config;
         self
     }
 
@@ -161,6 +281,15 @@ impl CsrtTracker {
         // Update confidence
         self.confidence = (max_response / 5.0).clamp(0.0, 1.0);
 
+        // Update confidence history
+        if self.confidence_history.len() >= self.max_history_len {
+            self.confidence_history.remove(0);
+        }
+        self.confidence_history.push(self.confidence);
+
+        // Update occlusion state
+        self.update_occlusion_state();
+
         // Compute displacement
         let (tw, th) = self.template_size;
         let dy = peak_y - th as f64 / 2.0;
@@ -171,12 +300,14 @@ impl CsrtTracker {
         let actual_dx = dx * cell_size;
         let actual_dy = dy * cell_size;
 
-        // Update position
-        self.bbox.x += actual_dx as f32;
-        self.bbox.y += actual_dy as f32;
+        // During full occlusion, do not update position (maintain last known)
+        if self.occlusion_state != OcclusionState::FullOcclusion {
+            self.bbox.x += actual_dx as f32;
+            self.bbox.y += actual_dy as f32;
+        }
 
-        // Scale estimation
-        if self.confidence > 0.5 {
+        // Scale estimation only when confident
+        if self.confidence > 0.5 && self.occlusion_state == OcclusionState::Visible {
             let best_scale = self.estimate_scale(frame, width, height)?;
             self.bbox.width *= best_scale as f32;
             self.bbox.height *= best_scale as f32;
@@ -185,20 +316,42 @@ impl CsrtTracker {
         // Clamp to image bounds
         self.bbox = self.bbox.clamp(width as f32, height as f32);
 
-        // Update model
-        if self.confidence > 0.6 {
+        // Model update strategy depends on occlusion state
+        let effective_lr = match self.occlusion_state {
+            OcclusionState::Visible => {
+                // Save good state for recovery
+                self.saved_reliability_map = self.reliability_map.clone();
+                self.saved_filters = self.filters.clone();
+                self.learning_rate
+            }
+            OcclusionState::PartialOcclusion => {
+                // Reduce learning rate to avoid model corruption
+                self.learning_rate * 0.3
+            }
+            OcclusionState::FullOcclusion => {
+                // Decay reliability map but do not update filters
+                self.decay_reliability_map();
+                return Ok(self.bbox);
+            }
+            OcclusionState::Recovery => {
+                // Use recovery learning rate and blend with saved model
+                self.reliability_config.recovery_learning_rate
+            }
+        };
+
+        // Update model with adaptive learning rate
+        if self.confidence > self.reliability_config.full_occlusion_threshold {
             let new_patch = self.get_padded_patch(frame, width, height)?;
             let new_features = extract_multichannel_features(&new_patch, self.template_size);
             let labels = create_segmentation_mask(self.template_size, self.background_ratio);
 
-            // Update reliability map
-            self.update_reliability_map(&new_features, &labels);
+            // Update reliability map with spatial prior
+            self.update_adaptive_reliability_map(&new_features, &labels);
 
             // Update channel weights
             self.update_channel_weights(&new_features, &labels);
 
-            // Update filters
-            let lr = self.learning_rate;
+            // Update filters with effective learning rate
             for ch in 0..self.num_channels {
                 let channel_start = ch * self.template_size.0 * self.template_size.1;
                 let channel_end = channel_start + self.template_size.0 * self.template_size.1;
@@ -212,9 +365,9 @@ impl CsrtTracker {
                         self.template_size,
                     );
 
-                    // Blend with old filter
                     for i in 0..self.filters[ch].len().min(new_filter.len()) {
-                        self.filters[ch][i] = lr * new_filter[i] + (1.0 - lr) * self.filters[ch][i];
+                        self.filters[ch][i] = effective_lr * new_filter[i]
+                            + (1.0 - effective_lr) * self.filters[ch][i];
                     }
                 }
             }
@@ -242,6 +395,146 @@ impl CsrtTracker {
             filter.clear();
         }
         self.confidence = 1.0;
+        self.occlusion_state = OcclusionState::Visible;
+        self.occlusion_frame_count = 0;
+        self.confidence_history.clear();
+    }
+
+    /// Get current occlusion state.
+    #[must_use]
+    pub const fn occlusion_state(&self) -> OcclusionState {
+        self.occlusion_state
+    }
+
+    /// Get number of frames in current occlusion state.
+    #[must_use]
+    pub const fn occlusion_frame_count(&self) -> usize {
+        self.occlusion_frame_count
+    }
+
+    /// Check if the tracker considers the target lost.
+    #[must_use]
+    pub fn is_target_lost(&self) -> bool {
+        self.occlusion_state == OcclusionState::FullOcclusion
+            && self.occlusion_frame_count > self.reliability_config.max_occlusion_frames
+    }
+
+    /// Get confidence trend (positive = improving, negative = degrading).
+    #[must_use]
+    pub fn confidence_trend(&self) -> f64 {
+        if self.confidence_history.len() < 4 {
+            return 0.0;
+        }
+        let n = self.confidence_history.len();
+        let recent_half = n / 2;
+        let recent_avg: f64 = self.confidence_history[n - recent_half..]
+            .iter()
+            .sum::<f64>()
+            / recent_half as f64;
+        let older_avg: f64 =
+            self.confidence_history[..recent_half].iter().sum::<f64>() / recent_half as f64;
+        recent_avg - older_avg
+    }
+
+    /// Update occlusion state based on confidence.
+    fn update_occlusion_state(&mut self) {
+        let prev_state = self.occlusion_state;
+        let conf = self.confidence;
+
+        self.occlusion_state = match prev_state {
+            OcclusionState::Visible => {
+                if conf < self.reliability_config.full_occlusion_threshold {
+                    OcclusionState::FullOcclusion
+                } else if conf < self.reliability_config.partial_occlusion_threshold {
+                    OcclusionState::PartialOcclusion
+                } else {
+                    OcclusionState::Visible
+                }
+            }
+            OcclusionState::PartialOcclusion => {
+                if conf < self.reliability_config.full_occlusion_threshold {
+                    OcclusionState::FullOcclusion
+                } else if conf >= self.reliability_config.partial_occlusion_threshold {
+                    OcclusionState::Visible
+                } else {
+                    OcclusionState::PartialOcclusion
+                }
+            }
+            OcclusionState::FullOcclusion => {
+                if conf >= self.reliability_config.recovery_threshold {
+                    OcclusionState::Recovery
+                } else {
+                    OcclusionState::FullOcclusion
+                }
+            }
+            OcclusionState::Recovery => {
+                if conf >= self.reliability_config.partial_occlusion_threshold {
+                    OcclusionState::Visible
+                } else if conf < self.reliability_config.full_occlusion_threshold {
+                    OcclusionState::FullOcclusion
+                } else {
+                    OcclusionState::Recovery
+                }
+            }
+        };
+
+        if self.occlusion_state == prev_state {
+            self.occlusion_frame_count += 1;
+        } else {
+            self.occlusion_frame_count = 0;
+        }
+    }
+
+    /// Decay reliability map during full occlusion.
+    fn decay_reliability_map(&mut self) {
+        let decay = self.reliability_config.reliability_decay;
+        for val in &mut self.reliability_map {
+            *val *= decay;
+        }
+    }
+
+    /// Update adaptive reliability map with spatial Gaussian prior.
+    fn update_adaptive_reliability_map(&mut self, features: &[f64], labels: &[f64]) {
+        let (w, h) = self.template_size;
+        let n = w * h;
+        let sigma = self.reliability_config.spatial_prior_sigma;
+
+        let cx = w as f64 / 2.0;
+        let cy = h as f64 / 2.0;
+        let sigma_sq = (sigma * w as f64) * (sigma * w as f64);
+
+        for i in 0..n.min(self.reliability_map.len()) {
+            let px = (i % w) as f64;
+            let py = (i / w) as f64;
+
+            // Gaussian spatial prior: center has highest reliability
+            let dist_sq = (px - cx) * (px - cx) + (py - cy) * (py - cy);
+            let spatial_prior = (-0.5 * dist_sq / sigma_sq.max(1e-6)).exp();
+
+            // Feature consistency across channels
+            let mut consistency = 0.0;
+            for ch in 0..self.num_channels {
+                let idx = ch * n + i;
+                if idx < features.len() && i < labels.len() {
+                    let diff = (features[idx] - labels[i]).abs();
+                    consistency += diff;
+                }
+            }
+            let feature_reliability = (-consistency / self.num_channels as f64).exp();
+
+            // Combine spatial prior and feature reliability
+            let new_reliability = spatial_prior * feature_reliability;
+
+            // Blend with existing reliability
+            let alpha = if self.occlusion_state == OcclusionState::Recovery {
+                self.reliability_config.recovery_learning_rate
+            } else {
+                self.learning_rate
+            };
+
+            self.reliability_map[i] =
+                alpha * new_reliability + (1.0 - alpha) * self.reliability_map[i];
+        }
     }
 
     /// Get padded patch around current bbox.
@@ -582,4 +875,280 @@ fn create_scale_window() -> Vec<f64> {
 fn gaussian_1d(x: f64, mean: f64, sigma: f64) -> f64 {
     let diff = x - mean;
     (-0.5 * diff * diff / (sigma * sigma)).exp()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_csrt_tracker_new() {
+        let bbox = BoundingBox::new(50.0, 50.0, 100.0, 100.0);
+        let tracker = CsrtTracker::new(bbox);
+        assert_eq!(tracker.confidence(), 1.0);
+        assert_eq!(tracker.occlusion_state(), OcclusionState::Visible);
+        assert_eq!(tracker.occlusion_frame_count(), 0);
+        assert!(!tracker.is_target_lost());
+    }
+
+    #[test]
+    fn test_csrt_tracker_with_learning_rate() {
+        let bbox = BoundingBox::new(50.0, 50.0, 100.0, 100.0);
+        let tracker = CsrtTracker::new(bbox).with_learning_rate(0.05);
+        assert_eq!(tracker.learning_rate, 0.05);
+    }
+
+    #[test]
+    fn test_csrt_tracker_with_background_ratio() {
+        let bbox = BoundingBox::new(50.0, 50.0, 100.0, 100.0);
+        let tracker = CsrtTracker::new(bbox).with_background_ratio(0.5);
+        assert_eq!(tracker.background_ratio, 0.5);
+    }
+
+    #[test]
+    fn test_csrt_tracker_with_reliability_config() {
+        let bbox = BoundingBox::new(50.0, 50.0, 100.0, 100.0);
+        let config = AdaptiveReliabilityConfig::new()
+            .with_partial_occlusion_threshold(0.4)
+            .with_full_occlusion_threshold(0.2)
+            .with_recovery_threshold(0.7)
+            .with_max_occlusion_frames(50);
+        let tracker = CsrtTracker::new(bbox).with_reliability_config(config);
+        assert_eq!(tracker.reliability_config.partial_occlusion_threshold, 0.4);
+        assert_eq!(tracker.reliability_config.full_occlusion_threshold, 0.2);
+        assert_eq!(tracker.reliability_config.recovery_threshold, 0.7);
+        assert_eq!(tracker.reliability_config.max_occlusion_frames, 50);
+    }
+
+    #[test]
+    fn test_csrt_tracker_reset() {
+        let bbox = BoundingBox::new(50.0, 50.0, 100.0, 100.0);
+        let mut tracker = CsrtTracker::new(bbox);
+        tracker.confidence = 0.3;
+        tracker.occlusion_state = OcclusionState::FullOcclusion;
+        tracker.occlusion_frame_count = 10;
+
+        let new_bbox = BoundingBox::new(100.0, 100.0, 80.0, 80.0);
+        tracker.reset(new_bbox);
+
+        assert_eq!(tracker.confidence(), 1.0);
+        assert_eq!(tracker.occlusion_state(), OcclusionState::Visible);
+        assert_eq!(tracker.occlusion_frame_count(), 0);
+    }
+
+    #[test]
+    fn test_csrt_initialize_and_update() {
+        let bbox = BoundingBox::new(30.0, 30.0, 40.0, 40.0);
+        let mut tracker = CsrtTracker::new(bbox);
+
+        let frame = vec![128u8; 100 * 100];
+        let init_result = tracker.initialize(&frame, 100, 100);
+        assert!(init_result.is_ok());
+
+        let update_result = tracker.update(&frame, 100, 100);
+        assert!(update_result.is_ok());
+    }
+
+    #[test]
+    fn test_csrt_initialize_invalid_dimensions() {
+        let bbox = BoundingBox::new(30.0, 30.0, 40.0, 40.0);
+        let mut tracker = CsrtTracker::new(bbox);
+        let result = tracker.initialize(&[], 0, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_csrt_update_not_initialized() {
+        let bbox = BoundingBox::new(30.0, 30.0, 40.0, 40.0);
+        let mut tracker = CsrtTracker::new(bbox);
+        let frame = vec![128u8; 100 * 100];
+        let result = tracker.update(&frame, 100, 100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_occlusion_state_default() {
+        assert_eq!(OcclusionState::default(), OcclusionState::Visible);
+    }
+
+    #[test]
+    fn test_occlusion_state_transitions() {
+        let bbox = BoundingBox::new(30.0, 30.0, 40.0, 40.0);
+        let mut tracker = CsrtTracker::new(bbox);
+
+        // Simulate entering partial occlusion
+        tracker.confidence = 0.4;
+        tracker.update_occlusion_state();
+        assert_eq!(tracker.occlusion_state(), OcclusionState::PartialOcclusion);
+
+        // Simulate entering full occlusion
+        tracker.confidence = 0.1;
+        tracker.update_occlusion_state();
+        assert_eq!(tracker.occlusion_state(), OcclusionState::FullOcclusion);
+
+        // Simulate recovery
+        tracker.confidence = 0.7;
+        tracker.update_occlusion_state();
+        assert_eq!(tracker.occlusion_state(), OcclusionState::Recovery);
+
+        // Simulate full recovery to visible
+        tracker.confidence = 0.8;
+        tracker.update_occlusion_state();
+        assert_eq!(tracker.occlusion_state(), OcclusionState::Visible);
+    }
+
+    #[test]
+    fn test_occlusion_frame_count_increments() {
+        let bbox = BoundingBox::new(30.0, 30.0, 40.0, 40.0);
+        let mut tracker = CsrtTracker::new(bbox);
+
+        // Stay in visible state
+        tracker.confidence = 0.9;
+        tracker.update_occlusion_state();
+        assert_eq!(tracker.occlusion_frame_count(), 1);
+
+        tracker.update_occlusion_state();
+        assert_eq!(tracker.occlusion_frame_count(), 2);
+
+        // Transition resets count
+        tracker.confidence = 0.1;
+        tracker.update_occlusion_state();
+        assert_eq!(tracker.occlusion_frame_count(), 0);
+    }
+
+    #[test]
+    fn test_is_target_lost() {
+        let bbox = BoundingBox::new(30.0, 30.0, 40.0, 40.0);
+        let config = AdaptiveReliabilityConfig::new().with_max_occlusion_frames(5);
+        let mut tracker = CsrtTracker::new(bbox).with_reliability_config(config);
+
+        tracker.occlusion_state = OcclusionState::FullOcclusion;
+        tracker.occlusion_frame_count = 3;
+        assert!(!tracker.is_target_lost());
+
+        tracker.occlusion_frame_count = 6;
+        assert!(tracker.is_target_lost());
+    }
+
+    #[test]
+    fn test_confidence_trend_empty() {
+        let bbox = BoundingBox::new(30.0, 30.0, 40.0, 40.0);
+        let tracker = CsrtTracker::new(bbox);
+        assert_eq!(tracker.confidence_trend(), 0.0);
+    }
+
+    #[test]
+    fn test_confidence_trend_improving() {
+        let bbox = BoundingBox::new(30.0, 30.0, 40.0, 40.0);
+        let mut tracker = CsrtTracker::new(bbox);
+        tracker.confidence_history = vec![0.3, 0.3, 0.3, 0.3, 0.7, 0.7, 0.7, 0.7];
+        let trend = tracker.confidence_trend();
+        assert!(trend > 0.0);
+    }
+
+    #[test]
+    fn test_confidence_trend_degrading() {
+        let bbox = BoundingBox::new(30.0, 30.0, 40.0, 40.0);
+        let mut tracker = CsrtTracker::new(bbox);
+        tracker.confidence_history = vec![0.9, 0.9, 0.9, 0.9, 0.3, 0.3, 0.3, 0.3];
+        let trend = tracker.confidence_trend();
+        assert!(trend < 0.0);
+    }
+
+    #[test]
+    fn test_decay_reliability_map() {
+        let bbox = BoundingBox::new(30.0, 30.0, 40.0, 40.0);
+        let mut tracker = CsrtTracker::new(bbox);
+        let initial_sum: f64 = tracker.reliability_map.iter().sum();
+
+        tracker.decay_reliability_map();
+        let after_sum: f64 = tracker.reliability_map.iter().sum();
+        assert!(after_sum < initial_sum);
+    }
+
+    #[test]
+    fn test_adaptive_reliability_config_default() {
+        let config = AdaptiveReliabilityConfig::default();
+        assert_eq!(config.partial_occlusion_threshold, 0.5);
+        assert_eq!(config.full_occlusion_threshold, 0.25);
+        assert_eq!(config.recovery_threshold, 0.6);
+        assert_eq!(config.max_occlusion_frames, 30);
+        assert_eq!(config.reliability_decay, 0.95);
+        assert!(config.enable_segmentation);
+    }
+
+    #[test]
+    fn test_extract_multichannel_features() {
+        let patch = vec![100.0; 64 * 64];
+        let features = extract_multichannel_features(&patch, (64, 64));
+        assert_eq!(features.len(), 64 * 64 * 9);
+    }
+
+    #[test]
+    fn test_create_segmentation_mask() {
+        let mask = create_segmentation_mask((64, 64), 0.3);
+        assert_eq!(mask.len(), 64 * 64);
+        let fg_count = mask.iter().filter(|&&v| v > 0.5).count();
+        let bg_count = mask.iter().filter(|&&v| v <= 0.5).count();
+        assert!(fg_count > 0);
+        assert!(bg_count > 0);
+    }
+
+    #[test]
+    fn test_find_peak_subpixel() {
+        let mut response = vec![0.0; 64 * 64];
+        // Place peak in center
+        response[32 * 64 + 32] = 10.0;
+        response[32 * 64 + 31] = 5.0;
+        response[32 * 64 + 33] = 5.0;
+        response[31 * 64 + 32] = 5.0;
+        response[33 * 64 + 32] = 5.0;
+
+        let (py, px, max_val) = find_peak_subpixel(&response, (64, 64));
+        assert!((px - 32.0).abs() < 1.0);
+        assert!((py - 32.0).abs() < 1.0);
+        assert_eq!(max_val, 10.0);
+    }
+
+    #[test]
+    fn test_gaussian_1d() {
+        let val = gaussian_1d(0.0, 0.0, 1.0);
+        assert!((val - 1.0).abs() < 1e-10);
+
+        let val2 = gaussian_1d(1.0, 0.0, 1.0);
+        assert!(val2 < val);
+    }
+
+    #[test]
+    fn test_correlate_with_filter() {
+        let features = vec![1.0; 64 * 64];
+        let filter = vec![2.0; 64 * 64];
+        let response = correlate_with_filter(&features, &filter, (64, 64));
+        assert_eq!(response.len(), 64 * 64);
+        assert_eq!(response[0], 2.0);
+    }
+
+    #[test]
+    fn test_normalize_channel() {
+        let mut channel = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        normalize_channel(&mut channel);
+        let mean: f64 = channel.iter().sum::<f64>() / channel.len() as f64;
+        assert!(mean.abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_csrt_tracker_multiple_updates() {
+        let bbox = BoundingBox::new(30.0, 30.0, 40.0, 40.0);
+        let mut tracker = CsrtTracker::new(bbox);
+
+        let frame = vec![128u8; 100 * 100];
+        tracker
+            .initialize(&frame, 100, 100)
+            .expect("init should succeed");
+
+        for _ in 0..5 {
+            let result = tracker.update(&frame, 100, 100);
+            assert!(result.is_ok());
+        }
+    }
 }

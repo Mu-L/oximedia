@@ -212,6 +212,7 @@ pub fn format_timestamp_iso8601(timestamp: u64) -> String {
 /// # Errors
 ///
 /// Returns the last error if all attempts fail
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn retry_with_backoff<F, Fut, T, E>(
     max_attempts: u32,
     initial_delay_ms: u64,

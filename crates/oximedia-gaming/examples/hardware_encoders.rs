@@ -43,7 +43,7 @@ fn main() {
         match QsvEncoder::get_capabilities() {
             Ok(caps) => {
                 println!("   GPU: {}", caps.gpu_name);
-                println!("   Generation: {}", caps.generation);
+                println!("   Generation: {:?}", caps.generation);
                 println!("   Max Resolution: {}x{}", caps.max_width, caps.max_height);
                 println!(
                     "   AV1 Support: {}",
@@ -69,7 +69,7 @@ fn main() {
         match VceEncoder::get_capabilities() {
             Ok(caps) => {
                 println!("   GPU: {}", caps.gpu_name);
-                println!("   Version: {}", caps.version);
+                println!("   Version: {:?}", caps.vcn_version);
                 println!("   Max Resolution: {}x{}", caps.max_width, caps.max_height);
                 println!(
                     "   AV1 Support: {}",

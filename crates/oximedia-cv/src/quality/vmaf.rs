@@ -14,11 +14,12 @@
 //!
 //! # Examples
 //!
-//! ```
+//! ```no_run
 //! use oximedia_cv::quality::vmaf::calculate_vmaf;
 //! use oximedia_codec::VideoFrame;
 //! use oximedia_core::PixelFormat;
 //!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut reference = VideoFrame::new(PixelFormat::Yuv420p, 1920, 1080);
 //! reference.allocate();
 //! let mut distorted = VideoFrame::new(PixelFormat::Yuv420p, 1920, 1080);
@@ -26,6 +27,8 @@
 //!
 //! let result = calculate_vmaf(&reference, &distorted)?;
 //! println!("VMAF: {:.2}", result.score);
+//! Ok(())
+//! }
 //! ```
 
 use crate::error::{CvError, CvResult};
@@ -122,11 +125,12 @@ impl Default for VmafFeatures {
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use oximedia_cv::quality::vmaf::calculate_vmaf;
 /// use oximedia_codec::VideoFrame;
 /// use oximedia_core::PixelFormat;
 ///
+/// fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut reference = VideoFrame::new(PixelFormat::Yuv420p, 1280, 720);
 /// reference.allocate();
 /// let mut distorted = VideoFrame::new(PixelFormat::Yuv420p, 1280, 720);
@@ -134,6 +138,8 @@ impl Default for VmafFeatures {
 ///
 /// let result = calculate_vmaf(&reference, &distorted)?;
 /// assert!(result.score >= 0.0 && result.score <= 100.0);
+/// Ok(())
+/// }
 /// ```
 pub fn calculate_vmaf(reference: &VideoFrame, distorted: &VideoFrame) -> CvResult<VmafResult> {
     validate_frames(reference, distorted)?;

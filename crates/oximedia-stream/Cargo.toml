@@ -1,0 +1,22 @@
+[package]
+name = "oximedia-stream"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Adaptive streaming pipeline, segment lifecycle management, and stream health monitoring for OxiMedia"
+readme = "README.md"
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["streaming", "adaptive", "hls", "dash", "media"]
+categories = ["multimedia", "network-programming"]
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -357,6 +357,450 @@ impl FragmentedTrack {
     }
 }
 
+// ─── Fragmented MP4 live ingest ────────────────────────────────────────────────
+
+/// Parser for fragmented MP4 live ingest streams (moof+mdat).
+///
+/// Handles incoming fMP4 data from live sources, tracking sequence numbers
+/// and validating fragment boundaries.
+#[derive(Debug)]
+pub struct FragmentedMp4Ingest {
+    /// Expected next sequence number.
+    expected_sequence: u32,
+    /// Total fragments received.
+    fragments_received: u64,
+    /// Total bytes received.
+    bytes_received: u64,
+    /// Fragments received out of order.
+    out_of_order_count: u64,
+    /// Whether we have received an init segment.
+    init_received: bool,
+}
+
+impl FragmentedMp4Ingest {
+    /// Creates a new ingest handler.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            expected_sequence: 1,
+            fragments_received: 0,
+            bytes_received: 0,
+            out_of_order_count: 0,
+            init_received: false,
+        }
+    }
+
+    /// Ingests raw fragment data and attempts to parse it.
+    ///
+    /// Returns the parsed fragment on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns `OxiError` if the data is not a valid fragment.
+    pub fn ingest(&mut self, data: &[u8]) -> OxiResult<IngestResult> {
+        if data.len() < 8 {
+            return Err(OxiError::InvalidData("Fragment data too short".into()));
+        }
+
+        let box_type = &data[4..8];
+
+        if box_type == b"ftyp" {
+            self.init_received = true;
+            self.bytes_received += data.len() as u64;
+            return Ok(IngestResult::InitSegment);
+        }
+
+        if box_type == b"moof" {
+            if !self.init_received {
+                return Err(OxiError::InvalidData(
+                    "Received moof before init segment".into(),
+                ));
+            }
+
+            // Parse sequence number from moof > mfhd
+            let sequence = self
+                .parse_mfhd_sequence(data)
+                .unwrap_or(self.expected_sequence);
+
+            if sequence != self.expected_sequence {
+                self.out_of_order_count += 1;
+            }
+
+            self.expected_sequence = sequence + 1;
+            self.fragments_received += 1;
+            self.bytes_received += data.len() as u64;
+
+            return Ok(IngestResult::MediaFragment { sequence });
+        }
+
+        // For mdat and other boxes, just track bytes
+        self.bytes_received += data.len() as u64;
+        Ok(IngestResult::OtherBox)
+    }
+
+    /// Attempts to parse the sequence number from a mfhd box within moof.
+    fn parse_mfhd_sequence(&self, data: &[u8]) -> Option<u32> {
+        // moof box structure: size(4) + "moof"(4) + children
+        // mfhd is first child: size(4) + "mfhd"(4) + version+flags(4) + sequence(4)
+        if data.len() < 24 {
+            return None;
+        }
+        // Check for mfhd at offset 8
+        if &data[12..16] != b"mfhd" {
+            return None;
+        }
+        // Sequence number at offset 20 (after version+flags)
+        let seq = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+        Some(seq)
+    }
+
+    /// Returns the total number of fragments received.
+    #[must_use]
+    pub fn fragments_received(&self) -> u64 {
+        self.fragments_received
+    }
+
+    /// Returns the total bytes received.
+    #[must_use]
+    pub fn bytes_received(&self) -> u64 {
+        self.bytes_received
+    }
+
+    /// Returns the number of out-of-order fragments.
+    #[must_use]
+    pub fn out_of_order_count(&self) -> u64 {
+        self.out_of_order_count
+    }
+
+    /// Returns whether an init segment has been received.
+    #[must_use]
+    pub fn init_received(&self) -> bool {
+        self.init_received
+    }
+}
+
+impl Default for FragmentedMp4Ingest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Result of ingesting a fragment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IngestResult {
+    /// An initialization segment (ftyp+moov).
+    InitSegment,
+    /// A media fragment (moof+mdat) with its sequence number.
+    MediaFragment {
+        /// Sequence number from the mfhd box.
+        sequence: u32,
+    },
+    /// Some other MP4 box (mdat, styp, etc.).
+    OtherBox,
+}
+
+// ─── CMAF chunk generation ────────────────────────────────────────────────────
+
+/// CMAF (Common Media Application Format, ISO/IEC 23000-19) chunk types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmafChunkType {
+    /// Regular CMAF chunk (contains one or more complete samples).
+    Regular,
+    /// Low-latency CMAF chunk (may contain a single sample for LL-DASH/LL-HLS).
+    LowLatency,
+}
+
+/// Configuration for CMAF chunk generation.
+#[derive(Debug, Clone)]
+pub struct CmafConfig {
+    /// Target chunk duration in milliseconds.
+    pub chunk_duration_ms: u64,
+    /// Chunk type (regular or low-latency).
+    pub chunk_type: CmafChunkType,
+    /// Whether to add styp box to each chunk.
+    pub add_styp: bool,
+    /// Brand for styp box.
+    pub brand: String,
+    /// Enable chunked transfer encoding hints.
+    pub chunked_transfer: bool,
+}
+
+impl Default for CmafConfig {
+    fn default() -> Self {
+        Self {
+            chunk_duration_ms: 2000,
+            chunk_type: CmafChunkType::Regular,
+            add_styp: true,
+            brand: "cmfc".into(),
+            chunked_transfer: false,
+        }
+    }
+}
+
+impl CmafConfig {
+    /// Creates a new CMAF config for regular chunks.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates a low-latency CMAF config with short chunks.
+    #[must_use]
+    pub fn low_latency() -> Self {
+        Self {
+            chunk_duration_ms: 500,
+            chunk_type: CmafChunkType::LowLatency,
+            add_styp: true,
+            brand: "cmfl".into(),
+            chunked_transfer: true,
+        }
+    }
+
+    /// Sets the chunk duration.
+    #[must_use]
+    pub fn with_chunk_duration_ms(mut self, ms: u64) -> Self {
+        self.chunk_duration_ms = ms;
+        self
+    }
+
+    /// Sets the chunk type.
+    #[must_use]
+    pub fn with_chunk_type(mut self, ct: CmafChunkType) -> Self {
+        self.chunk_type = ct;
+        self
+    }
+
+    /// Enables chunked transfer encoding.
+    #[must_use]
+    pub fn with_chunked_transfer(mut self, enabled: bool) -> Self {
+        self.chunked_transfer = enabled;
+        self
+    }
+}
+
+/// A generated CMAF chunk.
+#[derive(Debug, Clone)]
+pub struct CmafChunk {
+    /// Chunk sequence number.
+    pub sequence: u32,
+    /// Chunk data (styp + moof + mdat or just moof + mdat).
+    pub data: Vec<u8>,
+    /// Duration of this chunk in microseconds.
+    pub duration_us: u64,
+    /// Whether this chunk starts with a keyframe.
+    pub starts_with_keyframe: bool,
+    /// Chunk type.
+    pub chunk_type: CmafChunkType,
+    /// Whether this chunk is independently decodable.
+    pub independent: bool,
+}
+
+impl CmafChunk {
+    /// Creates a new CMAF chunk.
+    #[must_use]
+    pub fn new(sequence: u32, chunk_type: CmafChunkType) -> Self {
+        Self {
+            sequence,
+            data: Vec::new(),
+            duration_us: 0,
+            starts_with_keyframe: false,
+            chunk_type,
+            independent: false,
+        }
+    }
+
+    /// Returns the size of the chunk in bytes.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Returns the duration as a `Duration`.
+    #[must_use]
+    pub fn duration(&self) -> Duration {
+        Duration::from_micros(self.duration_us)
+    }
+}
+
+/// Builder for CMAF chunks from fragmented MP4 fragments.
+#[derive(Debug)]
+pub struct CmafChunkBuilder {
+    config: CmafConfig,
+    sequence: u32,
+}
+
+impl CmafChunkBuilder {
+    /// Creates a new CMAF chunk builder.
+    #[must_use]
+    pub fn new(config: CmafConfig) -> Self {
+        Self {
+            config,
+            sequence: 1,
+        }
+    }
+
+    /// Converts an `Mp4Fragment` into one or more CMAF chunks.
+    pub fn fragment_to_chunks(&mut self, fragment: &Mp4Fragment) -> Vec<CmafChunk> {
+        if fragment.is_init() {
+            return Vec::new();
+        }
+
+        let mut chunk = CmafChunk::new(self.sequence, self.config.chunk_type);
+        chunk.duration_us = fragment.duration_us;
+        chunk.starts_with_keyframe = fragment.has_keyframe;
+        chunk.independent = fragment.has_keyframe;
+
+        // Build chunk data
+        let mut data = Vec::new();
+
+        // Add styp box if configured
+        if self.config.add_styp {
+            let brand_bytes = self.config.brand.as_bytes();
+            let brand = if brand_bytes.len() >= 4 {
+                [
+                    brand_bytes[0],
+                    brand_bytes[1],
+                    brand_bytes[2],
+                    brand_bytes[3],
+                ]
+            } else {
+                [b'c', b'm', b'f', b'c']
+            };
+            let styp_size: u32 = 16; // size + "styp" + brand + minor_version
+            data.extend_from_slice(&styp_size.to_be_bytes());
+            data.extend_from_slice(b"styp");
+            data.extend_from_slice(&brand);
+            data.extend_from_slice(&0u32.to_be_bytes()); // minor version
+        }
+
+        data.extend_from_slice(&fragment.data);
+        chunk.data = data;
+
+        self.sequence += 1;
+        vec![chunk]
+    }
+
+    /// Returns the current sequence number.
+    #[must_use]
+    pub fn current_sequence(&self) -> u32 {
+        self.sequence
+    }
+
+    /// Returns the CMAF configuration.
+    #[must_use]
+    pub fn config(&self) -> &CmafConfig {
+        &self.config
+    }
+}
+
+// ─── Fragment boundary detection ──────────────────────────────────────────────
+
+/// Detects and validates fragment boundaries in a byte stream.
+///
+/// Scans for moof/mdat box pairs and validates their structural integrity.
+#[derive(Debug, Clone)]
+pub struct FragmentBoundaryDetector {
+    /// Detected fragment boundaries (byte offsets).
+    boundaries: Vec<FragmentBoundary>,
+}
+
+/// A detected fragment boundary in a byte stream.
+#[derive(Debug, Clone)]
+pub struct FragmentBoundary {
+    /// Byte offset of the moof box start.
+    pub moof_offset: u64,
+    /// Size of the moof box.
+    pub moof_size: u32,
+    /// Byte offset of the mdat box start (if found).
+    pub mdat_offset: Option<u64>,
+    /// Size of the mdat box (if found).
+    pub mdat_size: Option<u32>,
+    /// Whether this boundary appears structurally valid.
+    pub valid: bool,
+}
+
+impl FragmentBoundaryDetector {
+    /// Creates a new detector.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            boundaries: Vec::new(),
+        }
+    }
+
+    /// Scans a byte buffer for fragment boundaries.
+    ///
+    /// Finds all moof boxes and their associated mdat boxes.
+    pub fn scan(&mut self, data: &[u8]) {
+        self.boundaries.clear();
+        let mut offset = 0u64;
+
+        while (offset as usize) + 8 <= data.len() {
+            let pos = offset as usize;
+            let size = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            let box_type = &data[pos + 4..pos + 8];
+
+            if box_type == b"moof" && size >= 8 {
+                let mut boundary = FragmentBoundary {
+                    moof_offset: offset,
+                    moof_size: size,
+                    mdat_offset: None,
+                    mdat_size: None,
+                    valid: true,
+                };
+
+                // Look for mdat immediately after moof
+                let mdat_pos = (offset + u64::from(size)) as usize;
+                if mdat_pos + 8 <= data.len() {
+                    let mdat_size = u32::from_be_bytes([
+                        data[mdat_pos],
+                        data[mdat_pos + 1],
+                        data[mdat_pos + 2],
+                        data[mdat_pos + 3],
+                    ]);
+                    if &data[mdat_pos + 4..mdat_pos + 8] == b"mdat" {
+                        boundary.mdat_offset = Some(offset + u64::from(size));
+                        boundary.mdat_size = Some(mdat_size);
+                    }
+                }
+
+                self.boundaries.push(boundary);
+            }
+
+            if size < 8 {
+                break;
+            }
+            offset += u64::from(size);
+        }
+    }
+
+    /// Returns the detected boundaries.
+    #[must_use]
+    pub fn boundaries(&self) -> &[FragmentBoundary] {
+        &self.boundaries
+    }
+
+    /// Returns the number of detected fragments.
+    #[must_use]
+    pub fn fragment_count(&self) -> usize {
+        self.boundaries.len()
+    }
+
+    /// Returns `true` if all detected boundaries are structurally valid.
+    #[must_use]
+    pub fn all_valid(&self) -> bool {
+        self.boundaries
+            .iter()
+            .all(|b| b.valid && b.mdat_offset.is_some())
+    }
+}
+
+impl Default for FragmentBoundaryDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +867,215 @@ mod tests {
         assert_eq!(track.stream_index, 0);
         assert_eq!(track.default_sample_duration, Some(960));
         assert_eq!(track.default_sample_size, Some(100));
+    }
+
+    // ── FragmentedMp4Ingest tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_ingest_new() {
+        let ingest = FragmentedMp4Ingest::new();
+        assert!(!ingest.init_received());
+        assert_eq!(ingest.fragments_received(), 0);
+        assert_eq!(ingest.bytes_received(), 0);
+    }
+
+    #[test]
+    fn test_ingest_too_short() {
+        let mut ingest = FragmentedMp4Ingest::new();
+        let result = ingest.ingest(&[0u8; 4]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ingest_ftyp() {
+        let mut data = vec![0u8; 20];
+        data[0..4].copy_from_slice(&20u32.to_be_bytes());
+        data[4..8].copy_from_slice(b"ftyp");
+        data[8..12].copy_from_slice(b"iso5");
+
+        let mut ingest = FragmentedMp4Ingest::new();
+        let result = ingest.ingest(&data).expect("ingest ok");
+        assert_eq!(result, IngestResult::InitSegment);
+        assert!(ingest.init_received());
+    }
+
+    #[test]
+    fn test_ingest_moof_before_init() {
+        let mut data = vec![0u8; 24];
+        data[0..4].copy_from_slice(&24u32.to_be_bytes());
+        data[4..8].copy_from_slice(b"moof");
+
+        let mut ingest = FragmentedMp4Ingest::new();
+        let result = ingest.ingest(&data);
+        assert!(result.is_err()); // No init yet
+    }
+
+    #[test]
+    fn test_ingest_moof_after_init() {
+        let mut ingest = FragmentedMp4Ingest::new();
+
+        // Send init first
+        let mut ftyp = vec![0u8; 20];
+        ftyp[0..4].copy_from_slice(&20u32.to_be_bytes());
+        ftyp[4..8].copy_from_slice(b"ftyp");
+        ingest.ingest(&ftyp).expect("ftyp ok");
+
+        // Now send moof with mfhd
+        let mut moof = vec![0u8; 24];
+        moof[0..4].copy_from_slice(&24u32.to_be_bytes());
+        moof[4..8].copy_from_slice(b"moof");
+        moof[8..12].copy_from_slice(&16u32.to_be_bytes()); // mfhd size
+        moof[12..16].copy_from_slice(b"mfhd");
+        moof[16..20].copy_from_slice(&0u32.to_be_bytes()); // version+flags
+        moof[20..24].copy_from_slice(&1u32.to_be_bytes()); // sequence = 1
+
+        let result = ingest.ingest(&moof).expect("moof ok");
+        assert_eq!(result, IngestResult::MediaFragment { sequence: 1 });
+        assert_eq!(ingest.fragments_received(), 1);
+    }
+
+    #[test]
+    fn test_ingest_other_box() {
+        let mut ingest = FragmentedMp4Ingest::new();
+        let mut data = vec![0u8; 16];
+        data[0..4].copy_from_slice(&16u32.to_be_bytes());
+        data[4..8].copy_from_slice(b"mdat");
+
+        let result = ingest.ingest(&data).expect("ingest ok");
+        assert_eq!(result, IngestResult::OtherBox);
+    }
+
+    // ── CMAF tests ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cmaf_config_default() {
+        let cfg = CmafConfig::default();
+        assert_eq!(cfg.chunk_duration_ms, 2000);
+        assert_eq!(cfg.chunk_type, CmafChunkType::Regular);
+        assert!(cfg.add_styp);
+        assert!(!cfg.chunked_transfer);
+    }
+
+    #[test]
+    fn test_cmaf_config_low_latency() {
+        let cfg = CmafConfig::low_latency();
+        assert_eq!(cfg.chunk_duration_ms, 500);
+        assert_eq!(cfg.chunk_type, CmafChunkType::LowLatency);
+        assert!(cfg.chunked_transfer);
+    }
+
+    #[test]
+    fn test_cmaf_config_builder() {
+        let cfg = CmafConfig::new()
+            .with_chunk_duration_ms(1000)
+            .with_chunk_type(CmafChunkType::LowLatency)
+            .with_chunked_transfer(true);
+        assert_eq!(cfg.chunk_duration_ms, 1000);
+        assert_eq!(cfg.chunk_type, CmafChunkType::LowLatency);
+        assert!(cfg.chunked_transfer);
+    }
+
+    #[test]
+    fn test_cmaf_chunk_new() {
+        let chunk = CmafChunk::new(1, CmafChunkType::Regular);
+        assert_eq!(chunk.sequence, 1);
+        assert_eq!(chunk.size(), 0);
+        assert!(!chunk.starts_with_keyframe);
+    }
+
+    #[test]
+    fn test_cmaf_chunk_builder_from_fragment() {
+        let mut fragment = Mp4Fragment::new(FragmentType::Media, 1);
+        fragment.data = b"moof_mdat_data".to_vec();
+        fragment.duration_us = 2_000_000;
+        fragment.has_keyframe = true;
+
+        let cfg = CmafConfig::new();
+        let mut builder = CmafChunkBuilder::new(cfg);
+        let chunks = builder.fragment_to_chunks(&fragment);
+
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].starts_with_keyframe);
+        assert_eq!(chunks[0].duration_us, 2_000_000);
+        // Should have styp prefix
+        assert!(chunks[0].data.len() > fragment.data.len());
+        assert_eq!(builder.current_sequence(), 2);
+    }
+
+    #[test]
+    fn test_cmaf_chunk_builder_skips_init() {
+        let fragment = Mp4Fragment::new(FragmentType::Init, 0);
+        let cfg = CmafConfig::new();
+        let mut builder = CmafChunkBuilder::new(cfg);
+        let chunks = builder.fragment_to_chunks(&fragment);
+        assert!(chunks.is_empty());
+    }
+
+    // ── Fragment boundary detection tests ────────────────────────────────────
+
+    #[test]
+    fn test_boundary_detector_empty() {
+        let mut detector = FragmentBoundaryDetector::new();
+        detector.scan(&[]);
+        assert_eq!(detector.fragment_count(), 0);
+        assert!(detector.all_valid());
+    }
+
+    #[test]
+    fn test_boundary_detector_single_moof_mdat() {
+        let mut data = Vec::new();
+        // moof box
+        data.extend_from_slice(&16u32.to_be_bytes());
+        data.extend_from_slice(b"moof");
+        data.extend_from_slice(&[0u8; 8]); // padding
+                                           // mdat box
+        data.extend_from_slice(&12u32.to_be_bytes());
+        data.extend_from_slice(b"mdat");
+        data.extend_from_slice(&[0u8; 4]); // data
+
+        let mut detector = FragmentBoundaryDetector::new();
+        detector.scan(&data);
+
+        assert_eq!(detector.fragment_count(), 1);
+        let b = &detector.boundaries()[0];
+        assert_eq!(b.moof_offset, 0);
+        assert_eq!(b.moof_size, 16);
+        assert!(b.mdat_offset.is_some());
+        assert_eq!(b.mdat_size, Some(12));
+        assert!(detector.all_valid());
+    }
+
+    #[test]
+    fn test_boundary_detector_moof_without_mdat() {
+        let mut data = Vec::new();
+        // moof box only
+        data.extend_from_slice(&16u32.to_be_bytes());
+        data.extend_from_slice(b"moof");
+        data.extend_from_slice(&[0u8; 8]);
+
+        let mut detector = FragmentBoundaryDetector::new();
+        detector.scan(&data);
+
+        assert_eq!(detector.fragment_count(), 1);
+        assert!(detector.boundaries()[0].mdat_offset.is_none());
+        assert!(!detector.all_valid()); // No mdat → not fully valid
+    }
+
+    #[test]
+    fn test_boundary_detector_two_fragments() {
+        let mut data = Vec::new();
+        for _ in 0..2 {
+            data.extend_from_slice(&16u32.to_be_bytes());
+            data.extend_from_slice(b"moof");
+            data.extend_from_slice(&[0u8; 8]);
+            data.extend_from_slice(&12u32.to_be_bytes());
+            data.extend_from_slice(b"mdat");
+            data.extend_from_slice(&[0u8; 4]);
+        }
+
+        let mut detector = FragmentBoundaryDetector::new();
+        detector.scan(&data);
+        assert_eq!(detector.fragment_count(), 2);
+        assert!(detector.all_valid());
     }
 }

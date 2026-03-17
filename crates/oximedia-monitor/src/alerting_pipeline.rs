@@ -334,6 +334,155 @@ impl EscalationTracker {
     }
 }
 
+// ── alert deduplication ──────────────────────────────────────────────────────
+
+/// Deduplication key: combination of rule ID and metric name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DedupKey {
+    rule_id: String,
+    metric: String,
+}
+
+impl DedupKey {
+    /// Build a dedup key from a fired alert.
+    #[must_use]
+    pub fn from_alert(alert: &PipelineFiredAlert) -> Self {
+        Self {
+            rule_id: alert.rule_id.clone(),
+            metric: alert.metric.clone(),
+        }
+    }
+
+    /// Build a dedup key from explicit parts.
+    #[must_use]
+    pub fn new(rule_id: impl Into<String>, metric: impl Into<String>) -> Self {
+        Self {
+            rule_id: rule_id.into(),
+            metric: metric.into(),
+        }
+    }
+}
+
+/// Per-key dedup state.
+#[derive(Debug, Clone)]
+struct DedupState {
+    /// When this key was last allowed through.
+    last_allowed: Instant,
+    /// Total suppressed count since last allowed.
+    suppressed_count: u64,
+}
+
+/// Configurable alert deduplication filter.
+///
+/// Suppresses repeated firings of the same alert (same rule + metric) within
+/// a configurable cooldown window.  Unlike `silence_for` on individual rules,
+/// this operates as a global pipeline stage that catches all duplicates.
+#[derive(Debug)]
+pub struct DedupFilter {
+    /// Cooldown window: how long after allowing an alert to suppress duplicates.
+    cooldown: Duration,
+    /// Per-key dedup state.
+    state: HashMap<DedupKey, DedupState>,
+    /// Total alerts allowed through.
+    total_allowed: u64,
+    /// Total alerts suppressed.
+    total_suppressed: u64,
+}
+
+impl DedupFilter {
+    /// Create a new dedup filter with the given cooldown window.
+    #[must_use]
+    pub fn new(cooldown: Duration) -> Self {
+        Self {
+            cooldown,
+            state: HashMap::new(),
+            total_allowed: 0,
+            total_suppressed: 0,
+        }
+    }
+
+    /// Filter a list of fired alerts, suppressing duplicates.
+    ///
+    /// Returns only the alerts that should be dispatched.
+    pub fn filter(&mut self, alerts: Vec<PipelineFiredAlert>) -> Vec<PipelineFiredAlert> {
+        let now = Instant::now();
+        let mut passed = Vec::new();
+
+        for alert in alerts {
+            let key = DedupKey::from_alert(&alert);
+
+            if let Some(state) = self.state.get_mut(&key) {
+                if now.duration_since(state.last_allowed) < self.cooldown {
+                    state.suppressed_count += 1;
+                    self.total_suppressed += 1;
+                    continue;
+                }
+                // Cooldown elapsed: allow through and reset.
+                state.last_allowed = now;
+                state.suppressed_count = 0;
+            } else {
+                self.state.insert(
+                    key,
+                    DedupState {
+                        last_allowed: now,
+                        suppressed_count: 0,
+                    },
+                );
+            }
+
+            self.total_allowed += 1;
+            passed.push(alert);
+        }
+
+        passed
+    }
+
+    /// Get the number of distinct dedup keys being tracked.
+    #[must_use]
+    pub fn tracked_keys(&self) -> usize {
+        self.state.len()
+    }
+
+    /// Get the total number of alerts allowed through.
+    #[must_use]
+    pub fn total_allowed(&self) -> u64 {
+        self.total_allowed
+    }
+
+    /// Get the total number of suppressed alerts.
+    #[must_use]
+    pub fn total_suppressed(&self) -> u64 {
+        self.total_suppressed
+    }
+
+    /// Get the suppressed count for a specific key.
+    #[must_use]
+    pub fn suppressed_for(&self, key: &DedupKey) -> u64 {
+        self.state.get(key).map_or(0, |s| s.suppressed_count)
+    }
+
+    /// Remove expired entries from the state map (keys whose cooldown has elapsed).
+    pub fn cleanup(&mut self) {
+        let now = Instant::now();
+        let cooldown = self.cooldown;
+        self.state
+            .retain(|_, s| now.duration_since(s.last_allowed) < cooldown);
+    }
+
+    /// Clear all state.
+    pub fn clear(&mut self) {
+        self.state.clear();
+        self.total_allowed = 0;
+        self.total_suppressed = 0;
+    }
+
+    /// Get the cooldown window.
+    #[must_use]
+    pub fn cooldown(&self) -> Duration {
+        self.cooldown
+    }
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -514,5 +663,155 @@ mod tests {
     fn test_priority_ordering() {
         assert!(Priority::Critical > Priority::Warning);
         assert!(Priority::Warning > Priority::Info);
+    }
+
+    // ── DedupFilter tests ────────────────────────────────────────────────
+
+    fn make_fired_alert(rule_id: &str, metric: &str, value: f64) -> PipelineFiredAlert {
+        PipelineFiredAlert {
+            rule_id: rule_id.to_string(),
+            metric: metric.to_string(),
+            value,
+            fired_at: Instant::now(),
+            priority: Priority::Warning,
+        }
+    }
+
+    #[test]
+    fn test_dedup_filter_allows_first_alert() {
+        let mut filter = DedupFilter::new(Duration::from_secs(60));
+        let alerts = vec![make_fired_alert("r1", "cpu", 95.0)];
+        let passed = filter.filter(alerts);
+        assert_eq!(passed.len(), 1);
+        assert_eq!(filter.total_allowed(), 1);
+        assert_eq!(filter.total_suppressed(), 0);
+    }
+
+    #[test]
+    fn test_dedup_filter_suppresses_duplicate_within_cooldown() {
+        let mut filter = DedupFilter::new(Duration::from_secs(60));
+        let alerts1 = vec![make_fired_alert("r1", "cpu", 95.0)];
+        let passed1 = filter.filter(alerts1);
+        assert_eq!(passed1.len(), 1);
+
+        // Same rule+metric within cooldown.
+        let alerts2 = vec![make_fired_alert("r1", "cpu", 96.0)];
+        let passed2 = filter.filter(alerts2);
+        assert_eq!(passed2.len(), 0);
+        assert_eq!(filter.total_suppressed(), 1);
+    }
+
+    #[test]
+    fn test_dedup_filter_allows_different_keys() {
+        let mut filter = DedupFilter::new(Duration::from_secs(60));
+        let alerts = vec![
+            make_fired_alert("r1", "cpu", 95.0),
+            make_fired_alert("r2", "memory", 85.0),
+        ];
+        let passed = filter.filter(alerts);
+        assert_eq!(passed.len(), 2);
+    }
+
+    #[test]
+    fn test_dedup_filter_allows_same_rule_different_metric() {
+        let mut filter = DedupFilter::new(Duration::from_secs(60));
+        let alerts = vec![make_fired_alert("r1", "cpu", 95.0)];
+        let _ = filter.filter(alerts);
+
+        let alerts2 = vec![make_fired_alert("r1", "memory", 85.0)];
+        let passed = filter.filter(alerts2);
+        assert_eq!(passed.len(), 1);
+    }
+
+    #[test]
+    fn test_dedup_filter_allows_after_cooldown() {
+        let mut filter = DedupFilter::new(Duration::from_millis(0)); // zero cooldown
+        let alerts1 = vec![make_fired_alert("r1", "cpu", 95.0)];
+        let _ = filter.filter(alerts1);
+
+        // With 0ms cooldown, the next evaluation should pass.
+        let alerts2 = vec![make_fired_alert("r1", "cpu", 96.0)];
+        let passed = filter.filter(alerts2);
+        assert_eq!(passed.len(), 1);
+    }
+
+    #[test]
+    fn test_dedup_filter_suppressed_for_key() {
+        let mut filter = DedupFilter::new(Duration::from_secs(60));
+        let key = DedupKey::new("r1", "cpu");
+
+        let _ = filter.filter(vec![make_fired_alert("r1", "cpu", 90.0)]);
+        let _ = filter.filter(vec![make_fired_alert("r1", "cpu", 91.0)]);
+        let _ = filter.filter(vec![make_fired_alert("r1", "cpu", 92.0)]);
+
+        assert_eq!(filter.suppressed_for(&key), 2);
+    }
+
+    #[test]
+    fn test_dedup_filter_tracked_keys() {
+        let mut filter = DedupFilter::new(Duration::from_secs(60));
+        let _ = filter.filter(vec![
+            make_fired_alert("r1", "cpu", 95.0),
+            make_fired_alert("r2", "memory", 80.0),
+        ]);
+        assert_eq!(filter.tracked_keys(), 2);
+    }
+
+    #[test]
+    fn test_dedup_filter_cleanup() {
+        let mut filter = DedupFilter::new(Duration::from_millis(0)); // instant expiry
+        let _ = filter.filter(vec![make_fired_alert("r1", "cpu", 95.0)]);
+        assert_eq!(filter.tracked_keys(), 1);
+
+        filter.cleanup();
+        assert_eq!(filter.tracked_keys(), 0);
+    }
+
+    #[test]
+    fn test_dedup_filter_clear() {
+        let mut filter = DedupFilter::new(Duration::from_secs(60));
+        let _ = filter.filter(vec![make_fired_alert("r1", "cpu", 95.0)]);
+        filter.clear();
+        assert_eq!(filter.tracked_keys(), 0);
+        assert_eq!(filter.total_allowed(), 0);
+        assert_eq!(filter.total_suppressed(), 0);
+    }
+
+    #[test]
+    fn test_dedup_filter_batch_with_duplicates() {
+        let mut filter = DedupFilter::new(Duration::from_secs(60));
+        // Submit 3 alerts for the same key in a single batch.
+        // Only the first should pass.
+        let alerts = vec![
+            make_fired_alert("r1", "cpu", 91.0),
+            make_fired_alert("r1", "cpu", 92.0),
+            make_fired_alert("r1", "cpu", 93.0),
+        ];
+        let passed = filter.filter(alerts);
+        assert_eq!(passed.len(), 1);
+        assert_eq!(filter.total_suppressed(), 2);
+    }
+
+    // ── Pipeline + DedupFilter integration ────────────────────────────────
+
+    #[test]
+    fn test_pipeline_with_dedup_integration() {
+        let mut pipeline = AlertingPipeline::new();
+        pipeline.add_rule(
+            PipelineRule::new("r1", "cpu", Comparator::Gt, 90.0, Priority::Warning)
+                .with_silence(Duration::from_millis(0)),
+        );
+
+        let mut dedup = DedupFilter::new(Duration::from_secs(60));
+
+        // First evaluation: alert fires and passes dedup.
+        let raw_alerts = pipeline.evaluate("cpu", 95.0);
+        let dispatched = dedup.filter(raw_alerts);
+        assert_eq!(dispatched.len(), 1);
+
+        // Second evaluation: alert fires again but dedup suppresses.
+        let raw_alerts = pipeline.evaluate("cpu", 96.0);
+        let dispatched = dedup.filter(raw_alerts);
+        assert_eq!(dispatched.len(), 0);
     }
 }

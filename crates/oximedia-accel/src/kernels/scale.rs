@@ -66,11 +66,10 @@ impl ScaleKernel {
         let bilinear_shader = bilinear::load(device.clone())
             .map_err(|e| AccelError::ShaderCompilation(format!("Bilinear shader: {e:?}")))?;
 
-        let bilinear_stage = PipelineShaderStageCreateInfo::new(
-            bilinear_shader
-                .entry_point("main")
-                .expect("shader entry point 'main' not found"),
-        );
+        let bilinear_stage =
+            PipelineShaderStageCreateInfo::new(bilinear_shader.entry_point("main").ok_or_else(
+                || AccelError::ShaderCompilation("Shader entry point 'main' not found".to_string()),
+            )?);
 
         let bilinear_layout = PipelineLayout::new(
             device.clone(),
@@ -93,11 +92,10 @@ impl ScaleKernel {
         let nearest_shader = nearest::load(device.clone())
             .map_err(|e| AccelError::ShaderCompilation(format!("Nearest shader: {e:?}")))?;
 
-        let nearest_stage = PipelineShaderStageCreateInfo::new(
-            nearest_shader
-                .entry_point("main")
-                .expect("shader entry point 'main' not found"),
-        );
+        let nearest_stage =
+            PipelineShaderStageCreateInfo::new(nearest_shader.entry_point("main").ok_or_else(
+                || AccelError::ShaderCompilation("Shader entry point 'main' not found".to_string()),
+            )?);
 
         let nearest_layout = PipelineLayout::new(
             device.clone(),

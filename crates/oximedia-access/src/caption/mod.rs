@@ -8,10 +8,13 @@ pub mod position;
 pub mod style;
 pub mod sync;
 
-pub use generate::{CaptionConfig, CaptionGenerator};
+pub use generate::{
+    CaptionConfig, CaptionGenerator, MultiSpeakerConfig, SpeakerColor, SpeakerLabelFormat,
+    SpeakerTracker, SpeechSegment,
+};
 pub use position::{CaptionPosition, CaptionPositioner};
 pub use style::{CaptionStyle, CaptionStylePreset};
-pub use sync::{CaptionSynchronizer, SyncQuality};
+pub use sync::{CaptionSynchronizer, SyncAdjustment, SyncDriftAnalysis, SyncQuality};
 
 use oximedia_subtitle::Subtitle;
 use serde::{Deserialize, Serialize};

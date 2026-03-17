@@ -232,6 +232,112 @@ impl LayoutEngine {
     }
 }
 
+// ── SafeAreaMargins ────────────────────────────────────────────────────────
+
+/// Configurable broadcast safe-area margins.
+///
+/// Broadcast standards (EBU, SMPTE) define minimum margins within which all
+/// essential content must appear so that it is not cropped by consumer displays.
+/// `SafeAreaMargins` expresses these margins as fractions of the full frame
+/// width / height.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SafeAreaMargins {
+    /// Left margin as a fraction of frame width (0.0–0.5).
+    pub left: f32,
+    /// Right margin as a fraction of frame width (0.0–0.5).
+    pub right: f32,
+    /// Top margin as a fraction of frame height (0.0–0.5).
+    pub top: f32,
+    /// Bottom margin as a fraction of frame height (0.0–0.5).
+    pub bottom: f32,
+}
+
+impl SafeAreaMargins {
+    /// Create custom margins (all values clamped to `[0.0, 0.5]`).
+    pub fn new(left: f32, right: f32, top: f32, bottom: f32) -> Self {
+        Self {
+            left: left.clamp(0.0, 0.5),
+            right: right.clamp(0.0, 0.5),
+            top: top.clamp(0.0, 0.5),
+            bottom: bottom.clamp(0.0, 0.5),
+        }
+    }
+
+    /// Uniform margin on all four sides.
+    pub fn uniform(fraction: f32) -> Self {
+        let f = fraction.clamp(0.0, 0.5);
+        Self {
+            left: f,
+            right: f,
+            top: f,
+            bottom: f,
+        }
+    }
+
+    /// EBU R 95 / SMPTE RP 218 **action-safe** area: 3.5% margin on each side.
+    pub fn action_safe() -> Self {
+        Self::uniform(0.035)
+    }
+
+    /// EBU R 95 / SMPTE RP 218 **title-safe** area: 5% margin on each side.
+    pub fn title_safe() -> Self {
+        Self::uniform(0.05)
+    }
+
+    /// No margins (full-frame).
+    pub fn none() -> Self {
+        Self::uniform(0.0)
+    }
+
+    /// Compute the inset rectangle for a frame of the given pixel dimensions.
+    ///
+    /// Returns `(x, y, width, height)` in pixels.
+    pub fn inset_rect(&self, frame_width: f32, frame_height: f32) -> (f32, f32, f32, f32) {
+        let x = self.left * frame_width;
+        let y = self.top * frame_height;
+        let right = frame_width - self.right * frame_width;
+        let bottom = frame_height - self.bottom * frame_height;
+        let w = (right - x).max(0.0);
+        let h = (bottom - y).max(0.0);
+        (x, y, w, h)
+    }
+
+    /// Returns `true` if the point `(px, py)` (in pixels) falls within the
+    /// safe area for a frame of size `(frame_width, frame_height)`.
+    pub fn contains_point(&self, px: f32, py: f32, frame_width: f32, frame_height: f32) -> bool {
+        let (sx, sy, sw, sh) = self.inset_rect(frame_width, frame_height);
+        px >= sx && px <= sx + sw && py >= sy && py <= sy + sh
+    }
+}
+
+impl Default for SafeAreaMargins {
+    fn default() -> Self {
+        Self::title_safe()
+    }
+}
+
+// ── LayoutEngine with SafeArea ─────────────────────────────────────────────
+
+impl LayoutEngine {
+    /// Set safe-area margins and re-constrain the container dimensions so that
+    /// all layout boxes reside within the safe area.
+    ///
+    /// The engine's `container_width` and `container_height` are replaced with
+    /// the safe-area inset dimensions, and the returned `(offset_x, offset_y)`
+    /// values indicate where the safe-area origin falls within the original frame.
+    pub fn apply_safe_area(
+        &mut self,
+        safe_area: SafeAreaMargins,
+        frame_width: f32,
+        frame_height: f32,
+    ) -> (f32, f32) {
+        let (x, y, w, h) = safe_area.inset_rect(frame_width, frame_height);
+        self.container_width = w;
+        self.container_height = h;
+        (x, y)
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
@@ -403,5 +509,89 @@ mod tests {
     fn test_engine_empty_produces_empty_results() {
         let engine = LayoutEngine::new(1920.0, 1080.0);
         assert!(engine.layout_all().is_empty());
+    }
+
+    // --- SafeAreaMargins tests ---
+
+    #[test]
+    fn test_safe_area_uniform() {
+        let m = SafeAreaMargins::uniform(0.1);
+        assert!((m.left - 0.1).abs() < f32::EPSILON);
+        assert!((m.right - 0.1).abs() < f32::EPSILON);
+        assert!((m.top - 0.1).abs() < f32::EPSILON);
+        assert!((m.bottom - 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_safe_area_action_safe() {
+        let m = SafeAreaMargins::action_safe();
+        assert!((m.left - 0.035).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_safe_area_title_safe() {
+        let m = SafeAreaMargins::title_safe();
+        assert!((m.left - 0.05).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_safe_area_none() {
+        let m = SafeAreaMargins::none();
+        assert_eq!(m.inset_rect(1920.0, 1080.0), (0.0, 0.0, 1920.0, 1080.0));
+    }
+
+    #[test]
+    fn test_safe_area_inset_rect_1080p_title() {
+        let m = SafeAreaMargins::title_safe();
+        let (x, y, w, h) = m.inset_rect(1920.0, 1080.0);
+        // x = 0.05*1920 = 96; y = 0.05*1080 = 54
+        // w = 1920 - 2*96 = 1728; h = 1080 - 2*54 = 972
+        assert!((x - 96.0).abs() < 0.1);
+        assert!((y - 54.0).abs() < 0.1);
+        assert!((w - 1728.0).abs() < 0.1);
+        assert!((h - 972.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_safe_area_contains_point_center() {
+        let m = SafeAreaMargins::title_safe();
+        assert!(m.contains_point(960.0, 540.0, 1920.0, 1080.0));
+    }
+
+    #[test]
+    fn test_safe_area_contains_point_corner() {
+        let m = SafeAreaMargins::title_safe();
+        // Top-left corner is outside title safe.
+        assert!(!m.contains_point(0.0, 0.0, 1920.0, 1080.0));
+    }
+
+    #[test]
+    fn test_safe_area_clamp_over_half() {
+        let m = SafeAreaMargins::uniform(0.9); // clamped to 0.5
+        assert!((m.left - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_layout_engine_apply_safe_area() {
+        let mut engine = LayoutEngine::new(1920.0, 1080.0);
+        let (ox, oy) = engine.apply_safe_area(SafeAreaMargins::title_safe(), 1920.0, 1080.0);
+        // Container should now be the safe-area inner dimensions.
+        assert!((engine.container_width - 1728.0).abs() < 0.1);
+        assert!((engine.container_height - 972.0).abs() < 0.1);
+        // Offset should be the top-left corner of the safe area.
+        assert!((ox - 96.0).abs() < 0.1);
+        assert!((oy - 54.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_safe_area_custom_asymmetric() {
+        let m = SafeAreaMargins::new(0.05, 0.1, 0.03, 0.07);
+        let (x, y, w, h) = m.inset_rect(1000.0, 1000.0);
+        assert!((x - 50.0).abs() < 0.1); // left 5%
+        assert!((y - 30.0).abs() < 0.1); // top 3%
+                                         // right edge at 1000 - 100 = 900; w = 900 - 50 = 850
+        assert!((w - 850.0).abs() < 0.1);
+        // bottom edge at 1000 - 70 = 930; h = 930 - 30 = 900
+        assert!((h - 900.0).abs() < 0.1);
     }
 }

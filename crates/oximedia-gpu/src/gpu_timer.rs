@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn test_timing_stats_single() {
-        let durations = vec![Duration::from_micros(1000)];
+        let durations = vec![Duration::from_millis(1)];
         let stats = TimingStats::from_durations(&durations)
             .expect("from_durations should succeed with valid durations");
         assert_eq!(stats.min, stats.max);

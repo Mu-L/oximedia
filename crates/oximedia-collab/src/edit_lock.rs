@@ -573,3 +573,482 @@ mod tests {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-track locking with lock escalation
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The granularity at which a per-track lock is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TrackLockGranularity {
+    /// Locked for reading only (multiple readers allowed).
+    Read,
+    /// Locked for small region edits.
+    Region,
+    /// Locked for operations spanning the entire track.
+    FullTrack,
+}
+
+impl std::fmt::Display for TrackLockGranularity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read => write!(f, "read"),
+            Self::Region => write!(f, "region"),
+            Self::FullTrack => write!(f, "full_track"),
+        }
+    }
+}
+
+/// A per-track lock record.
+#[derive(Debug, Clone)]
+pub struct TrackLock {
+    /// Track being locked.
+    pub track_id: String,
+    /// User holding this lock.
+    pub user_id: String,
+    /// Lock granularity.
+    pub granularity: TrackLockGranularity,
+    /// When this lock was acquired (epoch millis).
+    pub acquired_at: u64,
+    /// When this lock expires (epoch millis).
+    pub expires_at: u64,
+}
+
+impl TrackLock {
+    /// Check if expired.
+    #[must_use]
+    pub fn is_expired(&self, now: u64) -> bool {
+        now >= self.expires_at
+    }
+
+    /// Remaining TTL in milliseconds (0 if expired).
+    #[must_use]
+    pub fn remaining_ms(&self, now: u64) -> u64 {
+        self.expires_at.saturating_sub(now)
+    }
+}
+
+/// Error returned by per-track lock operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrackLockError {
+    /// Another user holds a conflicting lock.
+    Conflict {
+        track_id: String,
+        held_by: String,
+        held_granularity: TrackLockGranularity,
+    },
+    /// The requested lock does not exist.
+    NotFound { track_id: String, user_id: String },
+    /// The lock has already expired.
+    Expired { track_id: String },
+    /// Deadlock detected between two users competing on the same track.
+    Deadlock { description: String },
+}
+
+impl std::fmt::Display for TrackLockError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Conflict {
+                track_id,
+                held_by,
+                held_granularity,
+            } => write!(
+                f,
+                "Track '{track_id}' locked ({held_granularity}) by '{held_by}'"
+            ),
+            Self::NotFound { track_id, user_id } => {
+                write!(f, "No lock on track '{track_id}' for user '{user_id}'")
+            }
+            Self::Expired { track_id } => write!(f, "Lock on track '{track_id}' has expired"),
+            Self::Deadlock { description } => write!(f, "Deadlock: {description}"),
+        }
+    }
+}
+
+/// Manager for per-track locks with escalation support.
+///
+/// Supports three granularity levels:
+/// - `Read` — multiple readers allowed across users.
+/// - `Region` — exclusive: only one user per track at a time.
+/// - `FullTrack` — exclusive upgrade; downgrades require re-acquisition.
+///
+/// Escalation: a user holding a `Region` lock can escalate to `FullTrack`
+/// if no other user holds any lock on the same track.
+#[derive(Debug, Default)]
+pub struct TrackLockManager {
+    /// Active per-track locks.  Multiple entries for the same track are
+    /// allowed only when all are `Read`.
+    locks: Vec<TrackLock>,
+    /// Default TTL in milliseconds.
+    default_ttl_ms: u64,
+}
+
+impl TrackLockManager {
+    /// Create a new manager with the given default TTL.
+    #[must_use]
+    pub fn new(default_ttl_ms: u64) -> Self {
+        Self {
+            locks: Vec::new(),
+            default_ttl_ms,
+        }
+    }
+
+    /// Remove expired locks and return the count removed.
+    pub fn cleanup_expired(&mut self, now: u64) -> usize {
+        let before = self.locks.len();
+        self.locks.retain(|l| !l.is_expired(now));
+        before - self.locks.len()
+    }
+
+    /// Attempt to acquire a lock on `track_id` for `user_id`.
+    ///
+    /// Returns `Ok(())` on success, or a `TrackLockError` if the acquisition
+    /// would conflict or is illegal.
+    pub fn acquire(
+        &mut self,
+        track_id: &str,
+        user_id: &str,
+        granularity: TrackLockGranularity,
+        now: u64,
+    ) -> Result<(), TrackLockError> {
+        self.cleanup_expired(now);
+
+        // Check for conflicts with other users' locks on the same track.
+        for existing in self.locks.iter().filter(|l| l.track_id == track_id) {
+            if existing.user_id == user_id {
+                // Same user re-acquiring the same or lower granularity is a
+                // no-op upgrade path; handled by escalate().
+                continue;
+            }
+            // Two Read locks are always compatible.
+            if existing.granularity == TrackLockGranularity::Read
+                && granularity == TrackLockGranularity::Read
+            {
+                continue;
+            }
+            // Any other combination is a conflict.
+            return Err(TrackLockError::Conflict {
+                track_id: track_id.to_string(),
+                held_by: existing.user_id.clone(),
+                held_granularity: existing.granularity,
+            });
+        }
+
+        // Remove any existing lock this user holds on the same track before
+        // inserting the new one.
+        self.locks
+            .retain(|l| !(l.track_id == track_id && l.user_id == user_id));
+
+        self.locks.push(TrackLock {
+            track_id: track_id.to_string(),
+            user_id: user_id.to_string(),
+            granularity,
+            acquired_at: now,
+            expires_at: now + self.default_ttl_ms,
+        });
+
+        Ok(())
+    }
+
+    /// Release a lock held by `user_id` on `track_id`.
+    pub fn release(&mut self, track_id: &str, user_id: &str) -> Result<(), TrackLockError> {
+        let before = self.locks.len();
+        self.locks
+            .retain(|l| !(l.track_id == track_id && l.user_id == user_id));
+        if self.locks.len() < before {
+            Ok(())
+        } else {
+            Err(TrackLockError::NotFound {
+                track_id: track_id.to_string(),
+                user_id: user_id.to_string(),
+            })
+        }
+    }
+
+    /// Escalate an existing lock held by `user_id` on `track_id` to a higher
+    /// granularity.
+    ///
+    /// Returns `Err(TrackLockError::Conflict)` if another user holds any lock
+    /// on that track, or `Err(TrackLockError::NotFound)` if the caller has no
+    /// current lock on the track.
+    pub fn escalate(
+        &mut self,
+        track_id: &str,
+        user_id: &str,
+        new_granularity: TrackLockGranularity,
+        now: u64,
+    ) -> Result<(), TrackLockError> {
+        self.cleanup_expired(now);
+
+        // Check the caller has a lock to escalate.
+        let current = self
+            .locks
+            .iter()
+            .find(|l| l.track_id == track_id && l.user_id == user_id)
+            .ok_or_else(|| TrackLockError::NotFound {
+                track_id: track_id.to_string(),
+                user_id: user_id.to_string(),
+            })?;
+
+        let current_granularity = current.granularity;
+
+        if new_granularity <= current_granularity {
+            // Already at this level or higher; treat as success.
+            return Ok(());
+        }
+
+        // Ensure no other users are on this track.
+        for other in self.locks.iter().filter(|l| l.track_id == track_id) {
+            if other.user_id == user_id {
+                continue;
+            }
+            return Err(TrackLockError::Conflict {
+                track_id: track_id.to_string(),
+                held_by: other.user_id.clone(),
+                held_granularity: other.granularity,
+            });
+        }
+
+        // Upgrade the lock.
+        for lock in self.locks.iter_mut() {
+            if lock.track_id == track_id && lock.user_id == user_id {
+                lock.granularity = new_granularity;
+                lock.expires_at = now + self.default_ttl_ms;
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Detect potential deadlocks: two or more users each waiting for a
+    /// resource the other holds (simplified cycle check).
+    ///
+    /// In this model we simply check if user A holds a read lock while user B
+    /// attempts an exclusive lock *and* user B holds a read lock on a
+    /// *different* track that user A is attempting to escalate — a hallmark of
+    /// the classic AB/BA deadlock pattern.
+    ///
+    /// Returns a list of `(user_a, user_b)` pairs that are in a deadlock
+    /// situation given the provided pending escalation requests.
+    ///
+    /// `pending_escalations` is a slice of `(track_id, user_id)` pairs
+    /// representing locks that users are about to request.
+    #[must_use]
+    pub fn detect_deadlocks(&self, pending_escalations: &[(&str, &str)]) -> Vec<(String, String)> {
+        let mut deadlocks = Vec::new();
+
+        // Build a map: track_id → [user_id currently holding exclusive locks]
+        let held: std::collections::HashMap<&str, Vec<&str>> = {
+            let mut m: std::collections::HashMap<&str, Vec<&str>> =
+                std::collections::HashMap::new();
+            for lock in &self.locks {
+                if lock.granularity > TrackLockGranularity::Read {
+                    m.entry(lock.track_id.as_str())
+                        .or_default()
+                        .push(&lock.user_id);
+                }
+            }
+            m
+        };
+
+        // For each pair of pending escalations, check if they form a cycle:
+        // user_a wants track T1 (held by user_b) and user_b wants track T2
+        // (held by user_a).
+        for i in 0..pending_escalations.len() {
+            for j in (i + 1)..pending_escalations.len() {
+                let (track_i, user_i) = pending_escalations[i];
+                let (track_j, user_j) = pending_escalations[j];
+
+                if user_i == user_j || track_i == track_j {
+                    continue;
+                }
+
+                let i_blocked_by_j = held
+                    .get(track_i)
+                    .map(|holders| holders.contains(&user_j))
+                    .unwrap_or(false);
+
+                let j_blocked_by_i = held
+                    .get(track_j)
+                    .map(|holders| holders.contains(&user_i))
+                    .unwrap_or(false);
+
+                if i_blocked_by_j && j_blocked_by_i {
+                    deadlocks.push((user_i.to_string(), user_j.to_string()));
+                }
+            }
+        }
+
+        deadlocks
+    }
+
+    /// Return all locks held by a specific user.
+    #[must_use]
+    pub fn user_locks(&self, user_id: &str) -> Vec<&TrackLock> {
+        self.locks.iter().filter(|l| l.user_id == user_id).collect()
+    }
+
+    /// Return all locks on a specific track.
+    #[must_use]
+    pub fn track_locks(&self, track_id: &str) -> Vec<&TrackLock> {
+        self.locks
+            .iter()
+            .filter(|l| l.track_id == track_id)
+            .collect()
+    }
+
+    /// Release all locks held by a user.
+    pub fn release_all_for_user(&mut self, user_id: &str) -> usize {
+        let before = self.locks.len();
+        self.locks.retain(|l| l.user_id != user_id);
+        before - self.locks.len()
+    }
+
+    /// Total number of active locks.
+    #[must_use]
+    pub fn active_count(&self) -> usize {
+        self.locks.len()
+    }
+}
+
+#[cfg(test)]
+mod track_lock_tests {
+    use super::*;
+
+    #[test]
+    fn test_acquire_read_lock() {
+        let mut mgr = TrackLockManager::new(60_000);
+        mgr.acquire("video-1", "user1", TrackLockGranularity::Read, 1000)
+            .expect("should acquire read lock");
+        assert_eq!(mgr.active_count(), 1);
+    }
+
+    #[test]
+    fn test_two_read_locks_on_same_track() {
+        let mut mgr = TrackLockManager::new(60_000);
+        mgr.acquire("video-1", "user1", TrackLockGranularity::Read, 1000)
+            .expect("user1 read lock");
+        mgr.acquire("video-1", "user2", TrackLockGranularity::Read, 1000)
+            .expect("user2 read lock");
+        assert_eq!(mgr.active_count(), 2);
+    }
+
+    #[test]
+    fn test_region_lock_conflicts_with_region() {
+        let mut mgr = TrackLockManager::new(60_000);
+        mgr.acquire("video-1", "user1", TrackLockGranularity::Region, 1000)
+            .expect("user1 region lock");
+        let err = mgr
+            .acquire("video-1", "user2", TrackLockGranularity::Region, 1000)
+            .expect_err("should conflict");
+        assert!(matches!(err, TrackLockError::Conflict { .. }));
+    }
+
+    #[test]
+    fn test_full_track_lock_conflicts_with_read() {
+        let mut mgr = TrackLockManager::new(60_000);
+        mgr.acquire("video-1", "user1", TrackLockGranularity::Read, 1000)
+            .expect("user1 read lock");
+        let err = mgr
+            .acquire("video-1", "user2", TrackLockGranularity::FullTrack, 1000)
+            .expect_err("should conflict");
+        assert!(matches!(err, TrackLockError::Conflict { .. }));
+    }
+
+    #[test]
+    fn test_release_lock() {
+        let mut mgr = TrackLockManager::new(60_000);
+        mgr.acquire("video-1", "user1", TrackLockGranularity::Region, 1000)
+            .expect("acquire");
+        mgr.release("video-1", "user1").expect("release");
+        assert_eq!(mgr.active_count(), 0);
+    }
+
+    #[test]
+    fn test_escalate_region_to_full_track() {
+        let mut mgr = TrackLockManager::new(60_000);
+        mgr.acquire("video-1", "user1", TrackLockGranularity::Region, 1000)
+            .expect("acquire region");
+        mgr.escalate("video-1", "user1", TrackLockGranularity::FullTrack, 2000)
+            .expect("escalate to full_track");
+        let locks = mgr.track_locks("video-1");
+        assert_eq!(locks.len(), 1);
+        assert_eq!(locks[0].granularity, TrackLockGranularity::FullTrack);
+    }
+
+    #[test]
+    fn test_escalate_blocked_by_other_user() {
+        let mut mgr = TrackLockManager::new(60_000);
+        mgr.acquire("video-1", "user1", TrackLockGranularity::Region, 1000)
+            .expect("user1 region lock");
+        mgr.acquire("video-2", "user2", TrackLockGranularity::Read, 1000)
+            .expect("user2 read on other track");
+        // Inject a lock so user2 also holds a read on video-1
+        mgr.locks.push(TrackLock {
+            track_id: "video-1".to_string(),
+            user_id: "user2".to_string(),
+            granularity: TrackLockGranularity::Read,
+            acquired_at: 1000,
+            expires_at: 61_000,
+        });
+        let err = mgr
+            .escalate("video-1", "user1", TrackLockGranularity::FullTrack, 2000)
+            .expect_err("escalation should be blocked by user2");
+        assert!(matches!(err, TrackLockError::Conflict { .. }));
+    }
+
+    #[test]
+    fn test_escalate_no_existing_lock_fails() {
+        let mut mgr = TrackLockManager::new(60_000);
+        let err = mgr
+            .escalate("video-1", "user1", TrackLockGranularity::FullTrack, 1000)
+            .expect_err("no lock to escalate");
+        assert!(matches!(err, TrackLockError::NotFound { .. }));
+    }
+
+    #[test]
+    fn test_detect_deadlocks() {
+        let mut mgr = TrackLockManager::new(60_000);
+        // user1 holds Region on video-1; user2 holds Region on video-2
+        mgr.acquire("video-1", "user1", TrackLockGranularity::Region, 1000)
+            .expect("user1 locks video-1");
+        mgr.acquire("video-2", "user2", TrackLockGranularity::Region, 1000)
+            .expect("user2 locks video-2");
+
+        // Pending: user1 wants video-2, user2 wants video-1 → deadlock
+        let pending = vec![("video-2", "user1"), ("video-1", "user2")];
+        let deadlocks = mgr.detect_deadlocks(&pending);
+        assert_eq!(deadlocks.len(), 1, "should detect one deadlock pair");
+    }
+
+    #[test]
+    fn test_no_deadlock_when_no_conflict() {
+        let mgr = TrackLockManager::new(60_000);
+        let pending = vec![("video-1", "user1"), ("video-2", "user2")];
+        let deadlocks = mgr.detect_deadlocks(&pending);
+        assert!(deadlocks.is_empty());
+    }
+
+    #[test]
+    fn test_expiry_cleanup() {
+        let mut mgr = TrackLockManager::new(100);
+        mgr.acquire("video-1", "user1", TrackLockGranularity::Region, 1000)
+            .expect("acquire");
+        let removed = mgr.cleanup_expired(2000);
+        assert_eq!(removed, 1);
+        assert_eq!(mgr.active_count(), 0);
+    }
+
+    #[test]
+    fn test_granularity_ordering() {
+        assert!(TrackLockGranularity::Read < TrackLockGranularity::Region);
+        assert!(TrackLockGranularity::Region < TrackLockGranularity::FullTrack);
+    }
+
+    #[test]
+    fn test_granularity_display() {
+        assert_eq!(TrackLockGranularity::Read.to_string(), "read");
+        assert_eq!(TrackLockGranularity::FullTrack.to_string(), "full_track");
+    }
+}

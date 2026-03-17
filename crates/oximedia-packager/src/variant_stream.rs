@@ -91,13 +91,7 @@ pub struct VariantStream {
 impl VariantStream {
     /// Create a new video variant.
     #[must_use]
-    pub fn video(
-        id: &str,
-        codec: StreamCodec,
-        width: u32,
-        height: u32,
-        bitrate: u64,
-    ) -> Self {
+    pub fn video(id: &str, codec: StreamCodec, width: u32, height: u32, bitrate: u64) -> Self {
         Self {
             id: id.to_string(),
             video_codec: Some(codec),
@@ -189,9 +183,7 @@ impl VariantStream {
                 "Variant must have at least one codec".into(),
             ));
         }
-        if self.video_codec.is_some()
-            && (self.width.is_none() || self.height.is_none())
-        {
+        if self.video_codec.is_some() && (self.width.is_none() || self.height.is_none()) {
             return Err(PackagerError::InvalidConfig(
                 "Video variant must specify width and height".into(),
             ));
@@ -366,8 +358,20 @@ mod tests {
     #[test]
     fn test_variant_set() {
         let mut set = VariantSet::new();
-        set.add(VariantStream::video("v1", StreamCodec::Av1, 1920, 1080, 5_000_000));
-        set.add(VariantStream::video("v2", StreamCodec::Av1, 1280, 720, 3_000_000));
+        set.add(VariantStream::video(
+            "v1",
+            StreamCodec::Av1,
+            1920,
+            1080,
+            5_000_000,
+        ));
+        set.add(VariantStream::video(
+            "v2",
+            StreamCodec::Av1,
+            1280,
+            720,
+            3_000_000,
+        ));
         assert_eq!(set.len(), 2);
         assert!(set.validate().is_ok());
     }
@@ -375,8 +379,20 @@ mod tests {
     #[test]
     fn test_variant_set_video_sorted() {
         let mut set = VariantSet::new();
-        set.add(VariantStream::video("hi", StreamCodec::Av1, 1920, 1080, 5_000_000));
-        set.add(VariantStream::video("lo", StreamCodec::Av1, 640, 360, 500_000));
+        set.add(VariantStream::video(
+            "hi",
+            StreamCodec::Av1,
+            1920,
+            1080,
+            5_000_000,
+        ));
+        set.add(VariantStream::video(
+            "lo",
+            StreamCodec::Av1,
+            640,
+            360,
+            500_000,
+        ));
         let vids = set.video_variants();
         assert!(vids[0].video_bitrate < vids[1].video_bitrate);
     }
@@ -389,8 +405,7 @@ mod tests {
 
     #[test]
     fn test_default_variant() {
-        let v = VariantStream::video("v1", StreamCodec::Av1, 1920, 1080, 5_000_000)
-            .as_default();
+        let v = VariantStream::video("v1", StreamCodec::Av1, 1920, 1080, 5_000_000).as_default();
         assert!(v.is_default);
     }
 }

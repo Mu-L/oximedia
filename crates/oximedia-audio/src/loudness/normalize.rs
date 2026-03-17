@@ -577,3 +577,346 @@ pub struct FileNormalizationStats {
     /// Total gain in dB.
     pub total_gain_db: f64,
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auto-gain processor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Configuration for [`AutoGainProcessor`].
+#[derive(Debug, Clone)]
+pub struct AutoGainConfig {
+    /// Target output level in dBFS (e.g. −6.0 for −6 dBFS).
+    pub target_db: f64,
+    /// Attack time constant in seconds (how fast gain is increased).
+    pub attack_secs: f64,
+    /// Release time constant in seconds (how fast gain is reduced).
+    pub release_secs: f64,
+    /// Sample rate in Hz.
+    pub sample_rate: f64,
+    /// Maximum allowed gain in dB (prevents extreme boosting of silence).
+    pub max_gain_db: f64,
+    /// Minimum allowed gain in dB (prevents extreme attenuation).
+    pub min_gain_db: f64,
+}
+
+impl Default for AutoGainConfig {
+    fn default() -> Self {
+        Self {
+            target_db: -6.0,
+            attack_secs: 0.1,
+            release_secs: 1.0,
+            sample_rate: 48_000.0,
+            max_gain_db: 20.0,
+            min_gain_db: -40.0,
+        }
+    }
+}
+
+/// Real-time auto-gain processor.
+///
+/// Continuously adjusts the output gain so that the short-term RMS level of
+/// the programme material tracks a configurable target level.  The processor
+/// uses separate attack and release time constants so that gain *reduction*
+/// (when the signal is too loud) happens faster than gain *boost* (when the
+/// signal is too quiet), which gives a natural sounding result and avoids the
+/// "pumping" artefact of a badly tuned AGC.
+///
+/// # Algorithm
+///
+/// 1. For each block of samples, compute the short-term RMS level.
+/// 2. Calculate the ideal gain to reach `target_db`.
+/// 3. Smooth the gain using attack/release coefficients.
+/// 4. Clamp the gain to `[min_gain_db, max_gain_db]`.
+/// 5. Apply the smoothed linear gain to the output.
+pub struct AutoGainProcessor {
+    config: AutoGainConfig,
+    /// Current smoothed gain (linear, not dB).
+    current_gain: f64,
+    /// Attack coefficient (0..1, closer to 1 = slower).
+    attack_coeff: f64,
+    /// Release coefficient (0..1, closer to 1 = slower).
+    release_coeff: f64,
+}
+
+impl AutoGainProcessor {
+    /// Create a new auto-gain processor.
+    #[must_use]
+    pub fn new(config: AutoGainConfig) -> Self {
+        let attack_coeff = Self::time_to_coeff(config.attack_secs, config.sample_rate);
+        let release_coeff = Self::time_to_coeff(config.release_secs, config.sample_rate);
+        Self {
+            current_gain: 1.0,
+            attack_coeff,
+            release_coeff,
+            config,
+        }
+    }
+
+    /// Compute a one-pole IIR time constant coefficient.
+    fn time_to_coeff(time_secs: f64, sample_rate: f64) -> f64 {
+        if time_secs <= 0.0 || sample_rate <= 0.0 {
+            return 0.0;
+        }
+        (-1.0_f64 / (time_secs * sample_rate)).exp()
+    }
+
+    /// Convert dB to linear.
+    #[inline]
+    fn db_to_linear(db: f64) -> f64 {
+        10.0_f64.powf(db / 20.0)
+    }
+
+    /// Convert linear to dB (returns -∞ for zero).
+    #[inline]
+    fn linear_to_db(linear: f64) -> f64 {
+        if linear <= 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            20.0 * linear.log10()
+        }
+    }
+
+    /// Process a block of interleaved `f64` samples in-place.
+    ///
+    /// The block size determines the granularity of the RMS measurement: use
+    /// a size of around 128–1 024 samples for most applications.
+    pub fn process_block(&mut self, samples: &mut [f64]) {
+        if samples.is_empty() {
+            return;
+        }
+
+        // Compute short-term RMS of the input block.
+        let sum_sq: f64 = samples.iter().map(|&s| s * s).sum();
+        let rms = (sum_sq / samples.len() as f64).sqrt();
+
+        // Compute the ideal gain to reach the target.
+        let target_linear = Self::db_to_linear(self.config.target_db);
+        let ideal_gain = if rms > 1e-10 {
+            (target_linear / rms).clamp(
+                Self::db_to_linear(self.config.min_gain_db),
+                Self::db_to_linear(self.config.max_gain_db),
+            )
+        } else {
+            // Signal is effectively silent — clamp to max gain to avoid explosion.
+            Self::db_to_linear(self.config.max_gain_db)
+        };
+
+        // Smooth towards ideal_gain with separate attack/release.
+        if ideal_gain < self.current_gain {
+            // Gain needs to fall — use release coefficient (gain reduction = fast).
+            self.current_gain =
+                self.release_coeff * self.current_gain + (1.0 - self.release_coeff) * ideal_gain;
+        } else {
+            // Gain needs to rise — use attack coefficient (gain boost = slow).
+            self.current_gain =
+                self.attack_coeff * self.current_gain + (1.0 - self.attack_coeff) * ideal_gain;
+        }
+
+        // Apply the smoothed gain.
+        for s in samples.iter_mut() {
+            *s *= self.current_gain;
+        }
+    }
+
+    /// Process a block of interleaved `f32` samples in-place.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn process_block_f32(&mut self, samples: &mut [f32]) {
+        if samples.is_empty() {
+            return;
+        }
+
+        let sum_sq: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+        let rms = (sum_sq / samples.len() as f64).sqrt();
+
+        let target_linear = Self::db_to_linear(self.config.target_db);
+        let ideal_gain = if rms > 1e-10 {
+            (target_linear / rms).clamp(
+                Self::db_to_linear(self.config.min_gain_db),
+                Self::db_to_linear(self.config.max_gain_db),
+            )
+        } else {
+            Self::db_to_linear(self.config.max_gain_db)
+        };
+
+        if ideal_gain < self.current_gain {
+            self.current_gain =
+                self.release_coeff * self.current_gain + (1.0 - self.release_coeff) * ideal_gain;
+        } else {
+            self.current_gain =
+                self.attack_coeff * self.current_gain + (1.0 - self.attack_coeff) * ideal_gain;
+        }
+
+        for s in samples.iter_mut() {
+            *s = (*s as f64 * self.current_gain) as f32;
+        }
+    }
+
+    /// Get the current gain in dB.
+    #[must_use]
+    pub fn current_gain_db(&self) -> f64 {
+        Self::linear_to_db(self.current_gain)
+    }
+
+    /// Get the current linear gain.
+    #[must_use]
+    pub fn current_gain(&self) -> f64 {
+        self.current_gain
+    }
+
+    /// Reset the processor to unity gain.
+    pub fn reset(&mut self) {
+        self.current_gain = 1.0;
+    }
+
+    /// Update the target output level (dBFS) at runtime.
+    pub fn set_target_db(&mut self, target_db: f64) {
+        self.config.target_db = target_db;
+    }
+
+    /// Update the attack time constant.
+    pub fn set_attack(&mut self, attack_secs: f64) {
+        self.config.attack_secs = attack_secs;
+        self.attack_coeff = Self::time_to_coeff(attack_secs, self.config.sample_rate);
+    }
+
+    /// Update the release time constant.
+    pub fn set_release(&mut self, release_secs: f64) {
+        self.config.release_secs = release_secs;
+        self.release_coeff = Self::time_to_coeff(release_secs, self.config.sample_rate);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AutoGain tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod auto_gain_tests {
+    use super::*;
+
+    fn make_agc() -> AutoGainProcessor {
+        AutoGainProcessor::new(AutoGainConfig::default())
+    }
+
+    #[test]
+    fn test_agc_creation() {
+        let agc = make_agc();
+        assert!((agc.current_gain() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_agc_reset() {
+        let mut agc = make_agc();
+        // Drive it up
+        let mut block = vec![0.001_f64; 512];
+        for _ in 0..200 {
+            agc.process_block(&mut block);
+        }
+        agc.reset();
+        assert!((agc.current_gain() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_agc_output_finite() {
+        let mut agc = make_agc();
+        let mut block: Vec<f64> = (0..256).map(|i| (i as f64 * 0.01).sin() * 0.5).collect();
+        agc.process_block(&mut block);
+        for &s in &block {
+            assert!(s.is_finite(), "output must be finite");
+        }
+    }
+
+    #[test]
+    fn test_agc_boosts_quiet_signal() {
+        let mut agc = AutoGainProcessor::new(AutoGainConfig {
+            target_db: -6.0,
+            attack_secs: 0.01,
+            release_secs: 0.1,
+            sample_rate: 48_000.0,
+            max_gain_db: 40.0,
+            min_gain_db: -40.0,
+        });
+
+        // Very quiet signal at -60 dBFS (rms ≈ 0.001)
+        let mut block = vec![0.001_f64; 1024];
+        for _ in 0..100 {
+            agc.process_block(&mut block);
+        }
+        // After many blocks the gain should be > 1
+        assert!(agc.current_gain() > 1.0, "AGC should boost quiet signal");
+    }
+
+    #[test]
+    fn test_agc_reduces_loud_signal() {
+        let mut agc = AutoGainProcessor::new(AutoGainConfig {
+            target_db: -20.0,
+            attack_secs: 0.01,
+            release_secs: 0.1,
+            sample_rate: 48_000.0,
+            max_gain_db: 40.0,
+            min_gain_db: -40.0,
+        });
+
+        // Very loud signal at 0 dBFS
+        let mut block = vec![1.0_f64; 1024];
+        for _ in 0..100 {
+            agc.process_block(&mut block);
+        }
+        // Gain should be < 1 to attenuate
+        assert!(agc.current_gain() < 1.0, "AGC should attenuate loud signal");
+    }
+
+    #[test]
+    fn test_agc_current_gain_db_unity() {
+        let agc = make_agc();
+        assert!((agc.current_gain_db() - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_agc_set_target_db() {
+        let mut agc = make_agc();
+        agc.set_target_db(-14.0);
+        assert!((agc.current_gain() - 1.0).abs() < 1e-10); // gain unchanged immediately
+    }
+
+    #[test]
+    fn test_agc_f32_output_finite() {
+        let mut agc = make_agc();
+        let mut block: Vec<f32> = (0..256).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        agc.process_block_f32(&mut block);
+        for &s in &block {
+            assert!(s.is_finite(), "f32 output must be finite");
+        }
+    }
+
+    #[test]
+    fn test_agc_empty_block_no_panic() {
+        let mut agc = make_agc();
+        let mut empty: Vec<f64> = Vec::new();
+        agc.process_block(&mut empty); // must not panic
+        assert!((agc.current_gain() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_agc_max_gain_clamped() {
+        let mut agc = AutoGainProcessor::new(AutoGainConfig {
+            target_db: 0.0,
+            attack_secs: 0.001,
+            release_secs: 0.001,
+            sample_rate: 48_000.0,
+            max_gain_db: 6.0,
+            min_gain_db: -40.0,
+        });
+        // Push with silence many times
+        let mut block = vec![1e-20_f64; 512];
+        for _ in 0..1000 {
+            agc.process_block(&mut block);
+        }
+        let max_linear = 10.0_f64.powf(6.0 / 20.0);
+        assert!(
+            agc.current_gain() <= max_linear + 1e-6,
+            "gain must not exceed max; got {}",
+            agc.current_gain()
+        );
+    }
+}

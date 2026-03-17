@@ -85,6 +85,7 @@ mod tests {
             frame_rate: Some((30, 1)),
             quality_mode: Some(QualityMode::High),
             container: Some("mp4".to_string()),
+            audio_channel_layout: None,
         };
         let preset = Preset::new(metadata, config);
         assert!(check_platform_compatibility(&preset, "YouTube").is_ok());
@@ -103,6 +104,7 @@ mod tests {
             frame_rate: Some((30, 1)),
             quality_mode: Some(QualityMode::High),
             container: Some("webm".to_string()),
+            audio_channel_layout: None,
         };
         let preset = Preset::new(metadata, config);
         assert!(check_codec_compatibility(&preset).is_ok());

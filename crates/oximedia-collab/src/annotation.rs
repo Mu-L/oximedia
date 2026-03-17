@@ -317,3 +317,337 @@ mod tests {
         assert_eq!(layer.frame, None);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Timestamp-anchored annotations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A precise point in a media timeline expressed in microseconds from the
+/// project start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MediaTimestamp {
+    /// Microseconds from the beginning of the project (or clip, depending on
+    /// context).
+    pub micros: u64,
+}
+
+impl MediaTimestamp {
+    /// Create a new media timestamp from microseconds.
+    #[must_use]
+    pub fn from_micros(micros: u64) -> Self {
+        Self { micros }
+    }
+
+    /// Create a timestamp from seconds (truncated to whole microseconds).
+    #[must_use]
+    pub fn from_secs_f64(secs: f64) -> Self {
+        let micros = (secs * 1_000_000.0) as u64;
+        Self { micros }
+    }
+
+    /// Return the timestamp in seconds.
+    #[must_use]
+    pub fn as_secs_f64(self) -> f64 {
+        self.micros as f64 / 1_000_000.0
+    }
+
+    /// Return the timestamp in milliseconds (truncated).
+    #[must_use]
+    pub fn as_millis(self) -> u64 {
+        self.micros / 1_000
+    }
+}
+
+impl std::fmt::Display for MediaTimestamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let secs = self.micros / 1_000_000;
+        let ms = (self.micros % 1_000_000) / 1_000;
+        write!(f, "{secs}.{ms:03}s")
+    }
+}
+
+/// An optional time range anchoring an annotation to a span of the media.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeAnchor {
+    /// Start of the annotation's temporal extent.
+    pub start: MediaTimestamp,
+    /// End of the annotation's temporal extent (exclusive).
+    pub end: MediaTimestamp,
+}
+
+impl TimeAnchor {
+    /// Create a new time anchor from start and end microseconds.
+    #[must_use]
+    pub fn new(start_micros: u64, end_micros: u64) -> Self {
+        Self {
+            start: MediaTimestamp::from_micros(start_micros),
+            end: MediaTimestamp::from_micros(end_micros),
+        }
+    }
+
+    /// Duration of this anchor in microseconds.
+    #[must_use]
+    pub fn duration_micros(self) -> u64 {
+        self.end.micros.saturating_sub(self.start.micros)
+    }
+
+    /// Check whether a given timestamp falls within this anchor.
+    #[must_use]
+    pub fn contains(self, ts: MediaTimestamp) -> bool {
+        ts >= self.start && ts < self.end
+    }
+
+    /// Check whether two time anchors overlap.
+    #[must_use]
+    pub fn overlaps(self, other: Self) -> bool {
+        self.start < other.end && other.start < self.end
+    }
+}
+
+/// An annotation that is anchored to a specific time range in the media
+/// timeline in addition to (optionally) a spatial shape on a frame.
+#[derive(Debug, Clone)]
+pub struct TimestampedAnnotation {
+    /// Unique identifier within the owning collection.
+    pub id: u64,
+    /// Display name of the annotation's author.
+    pub author: String,
+    /// Optional spatial shape (if the annotation is also visually placed).
+    pub shape: Option<AnnotationShape>,
+    /// Temporal anchor.
+    pub anchor: TimeAnchor,
+    /// Free-text comment.
+    pub text: String,
+    /// RGB display colour.
+    pub color: [u8; 3],
+    /// Wall-clock creation time in milliseconds since the Unix epoch.
+    pub created_at_ms: u64,
+    /// Whether this annotation has been resolved.
+    pub resolved: bool,
+    /// Optional tags for categorisation (e.g. "visual", "audio", "pacing").
+    pub tags: Vec<String>,
+}
+
+impl TimestampedAnnotation {
+    /// Mark the annotation as resolved.
+    pub fn resolve(&mut self) {
+        self.resolved = true;
+    }
+
+    /// Check whether this annotation overlaps with `anchor`.
+    #[must_use]
+    pub fn overlaps_anchor(&self, other: TimeAnchor) -> bool {
+        self.anchor.overlaps(other)
+    }
+
+    /// Add a tag.
+    pub fn add_tag(&mut self, tag: impl Into<String>) {
+        let tag = tag.into();
+        if !self.tags.contains(&tag) {
+            self.tags.push(tag);
+        }
+    }
+}
+
+/// A collection of timestamp-anchored annotations for a single project or
+/// clip, supporting querying by time range and author.
+#[derive(Debug, Default)]
+pub struct TimestampedAnnotationLayer {
+    annotations: Vec<TimestampedAnnotation>,
+    next_id: u64,
+}
+
+impl TimestampedAnnotationLayer {
+    /// Create an empty layer.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a new timestamped annotation and return its id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add(
+        &mut self,
+        author: impl Into<String>,
+        anchor: TimeAnchor,
+        text: impl Into<String>,
+        color: [u8; 3],
+        shape: Option<AnnotationShape>,
+        created_at_ms: u64,
+    ) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.annotations.push(TimestampedAnnotation {
+            id,
+            author: author.into(),
+            shape,
+            anchor,
+            text: text.into(),
+            color,
+            created_at_ms,
+            resolved: false,
+            tags: Vec::new(),
+        });
+        id
+    }
+
+    /// Resolve an annotation by id.  Returns `true` if found.
+    pub fn resolve(&mut self, id: u64) -> bool {
+        if let Some(ann) = self.annotations.iter_mut().find(|a| a.id == id) {
+            ann.resolve();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Query all annotations that overlap with `anchor`.
+    #[must_use]
+    pub fn overlapping(&self, anchor: TimeAnchor) -> Vec<&TimestampedAnnotation> {
+        self.annotations
+            .iter()
+            .filter(|a| a.anchor.overlaps(anchor))
+            .collect()
+    }
+
+    /// Query all annotations by author.
+    #[must_use]
+    pub fn by_author(&self, author: &str) -> Vec<&TimestampedAnnotation> {
+        self.annotations
+            .iter()
+            .filter(|a| a.author == author)
+            .collect()
+    }
+
+    /// All unresolved annotations sorted by anchor start.
+    #[must_use]
+    pub fn unresolved_sorted(&self) -> Vec<&TimestampedAnnotation> {
+        let mut result: Vec<&TimestampedAnnotation> =
+            self.annotations.iter().filter(|a| !a.resolved).collect();
+        result.sort_by_key(|a| a.anchor.start);
+        result
+    }
+
+    /// Total number of annotations.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.annotations.len()
+    }
+
+    /// True when the layer has no annotations.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.annotations.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod timestamped_tests {
+    use super::*;
+
+    fn make_anchor(start_s: f64, end_s: f64) -> TimeAnchor {
+        TimeAnchor::new((start_s * 1_000_000.0) as u64, (end_s * 1_000_000.0) as u64)
+    }
+
+    #[test]
+    fn test_media_timestamp_display() {
+        let ts = MediaTimestamp::from_micros(5_123_456);
+        assert_eq!(ts.to_string(), "5.123s");
+    }
+
+    #[test]
+    fn test_media_timestamp_round_trip() {
+        let ts = MediaTimestamp::from_secs_f64(3.5);
+        assert!((ts.as_secs_f64() - 3.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_time_anchor_contains() {
+        let a = make_anchor(1.0, 3.0);
+        assert!(a.contains(MediaTimestamp::from_secs_f64(1.0)));
+        assert!(a.contains(MediaTimestamp::from_secs_f64(2.5)));
+        assert!(!a.contains(MediaTimestamp::from_secs_f64(3.0))); // exclusive end
+        assert!(!a.contains(MediaTimestamp::from_secs_f64(0.5)));
+    }
+
+    #[test]
+    fn test_time_anchor_overlaps() {
+        let a = make_anchor(0.0, 5.0);
+        let b = make_anchor(3.0, 8.0);
+        let c = make_anchor(5.0, 10.0);
+        assert!(a.overlaps(b));
+        assert!(!a.overlaps(c)); // just touching at boundary
+    }
+
+    #[test]
+    fn test_time_anchor_duration() {
+        let a = make_anchor(1.0, 3.5);
+        assert_eq!(a.duration_micros(), 2_500_000);
+    }
+
+    #[test]
+    fn test_layer_add_and_count() {
+        let mut layer = TimestampedAnnotationLayer::new();
+        layer.add(
+            "alice",
+            make_anchor(0.0, 2.0),
+            "check scene",
+            [255, 0, 0],
+            None,
+            1_000,
+        );
+        layer.add(
+            "bob",
+            make_anchor(3.0, 5.0),
+            "audio issue",
+            [0, 255, 0],
+            None,
+            2_000,
+        );
+        assert_eq!(layer.len(), 2);
+        assert!(!layer.is_empty());
+    }
+
+    #[test]
+    fn test_layer_overlapping_query() {
+        let mut layer = TimestampedAnnotationLayer::new();
+        layer.add("alice", make_anchor(0.0, 2.0), "a", [0, 0, 0], None, 0);
+        layer.add("bob", make_anchor(5.0, 8.0), "b", [0, 0, 0], None, 0);
+        layer.add("carol", make_anchor(1.5, 4.0), "c", [0, 0, 0], None, 0);
+
+        let query = make_anchor(1.0, 3.0);
+        let results = layer.overlapping(query);
+        assert_eq!(results.len(), 2); // alice (0-2) and carol (1.5-4) overlap with (1-3)
+    }
+
+    #[test]
+    fn test_layer_resolve() {
+        let mut layer = TimestampedAnnotationLayer::new();
+        let id = layer.add("x", make_anchor(0.0, 1.0), "note", [0, 0, 0], None, 0);
+        assert!(layer.resolve(id));
+        let unresolved = layer.unresolved_sorted();
+        assert!(unresolved.is_empty());
+    }
+
+    #[test]
+    fn test_layer_unresolved_sorted_by_start() {
+        let mut layer = TimestampedAnnotationLayer::new();
+        layer.add("a", make_anchor(5.0, 7.0), "later", [0, 0, 0], None, 0);
+        layer.add("b", make_anchor(1.0, 3.0), "earlier", [0, 0, 0], None, 0);
+        let sorted = layer.unresolved_sorted();
+        assert_eq!(sorted.len(), 2);
+        assert!(sorted[0].anchor.start < sorted[1].anchor.start);
+    }
+
+    #[test]
+    fn test_annotation_add_tag() {
+        let mut layer = TimestampedAnnotationLayer::new();
+        let id = layer.add("a", make_anchor(0.0, 1.0), "", [0, 0, 0], None, 0);
+        if let Some(ann) = layer.annotations.iter_mut().find(|a| a.id == id) {
+            ann.add_tag("visual");
+            ann.add_tag("visual"); // duplicate
+            ann.add_tag("audio");
+            assert_eq!(ann.tags.len(), 2);
+        }
+    }
+}

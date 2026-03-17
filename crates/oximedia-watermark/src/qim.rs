@@ -5,7 +5,7 @@
 
 use crate::error::{WatermarkError, WatermarkResult};
 use crate::payload::{pack_bits, unpack_bits, PayloadCodec};
-use rustfft::{num_complex::Complex, FftPlanner};
+use oxifft::Complex;
 
 /// QIM configuration.
 #[derive(Debug, Clone)]
@@ -113,9 +113,6 @@ impl QimEmbedder {
         }
 
         let mut watermarked = samples.to_vec();
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(self.config.frame_size);
-        let ifft = planner.plan_fft_inverse(self.config.frame_size);
 
         let mut bit_idx = 0;
 
@@ -132,9 +129,9 @@ impl QimEmbedder {
             let frame = &samples[frame_start..frame_start + self.config.frame_size];
 
             // FFT
-            let mut freq_data: Vec<Complex<f32>> =
+            let freq_input: Vec<Complex<f32>> =
                 frame.iter().map(|&s| Complex::new(s, 0.0)).collect();
-            fft.process(&mut freq_data);
+            let mut freq_data = oxifft::fft(&freq_input);
 
             // Embed bits in magnitude
             for _ in 0..bits_per_frame {
@@ -169,15 +166,13 @@ impl QimEmbedder {
             }
 
             // IFFT
-            ifft.process(&mut freq_data);
+            // oxifft::ifft already normalises by 1/N, so write back directly.
+            let ifft_result = oxifft::ifft(&freq_data);
 
-            // Overlap-add
-            #[allow(clippy::cast_precision_loss)]
-            let scale = 1.0 / self.config.frame_size as f32;
-            for (i, c) in freq_data.iter().enumerate() {
+            for (i, c) in ifft_result.iter().enumerate() {
                 let idx = frame_start + i;
                 if idx < watermarked.len() {
-                    watermarked[idx] = c.re * scale;
+                    watermarked[idx] = c.re;
                 }
             }
         }
@@ -196,8 +191,10 @@ impl QimEmbedder {
         let quantized = ((value - offset) / delta).round() * delta + offset;
 
         if self.config.dither {
-            // Add small dither
-            quantized + (rand::random::<f32>() - 0.5) * delta * 0.1
+            // Add small dither using deterministic seed based on value bits
+            let seed = u64::from(quantized.to_bits());
+            let mut rng = scirs2_core::random::Random::seed(seed);
+            quantized + (rng.random_f64() as f32 - 0.5) * delta * 0.1
         } else {
             quantized
         }
@@ -295,8 +292,6 @@ impl QimDetector {
         expected_bits: usize,
     ) -> WatermarkResult<Vec<bool>> {
         let mut bits = Vec::new();
-        let mut planner = FftPlanner::new();
-        let fft = planner.plan_fft_forward(self.config.frame_size);
 
         // Use non-overlapping frames to match the embedder's frame layout.
         let hop_size = self.config.frame_size;
@@ -315,9 +310,9 @@ impl QimDetector {
             let frame = &samples[frame_start..frame_start + self.config.frame_size];
 
             // FFT
-            let mut freq_data: Vec<Complex<f32>> =
+            let freq_input: Vec<Complex<f32>> =
                 frame.iter().map(|&s| Complex::new(s, 0.0)).collect();
-            fft.process(&mut freq_data);
+            let freq_data = oxifft::fft(&freq_input);
 
             // Detect bits from magnitude
             for _ in 0..bits_per_frame {
@@ -448,11 +443,8 @@ mod tests {
 
         // Use pseudo-random noise for broadband FFT energy across all bins
         // (especially bins 50-499 used for QIM embedding with this config).
-        use rand::{rngs::SmallRng, Rng, SeedableRng};
-        let mut rng = SmallRng::seed_from_u64(77);
-        let samples: Vec<f32> = (0..50000)
-            .map(|_| rng.random_range(-0.5f32..0.5f32))
-            .collect();
+        let mut rng = scirs2_core::random::Random::seed(77);
+        let samples: Vec<f32> = (0..50000).map(|_| rng.random_f64() as f32 - 0.5).collect();
         let payload = b"FQ";
 
         let watermarked = embedder

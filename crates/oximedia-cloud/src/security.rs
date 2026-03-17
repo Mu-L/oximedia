@@ -1,6 +1,8 @@
 //! Security features including credentials management and encryption
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::collections::HashMap;
 
 use crate::error::{CloudError, Result};
@@ -283,6 +285,118 @@ impl Acl {
     }
 }
 
+// ── Signed URL generation ────────────────────────────────────────────────────
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Generates HMAC-SHA256 signed URLs for pre-authorised object access.
+///
+/// The signed URL encodes the bucket, key, expiry, a timestamp, and an
+/// HMAC-SHA256 signature computed over those components using the provided
+/// secret.  The format mimics the AWS S3 pre-signed URL query-parameter style.
+pub struct SignedUrl;
+
+impl SignedUrl {
+    /// Generate a signed URL for the given `bucket`/`key` pair.
+    ///
+    /// Parameters:
+    /// - `bucket`      – cloud storage bucket or container name.
+    /// - `key`         – object key / path within the bucket.
+    /// - `expiry_secs` – how many seconds the URL remains valid.
+    /// - `secret`      – the HMAC secret used to sign the URL.
+    ///
+    /// The returned URL contains:
+    /// - `X-Amz-Expires`         – expiry window in seconds.
+    /// - `X-Amz-Date`            – approximate creation date (Unix epoch).
+    /// - `X-Amz-SignedHeaders`   – fixed value `host`.
+    /// - `X-Amz-Signature`       – hex-encoded HMAC-SHA256 signature.
+    ///
+    /// The string that is signed is:
+    /// `"{bucket}\n{key}\n{expiry_secs}\n{epoch}"`
+    #[must_use]
+    pub fn generate(bucket: &str, key: &str, expiry_secs: u64, secret: &[u8]) -> String {
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let string_to_sign = format!("{bucket}\n{key}\n{expiry_secs}\n{epoch}");
+
+        let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
+        mac.update(string_to_sign.as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+
+        // URL-encode the key (replace '/' with '%2F' for path segments)
+        let encoded_key = urlencoding::encode(key);
+        let encoded_bucket = urlencoding::encode(bucket);
+
+        format!(
+            "https://s3.amazonaws.com/{encoded_bucket}/{encoded_key}\
+            ?X-Amz-Expires={expiry_secs}\
+            &X-Amz-Date={epoch}\
+            &X-Amz-SignedHeaders=host\
+            &X-Amz-Signature={signature}"
+        )
+    }
+
+    /// Verify whether a signed URL is still valid and has the correct signature.
+    ///
+    /// Returns `true` if the signature matches and the URL has not expired.
+    #[must_use]
+    pub fn verify(url: &str, secret: &[u8]) -> bool {
+        // Parse query parameters from the URL
+        let (base, query) = match url.split_once('?') {
+            Some(pair) => pair,
+            None => return false,
+        };
+
+        // Extract path components: /bucket/key
+        let path = base.trim_start_matches("https://s3.amazonaws.com/");
+        let (encoded_bucket, encoded_key) = match path.split_once('/') {
+            Some(pair) => pair,
+            None => return false,
+        };
+        let bucket = urlencoding::decode(encoded_bucket).unwrap_or_default();
+        let key = urlencoding::decode(encoded_key).unwrap_or_default();
+
+        // Parse query params
+        let mut expiry_secs: Option<u64> = None;
+        let mut date_epoch: Option<u64> = None;
+        let mut provided_sig: Option<String> = None;
+
+        for param in query.split('&') {
+            if let Some(val) = param.strip_prefix("X-Amz-Expires=") {
+                expiry_secs = val.parse().ok();
+            } else if let Some(val) = param.strip_prefix("X-Amz-Date=") {
+                date_epoch = val.parse().ok();
+            } else if let Some(val) = param.strip_prefix("X-Amz-Signature=") {
+                provided_sig = Some(val.to_string());
+            }
+        }
+
+        let (Some(expiry), Some(epoch), Some(sig)) = (expiry_secs, date_epoch, provided_sig) else {
+            return false;
+        };
+
+        // Check expiry
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if now > epoch.saturating_add(expiry) {
+            return false;
+        }
+
+        // Re-compute expected signature
+        let string_to_sign = format!("{bucket}\n{key}\n{expiry}\n{epoch}");
+        let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
+        mac.update(string_to_sign.as_bytes());
+        let expected_sig = hex::encode(mac.finalize().into_bytes());
+
+        expected_sig == sig
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,5 +459,74 @@ mod tests {
     fn test_acl_to_string() {
         assert_eq!(Acl::Private.to_s3_string(), "private");
         assert_eq!(Acl::PublicRead.to_s3_string(), "public-read");
+    }
+
+    // ── SignedUrl tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_signed_url_contains_required_params() {
+        let url = SignedUrl::generate("my-bucket", "videos/file.mp4", 3600, b"supersecret");
+        assert!(
+            url.contains("X-Amz-Expires=3600"),
+            "URL must include expiry"
+        );
+        assert!(url.contains("X-Amz-Date="), "URL must include date");
+        assert!(
+            url.contains("X-Amz-Signature="),
+            "URL must include signature"
+        );
+        assert!(
+            url.contains("X-Amz-SignedHeaders=host"),
+            "URL must include signed headers"
+        );
+    }
+
+    #[test]
+    fn test_signed_url_contains_bucket_and_key() {
+        let url = SignedUrl::generate("my-bucket", "path/to/object.mp4", 300, b"key");
+        assert!(url.contains("my-bucket"), "URL must include bucket");
+        // Key is URL-encoded
+        assert!(url.contains("path"), "URL must include key path");
+    }
+
+    #[test]
+    fn test_signed_url_different_secrets_produce_different_signatures() {
+        let url1 = SignedUrl::generate("bucket", "key", 300, b"secret1");
+        let url2 = SignedUrl::generate("bucket", "key", 300, b"secret2");
+        // Extract signatures
+        let sig1 = url1.split("X-Amz-Signature=").nth(1).unwrap_or("");
+        let sig2 = url2.split("X-Amz-Signature=").nth(1).unwrap_or("");
+        assert_ne!(
+            sig1, sig2,
+            "Different secrets must produce different signatures"
+        );
+    }
+
+    #[test]
+    fn test_signed_url_verify_valid() {
+        let secret = b"test-signing-secret";
+        let url = SignedUrl::generate("bucket", "key/file.mp4", 3600, secret);
+        assert!(
+            SignedUrl::verify(&url, secret),
+            "Freshly generated URL must verify"
+        );
+    }
+
+    #[test]
+    fn test_signed_url_verify_wrong_secret_fails() {
+        let url = SignedUrl::generate("bucket", "key.mp4", 3600, b"correct-secret");
+        assert!(
+            !SignedUrl::verify(&url, b"wrong-secret"),
+            "Wrong secret must not verify"
+        );
+    }
+
+    #[test]
+    fn test_signed_url_verify_malformed_url_fails() {
+        assert!(!SignedUrl::verify("not-a-valid-url", b"secret"));
+        assert!(!SignedUrl::verify(
+            "https://s3.amazonaws.com/bucket/key",
+            b"secret"
+        ));
     }
 }

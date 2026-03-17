@@ -81,6 +81,7 @@ mod tests {
             frame_rate: Some((30, 1)),
             quality_mode: Some(QualityMode::High),
             container: Some("mp4".to_string()),
+            audio_channel_layout: None,
         };
         let preset = Preset::new(metadata, config);
         assert!(validate_preset(&preset).is_ok());
@@ -100,6 +101,7 @@ mod tests {
             frame_rate: Some((30, 1)),
             quality_mode: Some(QualityMode::High),
             container: Some("mp4".to_string()),
+            audio_channel_layout: None,
         };
         let preset = Preset::new(metadata, config);
         assert!(validate_preset(&preset).is_err());

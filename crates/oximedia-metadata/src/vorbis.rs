@@ -22,6 +22,142 @@
 use crate::{Error, Metadata, MetadataFormat, MetadataValue};
 use std::io::{Cursor, Read};
 
+/// Vorbis Comment multi-value helper.
+///
+/// Per the Vorbis Comment specification, a field name MAY appear multiple
+/// times.  Each occurrence represents an additional value for that field.
+/// This struct provides ergonomic access to multi-value Vorbis Comment fields.
+#[derive(Debug, Clone)]
+pub struct VorbisComments {
+    /// The underlying metadata container.
+    inner: Metadata,
+}
+
+impl VorbisComments {
+    /// Create from an existing `Metadata` (must be `MetadataFormat::VorbisComments`).
+    pub fn new() -> Self {
+        Self {
+            inner: Metadata::new(MetadataFormat::VorbisComments),
+        }
+    }
+
+    /// Wrap an already-parsed `Metadata` container.
+    pub fn from_metadata(metadata: Metadata) -> Self {
+        Self { inner: metadata }
+    }
+
+    /// Get the first value for a field (case-insensitive lookup).
+    pub fn get_first(&self, key: &str) -> Option<&str> {
+        let upper = key.to_uppercase();
+        match self.inner.get(&upper) {
+            Some(MetadataValue::Text(s)) => Some(s.as_str()),
+            Some(MetadataValue::TextList(list)) => list.first().map(|s| s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Get all values for a field (case-insensitive lookup).
+    ///
+    /// Returns an empty slice if the field does not exist.
+    pub fn get_all(&self, key: &str) -> Vec<&str> {
+        let upper = key.to_uppercase();
+        match self.inner.get(&upper) {
+            Some(MetadataValue::Text(s)) => vec![s.as_str()],
+            Some(MetadataValue::TextList(list)) => list.iter().map(|s| s.as_str()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Set a single value for a field, replacing any previous values.
+    pub fn set(&mut self, key: &str, value: &str) {
+        let upper = key.to_uppercase();
+        self.inner
+            .insert(upper, MetadataValue::Text(value.to_string()));
+    }
+
+    /// Append a value to a field, creating a multi-value entry.
+    ///
+    /// Per the Vorbis Comment specification, multiple values for the same
+    /// field name are represented by repeated comment entries.
+    pub fn add_value(&mut self, key: &str, value: &str) {
+        let upper = key.to_uppercase();
+        match self.inner.get(&upper).cloned() {
+            Some(MetadataValue::Text(existing)) => {
+                let list = vec![existing, value.to_string()];
+                self.inner.insert(upper, MetadataValue::TextList(list));
+            }
+            Some(MetadataValue::TextList(mut list)) => {
+                list.push(value.to_string());
+                self.inner.insert(upper, MetadataValue::TextList(list));
+            }
+            _ => {
+                self.inner
+                    .insert(upper, MetadataValue::Text(value.to_string()));
+            }
+        }
+    }
+
+    /// Remove all values for a field (case-insensitive).
+    pub fn remove_all(&mut self, key: &str) -> bool {
+        let upper = key.to_uppercase();
+        self.inner.remove(&upper).is_some()
+    }
+
+    /// Return the number of distinct field names (not counting repeated values).
+    pub fn field_count(&self) -> usize {
+        self.inner
+            .fields()
+            .keys()
+            .filter(|k| k.as_str() != "VENDOR")
+            .count()
+    }
+
+    /// Return the total number of comment entries (counting each repeated value).
+    pub fn total_value_count(&self) -> usize {
+        let mut count = 0usize;
+        for (key, value) in self.inner.fields() {
+            if key == "VENDOR" {
+                continue;
+            }
+            match value {
+                MetadataValue::Text(_) => count += 1,
+                MetadataValue::TextList(list) => count += list.len(),
+                _ => {}
+            }
+        }
+        count
+    }
+
+    /// Set the vendor string.
+    pub fn set_vendor(&mut self, vendor: &str) {
+        self.inner.insert(
+            "VENDOR".to_string(),
+            MetadataValue::Text(vendor.to_string()),
+        );
+    }
+
+    /// Get the vendor string.
+    pub fn vendor(&self) -> Option<&str> {
+        self.inner.get("VENDOR").and_then(|v| v.as_text())
+    }
+
+    /// Consume and return the inner `Metadata`.
+    pub fn into_metadata(self) -> Metadata {
+        self.inner
+    }
+
+    /// Borrow the inner `Metadata`.
+    pub fn metadata(&self) -> &Metadata {
+        &self.inner
+    }
+}
+
+impl Default for VorbisComments {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Parse Vorbis Comments from data.
 ///
 /// # Errors
@@ -255,5 +391,158 @@ mod tests {
 
         // Should have vendor string
         assert!(parsed.get("VENDOR").is_some());
+    }
+
+    // ------- VorbisComments helper tests -------
+
+    #[test]
+    fn test_vorbis_comments_helper_new() {
+        let vc = VorbisComments::new();
+        assert_eq!(vc.field_count(), 0);
+        assert_eq!(vc.total_value_count(), 0);
+    }
+
+    #[test]
+    fn test_vorbis_comments_set_and_get_first() {
+        let mut vc = VorbisComments::new();
+        vc.set("title", "My Song");
+        assert_eq!(vc.get_first("TITLE"), Some("My Song"));
+        // Case-insensitive lookup
+        assert_eq!(vc.get_first("title"), Some("My Song"));
+    }
+
+    #[test]
+    fn test_vorbis_comments_add_value_creates_list() {
+        let mut vc = VorbisComments::new();
+        vc.add_value("ARTIST", "Alice");
+        vc.add_value("ARTIST", "Bob");
+        vc.add_value("ARTIST", "Charlie");
+
+        let all = vc.get_all("ARTIST");
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0], "Alice");
+        assert_eq!(all[1], "Bob");
+        assert_eq!(all[2], "Charlie");
+
+        // get_first returns the first value
+        assert_eq!(vc.get_first("ARTIST"), Some("Alice"));
+
+        // field_count = 1 (one field name), total_value_count = 3
+        assert_eq!(vc.field_count(), 1);
+        assert_eq!(vc.total_value_count(), 3);
+    }
+
+    #[test]
+    fn test_vorbis_comments_set_replaces_list() {
+        let mut vc = VorbisComments::new();
+        vc.add_value("GENRE", "Rock");
+        vc.add_value("GENRE", "Pop");
+        assert_eq!(vc.get_all("GENRE").len(), 2);
+
+        // set() should replace all values
+        vc.set("GENRE", "Jazz");
+        assert_eq!(vc.get_all("GENRE"), vec!["Jazz"]);
+    }
+
+    #[test]
+    fn test_vorbis_comments_remove_all() {
+        let mut vc = VorbisComments::new();
+        vc.add_value("ARTIST", "A");
+        vc.add_value("ARTIST", "B");
+        assert!(vc.remove_all("ARTIST"));
+        assert!(vc.get_all("ARTIST").is_empty());
+        // Removing again returns false
+        assert!(!vc.remove_all("ARTIST"));
+    }
+
+    #[test]
+    fn test_vorbis_comments_vendor() {
+        let mut vc = VorbisComments::new();
+        vc.set_vendor("OxiMedia 0.1.2");
+        assert_eq!(vc.vendor(), Some("OxiMedia 0.1.2"));
+
+        // Vendor should NOT count as a field
+        assert_eq!(vc.field_count(), 0);
+    }
+
+    #[test]
+    fn test_vorbis_comments_from_metadata_round_trip() {
+        let mut vc = VorbisComments::new();
+        vc.set("TITLE", "Song Title");
+        vc.add_value("ARTIST", "Artist 1");
+        vc.add_value("ARTIST", "Artist 2");
+        vc.set("DATE", "2025");
+        vc.set_vendor("TestVendor");
+
+        // Write -> parse -> wrap
+        let data = write(vc.metadata()).expect("write should succeed");
+        let parsed = parse(&data).expect("parse should succeed");
+        let vc2 = VorbisComments::from_metadata(parsed);
+
+        assert_eq!(vc2.get_first("TITLE"), Some("Song Title"));
+        assert_eq!(vc2.get_all("ARTIST").len(), 2);
+        assert_eq!(vc2.get_first("DATE"), Some("2025"));
+        assert_eq!(vc2.vendor(), Some("TestVendor"));
+    }
+
+    #[test]
+    fn test_vorbis_comments_into_metadata() {
+        let mut vc = VorbisComments::new();
+        vc.set("ALBUM", "My Album");
+        let metadata = vc.into_metadata();
+        assert_eq!(metadata.format(), MetadataFormat::VorbisComments);
+        assert_eq!(
+            metadata.get("ALBUM").and_then(|v| v.as_text()),
+            Some("My Album")
+        );
+    }
+
+    #[test]
+    fn test_vorbis_comments_get_all_nonexistent() {
+        let vc = VorbisComments::new();
+        assert!(vc.get_all("NONEXISTENT").is_empty());
+        assert_eq!(vc.get_first("NONEXISTENT"), None);
+    }
+
+    #[test]
+    fn test_parse_multivalue_from_raw_data() {
+        // Build raw Vorbis Comment data with repeated ARTIST keys
+        let mut raw = Vec::new();
+
+        // Vendor string
+        let vendor = b"TestEncoder";
+        write_u32_le(&mut raw, vendor.len() as u32);
+        raw.extend_from_slice(vendor);
+
+        // 3 comments: ARTIST=Alice, ARTIST=Bob, TITLE=Song
+        write_u32_le(&mut raw, 3);
+
+        let c1 = b"ARTIST=Alice";
+        write_u32_le(&mut raw, c1.len() as u32);
+        raw.extend_from_slice(c1);
+
+        let c2 = b"ARTIST=Bob";
+        write_u32_le(&mut raw, c2.len() as u32);
+        raw.extend_from_slice(c2);
+
+        let c3 = b"TITLE=Song";
+        write_u32_le(&mut raw, c3.len() as u32);
+        raw.extend_from_slice(c3);
+
+        let parsed = parse(&raw).expect("parse should succeed");
+        let artists = parsed
+            .get("ARTIST")
+            .and_then(|v| v.as_text_list())
+            .expect("should be a text list");
+        assert_eq!(artists.len(), 2);
+        assert_eq!(artists[0], "Alice");
+        assert_eq!(artists[1], "Bob");
+        assert_eq!(parsed.get("TITLE").and_then(|v| v.as_text()), Some("Song"));
+    }
+
+    #[test]
+    fn test_vorbis_comments_default() {
+        let vc = VorbisComments::default();
+        assert_eq!(vc.field_count(), 0);
     }
 }

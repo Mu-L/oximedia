@@ -419,9 +419,7 @@ impl MultiFrameDeblur {
 
         let mut output = vec![0u8; size];
         for i in 0..size {
-            if counts[i] > 0 {
-                output[i] = (fused[i] / counts[i]) as u8;
-            }
+            output[i] = fused[i].checked_div(counts[i]).unwrap_or(0) as u8;
         }
 
         Ok(output)
@@ -435,6 +433,7 @@ impl Default for MultiFrameDeblur {
 }
 
 /// Compute average motion from a motion vector field.
+#[allow(clippy::manual_checked_ops)]
 fn compute_average_motion(field: &MotionVectorField) -> MotionVector {
     if field.vectors.is_empty() {
         return MotionVector::default();

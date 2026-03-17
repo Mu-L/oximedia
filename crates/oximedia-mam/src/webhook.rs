@@ -585,6 +585,218 @@ impl WebhookManager {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Retry with exponential backoff engine
+// ---------------------------------------------------------------------------
+
+/// Configuration for retry with exponential backoff.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    /// Maximum number of retry attempts (not counting the initial attempt).
+    pub max_retries: u32,
+    /// Initial backoff delay in milliseconds.
+    pub initial_backoff_ms: u64,
+    /// Multiplier applied to the backoff after each retry (typically 2.0).
+    pub backoff_multiplier: f64,
+    /// Maximum backoff delay in milliseconds (cap).
+    pub max_backoff_ms: u64,
+    /// Optional jitter factor (0.0 = none, 1.0 = full jitter up to backoff).
+    /// Applied deterministically using attempt number as seed to stay pure.
+    pub jitter_factor: f64,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 5,
+            initial_backoff_ms: 1000,
+            backoff_multiplier: 2.0,
+            max_backoff_ms: 60_000,
+            jitter_factor: 0.0,
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// Create a new retry policy with the given max retries.
+    #[must_use]
+    pub fn new(max_retries: u32) -> Self {
+        Self {
+            max_retries,
+            ..Default::default()
+        }
+    }
+
+    /// Set initial backoff in milliseconds.
+    #[must_use]
+    pub fn with_initial_backoff_ms(mut self, ms: u64) -> Self {
+        self.initial_backoff_ms = ms;
+        self
+    }
+
+    /// Set the backoff multiplier.
+    #[must_use]
+    pub fn with_multiplier(mut self, m: f64) -> Self {
+        self.backoff_multiplier = m;
+        self
+    }
+
+    /// Set the maximum backoff cap in milliseconds.
+    #[must_use]
+    pub fn with_max_backoff_ms(mut self, ms: u64) -> Self {
+        self.max_backoff_ms = ms;
+        self
+    }
+
+    /// Set jitter factor (0.0..=1.0). Uses deterministic pseudo-jitter.
+    #[must_use]
+    pub fn with_jitter(mut self, factor: f64) -> Self {
+        self.jitter_factor = factor.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Compute the backoff duration for the given attempt (0-indexed).
+    #[must_use]
+    pub fn backoff_for_attempt(&self, attempt: u32) -> std::time::Duration {
+        let base = self.initial_backoff_ms as f64 * self.backoff_multiplier.powi(attempt as i32);
+        let capped = base.min(self.max_backoff_ms as f64);
+
+        // Deterministic pseudo-jitter based on attempt number.
+        let jitter = if self.jitter_factor > 0.0 {
+            let seed = (attempt as f64 * 0.618_033_988_749_895).fract();
+            capped * self.jitter_factor * seed
+        } else {
+            0.0
+        };
+
+        let total_ms = (capped + jitter).min(self.max_backoff_ms as f64 * 2.0);
+        std::time::Duration::from_millis(total_ms as u64)
+    }
+}
+
+/// Outcome of a single delivery attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryOutcome {
+    /// Delivery succeeded.
+    Success,
+    /// Delivery failed with a retryable error.
+    RetryableFailure(String),
+    /// Delivery failed with a permanent (non-retryable) error.
+    PermanentFailure(String),
+}
+
+/// Record of a single retry attempt.
+#[derive(Debug, Clone)]
+pub struct RetryAttempt {
+    /// 1-indexed attempt number.
+    pub attempt: u32,
+    /// Outcome of this attempt.
+    pub outcome: DeliveryOutcome,
+    /// Backoff that was (or would be) waited before this attempt.
+    pub backoff: std::time::Duration,
+}
+
+/// The full result of a retry execution.
+#[derive(Debug, Clone)]
+pub struct RetryResult {
+    /// Whether the overall delivery eventually succeeded.
+    pub success: bool,
+    /// Total number of attempts made.
+    pub total_attempts: u32,
+    /// Detail of each attempt.
+    pub attempts: Vec<RetryAttempt>,
+    /// Final outcome.
+    pub final_outcome: DeliveryOutcome,
+}
+
+/// A synchronous retry executor that computes the retry schedule and collects
+/// attempt results.  Actual waiting is handled by the caller (e.g.
+/// `tokio::time::sleep`).  This struct computes the plan and records outcomes.
+pub struct RetryExecutor {
+    policy: RetryPolicy,
+}
+
+impl RetryExecutor {
+    /// Create a new executor with the given policy.
+    #[must_use]
+    pub fn new(policy: RetryPolicy) -> Self {
+        Self { policy }
+    }
+
+    /// Return a reference to the retry policy.
+    #[must_use]
+    pub fn policy(&self) -> &RetryPolicy {
+        &self.policy
+    }
+
+    /// Compute the full backoff schedule (attempt 0 .. max_retries).
+    #[must_use]
+    pub fn schedule(&self) -> Vec<std::time::Duration> {
+        (0..=self.policy.max_retries)
+            .map(|i| self.policy.backoff_for_attempt(i))
+            .collect()
+    }
+
+    /// Record a series of delivery outcomes and produce a [`RetryResult`].
+    ///
+    /// `outcomes` should contain up to `max_retries + 1` items.  The executor
+    /// stops at the first `Success` or `PermanentFailure`, or when retries
+    /// are exhausted.
+    #[must_use]
+    pub fn execute(&self, outcomes: &[DeliveryOutcome]) -> RetryResult {
+        let mut attempts = Vec::new();
+        let max = (self.policy.max_retries + 1) as usize;
+
+        for (i, outcome) in outcomes.iter().take(max).enumerate() {
+            let backoff = if i == 0 {
+                std::time::Duration::ZERO
+            } else {
+                self.policy.backoff_for_attempt((i - 1) as u32)
+            };
+
+            attempts.push(RetryAttempt {
+                attempt: (i + 1) as u32,
+                outcome: outcome.clone(),
+                backoff,
+            });
+
+            match outcome {
+                DeliveryOutcome::Success => {
+                    return RetryResult {
+                        success: true,
+                        total_attempts: (i + 1) as u32,
+                        final_outcome: DeliveryOutcome::Success,
+                        attempts,
+                    };
+                }
+                DeliveryOutcome::PermanentFailure(_) => {
+                    return RetryResult {
+                        success: false,
+                        total_attempts: (i + 1) as u32,
+                        final_outcome: outcome.clone(),
+                        attempts,
+                    };
+                }
+                DeliveryOutcome::RetryableFailure(_) => {
+                    // Continue to next attempt.
+                }
+            }
+        }
+
+        let final_outcome = attempts
+            .last()
+            .map(|a| a.outcome.clone())
+            .unwrap_or_else(|| DeliveryOutcome::PermanentFailure("no attempts".to_string()));
+
+        RetryResult {
+            success: false,
+            total_attempts: attempts.len() as u32,
+            final_outcome,
+            attempts,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,5 +859,207 @@ mod tests {
 
         assert_eq!(req.name, "Test Webhook");
         assert_eq!(req.event_types.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // RetryPolicy tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_retry_policy_default() {
+        let p = RetryPolicy::default();
+        assert_eq!(p.max_retries, 5);
+        assert_eq!(p.initial_backoff_ms, 1000);
+        assert!((p.backoff_multiplier - 2.0).abs() < f64::EPSILON);
+        assert_eq!(p.max_backoff_ms, 60_000);
+        assert!((p.jitter_factor - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_retry_policy_builder() {
+        let p = RetryPolicy::new(3)
+            .with_initial_backoff_ms(500)
+            .with_multiplier(3.0)
+            .with_max_backoff_ms(30_000)
+            .with_jitter(0.5);
+        assert_eq!(p.max_retries, 3);
+        assert_eq!(p.initial_backoff_ms, 500);
+        assert!((p.backoff_multiplier - 3.0).abs() < f64::EPSILON);
+        assert_eq!(p.max_backoff_ms, 30_000);
+        assert!((p.jitter_factor - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_backoff_exponential_growth() {
+        let p = RetryPolicy::new(5)
+            .with_initial_backoff_ms(1000)
+            .with_multiplier(2.0)
+            .with_max_backoff_ms(100_000);
+
+        // attempt 0: 1000ms, 1: 2000ms, 2: 4000ms, 3: 8000ms
+        assert_eq!(p.backoff_for_attempt(0).as_millis(), 1000);
+        assert_eq!(p.backoff_for_attempt(1).as_millis(), 2000);
+        assert_eq!(p.backoff_for_attempt(2).as_millis(), 4000);
+        assert_eq!(p.backoff_for_attempt(3).as_millis(), 8000);
+    }
+
+    #[test]
+    fn test_backoff_capped() {
+        let p = RetryPolicy::new(10)
+            .with_initial_backoff_ms(1000)
+            .with_multiplier(2.0)
+            .with_max_backoff_ms(5000);
+
+        // 2^4 * 1000 = 16000 > 5000 cap
+        let d = p.backoff_for_attempt(4);
+        assert_eq!(d.as_millis(), 5000);
+    }
+
+    #[test]
+    fn test_backoff_with_jitter() {
+        let p = RetryPolicy::new(3)
+            .with_initial_backoff_ms(1000)
+            .with_multiplier(2.0)
+            .with_max_backoff_ms(100_000)
+            .with_jitter(0.5);
+
+        let base = p.backoff_for_attempt(0);
+        // With jitter, should be >= 1000ms (base might have jitter added).
+        assert!(base.as_millis() >= 1000);
+    }
+
+    #[test]
+    fn test_jitter_clamped() {
+        let p = RetryPolicy::new(1).with_jitter(5.0); // should clamp to 1.0
+        assert!((p.jitter_factor - 1.0).abs() < f64::EPSILON);
+        let p2 = RetryPolicy::new(1).with_jitter(-1.0); // should clamp to 0.0
+        assert!((p2.jitter_factor - 0.0).abs() < f64::EPSILON);
+    }
+
+    // -----------------------------------------------------------------------
+    // RetryExecutor tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_schedule_length() {
+        let policy = RetryPolicy::new(3);
+        let executor = RetryExecutor::new(policy);
+        let sched = executor.schedule();
+        assert_eq!(sched.len(), 4); // initial + 3 retries
+    }
+
+    #[test]
+    fn test_execute_immediate_success() {
+        let executor = RetryExecutor::new(RetryPolicy::new(3));
+        let outcomes = vec![DeliveryOutcome::Success];
+        let result = executor.execute(&outcomes);
+        assert!(result.success);
+        assert_eq!(result.total_attempts, 1);
+        assert_eq!(result.final_outcome, DeliveryOutcome::Success);
+    }
+
+    #[test]
+    fn test_execute_success_after_retries() {
+        let executor = RetryExecutor::new(RetryPolicy::new(5));
+        let outcomes = vec![
+            DeliveryOutcome::RetryableFailure("timeout".to_string()),
+            DeliveryOutcome::RetryableFailure("502".to_string()),
+            DeliveryOutcome::Success,
+        ];
+        let result = executor.execute(&outcomes);
+        assert!(result.success);
+        assert_eq!(result.total_attempts, 3);
+        assert_eq!(result.attempts.len(), 3);
+        // First attempt has zero backoff.
+        assert_eq!(result.attempts[0].backoff, std::time::Duration::ZERO);
+        // Second attempt has backoff.
+        assert!(result.attempts[1].backoff > std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn test_execute_exhausted_retries() {
+        let executor = RetryExecutor::new(RetryPolicy::new(2));
+        let outcomes = vec![
+            DeliveryOutcome::RetryableFailure("fail1".to_string()),
+            DeliveryOutcome::RetryableFailure("fail2".to_string()),
+            DeliveryOutcome::RetryableFailure("fail3".to_string()),
+        ];
+        let result = executor.execute(&outcomes);
+        assert!(!result.success);
+        assert_eq!(result.total_attempts, 3); // initial + 2 retries
+        assert_eq!(
+            result.final_outcome,
+            DeliveryOutcome::RetryableFailure("fail3".to_string())
+        );
+    }
+
+    #[test]
+    fn test_execute_permanent_failure_stops_retries() {
+        let executor = RetryExecutor::new(RetryPolicy::new(5));
+        let outcomes = vec![
+            DeliveryOutcome::RetryableFailure("timeout".to_string()),
+            DeliveryOutcome::PermanentFailure("404 not found".to_string()),
+            DeliveryOutcome::Success, // should never be reached
+        ];
+        let result = executor.execute(&outcomes);
+        assert!(!result.success);
+        assert_eq!(result.total_attempts, 2);
+        assert_eq!(
+            result.final_outcome,
+            DeliveryOutcome::PermanentFailure("404 not found".to_string())
+        );
+    }
+
+    #[test]
+    fn test_execute_empty_outcomes() {
+        let executor = RetryExecutor::new(RetryPolicy::new(3));
+        let result = executor.execute(&[]);
+        assert!(!result.success);
+        assert_eq!(result.total_attempts, 0);
+    }
+
+    #[test]
+    fn test_execute_backoff_increases() {
+        let policy = RetryPolicy::new(4)
+            .with_initial_backoff_ms(100)
+            .with_multiplier(2.0);
+        let executor = RetryExecutor::new(policy);
+        let outcomes = vec![
+            DeliveryOutcome::RetryableFailure("1".to_string()),
+            DeliveryOutcome::RetryableFailure("2".to_string()),
+            DeliveryOutcome::RetryableFailure("3".to_string()),
+            DeliveryOutcome::RetryableFailure("4".to_string()),
+            DeliveryOutcome::RetryableFailure("5".to_string()),
+        ];
+        let result = executor.execute(&outcomes);
+        // Backoff: 0, 100, 200, 400, 800
+        assert_eq!(result.attempts[0].backoff, std::time::Duration::ZERO);
+        assert_eq!(result.attempts[1].backoff.as_millis(), 100);
+        assert_eq!(result.attempts[2].backoff.as_millis(), 200);
+        assert_eq!(result.attempts[3].backoff.as_millis(), 400);
+        assert_eq!(result.attempts[4].backoff.as_millis(), 800);
+    }
+
+    #[test]
+    fn test_retry_policy_serialization() {
+        let policy = RetryPolicy::new(3).with_initial_backoff_ms(500);
+        let json = serde_json::to_string(&policy).expect("should succeed in test");
+        let deserialized: RetryPolicy =
+            serde_json::from_str(&json).expect("should succeed in test");
+        assert_eq!(deserialized.max_retries, 3);
+        assert_eq!(deserialized.initial_backoff_ms, 500);
+    }
+
+    #[test]
+    fn test_execute_fewer_outcomes_than_retries() {
+        // If we provide fewer outcomes than max_retries+1, it stops early.
+        let executor = RetryExecutor::new(RetryPolicy::new(10));
+        let outcomes = vec![
+            DeliveryOutcome::RetryableFailure("a".to_string()),
+            DeliveryOutcome::RetryableFailure("b".to_string()),
+        ];
+        let result = executor.execute(&outcomes);
+        assert!(!result.success);
+        assert_eq!(result.total_attempts, 2);
     }
 }

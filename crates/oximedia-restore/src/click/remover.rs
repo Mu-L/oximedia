@@ -242,6 +242,8 @@ mod tests {
             start: 50,
             end: 51,
             magnitude: 1.0,
+            confidence: 1.0,
+            severity: crate::click::detector::ClickSeverity::High,
         };
 
         let remover = ClickRemover::default();
@@ -266,6 +268,8 @@ mod tests {
             start: 50,
             end: 51,
             magnitude: 2.0,
+            confidence: 1.0,
+            severity: crate::click::detector::ClickSeverity::High,
         };
 
         let restored = remove_click_ar(&samples, &click, 10).expect("should succeed in test");
@@ -282,6 +286,8 @@ mod tests {
             start: 50,
             end: 51,
             magnitude: 1.0,
+            confidence: 1.0,
+            severity: crate::click::detector::ClickSeverity::High,
         };
 
         let restored = remove_click_median(&samples, &click, 5).expect("should succeed in test");

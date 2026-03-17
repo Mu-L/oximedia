@@ -63,40 +63,50 @@ impl ConvolutionKernel {
         })
     }
 
+    /// Infallible constructor for hardcoded kernels whose dimensions are
+    /// compile-time known to be valid (odd, matching length).
+    fn from_hardcoded(kernel: Vec<f32>, width: u32, height: u32, normalize: bool) -> Self {
+        debug_assert_eq!(kernel.len(), (width * height) as usize);
+        debug_assert!(width % 2 == 1 && height % 2 == 1);
+        Self {
+            kernel,
+            width,
+            height,
+            normalize,
+        }
+    }
+
     /// Create a Sobel X kernel (3x3)
     #[must_use]
     pub fn sobel_x() -> Self {
-        Self::new(
+        Self::from_hardcoded(
             vec![-1.0, 0.0, 1.0, -2.0, 0.0, 2.0, -1.0, 0.0, 1.0],
             3,
             3,
             false,
         )
-        .expect("hardcoded 3x3 Sobel X kernel is always valid")
     }
 
     /// Create a Sobel Y kernel (3x3)
     #[must_use]
     pub fn sobel_y() -> Self {
-        Self::new(
+        Self::from_hardcoded(
             vec![-1.0, -2.0, -1.0, 0.0, 0.0, 0.0, 1.0, 2.0, 1.0],
             3,
             3,
             false,
         )
-        .expect("hardcoded 3x3 Sobel Y kernel is always valid")
     }
 
     /// Create a Laplacian kernel (3x3)
     #[must_use]
     pub fn laplacian() -> Self {
-        Self::new(
+        Self::from_hardcoded(
             vec![0.0, 1.0, 0.0, 1.0, -4.0, 1.0, 0.0, 1.0, 0.0],
             3,
             3,
             false,
         )
-        .expect("hardcoded 3x3 Laplacian kernel is always valid")
     }
 
     /// Create a box blur kernel
@@ -110,13 +120,12 @@ impl ConvolutionKernel {
     /// Create a sharpening kernel
     #[must_use]
     pub fn sharpen() -> Self {
-        Self::new(
+        Self::from_hardcoded(
             vec![0.0, -1.0, 0.0, -1.0, 5.0, -1.0, 0.0, -1.0, 0.0],
             3,
             3,
             false,
         )
-        .expect("hardcoded 3x3 sharpen kernel is always valid")
     }
 
     /// Get the kernel data

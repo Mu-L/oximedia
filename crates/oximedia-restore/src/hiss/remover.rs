@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn test_hiss_remover() {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         let samples: Vec<f32> = (0..8192).map(|_| rng.random_range(-0.1..0.1)).collect();

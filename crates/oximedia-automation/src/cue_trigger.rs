@@ -138,7 +138,12 @@ pub struct CueTrigger {
 
 impl CueTrigger {
     /// Create a new cue trigger.
-    pub fn new(id: impl Into<String>, name: impl Into<String>, source_type: CueSourceType, action: CueAction) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        source_type: CueSourceType,
+        action: CueAction,
+    ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
@@ -230,8 +235,10 @@ impl CueTrigger {
 
     /// Check if the trigger is in a terminal state.
     pub fn is_terminal(&self) -> bool {
-        matches!(self.state, CueTriggerState::Executed | CueTriggerState::Disarmed | CueTriggerState::Error)
-            && !self.repeatable
+        matches!(
+            self.state,
+            CueTriggerState::Executed | CueTriggerState::Disarmed | CueTriggerState::Error
+        ) && !self.repeatable
     }
 }
 
@@ -265,7 +272,10 @@ impl CueTriggerManager {
     /// Add a trigger to the manager.
     pub fn add_trigger(&mut self, trigger: CueTrigger) -> Result<(), String> {
         if self.triggers.len() >= self.max_triggers {
-            return Err(format!("Maximum trigger count ({}) reached", self.max_triggers));
+            return Err(format!(
+                "Maximum trigger count ({}) reached",
+                self.max_triggers
+            ));
         }
         if self.triggers.contains_key(&trigger.id) {
             return Err(format!("Trigger with id '{}' already exists", trigger.id));
@@ -327,7 +337,10 @@ impl CueTriggerManager {
 
     /// Get the number of armed triggers.
     pub fn armed_count(&self) -> usize {
-        self.triggers.values().filter(|t| t.state == CueTriggerState::Armed).count()
+        self.triggers
+            .values()
+            .filter(|t| t.state == CueTriggerState::Armed)
+            .count()
     }
 
     /// Clean up terminal (non-repeatable, executed) triggers.
@@ -397,7 +410,12 @@ mod tests {
 
     #[test]
     fn test_cue_trigger_creation() {
-        let trigger = CueTrigger::new("t1", "Test Trigger", CueSourceType::Timecode, CueAction::Noop);
+        let trigger = CueTrigger::new(
+            "t1",
+            "Test Trigger",
+            CueSourceType::Timecode,
+            CueAction::Noop,
+        );
         assert_eq!(trigger.id, "t1");
         assert_eq!(trigger.name, "Test Trigger");
         assert_eq!(trigger.state, CueTriggerState::Armed);
@@ -407,11 +425,16 @@ mod tests {
 
     #[test]
     fn test_cue_trigger_builder() {
-        let trigger = CueTrigger::new("t2", "Priority Trigger", CueSourceType::Gpi, CueAction::Noop)
-            .with_priority(CuePriority::High)
-            .with_pre_roll(5)
-            .with_repeatable(true)
-            .with_cue_frame(1000);
+        let trigger = CueTrigger::new(
+            "t2",
+            "Priority Trigger",
+            CueSourceType::Gpi,
+            CueAction::Noop,
+        )
+        .with_priority(CuePriority::High)
+        .with_pre_roll(5)
+        .with_repeatable(true)
+        .with_cue_frame(1000);
         assert_eq!(trigger.priority, CuePriority::High);
         assert_eq!(trigger.pre_roll_frames, 5);
         assert!(trigger.repeatable);
@@ -420,7 +443,8 @@ mod tests {
 
     #[test]
     fn test_cue_trigger_fire() {
-        let mut trigger = CueTrigger::new("t3", "Fire Test", CueSourceType::Manual, CueAction::Noop);
+        let mut trigger =
+            CueTrigger::new("t3", "Fire Test", CueSourceType::Manual, CueAction::Noop);
         assert!(trigger.fire());
         assert_eq!(trigger.state, CueTriggerState::Fired);
         assert_eq!(trigger.fire_count, 1);
@@ -430,7 +454,8 @@ mod tests {
 
     #[test]
     fn test_cue_trigger_disarm() {
-        let mut trigger = CueTrigger::new("t4", "Disarm Test", CueSourceType::Manual, CueAction::Noop);
+        let mut trigger =
+            CueTrigger::new("t4", "Disarm Test", CueSourceType::Manual, CueAction::Noop);
         trigger.disarm();
         assert_eq!(trigger.state, CueTriggerState::Disarmed);
         assert!(!trigger.fire());
@@ -438,8 +463,9 @@ mod tests {
 
     #[test]
     fn test_cue_trigger_repeatable() {
-        let mut trigger = CueTrigger::new("t5", "Repeat Test", CueSourceType::Manual, CueAction::Noop)
-            .with_repeatable(true);
+        let mut trigger =
+            CueTrigger::new("t5", "Repeat Test", CueSourceType::Manual, CueAction::Noop)
+                .with_repeatable(true);
         assert!(trigger.fire());
         trigger.mark_executed();
         // Repeatable triggers re-arm after execution
@@ -461,7 +487,12 @@ mod tests {
 
     #[test]
     fn test_cue_trigger_is_terminal() {
-        let mut trigger = CueTrigger::new("t7", "Terminal Test", CueSourceType::Manual, CueAction::Noop);
+        let mut trigger = CueTrigger::new(
+            "t7",
+            "Terminal Test",
+            CueSourceType::Manual,
+            CueAction::Noop,
+        );
         assert!(!trigger.is_terminal());
         trigger.fire();
         trigger.mark_executed();

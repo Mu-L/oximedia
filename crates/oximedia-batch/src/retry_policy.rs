@@ -22,8 +22,40 @@ pub enum RetryStrategy {
         /// Maximum delay in milliseconds; caps exponential growth.
         max_ms: u64,
     },
+    /// Exponential backoff with decorrelated jitter to prevent thundering herd.
+    ///
+    /// Uses the "full jitter" algorithm: `delay = random(0, min(max_ms, initial_ms * 2^attempt))`.
+    /// This spreads retries uniformly across the window, eliminating synchronised
+    /// retry storms when many jobs fail at the same time.
+    ExponentialWithJitter {
+        /// Starting delay in milliseconds for the first retry.
+        initial_ms: u64,
+        /// Maximum delay in milliseconds; caps exponential growth.
+        max_ms: u64,
+        /// Jitter mode.
+        jitter: JitterMode,
+    },
     /// Immediate retry with no delay.
     Immediate,
+}
+
+/// Jitter algorithms for exponential backoff.
+///
+/// All modes compute a base delay of `initial_ms * 2^attempt` (capped at `max_ms`),
+/// then apply a randomisation strategy to spread retries over the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitterMode {
+    /// Full jitter: `uniform(0, base_delay)`.  Maximum spread; best for
+    /// preventing thundering herd when many clients retry simultaneously.
+    Full,
+    /// Equal jitter: `base_delay / 2 + uniform(0, base_delay / 2)`.
+    /// Guarantees at least half the base delay, limiting how aggressive the
+    /// retry can be while still providing good spread.
+    Equal,
+    /// Decorrelated jitter: `min(max_ms, uniform(initial_ms, prev_delay * 3))`.
+    /// Each retry's delay depends on the previous one rather than the attempt
+    /// number, producing a smoothly varying sequence.
+    Decorrelated,
 }
 
 /// Configuration for a retry policy.
@@ -63,6 +95,58 @@ impl RetryConfig {
         }
     }
 
+    /// Creates an exponential back-off with full jitter configuration.
+    ///
+    /// Full jitter spreads retries uniformly across `[0, base_delay]` to prevent
+    /// thundering herd when many jobs fail simultaneously.
+    #[must_use]
+    pub fn exponential_full_jitter(max_attempts: u32, initial_ms: u64, max_ms: u64) -> Self {
+        Self {
+            strategy: RetryStrategy::ExponentialWithJitter {
+                initial_ms,
+                max_ms,
+                jitter: JitterMode::Full,
+            },
+            max_attempts,
+        }
+    }
+
+    /// Creates an exponential back-off with equal jitter configuration.
+    ///
+    /// Equal jitter guarantees at least half the base delay while still providing
+    /// spread: `delay = base/2 + uniform(0, base/2)`.
+    #[must_use]
+    pub fn exponential_equal_jitter(max_attempts: u32, initial_ms: u64, max_ms: u64) -> Self {
+        Self {
+            strategy: RetryStrategy::ExponentialWithJitter {
+                initial_ms,
+                max_ms,
+                jitter: JitterMode::Equal,
+            },
+            max_attempts,
+        }
+    }
+
+    /// Creates an exponential back-off with decorrelated jitter configuration.
+    ///
+    /// Decorrelated jitter computes each delay relative to the previous one,
+    /// producing a smooth, unpredictable retry cadence.
+    #[must_use]
+    pub fn exponential_decorrelated_jitter(
+        max_attempts: u32,
+        initial_ms: u64,
+        max_ms: u64,
+    ) -> Self {
+        Self {
+            strategy: RetryStrategy::ExponentialWithJitter {
+                initial_ms,
+                max_ms,
+                jitter: JitterMode::Decorrelated,
+            },
+            max_attempts,
+        }
+    }
+
     /// Returns `true` if another attempt should be made.
     ///
     /// `attempt` is the number of attempts *already made* (0-based).
@@ -89,6 +173,22 @@ impl RetryConfig {
                 let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
                 let delay = initial_ms.saturating_mul(factor);
                 delay.min(*max_ms)
+            }
+            RetryStrategy::ExponentialWithJitter {
+                initial_ms,
+                max_ms,
+                jitter,
+            } => {
+                let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
+                let base_delay = initial_ms.saturating_mul(factor).min(*max_ms);
+                // Apply jitter deterministically for `next_delay_ms` (upper bound).
+                // Actual randomisation happens at the call site; here we return the
+                // maximum possible delay for the given jitter mode.
+                match jitter {
+                    JitterMode::Full => base_delay,
+                    JitterMode::Equal => base_delay,
+                    JitterMode::Decorrelated => base_delay,
+                }
             }
         }
     }

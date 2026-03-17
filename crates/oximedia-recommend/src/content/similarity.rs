@@ -111,18 +111,21 @@ impl ContentRecommender {
 
     /// Get content-based recommendations
     ///
+    /// When `request.content_id` is `None`, no content seed is available and an empty list
+    /// is returned rather than an error, allowing callers to gracefully handle the missing
+    /// seed without special-casing the strategy.
+    ///
     /// # Errors
     ///
-    /// Returns an error if recommendation generation fails
+    /// Returns an error if the specified content is not found in the similarity index
     pub fn recommend(
         &self,
         request: &RecommendationRequest,
     ) -> RecommendResult<Vec<Recommendation>> {
-        let base_content = request.content_id.ok_or_else(|| {
-            RecommendError::insufficient_data(
-                "Content ID required for content-based recommendations",
-            )
-        })?;
+        let base_content = match request.content_id {
+            Some(id) => id,
+            None => return Ok(Vec::new()),
+        };
 
         let similar = self
             .similarity_calculator

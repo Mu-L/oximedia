@@ -23,8 +23,8 @@ pub struct CatchupConfig {
 impl Default for CatchupConfig {
     fn default() -> Self {
         Self {
-            lookback_window: Duration::from_secs(7 * 24 * 3600), // 7 days
-            expiry_buffer: Duration::from_secs(3600),            // 1 hour
+            lookback_window: Duration::from_hours(168), // 7 days
+            expiry_buffer: Duration::from_hours(1),     // 1 hour
             max_concurrent_startover: 50,
             allow_startover_during_record: true,
         }
@@ -294,7 +294,7 @@ mod tests {
             "ch1",
             "Test Show",
             SystemTime::UNIX_EPOCH,
-            Duration::from_secs(3600),
+            Duration::from_hours(1),
         )
     }
 
@@ -314,25 +314,25 @@ mod tests {
     #[test]
     fn test_recording_expiry() {
         let r = make_recording("r1");
-        let window = Duration::from_secs(7 * 24 * 3600);
+        let window = Duration::from_hours(168);
         // Air time is UNIX_EPOCH; now is far in the future
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(30 * 24 * 3600);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_hours(720);
         assert!(r.is_expired(now, window));
     }
 
     #[test]
     fn test_recording_not_expired() {
         let r = make_recording("r1");
-        let window = Duration::from_secs(7 * 24 * 3600);
+        let window = Duration::from_hours(168);
         // Now is 1 day after air time
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(24 * 3600);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_hours(24);
         assert!(!r.is_expired(now, window));
     }
 
     #[test]
     fn test_startover_session_advance_and_pause() {
         let mut session = StartoverSession::new("s1", "r1", "viewer1");
-        session.advance(Duration::from_secs(60));
+        session.advance(Duration::from_mins(1));
         assert_eq!(session.offset.as_secs(), 60);
         session.pause();
         assert_eq!(session.state, StartoverState::Paused);
@@ -396,7 +396,7 @@ mod tests {
         let mut mgr = CatchupManager::new(CatchupConfig::default());
         mgr.register_recording(make_recording("r1"));
         // Expire all (now is far future)
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(90 * 24 * 3600);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_hours(2160);
         mgr.expire_old_recordings(now);
         let counts = mgr.recording_counts();
         assert_eq!(counts.get("Expired"), Some(&1));
@@ -412,7 +412,7 @@ mod tests {
             .expect("should succeed in test");
 
         let session = mgr.session_mut("sess1").expect("should succeed in test");
-        session.advance(Duration::from_secs(120));
+        session.advance(Duration::from_mins(2));
         assert_eq!(session.offset.as_secs(), 120);
     }
 

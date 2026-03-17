@@ -133,11 +133,14 @@ impl ObjectTracker {
     /// use oximedia_cv::tracking::{ObjectTracker, TrackerType};
     /// use oximedia_cv::detect::BoundingBox;
     ///
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let bbox = BoundingBox::new(50.0, 50.0, 30.0, 30.0);
     /// let mut tracker = ObjectTracker::new(TrackerType::Mosse, bbox);
     ///
     /// let frame = vec![100u8; 10000];
     /// let new_bbox = tracker.update(&frame, 100, 100)?;
+    /// Ok(())
+    /// }
     /// ```
     pub fn update(&mut self, frame: &[u8], w: u32, h: u32) -> CvResult<BoundingBox> {
         if w == 0 || h == 0 {

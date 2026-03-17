@@ -71,7 +71,7 @@ mod tests {
         let mut marker = HighlightMarker::new();
         marker.add_marker(Marker {
             name: "Epic Moment".to_string(),
-            timestamp: Duration::from_secs(120),
+            timestamp: Duration::from_mins(2),
             description: "Amazing play!".to_string(),
         });
         assert_eq!(marker.marker_count(), 1);

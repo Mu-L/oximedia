@@ -2,6 +2,7 @@
 name = "oximedia-search"
 description = "Media search and content discovery with metadata indexing"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -18,12 +19,10 @@ oximedia-cv = { workspace = true }
 oximedia-scene = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-tokio = { workspace = true }
 rayon = { workspace = true }
-ndarray = { workspace = true }
 
 # Search engine
-tantivy = "0.22"
+tantivy = { version = "0.25", optional = true }
 
 # Serialization
 serde_json = { workspace = true }
@@ -31,5 +30,9 @@ serde_json = { workspace = true }
 # Utilities
 uuid = { workspace = true }
 chrono = { workspace = true }
+
+[features]
+default = []
+search-engine = ["tantivy"]
 
 [dev-dependencies]

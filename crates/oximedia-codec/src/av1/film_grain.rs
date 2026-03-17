@@ -61,6 +61,7 @@
 #![allow(clippy::similar_names)]
 #![allow(clippy::trivially_copy_pass_by_ref)]
 
+use super::film_grain_table::PerBlockGrainTable;
 use crate::frame::VideoFrame;
 use crate::CodecResult;
 
@@ -1113,6 +1114,21 @@ impl FilmGrainSynthesizer {
 
     /// Apply grain with overlap blending.
     ///
+    /// When `overlap_flag` is set, grain blocks overlap by 2 pixels at
+    /// boundaries. The AV1 spec (Section 7.18.3.4) defines linear ramp
+    /// weights for blending adjacent grain blocks so that seams are
+    /// invisible.
+    ///
+    /// Block layout (GRAIN_BLOCK_SIZE = 32):
+    /// ```text
+    /// ┌───────────┬───────────┐
+    /// │ block(0,0) │ block(1,0)│  <- 2-pixel horizontal overlap
+    /// │            │←overlap→  │
+    /// ├───────────┼───────────┤  <- 2-pixel vertical overlap
+    /// │ block(0,1) │ block(1,1)│
+    /// └───────────┴───────────┘
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns error if grain application fails.
@@ -1121,9 +1137,394 @@ impl FilmGrainSynthesizer {
             return self.apply_grain(frame);
         }
 
-        // For now, just apply regular grain
-        // TODO: Implement overlap blending
-        self.apply_grain(frame)
+        if !self.params.is_enabled() {
+            return Ok(());
+        }
+
+        // Apply to Y plane with overlap blending
+        if let (Some(luma_template), Some(luma_scaling)) = (&self.luma_template, &self.luma_scaling)
+        {
+            self.apply_grain_plane_y_overlap(frame, luma_template, luma_scaling);
+        }
+
+        // Apply to chroma planes with overlap blending
+        if let (Some(cb_template), Some(cb_scaling)) = (&self.cb_template, &self.cb_scaling) {
+            if let Some(luma_template) = &self.luma_template {
+                self.apply_grain_plane_chroma_overlap(
+                    frame,
+                    cb_template,
+                    cb_scaling,
+                    luma_template,
+                    1,
+                    true,
+                );
+            }
+        }
+
+        if let (Some(cr_template), Some(cr_scaling)) = (&self.cr_template, &self.cr_scaling) {
+            if let Some(luma_template) = &self.luma_template {
+                self.apply_grain_plane_chroma_overlap(
+                    frame,
+                    cr_template,
+                    cr_scaling,
+                    luma_template,
+                    2,
+                    false,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Apply film grain with per-block parameter overrides from `table`.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if grain application fails.
+    pub fn apply_grain_per_block(
+        &self,
+        frame: &mut VideoFrame,
+        table: &PerBlockGrainTable,
+    ) -> CodecResult<()> {
+        if !self.params.is_enabled() {
+            return Ok(());
+        }
+        let width = frame.plane(0).width() as usize;
+        let height = frame.plane(0).height() as usize;
+        let stride = frame.plane(0).stride() as usize;
+        let bsz = GRAIN_BLOCK_SIZE;
+        let max_val = i32::from((1u16 << self.bit_depth.min(8)) - 1);
+        for by in 0..height.div_ceil(bsz) {
+            for bx in 0..width.div_ceil(bsz) {
+                let res = table.resolve(&self.params, bx as u32, by as u32);
+                let gauss = GaussianSequence::generate(res.grain_seed);
+                let tpl = LumaGrainTemplate::generate(&res, &gauss, self.bit_depth);
+                let n = res.num_y_points.min(MAX_LUMA_SCALING_POINTS);
+                let lut = ScalingLut::from_points(&res.y_points[..n], n, self.bit_depth);
+                let g_scale = i32::from(res.grain_scaling());
+                let g_shift = i32::from(res.grain_scale_shift);
+                let tsz = tpl.size().max(1);
+                let ox = (res.grain_seed as usize * 37) % tsz;
+                let oy = (res.grain_seed as usize * 59) % tsz;
+                let x1 = ((bx + 1) * bsz).min(width);
+                let y1 = ((by + 1) * bsz).min(height);
+                let data = frame.plane_mut(0).data_mut();
+                for y in (by * bsz)..y1 {
+                    for x in (bx * bsz)..x1 {
+                        let idx = y * stride + x;
+                        let pix = i32::from(data[idx]);
+                        let gs = i32::from(tpl.get((ox + x) % tsz, (oy + y) % tsz));
+                        let sc = i32::from(lut.get(pix, self.bit_depth));
+                        data[idx] =
+                            ((pix + (gs * sc * g_scale)) >> (g_shift + 8)).clamp(0, max_val) as u8;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Compute overlap blending weight for a coordinate within the overlap zone.
+    ///
+    /// AV1 uses a 2-pixel overlap region with linear ramp weights:
+    /// - Position 0 in overlap: weight = 27 (out of 32)
+    /// - Position 1 in overlap: weight = 17 (out of 32)
+    /// The complementary block gets (32 - weight).
+    fn overlap_weight(pos_in_overlap: usize) -> (i32, i32) {
+        // AV1 spec Table 7-26: overlap blending weights
+        match pos_in_overlap {
+            0 => (27, 5),
+            1 => (17, 15),
+            _ => (32, 0), // No blending outside overlap
+        }
+    }
+
+    /// Apply grain to Y plane with overlap blending between grain blocks.
+    fn apply_grain_plane_y_overlap(
+        &self,
+        frame: &mut VideoFrame,
+        template: &LumaGrainTemplate,
+        scaling: &ScalingLut,
+    ) {
+        let width = frame.plane(0).width() as usize;
+        let height = frame.plane(0).height() as usize;
+        let stride = frame.plane(0).stride() as usize;
+        let data = frame.plane_mut(0).data_mut();
+
+        let grain_scale = self.params.grain_scaling() as i32;
+        let grain_shift = self.params.grain_scale_shift as i32;
+        let max_value = (1 << self.bit_depth) - 1;
+        let block_size = GRAIN_BLOCK_SIZE;
+        let overlap = 2usize;
+
+        // Process frame in grain blocks
+        let blocks_y = (height + block_size - 1) / block_size;
+        let blocks_x = (width + block_size - 1) / block_size;
+
+        for by in 0..blocks_y {
+            for bx in 0..blocks_x {
+                let block_x0 = bx * block_size;
+                let block_y0 = by * block_size;
+
+                // Grain template offset for this block (varies per block for variety)
+                let seed_offset = (by * blocks_x + bx) as u16;
+                let offset_x = ((self
+                    .params
+                    .grain_seed
+                    .wrapping_add(seed_offset.wrapping_mul(37)))
+                    as usize)
+                    % template.size();
+                let offset_y = ((self
+                    .params
+                    .grain_seed
+                    .wrapping_add(seed_offset.wrapping_mul(59)))
+                    as usize)
+                    % template.size();
+
+                for local_y in 0..block_size {
+                    let y = block_y0 + local_y;
+                    if y >= height {
+                        break;
+                    }
+
+                    for local_x in 0..block_size {
+                        let x = block_x0 + local_x;
+                        if x >= width {
+                            break;
+                        }
+
+                        let idx = y * stride + x;
+                        let pixel = i32::from(data[idx]);
+                        let scale = i32::from(scaling.get(pixel, self.bit_depth));
+
+                        // Current block's grain value
+                        let grain_x = (local_x + offset_x) % template.size();
+                        let grain_y = (local_y + offset_y) % template.size();
+                        let mut grain_val = i32::from(template.get(grain_x, grain_y));
+
+                        // Horizontal overlap: blend with left block's grain
+                        if bx > 0 && local_x < overlap {
+                            let left_seed_offset = (by * blocks_x + (bx - 1)) as u16;
+                            let left_ox = ((self
+                                .params
+                                .grain_seed
+                                .wrapping_add(left_seed_offset.wrapping_mul(37)))
+                                as usize)
+                                % template.size();
+                            let left_oy = ((self
+                                .params
+                                .grain_seed
+                                .wrapping_add(left_seed_offset.wrapping_mul(59)))
+                                as usize)
+                                % template.size();
+
+                            let left_local_x = block_size + local_x;
+                            let left_gx = (left_local_x + left_ox) % template.size();
+                            let left_gy = (local_y + left_oy) % template.size();
+                            let left_grain = i32::from(template.get(left_gx, left_gy));
+
+                            let (w_curr, w_left) = Self::overlap_weight(local_x);
+                            grain_val = (grain_val * w_curr + left_grain * w_left + 16) >> 5;
+                        }
+
+                        // Vertical overlap: blend with top block's grain
+                        if by > 0 && local_y < overlap {
+                            let top_seed_offset = ((by - 1) * blocks_x + bx) as u16;
+                            let top_ox = ((self
+                                .params
+                                .grain_seed
+                                .wrapping_add(top_seed_offset.wrapping_mul(37)))
+                                as usize)
+                                % template.size();
+                            let top_oy = ((self
+                                .params
+                                .grain_seed
+                                .wrapping_add(top_seed_offset.wrapping_mul(59)))
+                                as usize)
+                                % template.size();
+
+                            let top_local_y = block_size + local_y;
+                            let top_gx = (local_x + top_ox) % template.size();
+                            let top_gy = (top_local_y + top_oy) % template.size();
+                            let top_grain = i32::from(template.get(top_gx, top_gy));
+
+                            let (w_curr, w_top) = Self::overlap_weight(local_y);
+                            grain_val = (grain_val * w_curr + top_grain * w_top + 16) >> 5;
+                        }
+
+                        let scaled_grain = (grain_val * scale) >> grain_scale;
+                        let adjusted_grain = scaled_grain >> grain_shift;
+                        let result = (pixel + adjusted_grain).clamp(0, max_value);
+                        data[idx] = result as u8;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Apply grain to chroma plane with overlap blending.
+    fn apply_grain_plane_chroma_overlap(
+        &self,
+        frame: &mut VideoFrame,
+        template: &ChromaGrainTemplate,
+        scaling: &ScalingLut,
+        luma_template: &LumaGrainTemplate,
+        plane_idx: usize,
+        is_cb: bool,
+    ) {
+        let width = frame.plane(plane_idx).width() as usize;
+        let height = frame.plane(plane_idx).height() as usize;
+        let stride = frame.plane(plane_idx).stride() as usize;
+
+        let luma_width = frame.plane(0).width() as usize;
+        let luma_height = frame.plane(0).height() as usize;
+        let luma_stride = frame.plane(0).stride() as usize;
+        let luma_data: Vec<u8> = frame.plane(0).data().to_vec();
+
+        let subsampling_x = width * 2 == luma_width;
+        let subsampling_y = height * 2 == luma_height;
+
+        let grain_scale = self.params.grain_scaling() as i32;
+        let grain_shift = self.params.grain_scale_shift as i32;
+        let max_value = (1 << self.bit_depth) - 1;
+        let block_size = GRAIN_BLOCK_SIZE;
+        let chroma_block = if subsampling_x {
+            block_size / 2
+        } else {
+            block_size
+        };
+        let overlap = 2usize;
+
+        let (mult, luma_mult, offset) = if is_cb {
+            (
+                i32::from(self.params.cb_mult),
+                i32::from(self.params.cb_luma_mult),
+                i32::from(self.params.cb_offset),
+            )
+        } else {
+            (
+                i32::from(self.params.cr_mult),
+                i32::from(self.params.cr_luma_mult),
+                i32::from(self.params.cr_offset),
+            )
+        };
+
+        let data = frame.plane_mut(plane_idx).data_mut();
+
+        let blocks_y = (height + chroma_block - 1) / chroma_block;
+        let blocks_x = (width + chroma_block - 1) / chroma_block;
+
+        for by in 0..blocks_y {
+            for bx in 0..blocks_x {
+                let block_x0 = bx * chroma_block;
+                let block_y0 = by * chroma_block;
+
+                let seed_offset = (by * blocks_x + bx) as u16;
+                let offset_x = ((self
+                    .params
+                    .grain_seed
+                    .wrapping_add(seed_offset.wrapping_mul(41)))
+                    as usize)
+                    % template.width;
+                let offset_y = ((self
+                    .params
+                    .grain_seed
+                    .wrapping_add(seed_offset.wrapping_mul(67)))
+                    as usize)
+                    % template.height;
+
+                for local_y in 0..chroma_block {
+                    let y = block_y0 + local_y;
+                    if y >= height {
+                        break;
+                    }
+
+                    for local_x in 0..chroma_block {
+                        let x = block_x0 + local_x;
+                        if x >= width {
+                            break;
+                        }
+
+                        let idx = y * stride + x;
+                        let pixel = i32::from(data[idx]);
+
+                        let luma_x = if subsampling_x { x * 2 } else { x };
+                        let luma_y = if subsampling_y { y * 2 } else { y };
+                        let luma_idx =
+                            luma_y.min(luma_height - 1) * luma_stride + luma_x.min(luma_width - 1);
+                        let luma_pixel = i32::from(luma_data[luma_idx]);
+
+                        let scale_src = if self.params.chroma_scaling_from_luma {
+                            luma_pixel
+                        } else {
+                            pixel
+                        };
+                        let scale = i32::from(scaling.get(scale_src, self.bit_depth));
+
+                        let grain_x = (local_x + offset_x) % template.width;
+                        let grain_y = (local_y + offset_y) % template.height;
+                        let mut grain_val = i32::from(template.get(grain_x, grain_y));
+
+                        let luma_grain_x = (luma_x + offset_x) % luma_template.size();
+                        let luma_grain_y = (luma_y + offset_y) % luma_template.size();
+                        let luma_grain = i32::from(luma_template.get(luma_grain_x, luma_grain_y));
+
+                        // Overlap blending for horizontal boundary
+                        if bx > 0 && local_x < overlap {
+                            let left_seed = (by * blocks_x + (bx - 1)) as u16;
+                            let left_ox = ((self
+                                .params
+                                .grain_seed
+                                .wrapping_add(left_seed.wrapping_mul(41)))
+                                as usize)
+                                % template.width;
+                            let left_oy = ((self
+                                .params
+                                .grain_seed
+                                .wrapping_add(left_seed.wrapping_mul(67)))
+                                as usize)
+                                % template.height;
+                            let left_gx = (chroma_block + local_x + left_ox) % template.width;
+                            let left_gy = (local_y + left_oy) % template.height;
+                            let left_grain = i32::from(template.get(left_gx, left_gy));
+
+                            let (w_curr, w_left) = Self::overlap_weight(local_x);
+                            grain_val = (grain_val * w_curr + left_grain * w_left + 16) >> 5;
+                        }
+
+                        // Overlap blending for vertical boundary
+                        if by > 0 && local_y < overlap {
+                            let top_seed = ((by - 1) * blocks_x + bx) as u16;
+                            let top_ox = ((self
+                                .params
+                                .grain_seed
+                                .wrapping_add(top_seed.wrapping_mul(41)))
+                                as usize)
+                                % template.width;
+                            let top_oy = ((self
+                                .params
+                                .grain_seed
+                                .wrapping_add(top_seed.wrapping_mul(67)))
+                                as usize)
+                                % template.height;
+                            let top_gx = (local_x + top_ox) % template.width;
+                            let top_gy = (chroma_block + local_y + top_oy) % template.height;
+                            let top_grain = i32::from(template.get(top_gx, top_gy));
+
+                            let (w_curr, w_top) = Self::overlap_weight(local_y);
+                            grain_val = (grain_val * w_curr + top_grain * w_top + 16) >> 5;
+                        }
+
+                        let combined_grain = (mult * grain_val + luma_mult * luma_grain + 128) >> 8;
+                        let scaled_grain = (combined_grain * scale) >> grain_scale;
+                        let adjusted_grain = (scaled_grain + offset - 256) >> grain_shift;
+                        let result = (pixel + adjusted_grain).clamp(0, max_value);
+                        data[idx] = result as u8;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1310,5 +1711,210 @@ mod tests {
         assert_eq!(GRAIN_BLOCK_SIZE, 32);
         assert_eq!(MAX_LUMA_SCALING_POINTS, 14);
         assert_eq!(MAX_CHROMA_SCALING_POINTS, 10);
+    }
+
+    #[test]
+    fn test_overlap_weight_values() {
+        let (w0_curr, w0_other) = FilmGrainSynthesizer::overlap_weight(0);
+        assert_eq!(w0_curr, 27);
+        assert_eq!(w0_other, 5);
+        assert_eq!(w0_curr + w0_other, 32);
+
+        let (w1_curr, w1_other) = FilmGrainSynthesizer::overlap_weight(1);
+        assert_eq!(w1_curr, 17);
+        assert_eq!(w1_other, 15);
+        assert_eq!(w1_curr + w1_other, 32);
+
+        let (w2_curr, w2_other) = FilmGrainSynthesizer::overlap_weight(2);
+        assert_eq!(w2_curr, 32);
+        assert_eq!(w2_other, 0);
+    }
+
+    #[test]
+    fn test_overlap_disabled_uses_regular_grain() {
+        use crate::frame::{Plane, VideoFrame};
+        use oximedia_core::PixelFormat;
+
+        let mut synth = FilmGrainSynthesizer::new(8);
+        let mut params = FilmGrainParams::new();
+        params.apply_grain = true;
+        params.film_grain_params_present = true;
+        params.grain_seed = 42;
+        params.overlap_flag = false;
+        params.add_y_point(0, 32);
+        params.add_y_point(255, 64);
+        synth.set_params(params);
+
+        let y = Plane::with_dimensions(vec![128u8; 64 * 64], 64, 64, 64);
+        let u = Plane::with_dimensions(vec![128u8; 32 * 32], 32, 32, 32);
+        let v = Plane::with_dimensions(vec![128u8; 32 * 32], 32, 32, 32);
+        let mut frame = {
+            let mut f = VideoFrame::new(PixelFormat::Yuv420p, y.width, y.height);
+            f.planes = vec![y, u, v];
+            f
+        };
+
+        let result = synth.apply_grain_with_overlap(&mut frame);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_overlap_enabled_produces_output() {
+        use crate::frame::{Plane, VideoFrame};
+        use oximedia_core::PixelFormat;
+
+        let mut synth = FilmGrainSynthesizer::new(8);
+        let mut params = FilmGrainParams::new();
+        params.apply_grain = true;
+        params.film_grain_params_present = true;
+        params.grain_seed = 42;
+        params.overlap_flag = true;
+        params.add_y_point(0, 48);
+        params.add_y_point(255, 80);
+        synth.set_params(params);
+
+        // Use 96x96 frame to ensure multiple grain blocks (32x32) with overlap
+        let y = Plane::with_dimensions(vec![128u8; 96 * 96], 96, 96, 96);
+        let u = Plane::with_dimensions(vec![128u8; 48 * 48], 48, 48, 48);
+        let v = Plane::with_dimensions(vec![128u8; 48 * 48], 48, 48, 48);
+        let mut frame = {
+            let mut f = VideoFrame::new(PixelFormat::Yuv420p, y.width, y.height);
+            f.planes = vec![y, u, v];
+            f
+        };
+
+        let result = synth.apply_grain_with_overlap(&mut frame);
+        assert!(result.is_ok());
+
+        // Verify that grain was actually applied (not all pixels remain 128)
+        let data = frame.plane(0).data();
+        let changed = data.iter().filter(|&&p| p != 128).count();
+        assert!(changed > 0, "Overlap grain should modify some pixels");
+    }
+
+    #[test]
+    fn test_overlap_vs_non_overlap_differ() {
+        use crate::frame::{Plane, VideoFrame};
+        use oximedia_core::PixelFormat;
+
+        fn make_synth(overlap: bool) -> FilmGrainSynthesizer {
+            let mut synth = FilmGrainSynthesizer::new(8);
+            let mut params = FilmGrainParams::new();
+            params.apply_grain = true;
+            params.film_grain_params_present = true;
+            params.grain_seed = 999;
+            params.overlap_flag = overlap;
+            params.add_y_point(0, 40);
+            params.add_y_point(255, 80);
+            synth.set_params(params);
+            synth
+        }
+
+        fn make_frame() -> VideoFrame {
+            let y = Plane::with_dimensions(vec![128u8; 96 * 96], 96, 96, 96);
+            let u = Plane::with_dimensions(vec![128u8; 48 * 48], 48, 48, 48);
+            let v = Plane::with_dimensions(vec![128u8; 48 * 48], 48, 48, 48);
+            {
+                let mut f = VideoFrame::new(PixelFormat::Yuv420p, y.width, y.height);
+                f.planes = vec![y, u, v];
+                f
+            }
+        }
+
+        let synth_no_overlap = make_synth(false);
+        let mut frame_no = make_frame();
+        synth_no_overlap
+            .apply_grain(&mut frame_no)
+            .expect("no overlap grain");
+
+        let synth_overlap = make_synth(true);
+        let mut frame_ov = make_frame();
+        synth_overlap
+            .apply_grain_with_overlap(&mut frame_ov)
+            .expect("overlap grain");
+
+        // The two should produce different results because overlap blending
+        // changes grain at block boundaries
+        let data_no = frame_no.plane(0).data();
+        let data_ov = frame_ov.plane(0).data();
+        let diff_count = data_no
+            .iter()
+            .zip(data_ov.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            diff_count > 0,
+            "Overlap and non-overlap grain should differ at boundaries"
+        );
+    }
+
+    // ── Per-block grain tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_per_block_grain_table_empty() {
+        use super::super::film_grain_table::{BlockGrainOverride, PerBlockGrainTable};
+        let base = FilmGrainParams::new();
+        let table = PerBlockGrainTable::new();
+        assert!(table.is_empty());
+        assert_eq!(table.resolve(&base, 0, 0).grain_seed, base.grain_seed);
+    }
+
+    #[test]
+    fn test_block_grain_override_clamps() {
+        use super::super::film_grain_table::BlockGrainOverride;
+        let mut base = FilmGrainParams::new();
+        base.grain_scaling_minus_8 = 3;
+        let mut ov = BlockGrainOverride::new(0, 0);
+        ov.scaling_delta = 10;
+        assert_eq!(ov.apply(&base).grain_scaling_minus_8, 3);
+        ov.scaling_delta = -10;
+        base.grain_scaling_minus_8 = 0;
+        assert_eq!(ov.apply(&base).grain_scaling_minus_8, 0);
+    }
+
+    #[test]
+    fn test_per_block_table_resolve() {
+        use super::super::film_grain_table::{BlockGrainOverride, PerBlockGrainTable};
+        let mut base = FilmGrainParams::new();
+        base.grain_seed = 100;
+        let mut table = PerBlockGrainTable::new();
+        let mut o0 = BlockGrainOverride::new(0, 0);
+        o0.seed_xor = 0xAA;
+        table.set(o0);
+        let mut o1 = BlockGrainOverride::new(1, 0);
+        o1.seed_xor = 0x55;
+        table.set(o1);
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.resolve(&base, 0, 0).grain_seed, 100 ^ 0xAA);
+        assert_eq!(table.resolve(&base, 1, 0).grain_seed, 100 ^ 0x55);
+        assert_eq!(table.resolve(&base, 9, 9).grain_seed, 100);
+    }
+
+    #[test]
+    fn test_apply_grain_per_block_ok() {
+        use super::super::film_grain_table::{BlockGrainOverride, PerBlockGrainTable};
+        use crate::frame::{Plane, VideoFrame};
+        use oximedia_core::PixelFormat;
+        let mut synth = FilmGrainSynthesizer::new(8);
+        let mut params = FilmGrainParams::new();
+        params.apply_grain = true;
+        params.film_grain_params_present = true;
+        params.grain_seed = 7;
+        params.add_y_point(0, 32);
+        params.add_y_point(255, 64);
+        synth.set_params(params);
+        let y = Plane::with_dimensions(vec![128u8; 64 * 64], 64, 64, 64);
+        let u = Plane::with_dimensions(vec![128u8; 32 * 32], 32, 32, 32);
+        let v = Plane::with_dimensions(vec![128u8; 32 * 32], 32, 32, 32);
+        let mut frame = {
+            let mut f = VideoFrame::new(PixelFormat::Yuv420p, y.width, y.height);
+            f.planes = vec![y, u, v];
+            f
+        };
+        let mut table = PerBlockGrainTable::new();
+        let mut ov = BlockGrainOverride::new(0, 0);
+        ov.seed_xor = 0xBEEF;
+        table.set(ov);
+        assert!(synth.apply_grain_per_block(&mut frame, &table).is_ok());
     }
 }

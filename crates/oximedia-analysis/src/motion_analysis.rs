@@ -324,6 +324,351 @@ impl MotionFieldStats {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Full Camera Motion Classifier
+// ---------------------------------------------------------------------------
+
+/// Detailed camera motion classification result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CameraMotionClassification {
+    /// Primary motion type.
+    pub motion_type: CameraMotion,
+    /// Confidence in the classification (0.0-1.0).
+    pub confidence: f32,
+    /// Magnitude of the detected motion (pixels/frame).
+    pub magnitude: f32,
+    /// Direction angle in degrees (0 = right, 90 = down, etc.).
+    pub direction_degrees: f32,
+    /// Whether motion appears "handheld" (small, noisy jitter).
+    pub is_handheld: bool,
+}
+
+/// Configuration for camera motion classification.
+#[derive(Debug, Clone)]
+pub struct CameraMotionConfig {
+    /// Motion magnitude below which the camera is considered static.
+    pub static_threshold: f32,
+    /// Maximum magnitude to be considered handheld jitter.
+    pub handheld_max_magnitude: f32,
+    /// Minimum variance-to-mean ratio to flag handheld.
+    pub handheld_variance_ratio: f32,
+    /// Zoom detection: ratio of magnitude variance to mean magnitude
+    /// above which a radial pattern is considered zoom.
+    pub zoom_variance_threshold: f32,
+}
+
+impl Default for CameraMotionConfig {
+    fn default() -> Self {
+        Self {
+            static_threshold: 0.5,
+            handheld_max_magnitude: 2.0,
+            handheld_variance_ratio: 0.5,
+            zoom_variance_threshold: 1.5,
+        }
+    }
+}
+
+/// Classify camera motion from a motion field with full detail.
+///
+/// This implements a multi-criterion classifier:
+/// 1. **Static**: very low mean magnitude.
+/// 2. **Handheld**: small noisy jitter (low magnitude, high variance ratio).
+/// 3. **Zoom**: radial divergence/convergence pattern from centre.
+/// 4. **Pan/Tilt**: dominant horizontal or vertical translation.
+/// 5. **Roll**: rotational pattern around centre.
+/// 6. **Complex**: no single dominant pattern.
+#[must_use]
+pub fn classify_camera_motion_detailed(
+    field: &MotionField,
+    config: &CameraMotionConfig,
+) -> CameraMotionClassification {
+    let mean = field.mean_vector();
+    let mag = mean.magnitude();
+    let variance = field.magnitude_variance();
+    let mean_mag = field.mean_magnitude();
+
+    // 1. Static
+    if mean_mag < config.static_threshold {
+        return CameraMotionClassification {
+            motion_type: CameraMotion::Static,
+            confidence: 1.0 - (mean_mag / config.static_threshold).min(1.0),
+            magnitude: mean_mag,
+            direction_degrees: 0.0,
+            is_handheld: false,
+        };
+    }
+
+    let angle_deg = mean.angle().to_degrees();
+    // Normalise to 0..360
+    let direction_degrees = if angle_deg < 0.0 {
+        angle_deg + 360.0
+    } else {
+        angle_deg
+    };
+
+    // 2. Handheld jitter
+    let variance_ratio = if mean_mag > f32::EPSILON {
+        variance / (mean_mag * mean_mag)
+    } else {
+        0.0
+    };
+    if mean_mag < config.handheld_max_magnitude && variance_ratio > config.handheld_variance_ratio {
+        return CameraMotionClassification {
+            motion_type: CameraMotion::Static,
+            confidence: 0.6,
+            magnitude: mean_mag,
+            direction_degrees,
+            is_handheld: true,
+        };
+    }
+
+    // 3. Zoom detection — check for radial divergence/convergence
+    let zoom_score = compute_zoom_score(field);
+    if zoom_score.abs() > config.zoom_variance_threshold {
+        let motion_type = if zoom_score > 0.0 {
+            CameraMotion::ZoomIn
+        } else {
+            CameraMotion::ZoomOut
+        };
+        return CameraMotionClassification {
+            motion_type,
+            confidence: (zoom_score.abs() / 5.0).min(1.0),
+            magnitude: mean_mag,
+            direction_degrees,
+            is_handheld: false,
+        };
+    }
+
+    // 4. Roll detection — check for rotational pattern.
+    // Only consider roll when the mean translation vector is small
+    // relative to the mean magnitude (i.e. motion is not dominated by
+    // a coherent translation).
+    let translation_ratio = if mean_mag > f32::EPSILON {
+        mag / mean_mag
+    } else {
+        0.0
+    };
+    let roll_score = compute_roll_score(field);
+    if roll_score > 1.0 && translation_ratio < 0.5 {
+        return CameraMotionClassification {
+            motion_type: CameraMotion::Roll,
+            confidence: (roll_score / 5.0).min(1.0),
+            magnitude: mean_mag,
+            direction_degrees,
+            is_handheld: false,
+        };
+    }
+
+    // 5. Pan/Tilt — dominant translation direction
+    let pi = std::f32::consts::PI;
+    let abs_angle = mean.angle().abs();
+
+    // High variance relative to translation magnitude => complex
+    if variance > mag * mag * 2.0 {
+        return CameraMotionClassification {
+            motion_type: CameraMotion::Complex,
+            confidence: 0.5,
+            magnitude: mean_mag,
+            direction_degrees,
+            is_handheld: false,
+        };
+    }
+
+    // Pan: horizontal dominant
+    if abs_angle < pi / 4.0 || abs_angle > 3.0 * pi / 4.0 {
+        let confidence = (mag / mean_mag).min(1.0);
+        return CameraMotionClassification {
+            motion_type: CameraMotion::Pan,
+            confidence,
+            magnitude: mean_mag,
+            direction_degrees,
+            is_handheld: false,
+        };
+    }
+
+    // Tilt: vertical dominant
+    let confidence = (mag / mean_mag).min(1.0);
+    CameraMotionClassification {
+        motion_type: CameraMotion::Tilt,
+        confidence,
+        magnitude: mean_mag,
+        direction_degrees,
+        is_handheld: false,
+    }
+}
+
+/// Compute a "zoom score": positive = zoom in, negative = zoom out.
+///
+/// Measures radial divergence from the frame centre. Vectors pointing
+/// outward from the centre indicate zoom-in; inward indicates zoom-out.
+fn compute_zoom_score(field: &MotionField) -> f32 {
+    if field.vectors.is_empty() {
+        return 0.0;
+    }
+    let cols = field.cols();
+    let rows = field.rows();
+    if cols == 0 || rows == 0 {
+        return 0.0;
+    }
+
+    let cx = (cols as f32 - 1.0) / 2.0;
+    let cy = (rows as f32 - 1.0) / 2.0;
+
+    let mut radial_sum = 0.0f32;
+    let mut count = 0u32;
+
+    for r in 0..rows {
+        for c in 0..cols {
+            let idx = r * cols + c;
+            if idx >= field.vectors.len() {
+                continue;
+            }
+            let v = &field.vectors[idx];
+            let rx = c as f32 - cx;
+            let ry = r as f32 - cy;
+            let r_mag = (rx * rx + ry * ry).sqrt();
+            if r_mag < 0.5 {
+                continue; // skip centre block
+            }
+            // Dot product of (motion vector) and (radial direction) gives
+            // radial component: positive = outward = zoom in
+            let radial = (v.dx * rx + v.dy * ry) / r_mag;
+            radial_sum += radial;
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return 0.0;
+    }
+    radial_sum / count as f32
+}
+
+/// Compute a "roll score": higher means more rotational pattern.
+///
+/// Measures tangential (perpendicular to radial) component of motion vectors.
+fn compute_roll_score(field: &MotionField) -> f32 {
+    if field.vectors.is_empty() {
+        return 0.0;
+    }
+    let cols = field.cols();
+    let rows = field.rows();
+    if cols == 0 || rows == 0 {
+        return 0.0;
+    }
+
+    let cx = (cols as f32 - 1.0) / 2.0;
+    let cy = (rows as f32 - 1.0) / 2.0;
+
+    let mut tangential_sum = 0.0f32;
+    let mut count = 0u32;
+
+    for r in 0..rows {
+        for c in 0..cols {
+            let idx = r * cols + c;
+            if idx >= field.vectors.len() {
+                continue;
+            }
+            let v = &field.vectors[idx];
+            let rx = c as f32 - cx;
+            let ry = r as f32 - cy;
+            let r_mag = (rx * rx + ry * ry).sqrt();
+            if r_mag < 0.5 {
+                continue;
+            }
+            // Tangential direction is perpendicular to radial: (-ry, rx) / r_mag
+            let tang = (-v.dx * ry + v.dy * rx) / r_mag;
+            tangential_sum += tang.abs();
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return 0.0;
+    }
+    tangential_sum / count as f32
+}
+
+/// Stateful camera motion tracker that accumulates per-frame classifications.
+#[derive(Debug)]
+pub struct CameraMotionTracker {
+    config: CameraMotionConfig,
+    estimator: BlockMatchingEstimator,
+    classifications: Vec<CameraMotionClassification>,
+}
+
+impl CameraMotionTracker {
+    /// Create a new tracker.
+    #[must_use]
+    pub fn new(config: CameraMotionConfig, block_size: usize, search_radius: usize) -> Self {
+        Self {
+            config,
+            estimator: BlockMatchingEstimator::new(block_size, search_radius),
+            classifications: Vec::new(),
+        }
+    }
+
+    /// Feed a Y-plane frame. Returns the classification if a motion field
+    /// was produced (i.e., not the first frame).
+    pub fn push_frame(
+        &mut self,
+        y_plane: &[u8],
+        width: usize,
+        height: usize,
+    ) -> Option<CameraMotionClassification> {
+        let field = self.estimator.estimate(y_plane, width, height)?;
+        let cls = classify_camera_motion_detailed(&field, &self.config);
+        self.classifications.push(cls.clone());
+        Some(cls)
+    }
+
+    /// Return all classifications so far.
+    #[must_use]
+    pub fn classifications(&self) -> &[CameraMotionClassification] {
+        &self.classifications
+    }
+
+    /// Compute dominant camera motion across all frames.
+    #[must_use]
+    pub fn dominant_motion(&self) -> CameraMotion {
+        if self.classifications.is_empty() {
+            return CameraMotion::Static;
+        }
+
+        let mut counts = [0usize; 7];
+        for cls in &self.classifications {
+            let idx = match cls.motion_type {
+                CameraMotion::Static => 0,
+                CameraMotion::Pan => 1,
+                CameraMotion::Tilt => 2,
+                CameraMotion::ZoomIn => 3,
+                CameraMotion::ZoomOut => 4,
+                CameraMotion::Roll => 5,
+                CameraMotion::Complex => 6,
+            };
+            counts[idx] += 1;
+        }
+
+        let motions = [
+            CameraMotion::Static,
+            CameraMotion::Pan,
+            CameraMotion::Tilt,
+            CameraMotion::ZoomIn,
+            CameraMotion::ZoomOut,
+            CameraMotion::Roll,
+            CameraMotion::Complex,
+        ];
+
+        let mut best_idx = 0;
+        for (i, &c) in counts.iter().enumerate() {
+            if c > counts[best_idx] {
+                best_idx = i;
+            }
+        }
+        motions[best_idx]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +792,140 @@ mod tests {
     #[test]
     fn test_camera_motion_default() {
         assert_eq!(CameraMotion::default(), CameraMotion::Static);
+    }
+
+    // -----------------------------------------------------------------------
+    // Camera motion classification tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_classify_detailed_static() {
+        let field = MotionField::new(32, 32, 8);
+        let config = CameraMotionConfig::default();
+        let cls = classify_camera_motion_detailed(&field, &config);
+        assert_eq!(cls.motion_type, CameraMotion::Static);
+        assert!(cls.confidence > 0.5);
+        assert!(!cls.is_handheld);
+    }
+
+    #[test]
+    fn test_classify_detailed_pan() {
+        let mut field = MotionField::new(32, 32, 8);
+        for v in &mut field.vectors {
+            v.dx = 5.0;
+            v.dy = 0.3;
+        }
+        let config = CameraMotionConfig::default();
+        let cls = classify_camera_motion_detailed(&field, &config);
+        assert_eq!(cls.motion_type, CameraMotion::Pan);
+        assert!(cls.magnitude > 4.0);
+    }
+
+    #[test]
+    fn test_classify_detailed_tilt() {
+        let mut field = MotionField::new(32, 32, 8);
+        for v in &mut field.vectors {
+            v.dx = 0.2;
+            v.dy = 5.0;
+        }
+        let config = CameraMotionConfig::default();
+        let cls = classify_camera_motion_detailed(&field, &config);
+        assert_eq!(cls.motion_type, CameraMotion::Tilt);
+    }
+
+    #[test]
+    fn test_classify_detailed_zoom_in() {
+        // Radial outward vectors from centre
+        let mut field = MotionField::new(32, 32, 8);
+        let cols = field.cols();
+        let rows = field.rows();
+        let cx = (cols as f32 - 1.0) / 2.0;
+        let cy = (rows as f32 - 1.0) / 2.0;
+        for r in 0..rows {
+            for c in 0..cols {
+                let idx = r * cols + c;
+                let rx = c as f32 - cx;
+                let ry = r as f32 - cy;
+                let mag = (rx * rx + ry * ry).sqrt().max(0.01);
+                field.vectors[idx] = MotionVector::new(rx / mag * 3.0, ry / mag * 3.0);
+            }
+        }
+        let config = CameraMotionConfig::default();
+        let cls = classify_camera_motion_detailed(&field, &config);
+        assert_eq!(cls.motion_type, CameraMotion::ZoomIn);
+    }
+
+    #[test]
+    fn test_classify_detailed_zoom_out() {
+        // Radial inward vectors toward centre
+        let mut field = MotionField::new(32, 32, 8);
+        let cols = field.cols();
+        let rows = field.rows();
+        let cx = (cols as f32 - 1.0) / 2.0;
+        let cy = (rows as f32 - 1.0) / 2.0;
+        for r in 0..rows {
+            for c in 0..cols {
+                let idx = r * cols + c;
+                let rx = c as f32 - cx;
+                let ry = r as f32 - cy;
+                let mag = (rx * rx + ry * ry).sqrt().max(0.01);
+                field.vectors[idx] = MotionVector::new(-rx / mag * 3.0, -ry / mag * 3.0);
+            }
+        }
+        let config = CameraMotionConfig::default();
+        let cls = classify_camera_motion_detailed(&field, &config);
+        assert_eq!(cls.motion_type, CameraMotion::ZoomOut);
+    }
+
+    #[test]
+    fn test_camera_motion_tracker_empty() {
+        let tracker = CameraMotionTracker::new(CameraMotionConfig::default(), 8, 4);
+        assert_eq!(tracker.dominant_motion(), CameraMotion::Static);
+        assert!(tracker.classifications().is_empty());
+    }
+
+    #[test]
+    fn test_camera_motion_tracker_first_frame_none() {
+        let mut tracker = CameraMotionTracker::new(CameraMotionConfig::default(), 8, 2);
+        let frame = vec![128u8; 32 * 32];
+        let result = tracker.push_frame(&frame, 32, 32);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_camera_motion_tracker_two_frames() {
+        let mut tracker = CameraMotionTracker::new(CameraMotionConfig::default(), 8, 2);
+        let frame1 = vec![128u8; 32 * 32];
+        let frame2 = vec![130u8; 32 * 32];
+        let _ = tracker.push_frame(&frame1, 32, 32);
+        let result = tracker.push_frame(&frame2, 32, 32);
+        assert!(result.is_some());
+        assert_eq!(tracker.classifications().len(), 1);
+    }
+
+    #[test]
+    fn test_zoom_score_zero_field() {
+        let field = MotionField::new(32, 32, 8);
+        let score = compute_zoom_score(&field);
+        assert!(score.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_roll_score_zero_field() {
+        let field = MotionField::new(32, 32, 8);
+        let score = compute_roll_score(&field);
+        assert!(score.abs() < 0.01);
+    }
+
+    #[test]
+    fn test_classification_direction_degrees_range() {
+        let mut field = MotionField::new(16, 16, 8);
+        for v in &mut field.vectors {
+            v.dx = -3.0;
+            v.dy = 4.0;
+        }
+        let config = CameraMotionConfig::default();
+        let cls = classify_camera_motion_detailed(&field, &config);
+        assert!(cls.direction_degrees >= 0.0 && cls.direction_degrees < 360.0);
     }
 }

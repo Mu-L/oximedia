@@ -13,6 +13,346 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use uuid::Uuid;
 
+// ──────────────────────────────────────────────────────────────────────────────
+// PlayReady System ID constant (9a04f079-9840-4286-ab92-e65be0885f95)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// PlayReady DRM System ID as a 16-byte array (MPEG CENC / ISOBMFF PSSH).
+///
+/// UUID: `9a04f079-9840-4286-ab92-e65be0885f95`
+pub const PLAYREADY_SYSTEM_ID: [u8; 16] = [
+    0x9a, 0x04, 0xf0, 0x79, 0x98, 0x40, 0x42, 0x86, 0xab, 0x92, 0xe6, 0x5b, 0xe0, 0x88, 0x5f, 0x95,
+];
+
+// ──────────────────────────────────────────────────────────────────────────────
+// PlayReadySimpleVersion — simplified 3-variant enum for PlayReadyHeaderObject
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Simplified PlayReady specification version selector used by
+/// [`PlayReadyHeaderObject`].
+///
+/// Corresponds to the three generations of the PlayReady specification that
+/// carry distinct header XML structures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayReadySpecVersion {
+    /// PlayReady 2.0 — original WRMHEADER v2 schema.
+    V2_0,
+    /// PlayReady 3.0 — v3 schema with enhanced policy fields.
+    V3_0,
+    /// PlayReady 4.0 — v4 schema, current generation.
+    V4_0,
+}
+
+impl PlayReadySpecVersion {
+    /// Map to the canonical WRMHEADER `version` attribute string.
+    pub fn header_version_str(self) -> &'static str {
+        match self {
+            PlayReadySpecVersion::V2_0 => "4.0.0.0",
+            PlayReadySpecVersion::V3_0 => "4.2.0.0",
+            PlayReadySpecVersion::V4_0 => "4.3.0.0",
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// PlayReadyHeaderObject — simplified API matching the DASH/HLS packaging spec
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// High-level representation of a **PlayReady Header Object** (PRO), as
+/// described in the Microsoft PlayReady Header Specification.
+///
+/// This type provides a cleaner, simpler surface than [`PlayReadyHeader`] and
+/// uses raw `Vec<u8>` key IDs instead of [`Uuid`] to align with common
+/// multi-DRM packaging workflows.
+#[derive(Debug, Clone)]
+pub struct PlayReadyHeaderObject {
+    /// PlayReady specification version for this header.
+    pub version: PlayReadySpecVersion,
+    /// Raw 16-byte key identifier.
+    pub key_id: Vec<u8>,
+    /// License Acquisition URL (`LA_URL`).
+    pub la_url: Option<String>,
+    /// License UI URL (`LUI_URL`).
+    pub lui_url: Option<String>,
+    /// Domain service identifier (`DS_ID`).
+    pub ds_id: Option<String>,
+}
+
+impl PlayReadyHeaderObject {
+    /// Create a new `PlayReadyHeaderObject` using PlayReady 4.0 by default.
+    ///
+    /// Returns an error when `key_id` is not exactly 16 bytes.
+    pub fn new(key_id: Vec<u8>, la_url: Option<String>) -> Result<Self> {
+        if key_id.len() != 16 {
+            return Err(DrmError::InvalidKey(format!(
+                "PlayReady key_id must be 16 bytes, got {}",
+                key_id.len()
+            )));
+        }
+        Ok(Self {
+            version: PlayReadySpecVersion::V4_0,
+            key_id,
+            la_url,
+            lui_url: None,
+            ds_id: None,
+        })
+    }
+
+    /// Override the specification version.
+    pub fn with_version(mut self, version: PlayReadySpecVersion) -> Self {
+        self.version = version;
+        self
+    }
+
+    /// Set the License UI URL.
+    pub fn with_lui_url(mut self, lui_url: String) -> Self {
+        self.lui_url = Some(lui_url);
+        self
+    }
+
+    /// Set the Domain Service ID.
+    pub fn with_ds_id(mut self, ds_id: String) -> Self {
+        self.ds_id = Some(ds_id);
+        self
+    }
+
+    /// Serialise to a PlayReady WRMHEADER XML string.
+    ///
+    /// The output follows the `WRMHEADER` schema used by DASH/HLS packagers.
+    pub fn to_xml(&self) -> Result<String> {
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+
+        writer
+            .write_event(Event::Decl(BytesDecl::new("1.0", Some("utf-8"), None)))
+            .map_err(|e| DrmError::XmlError(e.to_string()))?;
+
+        let mut wrmheader = BytesStart::new("WRMHEADER");
+        wrmheader.push_attribute((
+            "xmlns",
+            "http://schemas.microsoft.com/DRM/2007/03/PlayReadyHeader",
+        ));
+        wrmheader.push_attribute(("version", self.version.header_version_str()));
+        writer
+            .write_event(Event::Start(wrmheader))
+            .map_err(|e| DrmError::XmlError(e.to_string()))?;
+
+        writer
+            .write_event(Event::Start(BytesStart::new("DATA")))
+            .map_err(|e| DrmError::XmlError(e.to_string()))?;
+
+        // <PROTECTINFO>
+        writer
+            .write_event(Event::Start(BytesStart::new("PROTECTINFO")))
+            .map_err(|e| DrmError::XmlError(e.to_string()))?;
+        writer
+            .write_event(Event::Start(BytesStart::new("ALGID")))
+            .map_err(|e| DrmError::XmlError(e.to_string()))?;
+        writer
+            .write_event(Event::Text(BytesText::new("AESCTR")))
+            .map_err(|e| DrmError::XmlError(e.to_string()))?;
+        writer
+            .write_event(Event::End(BytesEnd::new("ALGID")))
+            .map_err(|e| DrmError::XmlError(e.to_string()))?;
+        writer
+            .write_event(Event::End(BytesEnd::new("PROTECTINFO")))
+            .map_err(|e| DrmError::XmlError(e.to_string()))?;
+
+        // <KID> — base64-encoded raw 16-byte key ID
+        writer
+            .write_event(Event::Start(BytesStart::new("KID")))
+            .map_err(|e| DrmError::XmlError(e.to_string()))?;
+        let kid_b64 = STANDARD.encode(&self.key_id);
+        writer
+            .write_event(Event::Text(BytesText::new(&kid_b64)))
+            .map_err(|e| DrmError::XmlError(e.to_string()))?;
+        writer
+            .write_event(Event::End(BytesEnd::new("KID")))
+            .map_err(|e| DrmError::XmlError(e.to_string()))?;
+
+        if let Some(ref la_url) = self.la_url {
+            writer
+                .write_event(Event::Start(BytesStart::new("LA_URL")))
+                .map_err(|e| DrmError::XmlError(e.to_string()))?;
+            writer
+                .write_event(Event::Text(BytesText::new(la_url)))
+                .map_err(|e| DrmError::XmlError(e.to_string()))?;
+            writer
+                .write_event(Event::End(BytesEnd::new("LA_URL")))
+                .map_err(|e| DrmError::XmlError(e.to_string()))?;
+        }
+
+        if let Some(ref lui_url) = self.lui_url {
+            writer
+                .write_event(Event::Start(BytesStart::new("LUI_URL")))
+                .map_err(|e| DrmError::XmlError(e.to_string()))?;
+            writer
+                .write_event(Event::Text(BytesText::new(lui_url)))
+                .map_err(|e| DrmError::XmlError(e.to_string()))?;
+            writer
+                .write_event(Event::End(BytesEnd::new("LUI_URL")))
+                .map_err(|e| DrmError::XmlError(e.to_string()))?;
+        }
+
+        if let Some(ref ds_id) = self.ds_id {
+            writer
+                .write_event(Event::Start(BytesStart::new("DS_ID")))
+                .map_err(|e| DrmError::XmlError(e.to_string()))?;
+            writer
+                .write_event(Event::Text(BytesText::new(ds_id)))
+                .map_err(|e| DrmError::XmlError(e.to_string()))?;
+            writer
+                .write_event(Event::End(BytesEnd::new("DS_ID")))
+                .map_err(|e| DrmError::XmlError(e.to_string()))?;
+        }
+
+        writer
+            .write_event(Event::End(BytesEnd::new("DATA")))
+            .map_err(|e| DrmError::XmlError(e.to_string()))?;
+        writer
+            .write_event(Event::End(BytesEnd::new("WRMHEADER")))
+            .map_err(|e| DrmError::XmlError(e.to_string()))?;
+
+        let bytes = writer.into_inner().into_inner();
+        String::from_utf8(bytes).map_err(|e| DrmError::XmlError(e.to_string()))
+    }
+
+    /// Parse a `PlayReadyHeaderObject` from a WRMHEADER XML string.
+    ///
+    /// Returns [`DrmError::XmlError`] on structural problems and
+    /// [`DrmError::InvalidKey`] when the decoded `KID` is not 16 bytes.
+    pub fn parse_xml(xml: &str) -> Result<Self> {
+        let mut reader = Reader::from_str(xml);
+        reader.config_mut().trim_text(true);
+
+        let mut key_id: Option<Vec<u8>> = None;
+        let mut la_url: Option<String> = None;
+        let mut lui_url: Option<String> = None;
+        let mut ds_id: Option<String> = None;
+        let mut spec_version = PlayReadySpecVersion::V4_0;
+        let mut current_element = String::new();
+        let mut buf = Vec::new();
+
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(e)) => {
+                    current_element = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    if current_element == "WRMHEADER" {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"version" {
+                                let v = String::from_utf8_lossy(&attr.value).to_string();
+                                spec_version = match v.as_str() {
+                                    "4.0.0.0" | "4.1.0.0" => PlayReadySpecVersion::V2_0,
+                                    "4.2.0.0" => PlayReadySpecVersion::V3_0,
+                                    _ => PlayReadySpecVersion::V4_0,
+                                };
+                            }
+                        }
+                    }
+                }
+                Ok(Event::Text(e)) => {
+                    let text = String::from_utf8_lossy(e.as_ref());
+                    match current_element.as_str() {
+                        "KID" => {
+                            let decoded = STANDARD
+                                .decode(text.trim())
+                                .map_err(DrmError::Base64Error)?;
+                            if decoded.len() != 16 {
+                                return Err(DrmError::InvalidKey(format!(
+                                    "decoded KID must be 16 bytes, got {}",
+                                    decoded.len()
+                                )));
+                            }
+                            key_id = Some(decoded);
+                        }
+                        "LA_URL" => {
+                            la_url = Some(text.to_string());
+                        }
+                        "LUI_URL" => {
+                            lui_url = Some(text.to_string());
+                        }
+                        "DS_ID" => {
+                            ds_id = Some(text.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(DrmError::XmlError(e.to_string())),
+                _ => {}
+            }
+            buf.clear();
+        }
+
+        let key_id = key_id.ok_or_else(|| {
+            DrmError::XmlError("WRMHEADER is missing a <KID> element".to_string())
+        })?;
+
+        Ok(Self {
+            version: spec_version,
+            key_id,
+            la_url,
+            lui_url,
+            ds_id,
+        })
+    }
+
+    /// Wrap the serialised XML inside a full ISO-BMFF PSSH box for inclusion
+    /// in DASH/CMAF/HLS streams.
+    ///
+    /// Layout:
+    /// ```text
+    /// 4 bytes  : box size (big-endian)
+    /// 4 bytes  : 'pssh'
+    /// 1 byte   : version = 0
+    /// 3 bytes  : flags = 0
+    /// 16 bytes : PLAYREADY_SYSTEM_ID
+    /// 4 bytes  : data length
+    /// N bytes  : PlayReady Header Object binary blob
+    ///              (2-byte record count LE + per-record 2-byte type LE +
+    ///               2-byte len LE + UTF-16LE XML)
+    /// ```
+    pub fn to_pssh_box(&self) -> Result<Vec<u8>> {
+        let xml = self.to_xml()?;
+
+        // Encode XML as UTF-16LE
+        let utf16_bytes = encode_utf16_le(&xml);
+
+        // PlayReady Header Object binary format:
+        //   record_count       : u16 LE  (always 1)
+        //   record[0].type     : u16 LE  (0x0001 = Rights Management Header)
+        //   record[0].length   : u16 LE
+        //   record[0].value    : utf16_bytes
+        let record_type: u16 = 0x0001;
+        let record_len: u16 = utf16_bytes.len() as u16;
+        // Header Object size = 4 (object_size u32) + 2 (record_count) +
+        //                      2 (type) + 2 (len) + utf16_bytes.len()
+        let object_size: u32 = 4 + 2 + 2 + 2 + utf16_bytes.len() as u32;
+
+        let mut pro = Vec::with_capacity(object_size as usize);
+        pro.extend_from_slice(&object_size.to_le_bytes());
+        pro.extend_from_slice(&1u16.to_le_bytes()); // record_count
+        pro.extend_from_slice(&record_type.to_le_bytes());
+        pro.extend_from_slice(&record_len.to_le_bytes());
+        pro.extend_from_slice(&utf16_bytes);
+
+        let total_size: u32 = (4 + 4 + 1 + 3 + 16 + 4 + pro.len()) as u32;
+        let mut box_bytes = Vec::with_capacity(total_size as usize);
+        box_bytes.extend_from_slice(&total_size.to_be_bytes());
+        box_bytes.extend_from_slice(b"pssh");
+        box_bytes.push(0u8);
+        box_bytes.extend_from_slice(&[0u8; 3]);
+        box_bytes.extend_from_slice(&PLAYREADY_SYSTEM_ID);
+        box_bytes.extend_from_slice(&(pro.len() as u32).to_be_bytes());
+        box_bytes.extend_from_slice(&pro);
+        Ok(box_bytes)
+    }
+}
+
+/// Encode a UTF-8 string to a UTF-16LE byte vector.
+fn encode_utf16_le(s: &str) -> Vec<u8> {
+    s.encode_utf16().flat_map(|c| c.to_le_bytes()).collect()
+}
+
 /// PlayReady header version
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayReadyVersion {
@@ -616,5 +956,84 @@ mod tests {
         let utf16 = encode_utf16(s);
         assert!(!utf16.is_empty());
         assert_eq!(utf16.len(), 8); // 4 chars * 2 bytes
+    }
+
+    // ── Tests for new PlayReadyHeaderObject / PLAYREADY_SYSTEM_ID ─────────────
+
+    #[test]
+    fn test_playready_system_id_bytes() {
+        assert_eq!(PLAYREADY_SYSTEM_ID[0], 0x9a);
+        assert_eq!(PLAYREADY_SYSTEM_ID[15], 0x95);
+        assert_eq!(PLAYREADY_SYSTEM_ID.len(), 16);
+    }
+
+    #[test]
+    fn test_playready_header_object_new_rejects_bad_key() {
+        let short_key = vec![0u8; 8];
+        let result = PlayReadyHeaderObject::new(short_key, None);
+        assert!(
+            result.is_err(),
+            "should reject key_id shorter than 16 bytes"
+        );
+    }
+
+    #[test]
+    fn test_playready_header_object_to_xml_roundtrip() {
+        let key_id: Vec<u8> = (0u8..16).collect();
+        let obj =
+            PlayReadyHeaderObject::new(key_id.clone(), Some("https://la.example.com".to_string()))
+                .expect("valid 16-byte key_id");
+
+        let xml = obj.to_xml().expect("to_xml should succeed");
+        assert!(
+            xml.contains("WRMHEADER"),
+            "XML must contain WRMHEADER element"
+        );
+        assert!(xml.contains("LA_URL"), "XML must contain LA_URL element");
+
+        let parsed = PlayReadyHeaderObject::parse_xml(&xml).expect("parse_xml should succeed");
+        assert_eq!(parsed.key_id, key_id);
+        assert_eq!(parsed.la_url.as_deref(), Some("https://la.example.com"));
+    }
+
+    #[test]
+    fn test_playready_header_object_optional_fields() {
+        let key_id: Vec<u8> = vec![0xabu8; 16];
+        let obj = PlayReadyHeaderObject::new(key_id.clone(), None)
+            .expect("valid 16-byte key_id")
+            .with_version(PlayReadySpecVersion::V3_0)
+            .with_lui_url("https://lui.example.com".to_string())
+            .with_ds_id("domain-123".to_string());
+
+        let xml = obj.to_xml().expect("to_xml should succeed");
+        assert!(xml.contains("LUI_URL"), "XML must contain LUI_URL");
+        assert!(xml.contains("DS_ID"), "XML must contain DS_ID");
+        assert!(xml.contains("4.2.0.0"), "V3_0 maps to version 4.2.0.0");
+
+        let parsed = PlayReadyHeaderObject::parse_xml(&xml).expect("parse_xml should succeed");
+        assert_eq!(parsed.version, PlayReadySpecVersion::V3_0);
+        assert_eq!(parsed.lui_url.as_deref(), Some("https://lui.example.com"));
+        assert_eq!(parsed.ds_id.as_deref(), Some("domain-123"));
+    }
+
+    #[test]
+    fn test_playready_header_object_to_pssh_box() {
+        let key_id: Vec<u8> = (0u8..16).collect();
+        let obj = PlayReadyHeaderObject::new(key_id, Some("https://la.example.com".to_string()))
+            .expect("valid key_id");
+
+        let pssh = obj.to_pssh_box().expect("to_pssh_box should succeed");
+        // Verify PSSH box header
+        assert!(pssh.len() >= 28, "PSSH box must be at least 28 bytes");
+        assert_eq!(&pssh[4..8], b"pssh", "box type must be 'pssh'");
+        assert_eq!(pssh[8], 0, "PSSH version must be 0");
+        assert_eq!(&pssh[12..28], &PLAYREADY_SYSTEM_ID, "system_id mismatch");
+    }
+
+    #[test]
+    fn test_playready_spec_version_header_strings() {
+        assert_eq!(PlayReadySpecVersion::V2_0.header_version_str(), "4.0.0.0");
+        assert_eq!(PlayReadySpecVersion::V3_0.header_version_str(), "4.2.0.0");
+        assert_eq!(PlayReadySpecVersion::V4_0.header_version_str(), "4.3.0.0");
     }
 }

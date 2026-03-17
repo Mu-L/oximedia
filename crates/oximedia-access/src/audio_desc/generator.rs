@@ -100,25 +100,157 @@ impl AudioDescriptionConfig {
     }
 }
 
+// ─── Emoji / symbol description tables ──────────────────────────────────────
+
+/// Expand emoji and accessibility symbols in `text` to their spoken-word
+/// equivalents so that screen readers and TTS engines produce natural output.
+///
+/// For example `"Great job! 👍"` → `"Great job! thumbs up"`.
+///
+/// The expansion is performed for a curated set of high-frequency emoji
+/// (Unicode 15 range) plus common accessibility symbols (♿, ♪, ♬, etc.).
+#[must_use]
+pub fn expand_emoji_and_symbols(text: &str) -> String {
+    // Table ordered longest-first to handle multi-codepoint sequences.
+    static EMOJI_TABLE: &[(&str, &str)] = &[
+        // Gestures
+        ("👍", "thumbs up"),
+        ("👎", "thumbs down"),
+        ("👋", "waving hand"),
+        ("🤝", "handshake"),
+        ("🙏", "folded hands"),
+        ("💪", "flexed bicep"),
+        ("👀", "eyes"),
+        ("👁️", "eye"),
+        ("👂", "ear"),
+        ("👃", "nose"),
+        ("✋", "raised hand"),
+        ("🖐️", "hand with fingers splayed"),
+        ("☝️", "index finger pointing up"),
+        // Faces / emotions
+        ("😀", "grinning face"),
+        ("😊", "smiling face"),
+        ("😂", "face with tears of joy"),
+        ("😢", "crying face"),
+        ("😡", "angry face"),
+        ("😱", "face screaming in fear"),
+        ("😴", "sleeping face"),
+        ("🤔", "thinking face"),
+        ("😍", "heart eyes face"),
+        ("🥺", "pleading face"),
+        // Hearts / symbols
+        ("❤️", "red heart"),
+        ("💔", "broken heart"),
+        ("💯", "hundred points"),
+        ("✅", "check mark"),
+        ("❌", "cross mark"),
+        ("⚠️", "warning"),
+        ("ℹ️", "information"),
+        ("🔇", "muted speaker"),
+        ("🔊", "speaker with high volume"),
+        ("🔔", "bell"),
+        ("🔕", "bell with slash"),
+        // Accessibility symbols
+        ("♿", "wheelchair accessibility"),
+        ("🦮", "guide dog"),
+        ("🦯", "white cane"),
+        ("👁️‍🗨️", "eye in speech bubble"),
+        // Musical notes
+        ("♪", "musical note"),
+        ("♫", "musical notes"),
+        ("♬", "musical notes"),
+        ("🎵", "musical note"),
+        ("🎶", "musical notes"),
+        // Other common symbols
+        ("✨", "sparkles"),
+        ("🔥", "fire"),
+        ("⭐", "star"),
+        ("🌟", "glowing star"),
+        ("❓", "question mark"),
+        ("❗", "exclamation mark"),
+        ("➡️", "right arrow"),
+        ("⬅️", "left arrow"),
+        ("⬆️", "up arrow"),
+        ("⬇️", "down arrow"),
+        ("🔴", "red circle"),
+        ("🟢", "green circle"),
+        ("🟡", "yellow circle"),
+        ("⏸️", "pause button"),
+        ("▶️", "play button"),
+        ("⏹️", "stop button"),
+        ("⏩", "fast-forward button"),
+        ("⏪", "rewind button"),
+        ("🔒", "locked"),
+        ("🔓", "unlocked"),
+    ];
+
+    let mut result = text.to_string();
+    for (emoji, description) in EMOJI_TABLE {
+        if result.contains(emoji) {
+            result = result.replace(emoji, &format!(" {description} "));
+        }
+    }
+    // Collapse multiple consecutive spaces
+    let mut collapsed = String::with_capacity(result.len());
+    let mut prev_space = false;
+    for ch in result.chars() {
+        if ch == ' ' {
+            if !prev_space {
+                collapsed.push(ch);
+            }
+            prev_space = true;
+        } else {
+            collapsed.push(ch);
+            prev_space = false;
+        }
+    }
+    collapsed.trim().to_string()
+}
+
 /// Audio description generator.
 ///
 /// Generates audio descriptions from text scripts using text-to-speech
 /// or pre-recorded audio segments.
 pub struct AudioDescriptionGenerator {
     config: AudioDescriptionConfig,
+    /// Whether to auto-expand emoji and symbols before synthesis.
+    expand_emoji: bool,
 }
 
 impl AudioDescriptionGenerator {
     /// Create a new audio description generator.
     #[must_use]
     pub fn new(config: AudioDescriptionConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            expand_emoji: true,
+        }
     }
 
     /// Create generator with default configuration.
     #[must_use]
     pub fn default() -> Self {
         Self::new(AudioDescriptionConfig::default())
+    }
+
+    /// Enable or disable emoji/symbol expansion before synthesis.
+    #[must_use]
+    pub fn with_emoji_expansion(mut self, enable: bool) -> Self {
+        self.expand_emoji = enable;
+        self
+    }
+
+    /// Preprocess script text: optionally expand emoji/symbols for screen readers.
+    #[must_use]
+    pub fn preprocess_text<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        if self.expand_emoji {
+            let expanded = expand_emoji_and_symbols(text);
+            // Only allocate if the text actually changed
+            if expanded != text {
+                return std::borrow::Cow::Owned(expanded);
+            }
+        }
+        std::borrow::Cow::Borrowed(text)
     }
 
     /// Generate audio description from script.

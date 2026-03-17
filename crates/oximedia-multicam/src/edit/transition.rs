@@ -296,6 +296,44 @@ impl TransitionLibrary {
     }
 }
 
+// ── Pixel-level blend functions ───────────────────────────────────────────────
+
+/// Blend two RGBA frames with linear cross-fade (dissolve).
+///
+/// Each frame must be a flat buffer of raw bytes in **RGBA** (4 bytes per
+/// pixel) format.  Both frames must have the same length.
+///
+/// `alpha` is the weight of `frame_b` in the output:
+/// - `alpha = 0.0` → output equals `frame_a`.
+/// - `alpha = 1.0` → output equals `frame_b`.
+/// - `alpha = 0.5` → 50/50 blend.
+///
+/// `alpha` is clamped to `[0.0, 1.0]`.
+///
+/// # Returns
+///
+/// A new `Vec<u8>` of the same length as the inputs.  Returns an empty
+/// vector when the inputs are empty or have different lengths.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[must_use]
+pub fn dissolve_blend(frame_a: &[u8], frame_b: &[u8], alpha: f32) -> Vec<u8> {
+    if frame_a.len() != frame_b.len() || frame_a.is_empty() {
+        return Vec::new();
+    }
+
+    let alpha = alpha.clamp(0.0, 1.0);
+    let one_minus = 1.0 - alpha;
+
+    frame_a
+        .iter()
+        .zip(frame_b.iter())
+        .map(|(&a, &b)| {
+            let blended = f32::from(a) * one_minus + f32::from(b) * alpha;
+            blended.round().clamp(0.0, 255.0) as u8
+        })
+        .collect()
+}
+
 impl Default for TransitionLibrary {
     fn default() -> Self {
         Self::new()

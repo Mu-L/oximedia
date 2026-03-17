@@ -66,8 +66,15 @@ impl StateVariableFilter {
     }
 
     fn update_coefficients(&mut self) {
-        // Calculate frequency coefficient
-        self.f = 2.0 * (PI * self.config.frequency / self.sample_rate).sin();
+        // Calculate frequency coefficient.
+        // Clamp to [0, F_MAX] to prevent the SVF from becoming numerically
+        // unstable at high resonance + high frequency combinations.  The
+        // theoretical upper bound for stability is f < 2, but in practice
+        // high-Q filters lose stability well before that; 0.95 is a
+        // conservative safe ceiling that covers the full audible range at
+        // standard sample rates.
+        const F_MAX: f32 = 0.95;
+        self.f = (2.0 * (PI * self.config.frequency / self.sample_rate).sin()).min(F_MAX);
         // Calculate Q coefficient
         self.q = 1.0 / self.config.resonance;
     }
@@ -92,10 +99,20 @@ impl StateVariableFilter {
 
 impl AudioEffect for StateVariableFilter {
     fn process_sample(&mut self, input: f32) -> f32 {
+        // Guard against NaN/inf in state from prior instability.
+        if !self.low.is_finite() || !self.band.is_finite() {
+            self.low = 0.0;
+            self.band = 0.0;
+        }
+
         // State-variable filter equations
         self.low += self.f * self.band;
         let high = input - self.low - self.q * self.band;
         self.band += self.f * high;
+
+        // Clamp states to prevent runaway accumulation at high Q.
+        self.low = self.low.clamp(-1e6, 1e6);
+        self.band = self.band.clamp(-1e6, 1e6);
 
         // Select output based on mode
         match self.config.mode {

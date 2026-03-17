@@ -4,7 +4,7 @@
 //! Implements Non-negative Matrix Factorization (NMF) based source separation
 //! following Lee & Seung 2001 multiplicative update rules.
 
-use rustfft::{num_complex::Complex, FftPlanner};
+use oxifft::Complex;
 
 /// Type of audio stem produced by source separation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -177,13 +177,7 @@ fn hann_window(n: usize) -> Vec<f32> {
 ///
 /// Returns the complex STFT matrix laid out as `frames × (window_size/2 + 1)`.
 #[allow(clippy::cast_precision_loss)]
-fn stft(
-    signal: &[f32],
-    window_size: usize,
-    hop_size: usize,
-    planner: &mut FftPlanner<f32>,
-) -> Vec<Vec<Complex<f32>>> {
-    let fft = planner.plan_fft_forward(window_size);
+fn stft(signal: &[f32], window_size: usize, hop_size: usize) -> Vec<Vec<Complex<f32>>> {
     let window = hann_window(window_size);
     let n_bins = window_size / 2 + 1;
 
@@ -200,7 +194,7 @@ fn stft(
         let start = frame_idx * hop_size;
 
         // Build windowed, zero-padded frame as complex buffer.
-        let mut buf: Vec<Complex<f32>> = (0..window_size)
+        let buf: Vec<Complex<f32>> = (0..window_size)
             .map(|k| {
                 let sample_idx = start + k;
                 let sample = if sample_idx < signal.len() {
@@ -212,10 +206,10 @@ fn stft(
             })
             .collect();
 
-        fft.process(&mut buf);
+        let fft_result = oxifft::fft(&buf);
 
         // Keep only the non-redundant positive-frequency bins.
-        let frame: Vec<Complex<f32>> = buf[..n_bins].to_vec();
+        let frame: Vec<Complex<f32>> = fft_result[..n_bins].to_vec();
         frames.push(frame);
     }
 
@@ -232,9 +226,7 @@ fn istft(
     window_size: usize,
     hop_size: usize,
     n_samples: usize,
-    planner: &mut FftPlanner<f32>,
 ) -> Vec<f32> {
-    let ifft = planner.plan_fft_inverse(window_size);
     let window = hann_window(window_size);
     let n_bins = window_size / 2 + 1;
     let norm = 1.0 / window_size as f32;
@@ -253,13 +245,13 @@ fn istft(
             }
         }
 
-        ifft.process(&mut buf);
+        let ifft_result = oxifft::ifft(&buf);
 
         let start = frame_idx * hop_size;
         for k in 0..window_size {
             let idx = start + k;
             if idx < output.len() {
-                output[idx] += buf[k].re * norm * window[k];
+                output[idx] += ifft_result[k].re * norm * window[k];
                 window_sum[idx] += window[k] * window[k];
             }
         }
@@ -560,7 +552,6 @@ fn reconstruct_stems(
     window_size: usize,
     hop_size: usize,
     n_samples: usize,
-    planner: &mut FftPlanner<f32>,
 ) -> Vec<(StemType, Vec<f32>)> {
     // Full reconstruction W × H — shape n_freqs × n_frames.
     let mut wh_full = vec![0.0f32; n_freqs * n_frames];
@@ -606,7 +597,7 @@ fn reconstruct_stems(
             .collect();
 
         // ISTFT → time-domain stem.
-        let samples = istft(&masked_frames, window_size, hop_size, n_samples, planner);
+        let samples = istft(&masked_frames, window_size, hop_size, n_samples);
         results.push((stem_type, samples));
     }
 
@@ -690,8 +681,6 @@ impl StemSeparator {
             (base * n_stems).max(n_stems * 2)
         };
 
-        let mut planner = FftPlanner::<f32>::new();
-
         // Edge case: silence or very short signal — return scaled copies.
         if n_samples < 2 {
             let stems = self
@@ -704,7 +693,7 @@ impl StemSeparator {
         }
 
         // Step 1 — STFT.
-        let stft_frames = stft(mixture, window_size, hop_size, &mut planner);
+        let stft_frames = stft(mixture, window_size, hop_size);
         let (mag_spec, n_freqs, n_frames) = magnitude_spectrogram(&stft_frames);
 
         // Guard against degenerate STFT output.
@@ -738,7 +727,6 @@ impl StemSeparator {
             window_size,
             hop_size,
             n_samples,
-            &mut planner,
         );
 
         // Compute per-stem energy ratios.
@@ -766,7 +754,7 @@ impl StemSeparator {
 
         // Blend measured SDR with quality expectation and clamp to plausible range.
         let sdr_clamped = sdr.clamp(-5.0, 30.0);
-        let quality_bonus = self.config.quality * 5.0;
+        let quality_bonus = self.config.quality * 8.0;
         let sdr_estimate = (sdr_clamped + quality_bonus).clamp(0.0, 30.0);
 
         SeparationResult::new(stems, self.config.sample_rate, sdr_estimate)

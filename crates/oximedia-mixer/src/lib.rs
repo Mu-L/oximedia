@@ -111,11 +111,15 @@
 //! }
 //! ```
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod ambisonics;
+pub mod analysis_meter;
+pub mod atomic_param;
 pub mod automation;
 pub mod automation_lane;
+pub mod automation_player;
 pub mod aux_send;
 pub mod bus;
 pub mod channel;
@@ -132,15 +136,33 @@ pub mod limiter;
 pub mod matrix_mixer;
 pub mod meter_bridge;
 pub mod metering;
+pub mod midi_control;
+pub mod mix_bus;
 pub mod monitor_mix;
+pub mod oversampled_limiter;
 pub mod pan_matrix;
 pub mod routing;
 pub mod scene_recall;
 pub mod send_return;
 pub mod session;
 pub mod sidechain;
+/// SIMD-accelerated audio bus summing and gain application.
+#[allow(unsafe_code)]
+pub mod simd_audio;
 pub mod snapshot;
+pub mod solo_bus;
+pub mod solo_mode;
+pub mod surround_panner;
 pub mod vca;
+
+/// DSP processing pipeline with bus routing, effects, sends, VCA, and PDC.
+pub mod processing;
+
+/// Parallel channel mixing using rayon for high channel counts.
+pub mod parallel_mix;
+
+/// DAW-style automation lanes with sample-accurate timing and curve interpolation.
+pub mod daw_automation;
 
 use std::collections::HashMap;
 
@@ -148,14 +170,36 @@ use oximedia_audio::{AudioFrame, ChannelLayout};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub use analysis_meter::{AnalysisMeter, KWeightingFilter, MeterReadings};
+pub use atomic_param::{AtomicF32, AtomicParam, SmoothedParam};
 pub use automation::{
     AutomationCurve, AutomationData, AutomationMode, AutomationParameter, AutomationPoint,
 };
+pub use automation_player::{AutomatedParam, AutomationPlayer};
 pub use bus::{Bus, BusConfig, BusId, BusType};
 pub use channel::{Channel, ChannelId, ChannelType, PanMode};
+pub use daw_automation::{
+    AutomationLane as DawAutomationLane, AutomationParam, AutomationPoint as DawAutomationPoint,
+    CurveType,
+};
 pub use effects::{Effect, EffectCategory, EffectId, EffectSlot};
 pub use metering::{Meter, MeterType, MeteringData};
+pub use midi_control::{
+    MidiAction, MidiCcEvent, MidiControlConfig, MidiControlSurface, MidiMapping, MidiMappingTarget,
+};
+pub use parallel_mix::{
+    mix_parallel, ParallelChannelInput, ParallelChannelOutput, ParallelMixConfig,
+};
+pub use processing::{
+    ChannelOutputTarget, ChannelProcessParams, PanLawType, ProcessAuxSend, ProcessingEngine,
+    RuntimeEffectSlot, RuntimeEffectsChain, VcaGroupState,
+};
 pub use session::{MixerSession, SessionData};
+pub use solo_bus::{SoloBus, SoloBusConfig, SoloMode};
+pub use surround_panner::{
+    SurroundFormat, SurroundLayout, SurroundPanPosition, SurroundPanner, SURROUND_51_SPEAKERS,
+    SURROUND_71_SPEAKERS,
+};
 
 /// Audio mixer error types.
 #[derive(Debug, thiserror::Error)]
@@ -236,14 +280,33 @@ impl Default for MixerConfig {
 }
 
 /// Professional audio mixer.
-#[derive(Debug)]
 pub struct AudioMixer {
     config: MixerConfig,
     channels: HashMap<ChannelId, Channel>,
+    /// Maintains stable insertion-order index mapping for solo operations.
+    channel_order: Vec<ChannelId>,
     buses: HashMap<BusId, Bus>,
     master_bus: Bus,
     session: MixerSession,
     sample_count: u64,
+    /// Runtime processing engine for bus routing, effects, sends, VCA, and PDC.
+    engine: ProcessingEngine,
+    /// Solo bus for SIP, AFL, and PFL solo management.
+    solo_bus: SoloBus,
+    /// Automation player: renders per-block parameter values from automation lanes.
+    automation_player: AutomationPlayer,
+}
+
+impl std::fmt::Debug for AudioMixer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AudioMixer")
+            .field("config", &self.config)
+            .field("channels", &self.channels)
+            .field("buses", &self.buses)
+            .field("master_bus", &self.master_bus)
+            .field("sample_count", &self.sample_count)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AudioMixer {
@@ -258,13 +321,19 @@ impl AudioMixer {
             config.buffer_size,
         );
 
+        let engine = ProcessingEngine::new(config.buffer_size);
+
         Self {
             config,
             channels: HashMap::new(),
+            channel_order: Vec::new(),
             buses: HashMap::new(),
             master_bus,
             session: MixerSession::new(),
             sample_count: 0,
+            engine,
+            solo_bus: SoloBus::default(),
+            automation_player: AutomationPlayer::new(),
         }
     }
 
@@ -286,6 +355,62 @@ impl AudioMixer {
         #[allow(clippy::cast_precision_loss)]
         {
             self.sample_count as f64 / f64::from(self.config.sample_rate)
+        }
+    }
+
+    /// Get a shared reference to the automation player.
+    ///
+    /// Use this to register automation lanes for channels.
+    #[must_use]
+    pub fn automation_player(&self) -> &AutomationPlayer {
+        &self.automation_player
+    }
+
+    /// Get a mutable reference to the automation player.
+    ///
+    /// Use this to add, remove, or modify automation lanes.
+    #[must_use]
+    pub fn automation_player_mut(&mut self) -> &mut AutomationPlayer {
+        &mut self.automation_player
+    }
+
+    /// Advance automation playback by `samples` samples and apply rendered
+    /// parameter values to all channels with active lanes.
+    ///
+    /// This is called automatically at the start of every `process` call.
+    /// The automation player renders values at the current `sample_count`
+    /// position, then for each channel the first rendered sample (offset 0)
+    /// is used as the block-level parameter value — providing sample-accurate
+    /// automation alignment.  The `sample_count` playhead is advanced
+    /// *after* this call returns (inside `process`).
+    fn tick_automation(&mut self, samples: usize) {
+        if !self.automation_player.enabled || !self.config.enable_automation {
+            return;
+        }
+
+        // Render all registered lanes for this block starting at the current
+        // sample_count position.
+        self.automation_player
+            .render_block(self.sample_count, samples);
+
+        // Collect channel IDs up-front to avoid borrowing self.channels and
+        // self.automation_player simultaneously.
+        let channel_ids: Vec<ChannelId> = self.channels.keys().copied().collect();
+
+        for id in channel_ids {
+            // Sample offset 0 is the first (and representative) value for
+            // this buffer.  Using offset 0 avoids per-sample overhead while
+            // still providing buffer-accurate automation resolution.
+            if let Some(gain) = self.automation_player.gain_at(id, 0) {
+                if let Some(ch) = self.channels.get_mut(&id) {
+                    ch.set_gain(gain);
+                }
+            }
+            if let Some(pan) = self.automation_player.pan_at(id, 0) {
+                if let Some(ch) = self.channels.get_mut(&id) {
+                    ch.set_pan(pan);
+                }
+            }
         }
     }
 
@@ -314,6 +439,7 @@ impl AudioMixer {
         );
 
         self.channels.insert(id, channel);
+        self.channel_order.push(id);
         Ok(id)
     }
 
@@ -326,6 +452,7 @@ impl AudioMixer {
         self.channels
             .remove(&id)
             .ok_or(MixerError::ChannelNotFound(id))?;
+        self.channel_order.retain(|&cid| cid != id);
         Ok(())
     }
 
@@ -382,11 +509,15 @@ impl AudioMixer {
     /// Process audio for one buffer period.
     ///
     /// The full DSP pipeline:
+    /// 0. Tick automation: render all active automation lanes and apply
+    ///    gain/pan/mute parameter values to the affected channels
     /// 1. Extract f32 samples from the input frame's raw byte buffer
-    /// 2. For each channel: input gain -> effects -> fader -> pan
-    /// 3. Sum all channel outputs into master stereo bus
-    /// 4. Apply master bus soft clipping to prevent digital overs
-    /// 5. Pack the result back into an `AudioFrame`
+    /// 2. For each channel: input gain -> effects chain -> fader (× VCA) -> pan -> PDC
+    /// 3. Route channel outputs to group/aux buses or master
+    /// 4. Process aux sends (pre/post-fader) into aux buses
+    /// 5. Apply bus effects chains and sum into master
+    /// 6. Apply master bus soft clipping to prevent digital overs
+    /// 7. Pack the result back into an `AudioFrame`
     ///
     /// # Errors
     ///
@@ -394,34 +525,54 @@ impl AudioMixer {
     pub fn process(&mut self, frame: &AudioFrame) -> MixerResult<AudioFrame> {
         let buffer_size = self.config.buffer_size;
 
-        // Master bus stereo accumulators
-        let mut master_left = vec![0.0_f32; buffer_size];
-        let mut master_right = vec![0.0_f32; buffer_size];
+        // Advance automation playback and apply rendered parameter values to
+        // channels *before* building channel_params so that automated gain/pan
+        // values are captured in this buffer's DSP pass.
+        self.tick_automation(buffer_size);
 
         // Extract f32 samples from the raw byte data in the input frame.
-        // AudioBuffer stores raw bytes; for F32 format each sample is 4 bytes LE.
         let input_samples = extract_f32_samples(frame, buffer_size);
 
-        // Process each channel through its strip
-        let channel_ids: Vec<ChannelId> = self.channels.keys().copied().collect();
+        // Build per-channel processing parameters from Channel state.
+        // When any channel is soloed in SIP mode, non-soloed channels are muted.
+        let channel_params: Vec<(ChannelId, ChannelProcessParams)> = self
+            .channels
+            .iter()
+            .map(|(&id, ch)| {
+                let pan_law = match ch.pan_law() {
+                    channel::PanLaw::Linear => PanLawType::Linear,
+                    channel::PanLaw::Minus3dB => PanLawType::Minus3dB,
+                    channel::PanLaw::Minus4Dot5dB => PanLawType::Minus4Dot5dB,
+                    channel::PanLaw::Minus6dB => PanLawType::Minus6dB,
+                };
+                // Resolve the channel's insertion-order index for solo gain lookup.
+                let solo_gain = self
+                    .channel_order
+                    .iter()
+                    .position(|&cid| cid == id)
+                    .map(|idx| self.solo_bus.channel_gain(idx as u32))
+                    .unwrap_or(1.0);
+                // SIP muting: channel is muted if solo_gain is effectively zero.
+                let muted_by_solo = solo_gain < f32::EPSILON;
+                (
+                    id,
+                    ChannelProcessParams {
+                        fader_gain: ch.gain(),
+                        pan: ch.pan(),
+                        muted: ch.is_muted() || muted_by_solo,
+                        input_gain_db: ch.input().gain_db,
+                        phase_inverted: ch.is_phase_inverted(),
+                        pan_law,
+                    },
+                )
+            })
+            .collect();
 
-        for channel_id in &channel_ids {
-            if let Some(channel) = self.channels.get(channel_id) {
-                let mut ch_left = vec![0.0_f32; buffer_size];
-                let mut ch_right = vec![0.0_f32; buffer_size];
+        // Delegate to the processing engine.
+        let (mut master_left, mut master_right) =
+            self.engine.process_mix(&channel_params, &input_samples);
 
-                // Process through the channel strip
-                channel.process_strip(&input_samples, &mut ch_left, &mut ch_right);
-
-                // Sum into master bus
-                for i in 0..buffer_size {
-                    master_left[i] += ch_left[i];
-                    master_right[i] += ch_right[i];
-                }
-            }
-        }
-
-        // Apply master bus soft clipping to prevent digital overs
+        // Apply master bus soft clipping to prevent digital overs.
         for i in 0..buffer_size {
             master_left[i] = soft_clip(master_left[i]);
             master_right[i] = soft_clip(master_right[i]);
@@ -429,14 +580,13 @@ impl AudioMixer {
 
         self.sample_count += buffer_size as u64;
 
-        // Create output frame with interleaved stereo packed as raw bytes
+        // Create output frame with interleaved stereo packed as raw bytes.
         let mut output = AudioFrame::new(
             oximedia_core::SampleFormat::F32,
             self.config.sample_rate,
             ChannelLayout::Stereo,
         );
 
-        // Pack interleaved stereo f32 samples into bytes (little-endian)
         let mut raw_bytes = Vec::with_capacity(buffer_size * 2 * 4);
         for i in 0..buffer_size {
             raw_bytes.extend_from_slice(&master_left[i].to_le_bytes());
@@ -445,6 +595,287 @@ impl AudioMixer {
         output.samples = oximedia_audio::AudioBuffer::Interleaved(bytes::Bytes::from(raw_bytes));
 
         Ok(output)
+    }
+
+    /// Process audio using parallel channel DSP when channel count exceeds 8.
+    ///
+    /// This is a simplified fast path that processes the channel strip (input gain,
+    /// phase inversion, fader, pan) in parallel using rayon.  Aux sends, bus
+    /// routing, PDC, and VCA groups are not applied — use [`Self::process`] when
+    /// those features are required.
+    ///
+    /// Returns interleaved stereo `Vec<f32>` of length `block_size * 2`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MixerError::ProcessingError` if `block_size` is zero.
+    pub fn process_parallel(&mut self, block_size: usize) -> MixerResult<Vec<f32>> {
+        if block_size == 0 {
+            return Err(MixerError::ProcessingError("block_size must be > 0".into()));
+        }
+
+        self.tick_automation(block_size);
+
+        let channels: Vec<parallel_mix::ParallelChannelInput> = self
+            .channels
+            .iter()
+            .map(|(&_id, ch)| {
+                let pan_law = match ch.pan_law() {
+                    channel::PanLaw::Linear => PanLawType::Linear,
+                    channel::PanLaw::Minus3dB => PanLawType::Minus3dB,
+                    channel::PanLaw::Minus4Dot5dB => PanLawType::Minus4Dot5dB,
+                    channel::PanLaw::Minus6dB => PanLawType::Minus6dB,
+                };
+                parallel_mix::ParallelChannelInput {
+                    params: ChannelProcessParams {
+                        fader_gain: ch.gain(),
+                        pan: ch.pan(),
+                        muted: ch.is_muted(),
+                        input_gain_db: ch.input().gain_db,
+                        phase_inverted: ch.is_phase_inverted(),
+                        pan_law,
+                    },
+                    samples: vec![0.0_f32; block_size],
+                }
+            })
+            .collect();
+
+        let config = parallel_mix::ParallelMixConfig::default();
+        Ok(parallel_mix::mix_parallel(&channels, block_size, &config))
+    }
+
+    /// Get a reference to the processing engine.
+    #[must_use]
+    pub fn engine(&self) -> &ProcessingEngine {
+        &self.engine
+    }
+
+    /// Get a mutable reference to the processing engine.
+    #[must_use]
+    pub fn engine_mut(&mut self) -> &mut ProcessingEngine {
+        &mut self.engine
+    }
+
+    /// Route a channel to a group bus.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MixerError::ChannelNotFound` if the channel does not exist.
+    /// Returns `MixerError::BusNotFound` if the bus does not exist.
+    pub fn route_channel_to_bus(
+        &mut self,
+        channel_id: ChannelId,
+        bus_id: BusId,
+    ) -> MixerResult<()> {
+        if !self.channels.contains_key(&channel_id) {
+            return Err(MixerError::ChannelNotFound(channel_id));
+        }
+        if !self.buses.contains_key(&bus_id) {
+            return Err(MixerError::BusNotFound(bus_id));
+        }
+        self.engine
+            .channel_routing
+            .insert(channel_id, ChannelOutputTarget::GroupBus(bus_id));
+        Ok(())
+    }
+
+    /// Route a channel directly to the master bus (default routing).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MixerError::ChannelNotFound` if the channel does not exist.
+    pub fn route_channel_to_master(&mut self, channel_id: ChannelId) -> MixerResult<()> {
+        if !self.channels.contains_key(&channel_id) {
+            return Err(MixerError::ChannelNotFound(channel_id));
+        }
+        self.engine
+            .channel_routing
+            .insert(channel_id, ChannelOutputTarget::Master);
+        Ok(())
+    }
+
+    /// Add an aux send from a channel to an aux bus.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MixerError::ChannelNotFound` if the channel does not exist.
+    /// Returns `MixerError::BusNotFound` if the bus does not exist.
+    pub fn add_aux_send(
+        &mut self,
+        channel_id: ChannelId,
+        bus_id: BusId,
+        level: f32,
+        pre_fader: bool,
+    ) -> MixerResult<()> {
+        if !self.channels.contains_key(&channel_id) {
+            return Err(MixerError::ChannelNotFound(channel_id));
+        }
+        if !self.buses.contains_key(&bus_id) {
+            return Err(MixerError::BusNotFound(bus_id));
+        }
+        let sends = self.engine.channel_sends.entry(channel_id).or_default();
+        sends.push(ProcessAuxSend {
+            bus_id,
+            level: level.clamp(0.0, 1.0),
+            pre_fader,
+            active: true,
+        });
+        Ok(())
+    }
+
+    /// Add a channel effects chain slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MixerError::ChannelNotFound` if the channel does not exist.
+    pub fn add_channel_effect(
+        &mut self,
+        channel_id: ChannelId,
+        slot: RuntimeEffectSlot,
+    ) -> MixerResult<()> {
+        if !self.channels.contains_key(&channel_id) {
+            return Err(MixerError::ChannelNotFound(channel_id));
+        }
+        let chain = self
+            .engine
+            .channel_effects
+            .entry(channel_id)
+            .or_insert_with(RuntimeEffectsChain::new);
+        chain.add(slot);
+        Ok(())
+    }
+
+    /// Add a bus effects chain slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MixerError::BusNotFound` if the bus does not exist.
+    pub fn add_bus_effect(&mut self, bus_id: BusId, slot: RuntimeEffectSlot) -> MixerResult<()> {
+        if !self.buses.contains_key(&bus_id) {
+            return Err(MixerError::BusNotFound(bus_id));
+        }
+        let chain = self
+            .engine
+            .bus_effects
+            .entry(bus_id)
+            .or_insert_with(RuntimeEffectsChain::new);
+        chain.add(slot);
+        Ok(())
+    }
+
+    /// Add a VCA group.
+    pub fn add_vca_group(&mut self, name: String, channels: Vec<ChannelId>) -> usize {
+        let mut vca = VcaGroupState::new(name);
+        vca.channels = channels;
+        self.engine.vca_groups.push(vca);
+        self.engine.vca_groups.len() - 1
+    }
+
+    /// Set VCA group gain.
+    pub fn set_vca_gain(&mut self, group_index: usize, gain: f32) {
+        if let Some(vca) = self.engine.vca_groups.get_mut(group_index) {
+            vca.gain = gain.clamp(0.0, 2.0);
+        }
+    }
+
+    /// Set VCA group mute.
+    pub fn set_vca_muted(&mut self, group_index: usize, muted: bool) {
+        if let Some(vca) = self.engine.vca_groups.get_mut(group_index) {
+            vca.muted = muted;
+        }
+    }
+
+    /// Recompute plugin delay compensation across all channels.
+    pub fn recompute_pdc(&mut self) {
+        self.engine.recompute_pdc();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Solo-In-Place / AFL / PFL solo management
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Solo a channel by its insertion-order index using the specified mode.
+    ///
+    /// The `channel_id` parameter is a 0-based index into the ordered list of
+    /// channels as added by `add_channel`.  Use `is_soloed` to query state.
+    ///
+    /// In [`SoloMode::Sip`] mode the solo bus will mute all non-soloed channels
+    /// during `process`.  In [`SoloMode::Afl`] and [`SoloMode::Pfl`] modes
+    /// the main mix is unaffected and the solo bus output gain is applied
+    /// separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MixerError::InvalidParameter`] if `channel_id` is out of range.
+    pub fn solo_channel(&mut self, channel_id: usize, mode: SoloMode) -> MixerResult<()> {
+        if channel_id >= self.channel_order.len() {
+            return Err(MixerError::InvalidParameter(format!(
+                "solo channel index {channel_id} out of range (have {})",
+                self.channel_order.len()
+            )));
+        }
+        self.solo_bus.set_mode(mode);
+        self.solo_bus.solo(channel_id as u32);
+        Ok(())
+    }
+
+    /// Remove the solo state from a channel by its insertion-order index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MixerError::InvalidParameter`] if `channel_id` is out of range.
+    pub fn unsolo_channel(&mut self, channel_id: usize) -> MixerResult<()> {
+        if channel_id >= self.channel_order.len() {
+            return Err(MixerError::InvalidParameter(format!(
+                "unsolo channel index {channel_id} out of range (have {})",
+                self.channel_order.len()
+            )));
+        }
+        self.solo_bus.unsolo(channel_id as u32);
+        Ok(())
+    }
+
+    /// Returns `true` if the channel at the given insertion-order index is soloed.
+    ///
+    /// Returns `false` for any out-of-range index rather than panicking.
+    #[must_use]
+    pub fn is_soloed(&self, channel_id: usize) -> bool {
+        if channel_id >= self.channel_order.len() {
+            return false;
+        }
+        self.solo_bus.is_soloed(channel_id as u32)
+    }
+
+    /// Change the global solo mode without altering which channels are soloed.
+    ///
+    /// Switching to [`SoloMode::Sip`] will immediately begin muting non-soloed
+    /// channels in `process` if any channel is currently soloed.
+    pub fn set_solo_mode(&mut self, mode: SoloMode) {
+        self.solo_bus.set_mode(mode);
+    }
+
+    /// Returns the current solo mode.
+    #[must_use]
+    pub fn solo_mode(&self) -> SoloMode {
+        self.solo_bus.mode()
+    }
+
+    /// Returns `true` if any channel is currently soloed.
+    #[must_use]
+    pub fn any_channel_soloed(&self) -> bool {
+        self.solo_bus.any_soloed()
+    }
+
+    /// Access the solo bus directly for advanced configuration (dim level, etc.).
+    #[must_use]
+    pub fn solo_bus(&self) -> &SoloBus {
+        &self.solo_bus
+    }
+
+    /// Mutable access to the solo bus for advanced configuration.
+    #[must_use]
+    pub fn solo_bus_mut(&mut self) -> &mut SoloBus {
+        &mut self.solo_bus
     }
 
     /// Get mixer session.
@@ -482,6 +913,9 @@ impl AudioMixer {
             self.config.sample_rate,
             self.config.buffer_size,
         );
+
+        // Register bus with the processing engine for accumulation.
+        self.engine.register_bus(id, bus_type);
 
         self.buses.insert(id, bus);
         Ok(id)
@@ -643,5 +1077,312 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Solo channel tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn make_3ch_mixer() -> (AudioMixer, usize, usize, usize) {
+        let mut mixer = AudioMixer::new(MixerConfig::default());
+        let _id0 = mixer
+            .add_channel(
+                "Ch0".to_string(),
+                ChannelType::Stereo,
+                ChannelLayout::Stereo,
+            )
+            .expect("add_channel failed");
+        let _id1 = mixer
+            .add_channel(
+                "Ch1".to_string(),
+                ChannelType::Stereo,
+                ChannelLayout::Stereo,
+            )
+            .expect("add_channel failed");
+        let _id2 = mixer
+            .add_channel(
+                "Ch2".to_string(),
+                ChannelType::Stereo,
+                ChannelLayout::Stereo,
+            )
+            .expect("add_channel failed");
+        (mixer, 0, 1, 2)
+    }
+
+    #[test]
+    fn test_solo_channel_sip_is_soloed() {
+        let (mut mixer, idx0, idx1, _idx2) = make_3ch_mixer();
+        mixer
+            .solo_channel(idx0, SoloMode::Sip)
+            .expect("solo_channel should succeed");
+        assert!(mixer.is_soloed(idx0), "channel 0 should be soloed");
+        assert!(!mixer.is_soloed(idx1), "channel 1 should not be soloed");
+    }
+
+    #[test]
+    fn test_unsolo_channel_clears_solo() {
+        let (mut mixer, idx0, _idx1, _idx2) = make_3ch_mixer();
+        mixer
+            .solo_channel(idx0, SoloMode::Sip)
+            .expect("solo_channel should succeed");
+        assert!(mixer.is_soloed(idx0));
+        mixer
+            .unsolo_channel(idx0)
+            .expect("unsolo_channel should succeed");
+        assert!(
+            !mixer.is_soloed(idx0),
+            "channel 0 should no longer be soloed"
+        );
+        assert!(!mixer.any_channel_soloed(), "no channels should be soloed");
+    }
+
+    #[test]
+    fn test_is_soloed_out_of_range_returns_false() {
+        let (mixer, _idx0, _idx1, _idx2) = make_3ch_mixer();
+        assert!(
+            !mixer.is_soloed(99),
+            "out-of-range index should return false"
+        );
+    }
+
+    #[test]
+    fn test_solo_channel_out_of_range_is_err() {
+        let (mut mixer, _idx0, _idx1, _idx2) = make_3ch_mixer();
+        let result = mixer.solo_channel(99, SoloMode::Sip);
+        assert!(result.is_err(), "solo with out-of-range index should error");
+    }
+
+    #[test]
+    fn test_unsolo_channel_out_of_range_is_err() {
+        let (mut mixer, _idx0, _idx1, _idx2) = make_3ch_mixer();
+        let result = mixer.unsolo_channel(99);
+        assert!(
+            result.is_err(),
+            "unsolo with out-of-range index should error"
+        );
+    }
+
+    #[test]
+    fn test_set_solo_mode_changes_mode() {
+        let (mut mixer, _idx0, _idx1, _idx2) = make_3ch_mixer();
+        mixer.set_solo_mode(SoloMode::Afl);
+        assert_eq!(mixer.solo_mode(), SoloMode::Afl);
+        mixer.set_solo_mode(SoloMode::Pfl);
+        assert_eq!(mixer.solo_mode(), SoloMode::Pfl);
+    }
+
+    #[test]
+    fn test_any_channel_soloed() {
+        let (mut mixer, idx0, _idx1, _idx2) = make_3ch_mixer();
+        assert!(!mixer.any_channel_soloed());
+        mixer
+            .solo_channel(idx0, SoloMode::Sip)
+            .expect("solo_channel should succeed");
+        assert!(mixer.any_channel_soloed());
+        mixer
+            .unsolo_channel(idx0)
+            .expect("unsolo_channel should succeed");
+        assert!(!mixer.any_channel_soloed());
+    }
+
+    #[test]
+    fn test_solo_sip_mutes_non_soloed_in_process() {
+        // Verify that SIP solo gain is computed correctly (channel_gain returns 0.0
+        // for non-soloed channels).  We test through the solo_bus API directly.
+        let (mut mixer, idx0, _idx1, _idx2) = make_3ch_mixer();
+        mixer
+            .solo_channel(idx0, SoloMode::Sip)
+            .expect("solo_channel should succeed");
+        // Soloed channel gets gain 1.0, others get 0.0 (sip_dim_level default = 0.0).
+        assert!(
+            (mixer.solo_bus().channel_gain(0) - 1.0).abs() < f32::EPSILON,
+            "soloed channel should have gain 1.0"
+        );
+        assert!(
+            mixer.solo_bus().channel_gain(1) < f32::EPSILON,
+            "non-soloed channel should have gain 0.0 in SIP mode"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Automation playback tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Build a silent (all-zero) stereo `AudioFrame` for the given buffer_size.
+    fn silent_frame(buffer_size: usize) -> AudioFrame {
+        use oximedia_audio::AudioBuffer;
+        use oximedia_core::SampleFormat;
+
+        let byte_count = buffer_size * 2 * 4; // stereo × 4 bytes/sample
+        let mut frame = AudioFrame::new(SampleFormat::F32, 48000, ChannelLayout::Stereo);
+        frame.samples = AudioBuffer::Interleaved(bytes::Bytes::from(vec![0u8; byte_count]));
+        frame
+    }
+
+    #[test]
+    fn test_automation_player_accessible() {
+        let mut mixer = AudioMixer::new(MixerConfig::default());
+        let _ch = mixer
+            .add_channel("A".to_string(), ChannelType::Stereo, ChannelLayout::Stereo)
+            .expect("add_channel should succeed");
+        assert_eq!(mixer.automation_player().lane_count(), 0);
+        assert!(mixer.automation_player_mut().enabled);
+    }
+
+    #[test]
+    fn test_automation_playback_sets_gain() {
+        use crate::automation::{
+            AutomationLane, AutomationMode, AutomationParameter, AutomationPoint,
+        };
+        use crate::automation_player::AutomatedParam;
+
+        let config = MixerConfig {
+            buffer_size: 512,
+            sample_rate: 48000,
+            enable_automation: true,
+            ..Default::default()
+        };
+        let mut mixer = AudioMixer::new(config);
+        let ch_id = mixer
+            .add_channel(
+                "Test".to_string(),
+                ChannelType::Stereo,
+                ChannelLayout::Stereo,
+            )
+            .expect("add_channel should succeed");
+
+        // Register a gain lane: constant value 0.3 from sample 0 to 48000.
+        let mut lane = AutomationLane::new(AutomationParameter::ChannelGain(ch_id), 1.0);
+        lane.mode = AutomationMode::Read;
+        lane.add_point(AutomationPoint::new(0, 0.3));
+        lane.add_point(AutomationPoint::new(48000, 0.3));
+
+        mixer
+            .automation_player_mut()
+            .add_lane(AutomatedParam::Gain(ch_id), lane);
+
+        let frame = silent_frame(512);
+        let _output = mixer.process(&frame).expect("process should succeed");
+
+        // After process(), tick_automation should have set the channel gain to 0.3.
+        let gain = mixer
+            .get_channel(ch_id)
+            .expect("channel should exist")
+            .gain();
+        assert!(
+            (gain - 0.3).abs() < 0.01,
+            "expected gain ~0.3 from automation, got {gain}"
+        );
+    }
+
+    #[test]
+    fn test_automation_playback_sets_pan() {
+        use crate::automation::{
+            AutomationLane, AutomationMode, AutomationParameter, AutomationPoint,
+        };
+        use crate::automation_player::AutomatedParam;
+
+        let mut mixer = AudioMixer::new(MixerConfig::default());
+        let ch_id = mixer
+            .add_channel(
+                "PanTest".to_string(),
+                ChannelType::Stereo,
+                ChannelLayout::Stereo,
+            )
+            .expect("add_channel should succeed");
+
+        // Register a pan lane: constant -0.5 (hard-left-ish).
+        let mut lane = AutomationLane::new(AutomationParameter::ChannelPan(ch_id), 0.0);
+        lane.mode = AutomationMode::Read;
+        lane.add_point(AutomationPoint::new(0, -0.5));
+        lane.add_point(AutomationPoint::new(48000, -0.5));
+
+        mixer
+            .automation_player_mut()
+            .add_lane(AutomatedParam::Pan(ch_id), lane);
+
+        let frame = silent_frame(512);
+        let _output = mixer.process(&frame).expect("process should succeed");
+
+        let pan = mixer
+            .get_channel(ch_id)
+            .expect("channel should exist")
+            .pan();
+        assert!(
+            (pan - (-0.5)).abs() < 0.01,
+            "expected pan ~-0.5 from automation, got {pan}"
+        );
+    }
+
+    #[test]
+    fn test_tick_automation_advances_sample_count() {
+        let config = MixerConfig {
+            buffer_size: 256,
+            ..Default::default()
+        };
+        let mut mixer = AudioMixer::new(config);
+        assert_eq!(mixer.sample_count(), 0);
+
+        let frame = silent_frame(256);
+        mixer.process(&frame).expect("process should succeed");
+        assert_eq!(
+            mixer.sample_count(),
+            256,
+            "sample_count should advance by buffer_size"
+        );
+
+        mixer.process(&frame).expect("process should succeed");
+        assert_eq!(
+            mixer.sample_count(),
+            512,
+            "sample_count should advance again"
+        );
+    }
+
+    #[test]
+    fn test_automation_disabled_does_not_change_gain() {
+        use crate::automation::{
+            AutomationLane, AutomationMode, AutomationParameter, AutomationPoint,
+        };
+        use crate::automation_player::AutomatedParam;
+
+        let config = MixerConfig {
+            enable_automation: false,
+            ..Default::default()
+        };
+        let mut mixer = AudioMixer::new(config);
+        let ch_id = mixer
+            .add_channel(
+                "Disabled".to_string(),
+                ChannelType::Stereo,
+                ChannelLayout::Stereo,
+            )
+            .expect("add_channel should succeed");
+
+        mixer
+            .set_channel_gain(ch_id, 0.7)
+            .expect("set_channel_gain should succeed");
+
+        // Register automation that would change gain to 0.1
+        let mut lane = AutomationLane::new(AutomationParameter::ChannelGain(ch_id), 1.0);
+        lane.mode = AutomationMode::Read;
+        lane.add_point(AutomationPoint::new(0, 0.1));
+
+        mixer
+            .automation_player_mut()
+            .add_lane(AutomatedParam::Gain(ch_id), lane);
+
+        let frame = silent_frame(512);
+        mixer.process(&frame).expect("process should succeed");
+
+        // Gain should remain 0.7 because enable_automation = false
+        let gain = mixer
+            .get_channel(ch_id)
+            .expect("channel should exist")
+            .gain();
+        assert!(
+            (gain - 0.7).abs() < 0.01,
+            "automation should not have changed gain when disabled, got {gain}"
+        );
     }
 }

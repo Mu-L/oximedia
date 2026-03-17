@@ -13,18 +13,159 @@
 //! use oximedia_bench::metrics::{MetricsCalculator, QualityMetrics};
 //! use oximedia_codec::VideoFrame;
 //!
-//! # fn example(original: &VideoFrame, encoded: &VideoFrame) {
+//! # fn example(original: &VideoFrame, encoded: &VideoFrame) -> oximedia_bench::BenchResult<()> {
 //! let calculator = MetricsCalculator::new(true, true, false);
 //! let metrics = calculator.calculate(original, encoded)?;
 //!
 //! println!("PSNR: {:?} dB", metrics.psnr);
 //! println!("SSIM: {:?}", metrics.ssim);
+//! # Ok(())
 //! # }
 //! ```
 
 use crate::{BenchError, BenchResult};
 use oximedia_codec::VideoFrame;
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Per-frame quality tracking
+// ---------------------------------------------------------------------------
+
+/// Per-frame quality metrics recorded during a benchmark run.
+///
+/// Enables temporal quality analysis such as detecting quality drops at scene
+/// cuts or high-motion segments.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FrameQualityRecord {
+    /// Frame index (0-based).
+    pub frame_index: usize,
+    /// PSNR in dB, if computed.
+    pub psnr: Option<f64>,
+    /// SSIM (0–1), if computed.
+    pub ssim: Option<f64>,
+    /// VMAF (0–100), if computed.
+    pub vmaf: Option<f64>,
+}
+
+/// Temporal quality tracker accumulating per-frame [`FrameQualityRecord`]s.
+///
+/// After pushing all frames call [`TemporalQualityTracker::summary`] to obtain
+/// aggregate statistics.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TemporalQualityTracker {
+    /// Per-frame records in presentation order.
+    pub records: Vec<FrameQualityRecord>,
+}
+
+impl TemporalQualityTracker {
+    /// Create an empty tracker.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Push a per-frame quality measurement.
+    pub fn push(&mut self, frame_index: usize, metrics: &QualityMetrics) {
+        self.records.push(FrameQualityRecord {
+            frame_index,
+            psnr: metrics.psnr,
+            ssim: metrics.ssim,
+            vmaf: metrics.vmaf,
+        });
+    }
+
+    /// Return the number of frames tracked.
+    #[must_use]
+    pub fn frame_count(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Compute aggregate summary over all tracked frames.
+    ///
+    /// Returns `None` when no frames have been recorded.
+    #[must_use]
+    pub fn summary(&self) -> Option<TemporalQualitySummary> {
+        if self.records.is_empty() {
+            return None;
+        }
+
+        let psnr_vals: Vec<f64> = self.records.iter().filter_map(|r| r.psnr).collect();
+        let ssim_vals: Vec<f64> = self.records.iter().filter_map(|r| r.ssim).collect();
+        let vmaf_vals: Vec<f64> = self.records.iter().filter_map(|r| r.vmaf).collect();
+
+        let mean_psnr = if psnr_vals.is_empty() {
+            None
+        } else {
+            Some(psnr_vals.iter().sum::<f64>() / psnr_vals.len() as f64)
+        };
+        let min_psnr = psnr_vals.iter().copied().reduce(f64::min);
+        let max_psnr = psnr_vals.iter().copied().reduce(f64::max);
+
+        let mean_ssim = if ssim_vals.is_empty() {
+            None
+        } else {
+            Some(ssim_vals.iter().sum::<f64>() / ssim_vals.len() as f64)
+        };
+        let min_ssim = ssim_vals.iter().copied().reduce(f64::min);
+        let max_ssim = ssim_vals.iter().copied().reduce(f64::max);
+
+        let mean_vmaf = if vmaf_vals.is_empty() {
+            None
+        } else {
+            Some(vmaf_vals.iter().sum::<f64>() / vmaf_vals.len() as f64)
+        };
+        let min_vmaf = vmaf_vals.iter().copied().reduce(f64::min);
+
+        // Detect the worst frame (lowest PSNR, if available).
+        let worst_frame_index = if psnr_vals.is_empty() {
+            None
+        } else {
+            self.records
+                .iter()
+                .filter_map(|r| r.psnr.map(|p| (r.frame_index, p)))
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| idx)
+        };
+
+        Some(TemporalQualitySummary {
+            frame_count: self.records.len(),
+            mean_psnr,
+            min_psnr,
+            max_psnr,
+            mean_ssim,
+            min_ssim,
+            max_ssim,
+            mean_vmaf,
+            min_vmaf,
+            worst_frame_index,
+        })
+    }
+}
+
+/// Aggregate summary produced by [`TemporalQualityTracker::summary`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemporalQualitySummary {
+    /// Total number of frames measured.
+    pub frame_count: usize,
+    /// Mean PSNR across all frames.
+    pub mean_psnr: Option<f64>,
+    /// Minimum (worst) PSNR across all frames.
+    pub min_psnr: Option<f64>,
+    /// Maximum (best) PSNR across all frames.
+    pub max_psnr: Option<f64>,
+    /// Mean SSIM across all frames.
+    pub mean_ssim: Option<f64>,
+    /// Minimum SSIM across all frames.
+    pub min_ssim: Option<f64>,
+    /// Maximum SSIM across all frames.
+    pub max_ssim: Option<f64>,
+    /// Mean VMAF across all frames.
+    pub mean_vmaf: Option<f64>,
+    /// Minimum VMAF across all frames.
+    pub min_vmaf: Option<f64>,
+    /// Index of the frame with the lowest PSNR.
+    pub worst_frame_index: Option<usize>,
+}
 
 /// Quality metrics for a video frame or sequence.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
@@ -465,6 +606,174 @@ fn calculate_vmaf(
     }
 }
 
+// ---------------------------------------------------------------------------
+// MS-SSIM (Multi-Scale SSIM)
+// ---------------------------------------------------------------------------
+
+/// Standard MS-SSIM scale weights from Wang et al. (2003).
+const MS_SSIM_WEIGHTS: [f64; 5] = [0.0448, 0.2856, 0.3001, 0.2363, 0.1333];
+
+/// Compute Multi-Scale SSIM (MS-SSIM) between two grayscale pixel slices.
+///
+/// Both slices must have exactly `width * height` elements.  The function
+/// performs 5-scale decomposition using 2× downsampling (local averaging) and
+/// combines the per-scale SSIM contrast-structure terms with the luminance
+/// term from the finest scale using the standard weights
+/// `[0.0448, 0.2856, 0.3001, 0.2363, 0.1333]`.
+///
+/// Returns a value in `[0.0, 1.0]` where `1.0` denotes perfect structural
+/// similarity.  Returns `1.0` for identical inputs and falls back to a
+/// single-scale SSIM when the image is too small for all 5 scales.
+///
+/// # Panics
+///
+/// Does not panic; inputs smaller than 8×8 return `1.0` as degenerate images
+/// are assumed identical.
+#[must_use]
+pub fn compute_ms_ssim(ref_pixels: &[f32], test_pixels: &[f32], width: u32, height: u32) -> f64 {
+    let w = width as usize;
+    let h = height as usize;
+
+    if ref_pixels.len() != w * h || test_pixels.len() != w * h {
+        return 1.0; // mismatched dimensions — treat as degenerate
+    }
+
+    if w < 8 || h < 8 {
+        return 1.0;
+    }
+
+    const NUM_SCALES: usize = 5;
+    let mut luminance_product = 1.0_f64;
+    let mut cs_products = [1.0_f64; NUM_SCALES];
+
+    // Iterate over scales, downsampling by 2× at each stage.
+    let mut cur_ref: Vec<f32> = ref_pixels.to_vec();
+    let mut cur_tst: Vec<f32> = test_pixels.to_vec();
+    let mut cur_w = w;
+    let mut cur_h = h;
+
+    for scale in 0..NUM_SCALES {
+        // Compute SSIM statistics at this scale.
+        let (lum, cs) = ssim_luminance_cs(&cur_ref, &cur_tst, cur_w, cur_h);
+
+        cs_products[scale] = cs;
+        if scale == NUM_SCALES - 1 {
+            luminance_product = lum;
+        }
+
+        // Downsample by 2× for next scale (unless this is the last scale).
+        if scale + 1 < NUM_SCALES {
+            let new_w = cur_w / 2;
+            let new_h = cur_h / 2;
+            if new_w < 4 || new_h < 4 {
+                // Image too small to continue; stop here.
+                break;
+            }
+            cur_ref = downsample_2x(&cur_ref, cur_w, cur_h);
+            cur_tst = downsample_2x(&cur_tst, cur_w, cur_h);
+            cur_w = new_w;
+            cur_h = new_h;
+        }
+    }
+
+    // Combine: MS-SSIM = lum^w_M * prod_j(cs_j^w_j)
+    // Guard against NaN/negative by clamping all intermediate values.
+    let lum_clamped = luminance_product.clamp(0.0, 1.0);
+    let mut result = lum_clamped.powf(MS_SSIM_WEIGHTS[NUM_SCALES - 1]);
+    for (j, &cs) in cs_products.iter().enumerate() {
+        let cs_safe = cs.clamp(0.0, 1.0);
+        result *= cs_safe.powf(MS_SSIM_WEIGHTS[j]);
+    }
+
+    if result.is_nan() {
+        1.0
+    } else {
+        result.clamp(0.0, 1.0)
+    }
+}
+
+/// Compute the luminance and contrast-structure components of SSIM
+/// for two f32 grayscale planes.
+///
+/// Returns `(luminance, cs)` each in `[0.0, 1.0]`.  Degenerate (constant)
+/// images return `(1.0, 1.0)` to avoid division-by-zero / NaN.
+fn ssim_luminance_cs(ref_px: &[f32], tst_px: &[f32], width: usize, height: usize) -> (f64, f64) {
+    // SSIM stability constants for 0–255 range.
+    const C1: f64 = (0.01 * 255.0) * (0.01 * 255.0); // ≈ 6.5025
+    const C2: f64 = (0.03 * 255.0) * (0.03 * 255.0); // ≈ 58.5225
+
+    let n = (width * height) as f64;
+    if n == 0.0 {
+        return (1.0, 1.0);
+    }
+
+    let mut sum_x = 0.0_f64;
+    let mut sum_y = 0.0_f64;
+    let mut sum_xx = 0.0_f64;
+    let mut sum_yy = 0.0_f64;
+    let mut sum_xy = 0.0_f64;
+
+    let len = (width * height).min(ref_px.len()).min(tst_px.len());
+    for i in 0..len {
+        let x = f64::from(ref_px[i]);
+        let y = f64::from(tst_px[i]);
+        sum_x += x;
+        sum_y += y;
+        sum_xx += x * x;
+        sum_yy += y * y;
+        sum_xy += x * y;
+    }
+
+    let mu_x = sum_x / n;
+    let mu_y = sum_y / n;
+    // Clamp numerical noise to avoid tiny negatives for constant images.
+    let sigma_x2 = ((sum_xx / n) - mu_x * mu_x).max(0.0);
+    let sigma_y2 = ((sum_yy / n) - mu_y * mu_y).max(0.0);
+    let sigma_xy = (sum_xy / n) - mu_x * mu_y;
+
+    let lum_denom = mu_x * mu_x + mu_y * mu_y + C1;
+    let luminance = if lum_denom.abs() < f64::EPSILON {
+        1.0
+    } else {
+        ((2.0 * mu_x * mu_y + C1) / lum_denom).clamp(0.0, 1.0)
+    };
+
+    let cs_denom = sigma_x2 + sigma_y2 + C2;
+    let cs = if cs_denom.abs() < f64::EPSILON {
+        1.0
+    } else {
+        ((2.0 * sigma_xy + C2) / cs_denom).clamp(0.0, 1.0)
+    };
+
+    (luminance, cs)
+}
+
+/// Downsample a grayscale f32 image by 2× using 2×2 box averaging.
+fn downsample_2x(pixels: &[f32], width: usize, height: usize) -> Vec<f32> {
+    let new_w = width / 2;
+    let new_h = height / 2;
+    let mut out = Vec::with_capacity(new_w * new_h);
+
+    for row in 0..new_h {
+        for col in 0..new_w {
+            let r0 = row * 2;
+            let c0 = col * 2;
+            let idx00 = r0 * width + c0;
+            let idx01 = r0 * width + (c0 + 1).min(width - 1);
+            let idx10 = (r0 + 1).min(height - 1) * width + c0;
+            let idx11 = (r0 + 1).min(height - 1) * width + (c0 + 1).min(width - 1);
+
+            let v = (f64::from(pixels[idx00])
+                + f64::from(pixels[idx01])
+                + f64::from(pixels[idx10])
+                + f64::from(pixels[idx11]))
+                / 4.0;
+            out.push(v as f32);
+        }
+    }
+    out
+}
+
 /// Add metrics together for averaging.
 fn add_metrics(total: &mut QualityMetrics, metrics: &QualityMetrics) {
     if let Some(psnr) = metrics.psnr {
@@ -644,5 +953,59 @@ mod tests {
         let avg = average_metrics(&total, 2);
         assert_eq!(avg.psnr, Some(35.0));
         assert_eq!(avg.ssim, Some(0.95));
+    }
+
+    // ---- MS-SSIM tests ----
+
+    #[test]
+    fn test_ms_ssim_identical() {
+        // Identical images must yield MS-SSIM = 1.0.
+        let width: u32 = 64;
+        let height: u32 = 64;
+        let pixels: Vec<f32> = (0..(width * height)).map(|i| (i % 256) as f32).collect();
+        let ms_ssim = compute_ms_ssim(&pixels, &pixels, width, height);
+        assert!(
+            (ms_ssim - 1.0).abs() < 1e-9,
+            "MS-SSIM of identical images should be 1.0, got {ms_ssim:.12}"
+        );
+    }
+
+    #[test]
+    fn test_ms_ssim_different() {
+        // Very different images should have MS-SSIM < 1.0.
+        let width: u32 = 64;
+        let height: u32 = 64;
+        let all_black: Vec<f32> = vec![0.0; (width * height) as usize];
+        let all_white: Vec<f32> = vec![255.0; (width * height) as usize];
+        let ms_ssim = compute_ms_ssim(&all_black, &all_white, width, height);
+        assert!(
+            ms_ssim < 1.0,
+            "MS-SSIM of maximally different images should be < 1.0, got {ms_ssim:.6}"
+        );
+    }
+
+    #[test]
+    fn test_ms_ssim_symmetric() {
+        let width: u32 = 32;
+        let height: u32 = 32;
+        let a: Vec<f32> = (0..(width * height)).map(|i| (i % 200) as f32).collect();
+        let b: Vec<f32> = (0..(width * height))
+            .map(|i| (255 - i % 200) as f32)
+            .collect();
+        let ms_ab = compute_ms_ssim(&a, &b, width, height);
+        let ms_ba = compute_ms_ssim(&b, &a, width, height);
+        assert!(
+            (ms_ab - ms_ba).abs() < 1e-10,
+            "MS-SSIM should be symmetric: {ms_ab:.12} vs {ms_ba:.12}"
+        );
+    }
+
+    #[test]
+    fn test_ms_ssim_mismatched_dimensions_returns_one() {
+        // Mismatched slice length → degenerate → return 1.0.
+        let pixels: Vec<f32> = vec![128.0; 100];
+        let short: Vec<f32> = vec![200.0; 50]; // wrong length
+        let ms_ssim = compute_ms_ssim(&pixels, &short, 10, 10);
+        assert_eq!(ms_ssim, 1.0);
     }
 }

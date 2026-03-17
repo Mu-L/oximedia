@@ -23,10 +23,12 @@ impl Default for OverdriveConfig {
     }
 }
 
-/// Overdrive effect with soft clipping.
+/// Overdrive effect with soft clipping and wet/dry mix.
 pub struct Overdrive {
     config: OverdriveConfig,
     tone_filter: f32,
+    /// Wet/dry mix ratio: 0.0 = fully dry, 1.0 = fully wet.
+    wet_mix: f32,
 }
 
 impl Overdrive {
@@ -36,6 +38,7 @@ impl Overdrive {
         Self {
             config,
             tone_filter: 0.0,
+            wet_mix: 1.0,
         }
     }
 
@@ -64,11 +67,22 @@ impl AudioEffect for Overdrive {
         self.tone_filter = clipped * (1.0 - tone_coeff) + self.tone_filter * tone_coeff;
 
         // Apply output level
-        self.tone_filter * self.config.level
+        let wet_out = self.tone_filter * self.config.level;
+
+        // Wet/dry mix
+        wet_out * self.wet_mix + input * (1.0 - self.wet_mix)
     }
 
     fn reset(&mut self) {
         self.tone_filter = 0.0;
+    }
+
+    fn set_wet_dry(&mut self, wet: f32) {
+        self.wet_mix = wet.clamp(0.0, 1.0);
+    }
+
+    fn wet_dry(&self) -> f32 {
+        self.wet_mix
     }
 }
 
@@ -89,5 +103,27 @@ mod tests {
         assert!(Overdrive::soft_clip(0.0).abs() < 0.01);
         assert!(Overdrive::soft_clip(0.5).abs() < 1.0);
         assert!(Overdrive::soft_clip(2.0) <= 1.0);
+    }
+
+    #[test]
+    fn test_overdrive_wet_dry_default_is_one() {
+        let od = Overdrive::new(OverdriveConfig::default());
+        assert!((od.wet_dry() - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_overdrive_set_wet_dry_stores_value() {
+        let mut od = Overdrive::new(OverdriveConfig::default());
+        od.set_wet_dry(0.4);
+        assert!((od.wet_dry() - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_overdrive_dry_only_passes_input() {
+        let mut od = Overdrive::new(OverdriveConfig::default());
+        od.set_wet_dry(0.0);
+        // With wet=0 the output is purely the dry (input) signal.
+        let out = od.process_sample(0.3);
+        assert!((out - 0.3).abs() < 1e-5, "dry-only output={out}, want 0.3");
     }
 }

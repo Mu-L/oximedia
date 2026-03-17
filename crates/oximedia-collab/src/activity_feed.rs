@@ -544,3 +544,434 @@ mod tests {
         assert_eq!(results.len(), 1);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Session analytics
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Active-time window for a user in a session: continuous period during which
+/// the user was observed performing actions.
+#[derive(Debug, Clone)]
+pub struct ActiveWindow {
+    /// User ID.
+    pub user_id: String,
+    /// Start timestamp (epoch milliseconds).
+    pub start_ms: u64,
+    /// End timestamp (epoch milliseconds).
+    pub end_ms: u64,
+}
+
+impl ActiveWindow {
+    /// Duration of the window in milliseconds.
+    #[must_use]
+    pub fn duration_ms(&self) -> u64 {
+        self.end_ms.saturating_sub(self.start_ms)
+    }
+}
+
+/// Collaboration pattern observed in a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CollabPattern {
+    /// One user edits while others only review.
+    SingleEditor,
+    /// Multiple users edit simultaneously.
+    ConcurrentEditing,
+    /// Users take turns editing sequentially.
+    Sequential,
+    /// Editing activity is bursty (quiet periods punctuated by flurries).
+    Bursty,
+}
+
+impl std::fmt::Display for CollabPattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SingleEditor => write!(f, "single_editor"),
+            Self::ConcurrentEditing => write!(f, "concurrent_editing"),
+            Self::Sequential => write!(f, "sequential"),
+            Self::Bursty => write!(f, "bursty"),
+        }
+    }
+}
+
+/// Per-user session analytics derived from an `ActivityFeed`.
+#[derive(Debug, Clone)]
+pub struct UserSessionAnalytics {
+    /// User identifier.
+    pub user_id: String,
+    /// Total number of edit actions performed.
+    pub edit_count: usize,
+    /// Total number of comment actions.
+    pub comment_count: usize,
+    /// Total number of approval actions.
+    pub approval_count: usize,
+    /// Total active time in milliseconds (sum of active windows).
+    pub active_time_ms: u64,
+    /// Edits per minute (computed over the full observed time span).
+    pub edits_per_minute: f64,
+    /// Active windows where this user was performing actions.
+    pub active_windows: Vec<ActiveWindow>,
+}
+
+/// Full session-level analytics.
+#[derive(Debug, Clone)]
+pub struct SessionAnalytics {
+    /// Start of the session (earliest activity timestamp).
+    pub session_start_ms: u64,
+    /// End of the session (latest activity timestamp).
+    pub session_end_ms: u64,
+    /// Duration of the session in milliseconds.
+    pub session_duration_ms: u64,
+    /// Total number of activities in the session.
+    pub total_activities: usize,
+    /// Per-user analytics.
+    pub per_user: Vec<UserSessionAnalytics>,
+    /// Overall collaboration pattern detected.
+    pub pattern: CollabPattern,
+    /// Concurrent editing peak: maximum simultaneous active users.
+    pub peak_concurrent_editors: usize,
+}
+
+/// Analyse an `ActivityFeed` to produce session-level analytics.
+///
+/// `active_window_gap_ms` defines the maximum gap (in milliseconds) between
+/// two consecutive actions by the same user that are still considered part of
+/// the same *active window*.  Gaps larger than this are treated as idle
+/// periods.
+#[must_use]
+pub fn analyse_session(feed: &ActivityFeed, active_window_gap_ms: u64) -> SessionAnalytics {
+    use std::collections::HashMap;
+
+    let all_filter = ActivityFilter::new();
+    let entries = feed.query_all(&all_filter);
+
+    if entries.is_empty() {
+        return SessionAnalytics {
+            session_start_ms: 0,
+            session_end_ms: 0,
+            session_duration_ms: 0,
+            total_activities: 0,
+            per_user: Vec::new(),
+            pattern: CollabPattern::SingleEditor,
+            peak_concurrent_editors: 0,
+        };
+    }
+
+    // Determine session bounds.
+    let session_start_ms = entries.iter().map(|e| e.timestamp).min().unwrap_or(0);
+    let session_end_ms = entries.iter().map(|e| e.timestamp).max().unwrap_or(0);
+    let session_duration_ms = session_end_ms.saturating_sub(session_start_ms);
+
+    // Group entries by user.
+    let mut by_user: HashMap<String, Vec<&ActivityEntry>> = HashMap::new();
+    for entry in &entries {
+        by_user
+            .entry(entry.user_id.clone())
+            .or_default()
+            .push(entry);
+    }
+
+    // Compute per-user analytics.
+    let per_user: Vec<UserSessionAnalytics> = by_user
+        .iter()
+        .map(|(user_id, user_entries)| {
+            // Sort entries by timestamp.
+            let mut sorted: Vec<&&ActivityEntry> = user_entries.iter().collect();
+            sorted.sort_by_key(|e| e.timestamp);
+
+            let edit_count = user_entries
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        ActivityKind::TimelineEdit
+                            | ActivityKind::AudioEdit
+                            | ActivityKind::ClipAdded
+                            | ActivityKind::ClipRemoved
+                            | ActivityKind::EffectApplied
+                            | ActivityKind::ColorGradeChanged
+                    )
+                })
+                .count();
+
+            let comment_count = user_entries
+                .iter()
+                .filter(|e| e.kind == ActivityKind::CommentAdded)
+                .count();
+
+            let approval_count = user_entries
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.kind,
+                        ActivityKind::ApprovalGranted | ActivityKind::ApprovalRejected
+                    )
+                })
+                .count();
+
+            // Build active windows.
+            let mut windows: Vec<ActiveWindow> = Vec::new();
+            let mut window_start = sorted.first().map(|e| e.timestamp).unwrap_or(0);
+            let mut window_end = window_start;
+
+            for entry in sorted.iter().skip(1) {
+                if entry.timestamp.saturating_sub(window_end) > active_window_gap_ms {
+                    windows.push(ActiveWindow {
+                        user_id: user_id.clone(),
+                        start_ms: window_start,
+                        end_ms: window_end,
+                    });
+                    window_start = entry.timestamp;
+                }
+                window_end = entry.timestamp;
+            }
+            // Push last window.
+            windows.push(ActiveWindow {
+                user_id: user_id.clone(),
+                start_ms: window_start,
+                end_ms: window_end,
+            });
+
+            let active_time_ms: u64 = windows.iter().map(|w| w.duration_ms()).sum();
+
+            // Edits per minute over the full session span.
+            let span_mins = session_duration_ms as f64 / 60_000.0;
+            let edits_per_minute = if span_mins > 0.0 {
+                edit_count as f64 / span_mins
+            } else {
+                0.0
+            };
+
+            UserSessionAnalytics {
+                user_id: user_id.clone(),
+                edit_count,
+                comment_count,
+                approval_count,
+                active_time_ms,
+                edits_per_minute,
+                active_windows: windows,
+            }
+        })
+        .collect();
+
+    // Detect peak concurrent editors by scanning time buckets.
+    // We use a simple sweep: for each unique timestamp bucket of 1 second,
+    // count distinct users with ≥1 edit action in that bucket.
+    let peak_concurrent_editors = {
+        // Map second-aligned bucket → set of user IDs with edit actions.
+        let mut buckets: HashMap<u64, std::collections::HashSet<&str>> = HashMap::new();
+        for entry in &entries {
+            if matches!(
+                entry.kind,
+                ActivityKind::TimelineEdit
+                    | ActivityKind::AudioEdit
+                    | ActivityKind::ClipAdded
+                    | ActivityKind::ClipRemoved
+            ) {
+                let bucket = entry.timestamp / 1_000; // 1-second buckets
+                buckets
+                    .entry(bucket)
+                    .or_default()
+                    .insert(entry.user_id.as_str());
+            }
+        }
+        buckets.values().map(|s| s.len()).max().unwrap_or(0)
+    };
+
+    // Determine collaboration pattern.
+    let editing_users: usize = per_user.iter().filter(|u| u.edit_count > 0).count();
+    let pattern = if editing_users <= 1 {
+        CollabPattern::SingleEditor
+    } else if peak_concurrent_editors > 1 {
+        CollabPattern::ConcurrentEditing
+    } else {
+        CollabPattern::Sequential
+    };
+
+    SessionAnalytics {
+        session_start_ms,
+        session_end_ms,
+        session_duration_ms,
+        total_activities: entries.len(),
+        per_user,
+        pattern,
+        peak_concurrent_editors,
+    }
+}
+
+/// Edit frequency histogram: number of edit actions per time bucket.
+///
+/// `bucket_ms` is the bucket duration in milliseconds.  Returns a `Vec` of
+/// `(bucket_start_ms, count)` pairs in chronological order.
+#[must_use]
+pub fn edit_frequency_histogram(feed: &ActivityFeed, bucket_ms: u64) -> Vec<(u64, usize)> {
+    use std::collections::BTreeMap;
+
+    if bucket_ms == 0 {
+        return Vec::new();
+    }
+
+    let filter = ActivityFilter::new();
+    let entries = feed.query_all(&filter);
+
+    let mut buckets: BTreeMap<u64, usize> = BTreeMap::new();
+    for entry in entries {
+        if matches!(
+            entry.kind,
+            ActivityKind::TimelineEdit
+                | ActivityKind::AudioEdit
+                | ActivityKind::ClipAdded
+                | ActivityKind::ClipRemoved
+                | ActivityKind::EffectApplied
+        ) {
+            let bucket = (entry.timestamp / bucket_ms) * bucket_ms;
+            *buckets.entry(bucket).or_insert(0) += 1;
+        }
+    }
+
+    buckets.into_iter().collect()
+}
+
+#[cfg(test)]
+mod analytics_tests {
+    use super::*;
+
+    fn make_analytics_feed() -> ActivityFeed {
+        let mut feed = ActivityFeed::new(1000);
+
+        // User 1 edits at t=1000, t=2000, t=3000
+        feed.record(ActivityKind::TimelineEdit, "u1", "Alice", 1_000, "edit1");
+        feed.record(ActivityKind::TimelineEdit, "u1", "Alice", 2_000, "edit2");
+        feed.record(ActivityKind::TimelineEdit, "u1", "Alice", 3_000, "edit3");
+
+        // User 2 edits at t=1500 (concurrent with u1), comments at t=4000
+        feed.record(ActivityKind::ClipAdded, "u2", "Bob", 1_500, "clip added");
+        feed.record(ActivityKind::CommentAdded, "u2", "Bob", 4_000, "comment");
+
+        // User 2 approval at t=5000
+        feed.record(
+            ActivityKind::ApprovalGranted,
+            "u2",
+            "Bob",
+            5_000,
+            "approved",
+        );
+
+        feed
+    }
+
+    #[test]
+    fn test_analyse_session_basic() {
+        let feed = make_analytics_feed();
+        let analytics = analyse_session(&feed, 10_000);
+        assert_eq!(analytics.total_activities, 6);
+        assert_eq!(analytics.session_start_ms, 1_000);
+        assert_eq!(analytics.session_end_ms, 5_000);
+        assert_eq!(analytics.session_duration_ms, 4_000);
+        assert_eq!(analytics.per_user.len(), 2);
+    }
+
+    #[test]
+    fn test_analyse_session_per_user_edit_count() {
+        let feed = make_analytics_feed();
+        let analytics = analyse_session(&feed, 10_000);
+        let u1 = analytics
+            .per_user
+            .iter()
+            .find(|u| u.user_id == "u1")
+            .expect("u1 should be present");
+        assert_eq!(u1.edit_count, 3);
+        let u2 = analytics
+            .per_user
+            .iter()
+            .find(|u| u.user_id == "u2")
+            .expect("u2 should be present");
+        assert_eq!(u2.edit_count, 1);
+        assert_eq!(u2.comment_count, 1);
+        assert_eq!(u2.approval_count, 1);
+    }
+
+    #[test]
+    fn test_analyse_session_pattern_concurrent() {
+        let feed = make_analytics_feed();
+        // With a 10s gap tolerance, u1 and u2 overlap → concurrent
+        let analytics = analyse_session(&feed, 10_000);
+        assert_eq!(analytics.pattern, CollabPattern::ConcurrentEditing);
+    }
+
+    #[test]
+    fn test_analyse_session_pattern_single_editor() {
+        let mut feed = ActivityFeed::new(100);
+        feed.record(ActivityKind::TimelineEdit, "u1", "Alice", 1_000, "e1");
+        feed.record(ActivityKind::TimelineEdit, "u1", "Alice", 2_000, "e2");
+        let analytics = analyse_session(&feed, 5_000);
+        assert_eq!(analytics.pattern, CollabPattern::SingleEditor);
+    }
+
+    #[test]
+    fn test_analyse_session_empty_feed() {
+        let feed = ActivityFeed::new(100);
+        let analytics = analyse_session(&feed, 5_000);
+        assert_eq!(analytics.total_activities, 0);
+        assert!(analytics.per_user.is_empty());
+    }
+
+    #[test]
+    fn test_edit_frequency_histogram_basic() {
+        let mut feed = ActivityFeed::new(100);
+        feed.record(ActivityKind::TimelineEdit, "u1", "Alice", 0, "e0");
+        feed.record(ActivityKind::TimelineEdit, "u1", "Alice", 500, "e1");
+        feed.record(ActivityKind::TimelineEdit, "u1", "Alice", 1_500, "e2");
+        let hist = edit_frequency_histogram(&feed, 1_000);
+        // t=0 and t=500 are in bucket 0; t=1500 in bucket 1000
+        assert_eq!(hist.len(), 2);
+        assert_eq!(hist[0], (0, 2));
+        assert_eq!(hist[1], (1_000, 1));
+    }
+
+    #[test]
+    fn test_edit_frequency_histogram_zero_bucket_returns_empty() {
+        let feed = ActivityFeed::new(100);
+        let hist = edit_frequency_histogram(&feed, 0);
+        assert!(hist.is_empty());
+    }
+
+    #[test]
+    fn test_active_window_duration() {
+        let w = ActiveWindow {
+            user_id: "u1".to_string(),
+            start_ms: 1_000,
+            end_ms: 5_000,
+        };
+        assert_eq!(w.duration_ms(), 4_000);
+    }
+
+    #[test]
+    fn test_collab_pattern_display() {
+        assert_eq!(CollabPattern::SingleEditor.to_string(), "single_editor");
+        assert_eq!(
+            CollabPattern::ConcurrentEditing.to_string(),
+            "concurrent_editing"
+        );
+        assert_eq!(CollabPattern::Sequential.to_string(), "sequential");
+    }
+
+    #[test]
+    fn test_user_active_windows_split_on_gap() {
+        let mut feed = ActivityFeed::new(100);
+        // Two clusters separated by 60s
+        feed.record(ActivityKind::TimelineEdit, "u1", "Alice", 1_000, "e1");
+        feed.record(ActivityKind::TimelineEdit, "u1", "Alice", 2_000, "e2");
+        // Gap of 60s
+        feed.record(ActivityKind::TimelineEdit, "u1", "Alice", 62_000, "e3");
+        feed.record(ActivityKind::TimelineEdit, "u1", "Alice", 63_000, "e4");
+
+        // 5s gap tolerance → the 60s gap creates two windows
+        let analytics = analyse_session(&feed, 5_000);
+        let u1 = analytics
+            .per_user
+            .iter()
+            .find(|u| u.user_id == "u1")
+            .expect("u1");
+        assert_eq!(u1.active_windows.len(), 2);
+    }
+}

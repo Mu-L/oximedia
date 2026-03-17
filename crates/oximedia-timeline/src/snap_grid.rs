@@ -197,6 +197,131 @@ impl SnapGrid {
     pub fn set_config(&mut self, config: SnapConfig) {
         self.config = config;
     }
+
+    /// Populates snap points from clip boundaries on a timeline.
+    ///
+    /// Scans all tracks and adds `ClipStart` and `ClipEnd` snap points for
+    /// every clip. Existing clip snap points are removed first.
+    pub fn populate_from_clips(&mut self, clips: &[(u64, u64, String)]) {
+        // Remove existing clip snap points
+        self.points
+            .retain(|p| !matches!(p.kind, SnapKind::ClipStart | SnapKind::ClipEnd));
+
+        for (start, end, name) in clips {
+            self.points.push(SnapPoint::new(
+                *start,
+                format!("{name} start"),
+                SnapKind::ClipStart,
+            ));
+            self.points.push(SnapPoint::new(
+                *end,
+                format!("{name} end"),
+                SnapKind::ClipEnd,
+            ));
+        }
+    }
+
+    /// Sets the playhead snap position.
+    ///
+    /// Removes any existing playhead snap point and adds a new one at `frame`.
+    pub fn set_playhead(&mut self, frame: u64) {
+        self.points.retain(|p| p.kind != SnapKind::Playhead);
+        self.points
+            .push(SnapPoint::new(frame, "Playhead", SnapKind::Playhead));
+    }
+
+    /// Populates snap points from marker positions.
+    ///
+    /// Existing marker snap points are removed first.
+    pub fn populate_from_markers(&mut self, markers: &[(u64, String)]) {
+        self.points
+            .retain(|p| !matches!(p.kind, SnapKind::Marker | SnapKind::Chapter));
+
+        for (frame, label) in markers {
+            self.points
+                .push(SnapPoint::new(*frame, label.clone(), SnapKind::Marker));
+        }
+    }
+
+    /// Magnetic snap: finds the nearest snap point with magnetic strength.
+    ///
+    /// Unlike `snap()`, magnetic snap uses a strength value (0.0-1.0) that
+    /// scales the effective snap radius. Additionally, structural snap points
+    /// (clip edges, chapters) have higher priority over non-structural ones
+    /// (markers, beat grid) when equidistant.
+    ///
+    /// Returns `Some((snapped_frame, snap_point))` or `None`.
+    #[must_use]
+    pub fn magnetic_snap(&self, frame: u64, strength: f32) -> Option<(u64, &SnapPoint)> {
+        let strength = strength.clamp(0.0, 1.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let effective_radius = (self.config.snap_radius as f32 * strength).round() as u64;
+        if effective_radius == 0 {
+            return None;
+        }
+
+        self.points
+            .iter()
+            .filter(|p| self.config.is_enabled(p.kind))
+            .filter_map(|p| {
+                let dist = p.frame.abs_diff(frame);
+                if dist <= effective_radius {
+                    // Priority: structural points get a bonus (lower distance)
+                    let priority_dist = if p.kind.is_structural() {
+                        // Structural points are preferred: reduce effective distance
+                        dist.saturating_sub(1)
+                    } else {
+                        dist
+                    };
+                    Some((priority_dist, dist, p))
+                } else {
+                    None
+                }
+            })
+            .min_by_key(|(priority_dist, actual_dist, _)| (*priority_dist, *actual_dist))
+            .map(|(_, _, p)| (p.frame, p))
+    }
+
+    /// Snaps a range (e.g., a clip being dragged) to the nearest snap point.
+    ///
+    /// Both the start and end of the range are tested against snap points.
+    /// Returns the offset that should be applied to the range start to
+    /// achieve the snap, or 0 if no snap was found.
+    #[must_use]
+    pub fn snap_range(&self, range_start: u64, range_end: u64) -> i64 {
+        let start_snap = self.nearest(range_start);
+        let end_snap = self.nearest(range_end);
+
+        match (start_snap, end_snap) {
+            (Some(sp), Some(ep)) => {
+                let start_dist = sp.frame.abs_diff(range_start);
+                let end_dist = ep.frame.abs_diff(range_end);
+                if start_dist <= end_dist {
+                    sp.frame as i64 - range_start as i64
+                } else {
+                    ep.frame as i64 - range_end as i64
+                }
+            }
+            (Some(sp), None) => sp.frame as i64 - range_start as i64,
+            (None, Some(ep)) => ep.frame as i64 - range_end as i64,
+            (None, None) => 0,
+        }
+    }
+
+    /// Returns all snap points within the given frame range.
+    #[must_use]
+    pub fn points_in_range(&self, start: u64, end: u64) -> Vec<&SnapPoint> {
+        self.points
+            .iter()
+            .filter(|p| p.frame >= start && p.frame <= end && self.config.is_enabled(p.kind))
+            .collect()
+    }
+
+    /// Returns all snap points, regardless of configuration.
+    #[must_use]
+    pub fn all_points(&self) -> &[SnapPoint] {
+        &self.points
+    }
 }
 
 #[cfg(test)]
@@ -313,5 +438,214 @@ mod tests {
         };
         g.set_config(cfg);
         assert_eq!(g.config().snap_radius, 20);
+    }
+
+    // --- Magnetic snap tests ---
+
+    #[test]
+    fn test_populate_from_clips() {
+        let mut g = SnapGrid::new();
+        g.populate_from_clips(&[
+            (0, 100, "Clip1".to_string()),
+            (200, 350, "Clip2".to_string()),
+        ]);
+        let clip_starts: Vec<u64> = g.by_kind(SnapKind::ClipStart).map(|p| p.frame).collect();
+        assert_eq!(clip_starts, vec![0, 200]);
+        let clip_ends: Vec<u64> = g.by_kind(SnapKind::ClipEnd).map(|p| p.frame).collect();
+        assert_eq!(clip_ends, vec![100, 350]);
+    }
+
+    #[test]
+    fn test_populate_from_clips_replaces_existing() {
+        let mut g = SnapGrid::new();
+        g.populate_from_clips(&[(0, 100, "Old".to_string())]);
+        assert_eq!(g.by_kind(SnapKind::ClipStart).count(), 1);
+
+        g.populate_from_clips(&[(50, 150, "New".to_string())]);
+        // Old clip points should be replaced
+        let starts: Vec<u64> = g.by_kind(SnapKind::ClipStart).map(|p| p.frame).collect();
+        assert_eq!(starts, vec![50]);
+    }
+
+    #[test]
+    fn test_set_playhead() {
+        let mut g = SnapGrid::new();
+        g.set_playhead(100);
+        let playheads: Vec<u64> = g.by_kind(SnapKind::Playhead).map(|p| p.frame).collect();
+        assert_eq!(playheads, vec![100]);
+
+        // Setting again should replace, not add
+        g.set_playhead(200);
+        let playheads: Vec<u64> = g.by_kind(SnapKind::Playhead).map(|p| p.frame).collect();
+        assert_eq!(playheads, vec![200]);
+    }
+
+    #[test]
+    fn test_populate_from_markers() {
+        let mut g = SnapGrid::new();
+        g.populate_from_markers(&[(50, "Intro".to_string()), (200, "Chorus".to_string())]);
+        let markers: Vec<u64> = g.by_kind(SnapKind::Marker).map(|p| p.frame).collect();
+        assert_eq!(markers, vec![50, 200]);
+    }
+
+    #[test]
+    fn test_magnetic_snap_full_strength() {
+        let mut g = SnapGrid::new();
+        g.add(SnapPoint::new(100, "Clip end", SnapKind::ClipEnd));
+
+        // Full strength (1.0): radius = 5
+        let result = g.magnetic_snap(103, 1.0);
+        assert!(result.is_some());
+        let (frame, point) = result.expect("should snap");
+        assert_eq!(frame, 100);
+        assert_eq!(point.kind, SnapKind::ClipEnd);
+    }
+
+    #[test]
+    fn test_magnetic_snap_zero_strength() {
+        let mut g = SnapGrid::new();
+        g.add(SnapPoint::new(100, "Clip end", SnapKind::ClipEnd));
+
+        // Zero strength: no snap
+        let result = g.magnetic_snap(103, 0.0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_magnetic_snap_half_strength() {
+        let config = SnapConfig {
+            snap_radius: 10,
+            ..SnapConfig::default()
+        };
+        let mut g = SnapGrid::with_config(config);
+        g.add(SnapPoint::new(100, "Clip end", SnapKind::ClipEnd));
+
+        // Half strength: effective radius = 5
+        // Distance 4: should snap
+        let result = g.magnetic_snap(104, 0.5);
+        assert!(result.is_some());
+
+        // Distance 6: should not snap (6 > 5)
+        let result = g.magnetic_snap(106, 0.5);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_magnetic_snap_structural_priority() {
+        let config = SnapConfig {
+            snap_radius: 10,
+            ..SnapConfig::default()
+        };
+        let mut g = SnapGrid::with_config(config);
+        // Marker at 102 and ClipEnd at 101, query at 103
+        // Both at similar distance (1 vs 2), but ClipEnd is structural
+        // so gets priority_dist = 1 (actual 2 - 1 bonus), vs marker priority_dist = 1
+        // When priority distances tie, actual distance breaks tie: ClipEnd at dist 2 vs Marker at dist 1
+        // So to demonstrate structural priority, we need same actual distance
+        g.add(SnapPoint::new(101, "Clip end", SnapKind::ClipEnd));
+        g.add(SnapPoint::new(103, "Marker", SnapKind::Marker));
+
+        // Query at 102: ClipEnd at dist 1 (priority 0), Marker at dist 1 (priority 1)
+        let result = g.magnetic_snap(102, 1.0);
+        let (frame, point) = result.expect("should snap");
+        // Structural point at 101 gets priority bonus: effective dist = 0
+        // vs marker at 103 with effective dist = 1
+        assert_eq!(frame, 101);
+        assert_eq!(point.kind, SnapKind::ClipEnd);
+    }
+
+    #[test]
+    fn test_snap_range_start_wins() {
+        let config = SnapConfig {
+            snap_radius: 5,
+            ..SnapConfig::default()
+        };
+        let mut g = SnapGrid::with_config(config);
+        g.add(SnapPoint::new(100, "Snap", SnapKind::ClipEnd));
+
+        // Range [98, 200]: start is closer to snap point 100 (dist 2)
+        let offset = g.snap_range(98, 200);
+        assert_eq!(offset, 2); // Should shift right by 2
+    }
+
+    #[test]
+    fn test_snap_range_end_wins() {
+        let config = SnapConfig {
+            snap_radius: 5,
+            ..SnapConfig::default()
+        };
+        let mut g = SnapGrid::with_config(config);
+        g.add(SnapPoint::new(200, "Snap", SnapKind::ClipEnd));
+
+        // Range [0, 198]: end is closer to snap point 200 (dist 2)
+        let offset = g.snap_range(0, 198);
+        assert_eq!(offset, 2); // Should shift right by 2
+    }
+
+    #[test]
+    fn test_snap_range_no_snap() {
+        let g = SnapGrid::new();
+        let offset = g.snap_range(100, 200);
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn test_points_in_range() {
+        let g = make_grid();
+        let points = g.points_in_range(0, 60);
+        assert_eq!(points.len(), 2); // ClipStart at 0, Marker at 50
+    }
+
+    #[test]
+    fn test_points_in_range_empty() {
+        let g = make_grid();
+        let points = g.points_in_range(200, 300);
+        assert!(points.is_empty());
+    }
+
+    #[test]
+    fn test_all_points() {
+        let g = make_grid();
+        assert_eq!(g.all_points().len(), 3);
+    }
+
+    #[test]
+    fn test_playhead_snap_integration() {
+        let config = SnapConfig {
+            snap_to_playhead: true,
+            snap_radius: 5,
+            ..SnapConfig::default()
+        };
+        let mut g = SnapGrid::with_config(config);
+        g.set_playhead(100);
+
+        // Near playhead: should snap
+        assert_eq!(g.snap(102), 100);
+        // Far from playhead: should not snap
+        assert_eq!(g.snap(110), 110);
+    }
+
+    #[test]
+    fn test_clip_boundaries_and_markers_combined() {
+        let config = SnapConfig {
+            snap_radius: 5,
+            snap_to_clips: true,
+            snap_to_markers: true,
+            ..SnapConfig::default()
+        };
+        let mut g = SnapGrid::with_config(config);
+        g.populate_from_clips(&[
+            (0, 100, "Clip1".to_string()),
+            (100, 200, "Clip2".to_string()),
+        ]);
+        g.populate_from_markers(&[(150, "Marker".to_string())]);
+        g.set_playhead(75);
+
+        // Near clip boundary at 100
+        assert_eq!(g.snap(98), 100);
+        // Near marker at 150
+        assert_eq!(g.snap(148), 150);
+        // Near playhead at 75
+        assert_eq!(g.snap(73), 75);
     }
 }

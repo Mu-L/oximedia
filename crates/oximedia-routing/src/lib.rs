@@ -99,6 +99,12 @@ pub mod dante;
 // NMOS IS-04/IS-05
 pub mod nmos;
 
+#[cfg(feature = "nmos-http")]
+pub use nmos::http::NmosHttpServer;
+
+#[cfg(feature = "nmos-discovery")]
+pub use nmos::{NmosDiscovery, NmosDiscoveryBuilder, NmosDiscoveryError, NmosRegistryInfo};
+
 // Automation
 pub mod automation;
 
@@ -155,6 +161,27 @@ pub mod redundancy_group;
 
 // Traffic shaping and QoS
 pub mod traffic_shaper;
+
+// AES67 audio-over-IP interoperability
+pub mod aes67;
+
+// Hardware GPI/O-triggered routing changes
+pub mod gpio_trigger;
+
+// Level meter insertion at arbitrary signal path points
+pub mod metering_bridge;
+
+// Save/restore complete routing state with atomic rollback
+pub mod routing_snapshot;
+
+// Test signal generator (sine, pink noise, sweep)
+pub mod signal_generator;
+
+// Mix-minus routing for broadcast IFB feeds
+pub mod mix_minus;
+
+// Sparse crosspoint matrix for large matrices (256×256+)
+pub mod sparse_matrix;
 
 /// Re-export commonly used types for convenience
 pub mod prelude {

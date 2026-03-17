@@ -198,7 +198,11 @@ impl ObjectVersionHistory {
             }
         }
         // Activate target
-        if let Some(v) = self.versions.iter_mut().find(|v| v.version_id == version_id) {
+        if let Some(v) = self
+            .versions
+            .iter_mut()
+            .find(|v| v.version_id == version_id)
+        {
             v.status = VersionStatus::Active;
         }
         Ok(())
@@ -223,11 +227,7 @@ impl ObjectVersionHistory {
     }
 
     /// Compute diff between two versions.
-    pub fn diff(
-        &self,
-        old_id: VersionId,
-        new_id: VersionId,
-    ) -> Result<VersionDiff, VersionError> {
+    pub fn diff(&self, old_id: VersionId, new_id: VersionId) -> Result<VersionDiff, VersionError> {
         let old = self.get(old_id).ok_or(VersionError::NotFound(old_id))?;
         let new = self.get(new_id).ok_or(VersionError::NotFound(new_id))?;
         let size_delta = new.size_bytes as i64 - old.size_bytes as i64;
@@ -396,7 +396,10 @@ mod tests {
         let mut h = ObjectVersionHistory::new("file.mp4");
         let v1 = h.add_version(1000, "aaa", "u", "v1");
         h.delete_version(v1).expect("delete version should succeed");
-        assert_eq!(h.get(v1).expect("get should succeed").status, VersionStatus::Deleted);
+        assert_eq!(
+            h.get(v1).expect("get should succeed").status,
+            VersionStatus::Deleted
+        );
     }
 
     #[test]

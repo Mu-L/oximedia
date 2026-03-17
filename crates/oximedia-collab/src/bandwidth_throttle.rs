@@ -301,6 +301,265 @@ impl BandwidthThrottle {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Selective sync: region-priority bandwidth allocation
+// ---------------------------------------------------------------------------
+
+/// A timeline region identified by track and time range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SyncRegion {
+    /// Track identifier.
+    pub track_id: String,
+    /// Start time in milliseconds.
+    pub start_ms: i64,
+    /// End time in milliseconds.
+    pub end_ms: i64,
+}
+
+impl SyncRegion {
+    /// Create a new sync region.
+    pub fn new(track_id: impl Into<String>, start_ms: i64, end_ms: i64) -> Self {
+        Self {
+            track_id: track_id.into(),
+            start_ms,
+            end_ms,
+        }
+    }
+
+    /// Duration in milliseconds.
+    #[must_use]
+    pub fn duration_ms(&self) -> i64 {
+        self.end_ms.saturating_sub(self.start_ms)
+    }
+
+    /// Check whether this region overlaps another.
+    #[must_use]
+    pub fn overlaps(&self, other: &SyncRegion) -> bool {
+        self.track_id == other.track_id
+            && self.start_ms < other.end_ms
+            && other.start_ms < self.end_ms
+    }
+}
+
+/// Priority level for selective sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SyncPriority {
+    /// Background sync — lowest bandwidth allocation.
+    Background = 0,
+    /// Normal priority.
+    Normal = 1,
+    /// High priority — the user's viewport region.
+    High = 2,
+    /// Critical — the exact position where the user is editing.
+    Critical = 3,
+}
+
+impl SyncPriority {
+    /// Bandwidth multiplier relative to baseline.
+    #[must_use]
+    pub fn bandwidth_multiplier(&self) -> f64 {
+        match self {
+            Self::Background => 0.1,
+            Self::Normal => 0.3,
+            Self::High => 0.7,
+            Self::Critical => 1.0,
+        }
+    }
+}
+
+/// A sync request tagged with region and priority information.
+#[derive(Debug, Clone)]
+pub struct PrioritizedSyncRequest {
+    /// The user issuing the request.
+    pub user_id: String,
+    /// Region this request targets.
+    pub region: SyncRegion,
+    /// Computed priority.
+    pub priority: SyncPriority,
+    /// Payload size in bytes.
+    pub payload_bytes: u64,
+    /// Submission timestamp.
+    pub submitted_at: Instant,
+}
+
+/// Manages selective sync by prioritizing active timeline regions.
+///
+/// Each user has an "active region" (viewport/edit cursor) that determines
+/// the priority of sync requests for nearby regions.
+#[derive(Debug)]
+pub struct SelectiveSyncManager {
+    /// Per-user active (viewport) region.
+    active_regions: HashMap<String, SyncRegion>,
+    /// Pending sync requests ordered by priority.
+    queue: Vec<PrioritizedSyncRequest>,
+    /// Maximum queue depth.
+    max_queue_size: usize,
+    /// Allocated bandwidth budget per priority level (bytes/sec).
+    budget: HashMap<SyncPriority, f64>,
+    /// Bytes consumed per priority level in the current window.
+    consumed: HashMap<SyncPriority, f64>,
+    /// Last time the consumed counters were reset.
+    last_window_reset: Instant,
+    /// Window duration for budget accounting.
+    window_duration: Duration,
+}
+
+impl SelectiveSyncManager {
+    /// Create a new selective sync manager.
+    pub fn new(max_queue_size: usize, total_bandwidth: f64) -> Self {
+        // Distribute total bandwidth proportionally across priorities.
+        let mut budget = HashMap::new();
+        let total_weight: f64 = [
+            SyncPriority::Background,
+            SyncPriority::Normal,
+            SyncPriority::High,
+            SyncPriority::Critical,
+        ]
+        .iter()
+        .map(|p| p.bandwidth_multiplier())
+        .sum();
+
+        for p in [
+            SyncPriority::Background,
+            SyncPriority::Normal,
+            SyncPriority::High,
+            SyncPriority::Critical,
+        ] {
+            let share = (p.bandwidth_multiplier() / total_weight) * total_bandwidth;
+            budget.insert(p, share);
+        }
+
+        Self {
+            active_regions: HashMap::new(),
+            queue: Vec::new(),
+            max_queue_size,
+            budget,
+            consumed: HashMap::new(),
+            last_window_reset: Instant::now(),
+            window_duration: Duration::from_secs(1),
+        }
+    }
+
+    /// Set the active region (viewport) for a user.
+    pub fn set_active_region(&mut self, user_id: impl Into<String>, region: SyncRegion) {
+        self.active_regions.insert(user_id.into(), region);
+    }
+
+    /// Remove a user's active region.
+    pub fn remove_active_region(&mut self, user_id: &str) {
+        self.active_regions.remove(user_id);
+    }
+
+    /// Compute the priority for a sync request based on how it relates
+    /// to the requesting user's active region.
+    #[must_use]
+    pub fn compute_priority(&self, user_id: &str, target: &SyncRegion) -> SyncPriority {
+        let active = match self.active_regions.get(user_id) {
+            Some(r) => r,
+            None => return SyncPriority::Normal,
+        };
+
+        if active.track_id != target.track_id {
+            return SyncPriority::Background;
+        }
+
+        // Direct overlap with the active region → Critical
+        if active.overlaps(target) {
+            return SyncPriority::Critical;
+        }
+
+        // Adjacent: within 2x the active region's duration on either side.
+        let active_dur = active.duration_ms().max(1);
+        // Compute the gap between the two regions (positive = non-overlapping).
+        let gap = if target.start_ms >= active.end_ms {
+            target.start_ms - active.end_ms
+        } else if active.start_ms >= target.end_ms {
+            active.start_ms - target.end_ms
+        } else {
+            // They overlap — already handled above, but guard anyway.
+            0
+        };
+
+        if gap <= active_dur * 2 {
+            SyncPriority::High
+        } else {
+            SyncPriority::Normal
+        }
+    }
+
+    /// Submit a sync request. It will be prioritized based on the user's
+    /// active region.
+    pub fn submit(
+        &mut self,
+        user_id: impl Into<String>,
+        region: SyncRegion,
+        payload_bytes: u64,
+    ) -> Option<SyncPriority> {
+        if self.queue.len() >= self.max_queue_size {
+            return None;
+        }
+        let uid: String = user_id.into();
+        let priority = self.compute_priority(&uid, &region);
+        self.queue.push(PrioritizedSyncRequest {
+            user_id: uid,
+            region,
+            priority,
+            payload_bytes,
+            submitted_at: Instant::now(),
+        });
+        Some(priority)
+    }
+
+    /// Drain requests that fit within the current bandwidth budget,
+    /// highest priority first.
+    pub fn drain_ready(&mut self) -> Vec<PrioritizedSyncRequest> {
+        self.maybe_reset_window();
+
+        // Sort descending by priority.
+        self.queue.sort_by(|a, b| b.priority.cmp(&a.priority));
+
+        let mut ready = Vec::new();
+        let mut remaining = Vec::new();
+
+        for req in self.queue.drain(..) {
+            let budget = self.budget.get(&req.priority).copied().unwrap_or(0.0);
+            let consumed = self.consumed.get(&req.priority).copied().unwrap_or(0.0);
+
+            if consumed + req.payload_bytes as f64 <= budget {
+                *self.consumed.entry(req.priority).or_insert(0.0) += req.payload_bytes as f64;
+                ready.push(req);
+            } else {
+                remaining.push(req);
+            }
+        }
+
+        self.queue = remaining;
+        ready
+    }
+
+    /// Number of pending requests.
+    #[must_use]
+    pub fn pending_count(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Get the remaining budget for a priority level.
+    #[must_use]
+    pub fn remaining_budget(&self, priority: SyncPriority) -> f64 {
+        let budget = self.budget.get(&priority).copied().unwrap_or(0.0);
+        let consumed = self.consumed.get(&priority).copied().unwrap_or(0.0);
+        (budget - consumed).max(0.0)
+    }
+
+    /// Reset consumed counters if the window has elapsed.
+    fn maybe_reset_window(&mut self) {
+        if self.last_window_reset.elapsed() >= self.window_duration {
+            self.consumed.clear();
+            self.last_window_reset = Instant::now();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,5 +676,160 @@ mod tests {
         assert!(ThrottleTier::Light < ThrottleTier::Moderate);
         assert!(ThrottleTier::Moderate < ThrottleTier::Heavy);
         assert!(ThrottleTier::Heavy < ThrottleTier::Paused);
+    }
+
+    // ---- SyncRegion ----
+
+    #[test]
+    fn test_sync_region_overlaps() {
+        let a = SyncRegion::new("track_0", 0, 1000);
+        let b = SyncRegion::new("track_0", 500, 1500);
+        assert!(a.overlaps(&b));
+    }
+
+    #[test]
+    fn test_sync_region_no_overlap_adjacent() {
+        let a = SyncRegion::new("track_0", 0, 1000);
+        let b = SyncRegion::new("track_0", 1000, 2000);
+        assert!(!a.overlaps(&b));
+    }
+
+    #[test]
+    fn test_sync_region_different_track() {
+        let a = SyncRegion::new("track_0", 0, 1000);
+        let b = SyncRegion::new("track_1", 0, 1000);
+        assert!(!a.overlaps(&b));
+    }
+
+    #[test]
+    fn test_sync_region_duration() {
+        let r = SyncRegion::new("t", 100, 500);
+        assert_eq!(r.duration_ms(), 400);
+    }
+
+    // ---- SyncPriority ----
+
+    #[test]
+    fn test_sync_priority_ordering() {
+        assert!(SyncPriority::Critical > SyncPriority::High);
+        assert!(SyncPriority::High > SyncPriority::Normal);
+        assert!(SyncPriority::Normal > SyncPriority::Background);
+    }
+
+    #[test]
+    fn test_sync_priority_multiplier() {
+        assert!((SyncPriority::Critical.bandwidth_multiplier() - 1.0).abs() < f64::EPSILON);
+        assert!(
+            SyncPriority::Background.bandwidth_multiplier()
+                < SyncPriority::Normal.bandwidth_multiplier()
+        );
+    }
+
+    // ---- SelectiveSyncManager ----
+
+    #[test]
+    fn test_compute_priority_overlap_is_critical() {
+        let mut mgr = SelectiveSyncManager::new(100, 1_000_000.0);
+        mgr.set_active_region("alice", SyncRegion::new("t0", 0, 1000));
+        let target = SyncRegion::new("t0", 500, 1500);
+        assert_eq!(
+            mgr.compute_priority("alice", &target),
+            SyncPriority::Critical
+        );
+    }
+
+    #[test]
+    fn test_compute_priority_different_track_is_background() {
+        let mut mgr = SelectiveSyncManager::new(100, 1_000_000.0);
+        mgr.set_active_region("alice", SyncRegion::new("t0", 0, 1000));
+        let target = SyncRegion::new("t1", 0, 1000);
+        assert_eq!(
+            mgr.compute_priority("alice", &target),
+            SyncPriority::Background
+        );
+    }
+
+    #[test]
+    fn test_compute_priority_no_active_region_is_normal() {
+        let mgr = SelectiveSyncManager::new(100, 1_000_000.0);
+        let target = SyncRegion::new("t0", 0, 1000);
+        assert_eq!(mgr.compute_priority("bob", &target), SyncPriority::Normal);
+    }
+
+    #[test]
+    fn test_compute_priority_adjacent_is_high() {
+        let mut mgr = SelectiveSyncManager::new(100, 1_000_000.0);
+        mgr.set_active_region("alice", SyncRegion::new("t0", 0, 1000));
+        // Just past the active region, within 2x duration
+        let target = SyncRegion::new("t0", 1000, 2000);
+        let prio = mgr.compute_priority("alice", &target);
+        assert_eq!(prio, SyncPriority::High);
+    }
+
+    #[test]
+    fn test_compute_priority_far_away_is_normal() {
+        let mut mgr = SelectiveSyncManager::new(100, 1_000_000.0);
+        mgr.set_active_region("alice", SyncRegion::new("t0", 0, 1000));
+        let target = SyncRegion::new("t0", 50000, 60000);
+        let prio = mgr.compute_priority("alice", &target);
+        assert_eq!(prio, SyncPriority::Normal);
+    }
+
+    #[test]
+    fn test_submit_returns_priority() {
+        let mut mgr = SelectiveSyncManager::new(100, 1_000_000.0);
+        mgr.set_active_region("alice", SyncRegion::new("t0", 0, 1000));
+        let prio = mgr.submit("alice", SyncRegion::new("t0", 500, 800), 256);
+        assert_eq!(prio, Some(SyncPriority::Critical));
+        assert_eq!(mgr.pending_count(), 1);
+    }
+
+    #[test]
+    fn test_submit_full_queue_returns_none() {
+        let mut mgr = SelectiveSyncManager::new(1, 1_000_000.0);
+        mgr.submit("a", SyncRegion::new("t0", 0, 100), 10);
+        let result = mgr.submit("b", SyncRegion::new("t0", 0, 100), 10);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_drain_ready_respects_priority_order() {
+        let mut mgr = SelectiveSyncManager::new(100, 10_000_000.0);
+        mgr.set_active_region("alice", SyncRegion::new("t0", 0, 1000));
+        // Background request (different track)
+        mgr.submit("alice", SyncRegion::new("t1", 0, 100), 100);
+        // Critical request (overlapping active region)
+        mgr.submit("alice", SyncRegion::new("t0", 500, 700), 100);
+
+        let ready = mgr.drain_ready();
+        assert!(!ready.is_empty());
+        // First item should be highest priority
+        assert_eq!(ready[0].priority, SyncPriority::Critical);
+    }
+
+    #[test]
+    fn test_remaining_budget_decreases() {
+        let mut mgr = SelectiveSyncManager::new(100, 10_000_000.0);
+        let initial = mgr.remaining_budget(SyncPriority::Critical);
+        assert!(initial > 0.0);
+
+        mgr.submit("a", SyncRegion::new("t0", 0, 100), 1000);
+        mgr.set_active_region("a", SyncRegion::new("t0", 0, 100));
+        // Re-submit so it gets correct priority
+        mgr.queue.clear();
+        mgr.submit("a", SyncRegion::new("t0", 0, 100), 1000);
+        mgr.drain_ready();
+
+        let after = mgr.remaining_budget(SyncPriority::Critical);
+        assert!(after < initial);
+    }
+
+    #[test]
+    fn test_remove_active_region() {
+        let mut mgr = SelectiveSyncManager::new(100, 1_000_000.0);
+        mgr.set_active_region("alice", SyncRegion::new("t0", 0, 1000));
+        mgr.remove_active_region("alice");
+        let target = SyncRegion::new("t0", 500, 700);
+        assert_eq!(mgr.compute_priority("alice", &target), SyncPriority::Normal);
     }
 }

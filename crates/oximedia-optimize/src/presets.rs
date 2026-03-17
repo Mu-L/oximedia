@@ -17,6 +17,8 @@ impl OptimizationPresets {
             content_type: ContentType::Generic,
             parallel_rdo: false,
             lambda_multiplier: 0.8,
+            enable_roi: false,
+            enable_temporal_aq: false,
         }
     }
 
@@ -31,6 +33,8 @@ impl OptimizationPresets {
             content_type: ContentType::Generic,
             parallel_rdo: true,
             lambda_multiplier: 0.9,
+            enable_roi: false,
+            enable_temporal_aq: false,
         }
     }
 
@@ -45,6 +49,8 @@ impl OptimizationPresets {
             content_type: ContentType::Generic,
             parallel_rdo: true,
             lambda_multiplier: 1.0,
+            enable_roi: false,
+            enable_temporal_aq: false,
         }
     }
 
@@ -59,6 +65,8 @@ impl OptimizationPresets {
             content_type: ContentType::Generic,
             parallel_rdo: true,
             lambda_multiplier: 1.0,
+            enable_roi: false,
+            enable_temporal_aq: false,
         }
     }
 
@@ -73,6 +81,8 @@ impl OptimizationPresets {
             content_type: ContentType::Generic,
             parallel_rdo: true,
             lambda_multiplier: 1.0,
+            enable_roi: false,
+            enable_temporal_aq: false,
         }
     }
 
@@ -93,6 +103,8 @@ impl OptimizationPresets {
             content_type: ContentType::Generic,
             parallel_rdo: true,
             lambda_multiplier: 1.0,
+            enable_roi: false,
+            enable_temporal_aq: true,
         }
     }
 
@@ -107,6 +119,8 @@ impl OptimizationPresets {
             content_type: ContentType::Generic,
             parallel_rdo: true,
             lambda_multiplier: 1.1,
+            enable_roi: false,
+            enable_temporal_aq: true,
         }
     }
 
@@ -121,6 +135,8 @@ impl OptimizationPresets {
             content_type: ContentType::Generic,
             parallel_rdo: true,
             lambda_multiplier: 1.1,
+            enable_roi: false,
+            enable_temporal_aq: true,
         }
     }
 
@@ -135,6 +151,8 @@ impl OptimizationPresets {
             content_type: ContentType::Generic,
             parallel_rdo: true,
             lambda_multiplier: 1.2,
+            enable_roi: false,
+            enable_temporal_aq: true,
         }
     }
 
@@ -149,6 +167,8 @@ impl OptimizationPresets {
             content_type: ContentType::Animation,
             parallel_rdo: true,
             lambda_multiplier: 1.1, // Slightly higher for sharp edges
+            enable_roi: false,
+            enable_temporal_aq: false,
         }
     }
 
@@ -163,6 +183,8 @@ impl OptimizationPresets {
             content_type: ContentType::Film,
             parallel_rdo: true,
             lambda_multiplier: 1.0,
+            enable_roi: false,
+            enable_temporal_aq: true,
         }
     }
 
@@ -177,6 +199,8 @@ impl OptimizationPresets {
             content_type: ContentType::Film,
             parallel_rdo: true,
             lambda_multiplier: 0.9, // Lower for grain preservation
+            enable_roi: false,
+            enable_temporal_aq: true,
         }
     }
 
@@ -191,6 +215,8 @@ impl OptimizationPresets {
             content_type: ContentType::Screen,
             parallel_rdo: true,
             lambda_multiplier: 1.2, // Higher for text preservation
+            enable_roi: false,
+            enable_temporal_aq: false,
         }
     }
 
@@ -205,6 +231,8 @@ impl OptimizationPresets {
             content_type: ContentType::Generic,
             parallel_rdo: true,
             lambda_multiplier: 1.0,
+            enable_roi: false,
+            enable_temporal_aq: false,
         }
     }
 }

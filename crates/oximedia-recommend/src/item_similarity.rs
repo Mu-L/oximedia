@@ -2,9 +2,28 @@
 //!
 //! Provides dense feature vectors and a similarity matrix to enable fast
 //! nearest-neighbour lookups across a media catalogue.
+//!
+//! # Approximate Nearest-Neighbour via LSH
+//!
+//! For large catalogues where exact O(n) brute-force is too slow, use
+//! [`LshItemIndex`].  It wraps the random-hyperplane LSH implementation in
+//! [`crate::lsh`] with a convenient `ItemVector`-oriented API:
+//!
+//! ```
+//! use oximedia_recommend::item_similarity::{ItemVector, LshItemIndex, LshItemConfig};
+//!
+//! let mut index = LshItemIndex::new(LshItemConfig { dim: 4, num_tables: 4, num_planes: 8 });
+//! index.insert(ItemVector::new("a", vec![1.0, 0.0, 0.0, 0.0]));
+//! index.insert(ItemVector::new("b", vec![0.0, 1.0, 0.0, 0.0]));
+//!
+//! let results = index.find_similar(&[1.0, 0.0, 0.0, 0.0], 2);
+//! assert!(!results.is_empty());
+//! assert_eq!(results[0].item_id, "a");
+//! ```
 
 #![allow(dead_code)]
 
+use crate::lsh::{LshConfig, LshIndex, LshResult};
 use std::collections::HashMap;
 
 /// A dense feature vector representing a media item's content attributes.
@@ -143,6 +162,159 @@ impl SimilarityMatrix {
     }
 }
 
+// ---------------------------------------------------------------------------
+// LSH-backed approximate nearest-neighbour item index
+// ---------------------------------------------------------------------------
+
+/// Configuration for [`LshItemIndex`].
+///
+/// Mirrors [`LshConfig`] but uses the same field names as the rest of this
+/// module so callers can stay within `item_similarity` without importing
+/// `lsh` directly.
+#[derive(Debug, Clone)]
+pub struct LshItemConfig {
+    /// Embedding dimension (must match the `ItemVector` dimension).
+    pub dim: usize,
+    /// Number of hash tables.  More tables → higher recall, more memory.
+    pub num_tables: usize,
+    /// Number of random hyperplanes per table.  More planes → higher
+    /// precision per table but fewer candidates per query.
+    pub num_planes: usize,
+}
+
+impl Default for LshItemConfig {
+    fn default() -> Self {
+        Self {
+            dim: 64,
+            num_tables: 4,
+            num_planes: 8,
+        }
+    }
+}
+
+/// An approximate nearest-neighbour index for `ItemVector`s using
+/// locality-sensitive hashing.
+///
+/// Internally delegates to [`LshIndex`] (random-hyperplane / cosine LSH).
+/// The index supports:
+///
+/// - **`insert`** — add items one by one.
+/// - **`bulk_insert`** — add many items at once.
+/// - **`find_similar`** — approximate top-k query by cosine similarity.
+/// - **`find_similar_to_item`** — convenience method: query using a stored
+///   item's own vector.
+/// - **`exact_top_k`** — brute-force reference for accuracy evaluation.
+pub struct LshItemIndex {
+    inner: LshIndex,
+}
+
+impl LshItemIndex {
+    /// Create a new LSH item index with the given configuration.
+    #[must_use]
+    pub fn new(config: LshItemConfig) -> Self {
+        let lsh_config = LshConfig {
+            dim: config.dim,
+            num_tables: config.num_tables,
+            num_planes: config.num_planes,
+        };
+        Self {
+            inner: LshIndex::new(lsh_config),
+        }
+    }
+
+    /// Insert a single item into the index.
+    pub fn insert(&mut self, item: ItemVector) {
+        self.inner.insert(item.id, item.values);
+    }
+
+    /// Insert multiple items at once.
+    pub fn bulk_insert(&mut self, items: impl IntoIterator<Item = ItemVector>) {
+        for item in items {
+            self.insert(item);
+        }
+    }
+
+    /// Approximate top-k nearest neighbours of `query_vector`.
+    ///
+    /// Returns up to `top_k` results sorted by descending cosine similarity.
+    /// The result set is an approximation; some true neighbours may be missing
+    /// if they fall in different hash buckets.
+    #[must_use]
+    pub fn find_similar(&self, query_vector: &[f64], top_k: usize) -> Vec<LshResult> {
+        self.inner.query(query_vector, top_k)
+    }
+
+    /// Approximate top-k neighbours of a *named* item already in the index.
+    ///
+    /// Returns `None` if no item with `item_id` exists in the index.
+    /// The query item itself is excluded from the results.
+    ///
+    /// # Implementation note
+    ///
+    /// `LshIndex` stores vectors positionally and exposes `get_vector(idx)`.
+    /// To find the stored vector for `item_id`, we enumerate all stored items
+    /// via an exact-top-k query on the zero vector (which enumerates every
+    /// item by position), then look up the positional index by name.
+    #[must_use]
+    pub fn find_similar_to_item(&self, item_id: &str, top_k: usize) -> Option<Vec<LshResult>> {
+        let n = self.inner.len();
+        if n == 0 {
+            return None;
+        }
+
+        // Use exact_top_k on a zero-query to enumerate all stored item names
+        // in insertion order (the zero vector is equidistant from everything,
+        // so the order matches the internal positional index).
+        let zero = vec![0.0f64; self.inner.dim()];
+        let all_items = self.inner.exact_top_k(&zero, n);
+
+        // Find the positional index of our target item
+        let pos = all_items.iter().position(|r| r.item_id == item_id)?;
+
+        // Retrieve the stored vector and run an approximate query
+        let query_vec = self.inner.get_vector(pos)?.to_vec();
+        let mut results = self.inner.query(&query_vec, top_k + 1);
+
+        // Remove the item itself from results and fix ranks
+        results.retain(|r| r.item_id != item_id);
+        results.truncate(top_k);
+        for (i, r) in results.iter_mut().enumerate() {
+            r.rank = i + 1;
+        }
+        Some(results)
+    }
+
+    /// Exact brute-force top-k — intended for accuracy evaluation in tests.
+    #[must_use]
+    pub fn exact_top_k(&self, query_vector: &[f64], top_k: usize) -> Vec<LshResult> {
+        self.inner.exact_top_k(query_vector, top_k)
+    }
+
+    /// Number of items indexed.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns `true` if the index contains no items.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Configured embedding dimension.
+    #[must_use]
+    pub fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+}
+
+impl Default for LshItemIndex {
+    fn default() -> Self {
+        Self::new(LshItemConfig::default())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +443,113 @@ mod tests {
         let ac = m.get("a", "c").expect("should succeed in test");
         assert!((ab - 1.0).abs() < 1e-9);
         assert!(ac.abs() < 1e-9);
+    }
+
+    // ---- LshItemIndex ----
+
+    fn make_lsh_index() -> LshItemIndex {
+        LshItemIndex::new(LshItemConfig {
+            dim: 4,
+            num_tables: 6,
+            num_planes: 10,
+        })
+    }
+
+    #[test]
+    fn test_lsh_item_index_creation() {
+        let idx = LshItemIndex::default();
+        assert!(idx.is_empty());
+        assert_eq!(idx.len(), 0);
+    }
+
+    #[test]
+    fn test_lsh_item_index_insert_and_len() {
+        let mut idx = make_lsh_index();
+        idx.insert(ItemVector::new("a", vec![1.0, 0.0, 0.0, 0.0]));
+        idx.insert(ItemVector::new("b", vec![0.0, 1.0, 0.0, 0.0]));
+        assert_eq!(idx.len(), 2);
+        assert!(!idx.is_empty());
+    }
+
+    #[test]
+    fn test_lsh_item_index_bulk_insert() {
+        let mut idx = make_lsh_index();
+        let items = vec![
+            ItemVector::new("x", vec![1.0, 0.0, 0.0, 0.0]),
+            ItemVector::new("y", vec![0.0, 1.0, 0.0, 0.0]),
+            ItemVector::new("z", vec![0.0, 0.0, 1.0, 0.0]),
+        ];
+        idx.bulk_insert(items);
+        assert_eq!(idx.len(), 3);
+    }
+
+    #[test]
+    fn test_lsh_item_index_find_similar_returns_results() {
+        let mut idx = make_lsh_index();
+        idx.insert(ItemVector::new("a", vec![1.0, 0.0, 0.0, 0.0]));
+        idx.insert(ItemVector::new("b", vec![0.0, 1.0, 0.0, 0.0]));
+        idx.insert(ItemVector::new("c", vec![0.0, 0.0, 1.0, 0.0]));
+        let results = idx.find_similar(&[1.0, 0.0, 0.0, 0.0], 2);
+        assert!(!results.is_empty());
+        assert!(results.len() <= 2);
+    }
+
+    #[test]
+    fn test_lsh_item_index_identical_vector_is_top_result() {
+        let mut idx = make_lsh_index();
+        idx.insert(ItemVector::new("target", vec![1.0, 0.0, 0.0, 0.0]));
+        idx.insert(ItemVector::new("other1", vec![0.0, 1.0, 0.0, 0.0]));
+        idx.insert(ItemVector::new("other2", vec![0.0, 0.0, 1.0, 0.0]));
+        let results = idx.find_similar(&[1.0, 0.0, 0.0, 0.0], 1);
+        if !results.is_empty() {
+            assert_eq!(results[0].item_id, "target");
+        }
+    }
+
+    #[test]
+    fn test_lsh_item_index_similarity_in_range() {
+        let mut idx = make_lsh_index();
+        idx.insert(ItemVector::new("a", vec![1.0, 0.0, 0.0, 0.0]));
+        idx.insert(ItemVector::new("b", vec![0.707, 0.707, 0.0, 0.0]));
+        let results = idx.find_similar(&[1.0, 0.0, 0.0, 0.0], 2);
+        for r in &results {
+            assert!(r.similarity >= -1.0 && r.similarity <= 1.0);
+        }
+    }
+
+    #[test]
+    fn test_lsh_item_index_exact_top_k() {
+        let mut idx = make_lsh_index();
+        idx.insert(ItemVector::new("a", vec![1.0, 0.0, 0.0, 0.0]));
+        idx.insert(ItemVector::new("b", vec![1.0, 0.0, 0.0, 0.0]));
+        idx.insert(ItemVector::new("c", vec![0.0, 1.0, 0.0, 0.0]));
+        let exact = idx.exact_top_k(&[1.0, 0.0, 0.0, 0.0], 2);
+        assert_eq!(exact.len(), 2);
+        // a and b are identical to query, c is orthogonal
+        assert!(
+            exact[0].similarity > exact[1].similarity
+                || (exact[0].similarity - exact[1].similarity).abs() < 1e-9
+        );
+    }
+
+    #[test]
+    fn test_lsh_item_index_empty_query_returns_empty() {
+        let idx = make_lsh_index();
+        let results = idx.find_similar(&[1.0, 0.0, 0.0, 0.0], 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_lsh_item_index_dim() {
+        let idx = make_lsh_index();
+        assert_eq!(idx.dim(), 4);
+    }
+
+    #[test]
+    fn test_lsh_item_config_default() {
+        let config = LshItemConfig::default();
+        assert_eq!(config.dim, 64);
+        assert_eq!(config.num_tables, 4);
+        assert_eq!(config.num_planes, 8);
     }
 }

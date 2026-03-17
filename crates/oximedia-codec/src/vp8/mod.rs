@@ -66,6 +66,7 @@
 mod bool_decoder;
 mod dct;
 mod decoder;
+mod encoder;
 mod frame_header;
 mod loopfilter;
 mod mb_mode;
@@ -75,6 +76,7 @@ mod prediction;
 pub use bool_decoder::BoolDecoder;
 pub use dct::{dequantize_block, dequantize_coeff, idct4x4, iwht4x4, Block4x4, PixelBlock4x4};
 pub use decoder::Vp8Decoder;
+pub use encoder::{SimpleVp8Encoder, Vp8EncConfig, Vp8Encoder, Vp8EncoderConfig, Vp8Packet};
 pub use frame_header::{ClampingType, ColorSpace, FrameHeader, FrameType};
 pub use loopfilter::{
     calculate_filter_params, filter_horizontal_edge, filter_vertical_edge, LoopFilterConfig,

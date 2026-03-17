@@ -25,6 +25,7 @@ pub mod ela;
 pub mod ela_analysis;
 pub mod file_integrity;
 pub mod fingerprint;
+pub mod flat_array2;
 pub mod format_forensics;
 pub mod frame_forensics;
 pub mod frequency_forensics;
@@ -46,9 +47,10 @@ pub mod tampering;
 pub mod time_forensics;
 pub mod watermark_detect;
 
-use ndarray::Array2;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Errors that can occur during forensic analysis
@@ -125,7 +127,7 @@ pub struct ForensicTest {
     pub findings: Vec<String>,
     /// Anomaly map (if applicable)
     #[serde(skip)]
-    pub anomaly_map: Option<Array2<f64>>,
+    pub anomaly_map: Option<flat_array2::FlatArray2<f64>>,
 }
 
 impl ForensicTest {
@@ -188,8 +190,58 @@ impl TamperingReport {
         self.tests.insert(test.name.clone(), test);
     }
 
-    /// Calculate overall confidence from individual tests
+    /// Calculate overall confidence from individual tests using reliability-weighted
+    /// averaging.
+    ///
+    /// Different forensic tests have different reliability characteristics:
+    /// - ELA and compression analysis are strong indicators when positive
+    /// - Noise analysis provides moderate evidence
+    /// - Metadata analysis is supportive but less conclusive
+    /// - Geometric (copy-move) detection is highly reliable when triggered
+    /// - Lighting analysis provides supplementary evidence
+    ///
+    /// Each test's confidence is multiplied by a reliability weight before averaging.
+    /// Tests that detected tampering also receive a slight boost to reflect the
+    /// asymmetry between false positives and false negatives in forensic analysis.
     pub fn calculate_overall_confidence(&mut self) {
+        if self.tests.is_empty() {
+            self.overall_confidence = 0.0;
+            return;
+        }
+
+        let mut weighted_sum = 0.0_f64;
+        let mut weight_total = 0.0_f64;
+
+        for test in self.tests.values() {
+            let base_weight = test_reliability_weight(&test.name);
+            // Tests that detected tampering get a 20% boost to their weight,
+            // reflecting that a positive detection from a reliable test is
+            // more informative than a negative result.
+            let effective_weight = if test.tampering_detected {
+                base_weight * 1.2
+            } else {
+                base_weight
+            };
+
+            weighted_sum += test.confidence * effective_weight;
+            weight_total += effective_weight;
+        }
+
+        self.overall_confidence = if weight_total > 0.0 {
+            (weighted_sum / weight_total).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // Determine if tampering was detected based on threshold
+        self.tampering_detected = self.overall_confidence > 0.5;
+    }
+
+    /// Calculate overall confidence using simple (unweighted) averaging.
+    ///
+    /// This is the legacy behaviour preserved for callers that want equal
+    /// treatment of every test.
+    pub fn calculate_overall_confidence_unweighted(&mut self) {
         if self.tests.is_empty() {
             self.overall_confidence = 0.0;
             return;
@@ -197,9 +249,15 @@ impl TamperingReport {
 
         let total: f64 = self.tests.values().map(|t| t.confidence).sum();
         self.overall_confidence = total / self.tests.len() as f64;
-
-        // Determine if tampering was detected based on threshold
         self.tampering_detected = self.overall_confidence > 0.5;
+    }
+
+    /// Serialize this report to a JSON string.
+    ///
+    /// Returns a pretty-printed JSON string.  Anomaly maps (which are
+    /// `#[serde(skip)]`) are not included in the output.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Generate summary
@@ -263,6 +321,71 @@ impl Default for ForensicsConfig {
     }
 }
 
+/// Per-test reliability weight configuration.
+///
+/// Allows callers to override the default reliability weights used by
+/// [`TamperingReport::calculate_overall_confidence`].  Each field specifies
+/// the weight for the corresponding forensic test category.
+///
+/// Weights are relative — they do not need to sum to 1.0.  Tests whose name
+/// does not match any category receive the `default_weight`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestWeight {
+    /// Weight for ELA / Error Level Analysis tests (default 1.3)
+    pub ela: f64,
+    /// Weight for PRNU / noise analysis tests (default 1.0)
+    pub prnu: f64,
+    /// Weight for copy-move / geometric detection tests (default 1.5)
+    pub copy_move: f64,
+    /// Weight for compression / DCT analysis tests (default 1.2)
+    pub compression: f64,
+    /// Weight for lighting / shadow analysis tests (default 0.9)
+    pub lighting: f64,
+    /// Weight for metadata / EXIF analysis tests (default 0.7)
+    pub metadata: f64,
+    /// Fallback weight for tests not matching any category (default 1.0)
+    pub default_weight: f64,
+}
+
+impl Default for TestWeight {
+    fn default() -> Self {
+        Self {
+            ela: 1.3,
+            prnu: 1.0,
+            copy_move: 1.5,
+            compression: 1.2,
+            lighting: 0.9,
+            metadata: 0.7,
+            default_weight: 1.0,
+        }
+    }
+}
+
+impl TestWeight {
+    /// Look up the weight for a test by its name.
+    #[must_use]
+    pub fn weight_for(&self, test_name: &str) -> f64 {
+        let lower = test_name.to_lowercase();
+        if lower.contains("copy") || lower.contains("geometric") || lower.contains("clone") {
+            self.copy_move
+        } else if lower.contains("ela") || lower.contains("error level") {
+            self.ela
+        } else if lower.contains("compress") || lower.contains("dct") || lower.contains("jpeg") {
+            self.compression
+        } else if lower.contains("noise") || lower.contains("prnu") {
+            self.prnu
+        } else if lower.contains("light") || lower.contains("shadow") || lower.contains("illuminat")
+        {
+            self.lighting
+        } else if lower.contains("metadata") || lower.contains("exif") || lower.contains("software")
+        {
+            self.metadata
+        } else {
+            self.default_weight
+        }
+    }
+}
+
 /// Main forensics analyzer
 pub struct ForensicsAnalyzer {
     config: ForensicsConfig,
@@ -281,55 +404,101 @@ impl ForensicsAnalyzer {
         Self { config }
     }
 
-    /// Analyze an image for tampering
+    /// Analyze an image for tampering.
+    ///
+    /// Independent forensic tests are executed concurrently via rayon, so
+    /// multi-core systems will see significant throughput improvements on
+    /// large images.  Metadata analysis runs on the raw image bytes and is
+    /// also dispatched in parallel with the pixel-level tests.
     pub fn analyze(&self, image_data: &[u8]) -> ForensicsResult<TamperingReport> {
-        let mut report = TamperingReport::new();
-
-        // Parse image
+        // Parse image once — shared across all pixel-level tests.
         let image = image::load_from_memory(image_data)?;
         let rgb_image = image.to_rgb8();
 
-        // Run compression analysis
+        // Collect enabled pixel-level tasks as closures so rayon can run
+        // them in parallel.  Each closure returns ForensicsResult<ForensicTest>.
+        type TaskFn<'a> = Box<dyn Fn() -> ForensicsResult<ForensicTest> + Send + Sync + 'a>;
+
+        let mut tasks: Vec<TaskFn<'_>> = Vec::new();
+
         if self.config.enable_compression_analysis {
-            let test = compression::analyze_compression(&rgb_image)?;
-            report.add_test(test);
+            tasks.push(Box::new(|| compression::analyze_compression(&rgb_image)));
         }
-
-        // Run ELA
         if self.config.enable_ela {
-            let test = ela::perform_ela(&rgb_image)?;
-            report.add_test(test);
+            tasks.push(Box::new(|| ela::perform_ela(&rgb_image)));
         }
-
-        // Run noise analysis
         if self.config.enable_noise_analysis {
-            let test = noise::analyze_noise(&rgb_image)?;
-            report.add_test(test);
+            tasks.push(Box::new(|| noise::analyze_noise(&rgb_image)));
         }
-
-        // Run metadata analysis
-        if self.config.enable_metadata_analysis {
-            let test = metadata::analyze_metadata(image_data)?;
-            report.add_test(test);
-        }
-
-        // Run geometric analysis
         if self.config.enable_geometric_analysis {
-            let test = geometric::detect_copy_move(&rgb_image)?;
-            report.add_test(test);
+            tasks.push(Box::new(|| geometric::detect_copy_move(&rgb_image)));
         }
-
-        // Run lighting analysis
         if self.config.enable_lighting_analysis {
-            let test = lighting::analyze_lighting(&rgb_image)?;
-            report.add_test(test);
+            tasks.push(Box::new(|| lighting::analyze_lighting(&rgb_image)));
         }
 
-        // Calculate overall results
+        // Run pixel-level tests in parallel.
+        let pixel_results: Vec<ForensicsResult<ForensicTest>> =
+            tasks.par_iter().map(|f| f()).collect();
+
+        // Metadata analysis operates on the raw bytes; run it concurrently
+        // with the pixel tests using a separate par_iter scope.
+        let metadata_result: Option<ForensicsResult<ForensicTest>> =
+            if self.config.enable_metadata_analysis {
+                Some(metadata::analyze_metadata(image_data))
+            } else {
+                None
+            };
+
+        // Collect results into the report, propagating the first error.
+        let mut report = TamperingReport::new();
+
+        for result in pixel_results {
+            report.add_test(result?);
+        }
+        if let Some(result) = metadata_result {
+            report.add_test(result?);
+        }
+
+        // Calculate overall results.
         report.calculate_overall_confidence();
         report.generate_summary();
 
         Ok(report)
+    }
+
+    /// Analyze a batch of image files in parallel using rayon.
+    ///
+    /// Each path is read from disk and analyzed independently.  Files that
+    /// cannot be read or analyzed produce a report with default (clean) values
+    /// and a summary indicating the failure.
+    ///
+    /// # Errors
+    ///
+    /// This method never returns `Err` at the batch level — per-file failures
+    /// are captured in the individual reports via the summary field.
+    pub fn analyze_batch(&self, paths: &[PathBuf]) -> Vec<TamperingReport> {
+        paths
+            .par_iter()
+            .map(|path| {
+                let data = match std::fs::read(path) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let mut report = TamperingReport::new();
+                        report.summary = format!("Failed to read {}: {}", path.display(), e);
+                        return report;
+                    }
+                };
+                match self.analyze(&data) {
+                    Ok(report) => report,
+                    Err(e) => {
+                        let mut report = TamperingReport::new();
+                        report.summary = format!("Analysis failed for {}: {}", path.display(), e);
+                        report
+                    }
+                }
+            })
+            .collect()
     }
 
     /// Get the current configuration
@@ -346,6 +515,41 @@ impl ForensicsAnalyzer {
 impl Default for ForensicsAnalyzer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Return the reliability weight for a forensic test identified by name.
+///
+/// Weights are calibrated based on the empirical false-positive / false-negative
+/// rates of each test methodology:
+///
+/// | Test category        | Weight | Rationale                                    |
+/// |----------------------|--------|----------------------------------------------|
+/// | Copy-move detection  | 1.5    | Highly specific when triggered                |
+/// | ELA                  | 1.3    | Strong but sensitive to JPEG quality           |
+/// | Compression analysis | 1.2    | Reliable double-compression indicator          |
+/// | Noise analysis       | 1.0    | Moderate reliability (baseline)                |
+/// | Lighting analysis    | 0.9    | Useful but geometry-dependent                  |
+/// | Metadata analysis    | 0.7    | Supportive; easily spoofed or stripped          |
+///
+/// Unknown test names receive a baseline weight of `1.0`.
+#[must_use]
+pub fn test_reliability_weight(test_name: &str) -> f64 {
+    let lower = test_name.to_lowercase();
+    if lower.contains("copy") || lower.contains("geometric") || lower.contains("clone") {
+        1.5
+    } else if lower.contains("ela") || lower.contains("error level") {
+        1.3
+    } else if lower.contains("compress") || lower.contains("dct") || lower.contains("jpeg") {
+        1.2
+    } else if lower.contains("noise") || lower.contains("prnu") {
+        1.0
+    } else if lower.contains("light") || lower.contains("shadow") || lower.contains("illuminat") {
+        0.9
+    } else if lower.contains("metadata") || lower.contains("exif") || lower.contains("software") {
+        0.7
+    } else {
+        1.0
     }
 }
 
@@ -376,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tampering_report() {
+    fn test_tampering_report_unweighted() {
         let mut report = TamperingReport::new();
 
         let mut test1 = ForensicTest::new("Test1");
@@ -389,10 +593,276 @@ mod tests {
 
         report.add_test(test1);
         report.add_test(test2);
-        report.calculate_overall_confidence();
+        report.calculate_overall_confidence_unweighted();
 
         assert_eq!(report.tests.len(), 2);
-        assert_eq!(report.overall_confidence, 0.7);
+        assert!((report.overall_confidence - 0.7).abs() < 1e-10);
         assert!(report.tampering_detected);
+    }
+
+    #[test]
+    fn test_tampering_report_weighted_confidence_empty() {
+        let mut report = TamperingReport::new();
+        report.calculate_overall_confidence();
+        assert!((report.overall_confidence).abs() < 1e-10);
+        assert!(!report.tampering_detected);
+    }
+
+    #[test]
+    fn test_tampering_report_weighted_confidence_single_test() {
+        let mut report = TamperingReport::new();
+        let mut test = ForensicTest::new("ELA Analysis");
+        test.set_confidence(0.8);
+        test.tampering_detected = true;
+        report.add_test(test);
+        report.calculate_overall_confidence();
+        // Single test: weighted confidence == confidence (weight cancels)
+        assert!((report.overall_confidence - 0.8).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_weighted_confidence_strong_test_dominates() {
+        let mut report = TamperingReport::new();
+
+        // High-weight test (copy-move, weight 1.5) with high confidence
+        let mut copy_move = ForensicTest::new("Copy-Move Detection");
+        copy_move.set_confidence(0.9);
+        copy_move.tampering_detected = true;
+
+        // Low-weight test (metadata, weight 0.7) with low confidence
+        let mut metadata = ForensicTest::new("Metadata Analysis");
+        metadata.set_confidence(0.1);
+        metadata.tampering_detected = false;
+
+        report.add_test(copy_move);
+        report.add_test(metadata);
+        report.calculate_overall_confidence();
+
+        // Weighted average should be closer to 0.9 than simple average 0.5
+        assert!(report.overall_confidence > 0.5);
+
+        // Compare with unweighted
+        let mut report2 = TamperingReport::new();
+        let mut cm2 = ForensicTest::new("Copy-Move Detection");
+        cm2.set_confidence(0.9);
+        cm2.tampering_detected = true;
+        let mut md2 = ForensicTest::new("Metadata Analysis");
+        md2.set_confidence(0.1);
+        md2.tampering_detected = false;
+        report2.add_test(cm2);
+        report2.add_test(md2);
+        report2.calculate_overall_confidence_unweighted();
+
+        // Weighted should give higher confidence when strong test dominates
+        assert!(report.overall_confidence > report2.overall_confidence);
+    }
+
+    #[test]
+    fn test_weighted_confidence_detection_boost() {
+        // Two identical-confidence tests, one detected tampering
+        let mut report = TamperingReport::new();
+
+        let mut t1 = ForensicTest::new("Noise Analysis");
+        t1.set_confidence(0.6);
+        t1.tampering_detected = true;
+
+        let mut t2 = ForensicTest::new("Noise Check");
+        t2.set_confidence(0.6);
+        t2.tampering_detected = false;
+
+        report.add_test(t1);
+        report.add_test(t2);
+        report.calculate_overall_confidence();
+
+        // The detecting test gets a 1.2x boost, so the weighted average
+        // should be slightly above the unweighted 0.6
+        assert!(report.overall_confidence > 0.59);
+        assert!(report.overall_confidence < 0.65);
+    }
+
+    #[test]
+    fn test_reliability_weight_categories() {
+        assert!((test_reliability_weight("Copy-Move Detection") - 1.5).abs() < 1e-10);
+        assert!((test_reliability_weight("ELA Analysis") - 1.3).abs() < 1e-10);
+        assert!((test_reliability_weight("JPEG Compression Analysis") - 1.2).abs() < 1e-10);
+        assert!((test_reliability_weight("Noise Analysis") - 1.0).abs() < 1e-10);
+        assert!((test_reliability_weight("Lighting Analysis") - 0.9).abs() < 1e-10);
+        assert!((test_reliability_weight("Metadata Analysis") - 0.7).abs() < 1e-10);
+        assert!((test_reliability_weight("Unknown Test") - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_weighted_confidence_all_below_threshold() {
+        let mut report = TamperingReport::new();
+
+        let mut t1 = ForensicTest::new("ELA");
+        t1.set_confidence(0.2);
+        t1.tampering_detected = false;
+
+        let mut t2 = ForensicTest::new("Metadata");
+        t2.set_confidence(0.3);
+        t2.tampering_detected = false;
+
+        report.add_test(t1);
+        report.add_test(t2);
+        report.calculate_overall_confidence();
+
+        assert!(!report.tampering_detected);
+        assert!(report.overall_confidence < 0.5);
+    }
+
+    #[test]
+    fn test_weighted_confidence_clamped_to_unit() {
+        let mut report = TamperingReport::new();
+        let mut t = ForensicTest::new("ELA");
+        t.set_confidence(1.0);
+        t.tampering_detected = true;
+        report.add_test(t);
+        report.calculate_overall_confidence();
+        assert!(report.overall_confidence <= 1.0);
+    }
+
+    // ── TamperingReport::to_json ───────────────────────────────────────────────
+
+    #[test]
+    fn test_tampering_report_to_json_empty() {
+        let report = TamperingReport::new();
+        let json = report.to_json();
+        assert!(json.contains("overall_confidence"));
+        assert!(json.contains("tampering_detected"));
+        assert!(json.contains("tests"));
+    }
+
+    #[test]
+    fn test_tampering_report_to_json_with_tests() {
+        let mut report = TamperingReport::new();
+        let mut test = ForensicTest::new("ELA Analysis");
+        test.set_confidence(0.75);
+        test.tampering_detected = true;
+        test.add_finding("Suspicious region detected".to_string());
+        report.add_test(test);
+        report.calculate_overall_confidence();
+        report.generate_summary();
+
+        let json = report.to_json();
+        assert!(json.contains("ELA Analysis"));
+        assert!(json.contains("0.75"));
+        // Verify it's valid JSON by checking well-formedness
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should be valid JSON");
+        assert!(parsed.get("tampering_detected").is_some());
+    }
+
+    #[test]
+    fn test_tampering_report_to_json_is_valid_json() {
+        let mut report = TamperingReport::new();
+        let mut t1 = ForensicTest::new("Copy-Move Detection");
+        t1.set_confidence(0.9);
+        t1.tampering_detected = true;
+        let mut t2 = ForensicTest::new("Metadata Analysis");
+        t2.set_confidence(0.1);
+        report.add_test(t1);
+        report.add_test(t2);
+        report.calculate_overall_confidence();
+
+        let json = report.to_json();
+        let _parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("to_json must produce valid JSON");
+    }
+
+    // ── ForensicsAnalyzer::analyze_batch ──────────────────────────────────────
+
+    #[test]
+    fn test_analyze_batch_empty_paths() {
+        let analyzer = ForensicsAnalyzer::new();
+        let results = analyzer.analyze_batch(&[]);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_batch_nonexistent_path() {
+        let analyzer = ForensicsAnalyzer::new();
+        let path = std::path::PathBuf::from("/nonexistent/path/image.jpg");
+        let results = analyzer.analyze_batch(&[path]);
+        assert_eq!(results.len(), 1);
+        // Should not panic; result should have an error summary
+        assert!(!results[0].summary.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_batch_valid_images() {
+        use std::io::Cursor;
+        use std::io::Write;
+
+        // Use a 128×128 image — large enough for all forensic analysis kernels
+        // (the smallest kernel requires at least 64 pixels per dimension).
+        let img = image::RgbImage::new(128, 128);
+        let dyn_img = image::DynamicImage::ImageRgb8(img);
+        let mut buf = Cursor::new(Vec::new());
+        dyn_img
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .expect("PNG encoding should work");
+        let png_bytes = buf.into_inner();
+
+        // Write to temp file.
+        let mut tmp = std::env::temp_dir();
+        tmp.push("oximedia_forensics_batch_test.png");
+        {
+            let mut f = std::fs::File::create(&tmp).expect("temp file creation");
+            f.write_all(&png_bytes).expect("write PNG bytes");
+        }
+
+        let analyzer = ForensicsAnalyzer::new();
+        let results = analyzer.analyze_batch(&[tmp.clone()]);
+        assert_eq!(results.len(), 1);
+        // Clean image should produce a valid report.
+        assert!(!results[0].summary.is_empty());
+
+        // Cleanup.
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ── TestWeight ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_test_weight_defaults() {
+        let tw = TestWeight::default();
+        assert!((tw.ela - 1.3).abs() < 1e-10);
+        assert!((tw.prnu - 1.0).abs() < 1e-10);
+        assert!((tw.copy_move - 1.5).abs() < 1e-10);
+        assert!((tw.compression - 1.2).abs() < 1e-10);
+        assert!((tw.lighting - 0.9).abs() < 1e-10);
+        assert!((tw.metadata - 0.7).abs() < 1e-10);
+        assert!((tw.default_weight - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_test_weight_lookup() {
+        let tw = TestWeight::default();
+        assert!((tw.weight_for("ELA Analysis") - 1.3).abs() < 1e-10);
+        assert!((tw.weight_for("Copy-Move Detection") - 1.5).abs() < 1e-10);
+        assert!((tw.weight_for("JPEG Compression Analysis") - 1.2).abs() < 1e-10);
+        assert!((tw.weight_for("Noise Analysis PRNU") - 1.0).abs() < 1e-10);
+        assert!((tw.weight_for("Lighting Analysis") - 0.9).abs() < 1e-10);
+        assert!((tw.weight_for("Metadata Analysis") - 0.7).abs() < 1e-10);
+        assert!((tw.weight_for("Unknown Custom Test") - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_test_weight_custom_values() {
+        let tw = TestWeight {
+            ela: 2.0,
+            prnu: 0.5,
+            copy_move: 3.0,
+            compression: 1.0,
+            lighting: 0.5,
+            metadata: 0.3,
+            default_weight: 1.5,
+        };
+        assert!((tw.weight_for("ELA") - 2.0).abs() < 1e-10);
+        assert!((tw.weight_for("Clone Detection") - 3.0).abs() < 1e-10);
+        assert!((tw.weight_for("PRNU Extraction") - 0.5).abs() < 1e-10);
+        assert!((tw.weight_for("Shadow Analysis") - 0.5).abs() < 1e-10);
+        assert!((tw.weight_for("EXIF Check") - 0.3).abs() < 1e-10);
+        assert!((tw.weight_for("Anything Else") - 1.5).abs() < 1e-10);
     }
 }

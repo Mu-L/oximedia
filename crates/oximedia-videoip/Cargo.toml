@@ -1,6 +1,7 @@
 [package]
 name = "oximedia-videoip"
 version.workspace = true
+authors.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -48,8 +49,8 @@ flume = "0.12"
 
 [dev-dependencies]
 tokio-test = "0.4"
-tempfile = "3"
-criterion = "0.5"
+tempfile.workspace = true
+criterion = "0.8"
 
 [features]
 default = []

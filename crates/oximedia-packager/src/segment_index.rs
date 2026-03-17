@@ -257,7 +257,7 @@ mod tests {
         let mut idx = SegmentIndex::new();
         idx.insert(seg(0, 0, 6000, 0, 5000, true));
         idx.insert(seg(1, 6000, 6000, 5000, 4500, true));
-        assert_eq!(idx.total_duration(), Duration::from_millis(12000));
+        assert_eq!(idx.total_duration(), Duration::from_secs(12));
     }
 
     #[test]
@@ -265,10 +265,10 @@ mod tests {
         let mut idx = SegmentIndex::new();
         idx.insert(seg(0, 0, 6000, 0, 5000, true));
         idx.insert(seg(1, 6000, 6000, 5000, 4500, true));
-        let found = idx.find_by_time(Duration::from_millis(3000));
+        let found = idx.find_by_time(Duration::from_secs(3));
         assert!(found.is_some());
         assert_eq!(found.expect("should succeed in test").number, 0);
-        let found2 = idx.find_by_time(Duration::from_millis(7000));
+        let found2 = idx.find_by_time(Duration::from_secs(7));
         assert_eq!(found2.expect("should succeed in test").number, 1);
     }
 
@@ -276,7 +276,7 @@ mod tests {
     fn test_find_by_time_not_found() {
         let mut idx = SegmentIndex::new();
         idx.insert(seg(0, 0, 6000, 0, 5000, true));
-        assert!(idx.find_by_time(Duration::from_millis(99000)).is_none());
+        assert!(idx.find_by_time(Duration::from_secs(99)).is_none());
     }
 
     #[test]
