@@ -47,4 +47,9 @@ pub enum SceneError {
     /// Core error.
     #[error("Core error: {0}")]
     CoreError(#[from] oximedia_core::error::OxiError),
+
+    /// ML pipeline error (only available when the `onnx` feature is enabled).
+    #[cfg(feature = "onnx")]
+    #[error("ML error: {0}")]
+    MlError(#[from] oximedia_ml::MlError),
 }

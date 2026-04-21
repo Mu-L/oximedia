@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-04-21
+
+### Added
+- **Pure-Rust ONNX inference via OxiONNX** — new `oximedia-ml` crate wrapping `oxionnx` 0.1.2, `oxionnx-core`, `oxionnx-gpu`, and `oxionnx-directml` as optional deps. Typed pipelines with zero-cost defaults: no ONNX symbols are linked unless the `onnx` feature is explicitly enabled.
+- **`oximedia-ml` core types** — `OnnxModel` (Session wrapper), `ModelCache` (concurrent `Arc<Mutex<_>>` map with optional LRU capacity), `TypedPipeline` trait (`Input`/`Output` associated types + `process()`), `DeviceType` with `DeviceType::auto()` runtime probe (`Cpu`/`Cuda`/`WebGpu`/`DirectMl`/`CoreMl`), `ImagePreprocessor` (ImageNet mean/std normalization, NCHW/NHWC, letterbox/resize-to-fit), postprocess helpers (`softmax`, `sigmoid`, `argmax`, `top_k`), and a `ModelZoo` registry scaffold.
+- **`SceneClassifier` pipeline** — Places365/ImageNet-style typed pipeline on OxiONNX, configurable `top_k`, ImageNet-normalized 224×224 NCHW preprocessing, softmax → top-K postprocess. Constructors: `from_model`, `from_path`, `with_top_k`.
+- **`ShotBoundaryDetector` pipeline** — TransNetV2-compatible I/O (48×27 NCHW rolling window of frames, many-hot output for hard/soft cuts) with configurable window length and threshold; returns `Vec<ShotBoundary { frame_index, confidence, kind: Hard | SoftCut }>`.
+- **Facade integration** — new `oximedia::ml` module re-exporting `oximedia-ml` behind `features = ["ml"]`; sub-features `ml-scene-classifier`, `ml-shot-boundary`, and `ml-onnx` for selective inclusion. `full` feature now picks up `ml`, `ml-scene-classifier`, `ml-shot-boundary`.
+- **Workspace deps** — added `oxionnx-ops`, `oxionnx-gpu`, `oxionnx-directml`, and `oxionnx-proto` at 0.1.2 to root `[workspace.dependencies]` so sub-crates can opt in via `workspace = true`.
+- **Example** — `examples/ml_scene_classify.rs` demonstrates end-to-end scene classification via the typed pipeline (gated by `ml` + `ml-scene-classifier`).
+- **Feature gates on `oximedia-ml`** — `onnx`, `cuda`, `webgpu`, `directml`, `scene-classifier`, `shot-boundary`, `all-pipelines` (default build remains symbol-free).
+- **Tests** — 55+ tests across `oximedia-ml` covering model-cache concurrency, LRU eviction, preprocessing (ImageNet normalize, letterbox, layout), pipeline contracts, and synthetic tensor fixtures.
+- **Comprehensive ML guide** (`docs/ml_guide.md`) + README `Sovereign ML Pipelines` section covering typed pipelines, feature matrix (crate + facade + downstream), device selection with GPU backend table, CLI reference, WASM support matrix, and roadmap — Wave 6 Slice C.
+- **Python `oximedia.ml` submodule** (Wave 5 Slice B, 2026-04-21) — new PyO3 bindings for the typed ML pipeline stack, gated on the `oximedia-py/ml` feature. Exposes `MlDeviceType` (with `auto`/`cpu`/`cuda`/`webgpu`/`directml`/`coreml` constructors, `from_name`, `list_available`, `capabilities`), `MlDeviceCapabilities` (rich probe record), `OnnxModel` (`load`/`load_from_bytes` accepting bytes, per-model `info()`/`device()`), `MlModelInfo`/`MlTensorSpec`/`MlTensorDType`, `MlModelZoo` + `MlModelEntry` mirroring the zoo registry, and the full pipeline set: `SceneClassifier`, `ShotBoundaryDetector` (+ always-available `heuristic()` fallback), `AestheticScorer`, `ObjectDetector`, `FaceEmbedder`. Numpy `(H, W, 3) uint8` arrays for image pipelines and `(N, H, W, 3) uint8` for the shot-boundary sliding window. Result wrappers (`SceneClassification`, `ShotBoundary`, `AestheticScore`, `Detection`, `FaceEmbedding`) are Python-native dataclass-like objects; `FaceEmbedding` supports `cosine_similarity`, `to_list()`, and `to_numpy()`. 11 integration smoke tests in `crates/oximedia-py/tests/ml_smoke.rs` drive the submodule via an embedded Python interpreter. Depends on `oximedia-ml/all-pipelines`; not pulled in by default, so the default `pip install oximedia` build stays lean.
+
+### Changed
+- Workspace version bumped to **0.1.5** (was 0.1.4).
+- `oximedia` facade gains the `ml` feature (off by default); the `full` feature now pulls in `ml` plus the `ml-scene-classifier` and `ml-shot-boundary` sub-features.
+- **Codec decoder honesty pass (documentation-only)**: introduced a four-tier decoder taxonomy (`Verified` / `Functional` / `Bitstream-parsing` / `Experimental`) in the top-level README and in `oximedia-codec/README.md`. Decoders that previously carried a "Stable" / "Complete" label but do not yet reconstruct pixel or sample data end-to-end (AV1, VP9, VP8, Theora, Vorbis, AVIF) are now accurately labelled `Bitstream-parsing`. No source behaviour changes — the decoders still parse the bitstream as before. See `docs/codec_status.md` for the full per-decoder status, what each stub is missing, and the effort estimate.
+- `examples/decode_video.rs` rewritten to reflect the real decoder-status matrix instead of printing fake code samples that pretended to drive a full AV1/VP9 decode.
+
+### Added
+- **`docs/codec_status.md`** — per-decoder state, missing pieces, effort bucket (small / medium / large / specialist), and 0.1.5-vs-0.2.0+ target. Referenced from the top-level README, `oximedia-codec/README.md`, and `TODO.md`.
+- **`crates/oximedia-codec/tests/av1_real_bitstream.rs`** — `#[ignore]`'d integration test harness for GitHub issue #9. Reads a real AV1 bitstream path from the `OXIMEDIA_AV1_FIXTURE` env var (skips cleanly when unset, so no binary fixture ships in the repo) and asserts that the Y plane of at least one decoded frame has non-zero variance. Will pass automatically once AV1 pixel reconstruction lands.
+- **`TODO.md`** gains a "Codec Implementation Roadmap" section mirroring `docs/codec_status.md` effort buckets.
+- Documentation round 3: `docs/rate_control.md`, `docs/simd_dispatch.md`, `docs/wave5_deltas.md`.
+
+### Notes
+- `oximedia-neural` continues to ship its pre-existing homegrown ONNX-style runtime alongside the new `oximedia-ml` OxiONNX-backed pipelines; consolidation onto a single ML stack is planned for a future milestone.
+- CPU inference is fully pure-Rust via `oxionnx`. GPU backends (`cuda`, `webgpu`, `directml`) are additive feature gates wired in `oximedia-ml`; broader crate-by-crate integration (Waves 3–6 on the 0.1.5 TODO list) will land in subsequent cycles.
+
+### Validated
+- **Wave 6 Slice D — Full CI gate** (2026-04-21): `cargo check --workspace --all-features` clean; `cargo clippy --workspace --features onnx --all-targets -- -D warnings` clean (zero warnings); `cargo doc --workspace --features onnx --no-deps` clean after fixing 3 pre-existing unresolved intra-doc links to `MlError` in `oximedia-scene::ml` (fully-qualified to `oximedia_ml::MlError`); ML stack end-to-end tests all green — `oximedia-ml` 124 + 22 doctests, `oximedia-scene` 790, `oximedia-shots` 906, `oximedia-recommend` 991, `oximedia-mir` 800, `oximedia-caption-gen` 491 (4,124 tests); WASM gate clean for `oximedia-ml` (default, `onnx`, `onnx+webgpu`) and facade `oximedia --features ml` on `wasm32-unknown-unknown`; facade feature matrix validated (`no-default`, `ml`, `ml-onnx`, `full`); all `oximedia-ml` source files well under 2000-line refactor threshold (largest: `model.rs` at 500 lines).
+- **Pre-existing non-ML surface noise surfaced (not blocking)**: `oximedia-container` emits an `unused import: TagMap` warning on `cargo check -p oximedia --target wasm32-unknown-unknown --features ml` (`crates/oximedia-container/src/metadata/editor.rs:8`) — exit code 0, unrelated to Wave 1-6 ML work, tracked separately for a future sweep.
+
 ## [0.1.4] - 2026-04-20
 
 ### Added

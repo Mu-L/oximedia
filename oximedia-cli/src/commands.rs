@@ -34,6 +34,7 @@ use crate::lut_cmd;
 use crate::mam_cmd;
 use crate::mir_cmd;
 use crate::mixer_cmd;
+use crate::ml_cmd;
 use crate::multicam_cmd;
 use crate::ndi_cmd;
 use crate::normalize_cmd;
@@ -1053,6 +1054,12 @@ pub(crate) enum Commands {
     BatchEngine {
         #[command(subcommand)]
         command: batch_cmd::BatchEngineCommand,
+    },
+
+    /// Sovereign ML pipelines: list, probe, run (Pure-Rust ONNX via oximedia-ml)
+    Ml {
+        #[command(subcommand)]
+        command: ml_cmd::MlCommand,
     },
 }
 

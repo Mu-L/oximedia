@@ -1,11 +1,12 @@
 # OxiMedia — The Sovereign Media Framework: Development Roadmap
 
-**Version: 0.1.4**
-**Status as of: 2026-04-20**
-**Total SLOC: ~2,650,000 (Rust)**
-**Total Tests: 80,500+ passing**
-**Total Crates: 106**
-**Crate Status: 106 Stable / 0 Alpha / 0 Partial**
+**Version: 0.1.5 (active) / 0.1.4 (stable)**
+**Status as of: 2026-04-21**
+**Total SLOC: ~2,677,000 (Rust)**
+**Total Tests: 81,383 passing (cargo nextest run --workspace --all-features)**
+**Total Crates: 108**
+**Crate Status: 108 Stable / 0 Alpha / 0 Partial**
+**Current Branch: 0.1.5 — Full ONNX Runtime Integration via OxiONNX**
 
 ---
 
@@ -13,9 +14,9 @@
 
 | Category | Count | Notes |
 |----------|-------|-------|
-| Stable crates | 106 | All crates fully stabilized; no `todo!()`/`unimplemented!()` stubs |
-| Alpha crates | 0 | All 31 former alpha crates promoted to stable |
-| Partial crates | 0 | All 10 former partial crates completed and promoted to stable |
+| Stable crates | 108 | All crates fully stabilized; no `todo!()`/`unimplemented!()` stubs |
+| Alpha crates | 0 | All former alpha crates promoted to stable |
+| Partial crates | 0 | All former partial crates completed and promoted to stable |
 
 ---
 
@@ -296,12 +297,167 @@ Progress tracking for in-flight Wave items. `[~]` = in progress, `[x]` = complet
 - [x] Container v4: MKV BlockAdditionMapping + sample-accurate seek all formats + CMAF-LL chunked — Wave 4 Slice D (2026-04-18)
 - [x] FFmpeg compat v2: codec-map OnceLock + encoder quality args + -vf/-af + two-pass — Wave 4 Slice E (2026-04-18)
 - [x] Docs sweep round 2: oximedia-codec + oximedia-io + oximedia-bitstream + Wave-4 API deltas — Wave 4 Slice F (2026-04-18)
-- [ ] Transcode pipeline frame-level executor (TranscodePipeline::execute() + multi-track interleaver) — Wave 5 Slice A (2026-04-18)
-- [ ] HW-accel detection: macOS VideoToolbox + Linux VAAPI real platform probes — Wave 5 Slice B (2026-04-18)
-- [ ] ABR BBA-1 buffer-based rate adaptation strategy — oximedia-net — Wave 5 Slice C (2026-04-18)
-- [ ] Container v5: SCTE-35 MPEG-TS ad markers + BatchMetadataUpdate — Wave 5 Slice D (2026-04-18)
-- [ ] Core: structured ErrorContext chain (file:line:fn) + FormatNegotiator codec negotiation — Wave 5 Slice E (2026-04-18)
-- [ ] Docs round 3: codec feature matrix + rate-control guide + SIMD dispatch + Wave-5 deltas — Wave 5 Slice F (2026-04-18)
+- [x] Transcode pipeline frame-level executor (TranscodePipeline::execute() + multi-track interleaver) (verified 2026-04-21) — Wave 5 Slice A (2026-04-18)
+- [x] HW-accel detection: macOS VideoToolbox + Linux VAAPI real platform probes (verified 2026-04-21) — Wave 5 Slice B (2026-04-18)
+- [x] ABR BBA-1 buffer-based rate adaptation strategy — oximedia-net (verified 2026-04-21) — Wave 5 Slice C (2026-04-18)
+- [x] Container v5: SCTE-35 MPEG-TS ad markers + BatchMetadataUpdate (verified 2026-04-21) — Wave 5 Slice D (2026-04-18)
+- [x] Core: structured ErrorContext chain (file:line:fn) + FormatNegotiator codec negotiation (verified 2026-04-21) — Wave 5 Slice E (2026-04-18)
+- [x] Docs round 3: codec feature matrix + rate-control guide + SIMD dispatch + Wave-5 deltas (completed 2026-04-21) — Wave 5 Slice F (2026-04-18)
+
+---
+
+## 0.1.5 Planned — Full ONNX Runtime Integration (2026-04-20)
+
+**Theme**: Deliver the "Full ONNX Runtime integration" item previously slated for 0.3.0, via the Pure-Rust **OxiONNX** stack (`~/work/oxionnx/`, crates.io `0.1.2`). No C++ `ort` dependency — preserves COOLJAPAN Pure-Rust Policy. All inference feature-gated; pure-Rust default build unaffected.
+
+**Prerequisites verified (2026-04-20)**:
+- OxiONNX 0.1.2 already in workspace (`oxionnx`, `oxionnx-core`)
+- `oximedia-cv` already wired (`onnx` + `cuda` features via `oxionnx/cuda`)
+- Upstream workspace ships unused sister crates: `oxionnx-ops`, `oxionnx-gpu`, `oxionnx-directml`, `oxionnx-proto`
+
+### Scope
+
+| Item | Crate(s) | Notes |
+|------|----------|-------|
+| **Workspace dep expansion** | Root `Cargo.toml` | Add `oxionnx-ops = "0.1.2"`, `oxionnx-gpu = "0.1.2"`, `oxionnx-directml = "0.1.2"`, `oxionnx-proto = "0.1.2"` to `[workspace.dependencies]`. |
+| **New `oximedia-ml` facade crate** | `crates/oximedia-ml/` | Central model loader (`OnnxModel::load`), model zoo registry, versioning, disk cache in `~/.cache/oximedia/models/`, typed pipelines trait `TypedPipeline<In, Out>`. Feature flags: `onnx` (default off), `cuda`, `webgpu`, `directml`. |
+| **Typed pipelines** | `oximedia-ml` | `SceneClassifier`, `ShotBoundaryDetector`, `AutoCaption`, `AestheticScore`, `FaceEmbedder`, `ObjectDetector` — each a thin wrapper over an ONNX model with pre/post-processing. |
+| **Broaden OxiONNX integration** | `oximedia-scenes`, `oximedia-shots`, `oximedia-neural`, `oximedia-caption-gen`, `oximedia-recommend`, `oximedia-mir` | Behind `onnx` feature flag per-crate; default CPU heuristics preserved. |
+| **Op coverage** | `oximedia-ml` + consumers | Use `oxionnx-ops` for attention/conv/quantized/rnn/kv_cache/nn/ml to unlock real transformer + CNN model loading (not just MatMul/Conv/Softmax). |
+| **GPU backends** | Workspace + `oximedia-ml`, `oximedia-cv` | `oxionnx-gpu` (wgpu cross-platform) + `oxionnx-directml` (Windows). Parallel to existing `cuda` feature via `oxionnx-cuda`. |
+| **CLI `ml` subcommand** | `oximedia-cli` | `oximedia ml list`, `oximedia ml probe <model.onnx>`, `oximedia ml run <pipeline> --input <file>`. |
+| **Python `oximedia.ml` module** | `crates/oximedia-py/` | PyO3 wrappers for each typed pipeline; `import oximedia; oximedia.ml.scene_classifier.classify("in.mp4")`. |
+| **WASM compatibility check** | `oximedia-wasm` | OxiONNX CPU path is Pure Rust → validate `cargo check --target wasm32-unknown-unknown` stays clean with `onnx` feature. |
+| **Examples** | `oximedia/examples/` | `ml_scene_classify.rs`, `ml_auto_caption.rs`, `ml_model_zoo.rs`. |
+| **Docs** | Facade `README.md`, crate-level rustdoc | ONNX usage guide; feature matrix; GPU selection table. |
+| **Version bump** | Root + all `Cargo.toml` | `0.1.4` → `0.1.5` (branch already at 0.1.5; driven by branch-name version policy). |
+| **Op-coverage backfill** | `~/work/oxionnx/oxionnx-ops/` | If a needed opset op is missing, enhance OxiONNX-ops directly (per IMPLEMENT POLICY) rather than falling back to `ort`. |
+
+---
+
+## 0.1.5 Tracking
+
+Progress tracking for in-flight 0.1.5 Wave items. `[~]` = in progress, `[x]` = complete.
+
+### Wave 1 — Foundation (Workspace + `oximedia-ml` skeleton)
+- [x] Workspace Cargo.toml: add `oxionnx-ops`, `oxionnx-gpu`, `oxionnx-directml`, `oxionnx-proto` deps — Wave 1 Slice A (completed 2026-04-20)
+  - **Goal:** `oxionnx-ops`, `oxionnx-gpu`, `oxionnx-directml`, `oxionnx-proto` (all 0.1.2, all on crates.io) appear in root `Cargo.toml` `[workspace.dependencies]` so subcrates can `workspace = true`.
+  - **Design:** Append four lines after existing `oxionnx = "0.1.2"` / `oxionnx-core = "0.1.2"` in the workspace.dependencies block. Follow existing version-pinning style.
+  - **Files:** `Cargo.toml`
+  - **Prerequisites:** none
+  - **Tests:** workspace-level `cargo check --all-features` must still pass
+  - **Risk:** version drift — mitigate by pinning all four to `"0.1.2"` (verified on crates.io 2026-04-20)
+- [x] Workspace version bump 0.1.4 → 0.1.5 (root + all sub-crates) — Wave 1 Slice B (completed 2026-04-20)
+- [x] Create `oximedia-ml` crate (skeleton): `OnnxModel`, `ModelCache`, `TypedPipeline` trait, feature gates — Wave 1 Slice C (completed 2026-04-20)
+  - **Goal:** new `crates/oximedia-ml/` crate containing `OnnxModel`, `ModelCache`, `TypedPipeline` trait, `DeviceType` + `DeviceType::auto()`, `ImagePreprocessor`, `ModelZoo` registry scaffold, `MlError` + `MlResult`, `postprocess` helpers.
+  - **Design:** Feature gates `onnx` / `cuda` / `webgpu` / `directml` / `scene-classifier` / `shot-boundary` / `all-pipelines`. `OnnxModel` wraps `oxionnx::Session`. `ModelCache` = `Arc<Mutex<HashMap<PathBuf, Arc<Mutex<OnnxModel>>>>>` with optional LRU capacity. `TypedPipeline { type Input; type Output; fn process(&mut self, input: Self::Input) -> MlResult<Self::Output>; }`. See `atomic-giggling-dawn.md` §Design for full signatures.
+  - **Files:** `crates/oximedia-ml/{Cargo.toml,src/{lib,error,device,model,cache,preprocess,postprocess,pipeline,zoo}.rs}`
+  - **Prerequisites:** Wave 1 Slice A
+  - **Tests:** `tests/model_cache.rs` (concurrent get_or_load, LRU eviction), `tests/preprocess.rs` (ImageNet normalize, letterbox, layout), `tests/pipeline_contract.rs` (mock TypedPipeline round-trip), `tests/fixtures.rs` (synthetic tensor builders)
+  - **Risk:** `oxionnx::Session` 0.1.2 public API may differ from local path version — subagent must cross-check `~/work/oxionnx/oxionnx/src/lib.rs` or existing usage in `crates/oximedia-cv/src/ml/runtime.rs` before coding.
+- [x] Add `oximedia-ml` to facade crate re-export (feature `ml`) — Wave 1 Slice D (completed 2026-04-20)
+  - **Goal:** facade crate exposes `oximedia::ml` module re-exporting `oximedia-ml` behind `feature = "ml"`; the `full` feature picks it up.
+  - **Design:** `Cargo.toml` adds `oximedia-ml = { workspace = true, optional = true }` and `ml = ["dep:oximedia-ml"]`; `full` gets `"ml"` appended. `src/lib.rs` adds `#[cfg(feature = "ml")] pub mod ml { pub use oximedia_ml::*; }`. `src/prelude.rs` re-exports `DeviceType`, `ModelCache`, `MlError`, `MlResult`, `OnnxModel`, `TypedPipeline` behind `#[cfg(feature = "ml")]`.
+  - **Files:** `Cargo.toml`, `src/lib.rs`, `src/prelude.rs`
+  - **Prerequisites:** Wave 1 Slice C
+  - **Tests:** `cargo check -p oximedia --no-default-features`, `cargo check -p oximedia --features ml`, `cargo check -p oximedia --features full` all pass
+  - **Risk:** `SceneClassifier` name collision with `oximedia_neural::SceneClassifier` — mitigate by keeping each under its own module namespace (`oximedia::ml::*` vs `oximedia::neural::*`) and not re-exporting the type name at prelude level.
+
+### Wave 2 — Typed Pipelines + Op Coverage
+- [x] `SceneClassifier` pipeline in `oximedia-ml` (ONNX input/output contract + ImageNet-style preprocessing) — Wave 2 Slice A (completed 2026-04-20)
+  - **Goal:** `SceneClassifier` typed pipeline that takes a `VideoFrame`/image, runs an ImageNet-style ONNX classifier, returns sorted top-K `(label, score)` predictions. Implements `TypedPipeline`.
+  - **Design:** `SceneClassifier { model: OnnxModel, preproc: ImagePreprocessor, labels: Vec<String>, top_k: usize }` with `::from_model`, `::from_path`, `with_top_k`. Preprocessing: resize-to-fit 224×224, ImageNet mean/std, NCHW. Postprocessing: softmax → argsort-desc → take top_k → pair with labels. `SceneInput` wraps multiple input modes (raw tensor / image / video frame). Output: `SceneClassification { predictions: Vec<(String, f32)> }`.
+  - **Files:** `crates/oximedia-ml/src/pipelines/scene_classifier.rs`, `crates/oximedia-ml/src/pipelines/mod.rs` (add `pub mod scene_classifier; pub use scene_classifier::*;`)
+  - **Prerequisites:** Wave 1 Slice C
+  - **Tests:** `tests/pipeline_contract.rs` includes a `SceneClassifier` construction test that validates `PipelineInfo`/shape contracts without needing a real `.onnx` model (use synthetic ModelInfo).
+  - **Risk:** Real ONNX inference requires real model files (absent in repo). Mitigate by feature-gating construction paths and testing only the preprocessing/postprocessing/contract layer in this wave; real-model tests deferred to Wave 2E/6D.
+- [x] `ShotBoundaryDetector` pipeline (TransNetV2-compatible I/O) — Wave 2 Slice B (completed 2026-04-20)
+  - **Goal:** `ShotBoundaryDetector` typed pipeline with TransNetV2-compatible I/O (48×27 NCHW sliding window of frames, many-hot output for hard/soft cut probabilities).
+  - **Design:** `ShotBoundaryDetector { model: OnnxModel, preproc: ImagePreprocessor, window: usize, threshold: f32, prev_frames: VecDeque<TensorFrame> }`. Feeds a rolling 100-frame window (configurable). Output: `Vec<ShotBoundary { frame_index, confidence, kind: Hard | SoftCut }>`. `ShotBoundaryKind` enum tracks many-hot output channels.
+  - **Files:** `crates/oximedia-ml/src/pipelines/shot_boundary.rs`, `crates/oximedia-ml/src/pipelines/mod.rs`
+  - **Prerequisites:** Wave 1 Slice C
+  - **Tests:** `tests/pipeline_contract.rs` extended: construct `ShotBoundaryDetector` with synthetic `ModelInfo`; validate sliding-window accumulator logic (deque fill/drain invariants) without running inference.
+  - **Risk:** TransNetV2 expects specific input layout. Mitigate by documenting the expected shape `[1, 100, 27, 48, 3]` in rustdoc and validating dimensions up-front in `process()`, returning `MlError::ShapeMismatch` on drift.
+- [ ] `AutoCaption` pipeline (encoder-decoder with `oxionnx-ops` attention + kv_cache) — Wave 2 Slice C
+- [x] `AestheticScore` / `ObjectDetector` / `FaceEmbedder` pipelines — Wave 2 Slice D (completed 2026-04-20)
+- [ ] Op-coverage audit: run each pipeline against reference ONNX models; backfill missing ops in `~/work/oxionnx/oxionnx-ops/` if needed — Wave 2 Slice E
+
+### Wave 3 — GPU Backend Expansion
+- [ ] `oximedia-ml` GPU dispatch: wire `oxionnx-gpu` (wgpu) behind `webgpu` feature — Wave 3 Slice A
+- [ ] `oximedia-ml` DirectML dispatch: wire `oxionnx-directml` behind `directml` feature — Wave 3 Slice B
+- [ ] `oximedia-cv` parity: broaden existing `cuda` feature to also expose `webgpu`/`directml` toggles — Wave 3 Slice C
+- [x] Device-selection heuristic (`DeviceType::auto()`) with runtime probing — Wave 3 Slice D (completed 2026-04-20)
+
+### Wave 4 — Broader Integration (scenes/shots/mir/recommend/caption-gen/neural)
+- [x] Wire `oxionnx` into `oximedia-scenes` behind `onnx` feature — Wave 4 Slice A (completed 2026-04-20)
+- [x] Wire `oxionnx` into `oximedia-shots` behind `onnx` feature — Wave 4 Slice B (completed 2026-04-20)
+- [x] Wire `oxionnx` into `oximedia-caption-gen` behind `onnx` feature — Wave 4 Slice C (completed 2026-04-20)
+- [ ] Wire `oxionnx` into `oximedia-neural` behind `onnx` feature — Wave 4 Slice D
+- [x] Wire `oxionnx` into `oximedia-recommend` (embedding-based content sim) — Wave 4 Slice E (completed 2026-04-20)
+- [x] Wire `oxionnx` into `oximedia-mir` (music-tagging / genre ONNX) — Wave 4 Slice F (completed 2026-04-20)
+
+### Wave 5 — Interfaces (CLI / Python / WASM)
+- [x] CLI `oximedia ml list|probe|run` subcommands — Wave 5 Slice A (completed 2026-04-20)
+- [x] Python `oximedia.ml` PyO3 module — Wave 5 Slice B (completed 2026-04-21)
+- [x] WASM `cargo check --target wasm32-unknown-unknown --features onnx` validation — Wave 5 Slice C (completed 2026-04-20) — oximedia-ml default + `onnx` + `webgpu` + `directml` all build on wasm32; `cuda` is native-only (libloading driver binding); fixed pre-existing facade FileSource re-export so `oximedia --features ml` also builds on wasm32
+
+### Wave 6 — Docs + Examples + Validation
+- [x] Examples: `ml_scene_classify.rs`, `ml_auto_caption.rs`, `ml_model_zoo.rs` — Wave 6 Slice A (completed 2026-04-20)
+- [x] Rustdoc pass for `oximedia-ml` + updated facade `prelude.rs` — Wave 6 Slice B (completed 2026-04-20)
+- [x] README + `docs/ml_guide.md` feature matrix + GPU selection table — Wave 6 Slice C (completed 2026-04-21)
+- [x] Full CI gate: `cargo test --all --features onnx`, `cargo clippy --all -- -D warnings`, `cargo doc --all --no-deps` — Wave 6 Slice D (completed 2026-04-21)
+
+---
+
+## Codec Implementation Roadmap (0.1.5 Honesty Pass)
+
+Introduced in 0.1.5 alongside the documentation honesty pass. Mirrors
+`docs/codec_status.md` — see that file for per-decoder current state, what
+is missing, and the effort rationale.
+
+### Taxonomy
+
+| Label | Meaning |
+|-------|---------|
+| Verified | End-to-end decode matches a reference on external fixtures |
+| Functional | Real reconstruction path present and self-consistent on round-trip |
+| Bitstream-parsing | Headers parsed; no pixel/sample reconstruction |
+| Experimental | API sketch; not intended to decode |
+
+### Effort buckets
+
+| Bucket | Approximate cost |
+|--------|------------------|
+| small | Focused bug-fix or a single missing stage (days) |
+| medium | Multiple decoder stages (weeks) |
+| large | Complete reconstruction pipeline (months) |
+| specialist | Codec specialist + reference generator + conformance suite |
+
+### Gap list
+
+| Codec | Current | Missing | Effort | Target |
+|-------|---------|---------|--------|--------|
+| AV1 decode | Bitstream-parsing | Entropy / predict / transform / loop-filter / CDEF / film-grain wired to output buffer; reference-frame management; issue #9 | specialist | 0.2.0+ |
+| VP9 decode | Bitstream-parsing | Wire superblock/block/intra decode to `VideoFrame`; fill pipeline stages; reference-frame management | large | 0.2.0+ |
+| VP8 decode | Bitstream-parsing | Intra/inter decode, DCT/WHT inverse transform, loop filter, Y/U/V output | large | 0.2.0+ |
+| Theora decode | Bitstream-parsing (bug) | Replace `to_vec()` mis-copy with direct write into `frame.planes[i].data` | small | 0.1.5 point / 0.1.6 |
+| AVIF decode | Bitstream-parsing | Real AV1 pixel output + image-item demux (follows AV1) | specialist | follows AV1 |
+| WebP VP8 lossy decode | Missing | Full lossy VP8 WebP decoder (follows VP8) | large | follows VP8 |
+| Vorbis decode | Bitstream-parsing | Full codebook / residue / floor curve / MDCT-IMDCT / OLA / channel coupling | specialist | 0.2.0+ |
+| Opus SILK / hybrid | Functional (CELT only) | Real SILK LP analysis/synthesis (LTP, LSF, LPC); hybrid-mode band splitting | specialist | 0.1.6 / 0.2.0+ |
+
+### Supporting deliverables
+
+- [x] `docs/codec_status.md` — single source of truth for decoder honesty
+- [x] `crates/oximedia-codec/tests/av1_real_bitstream.rs` (`#[ignore]`; `OXIMEDIA_AV1_FIXTURE` env var; no binary fixture in repo) — executable gate for the AV1 gap; will pass when pixel reconstruction lands
+- [x] README + `crates/oximedia-codec/README.md` demoted: AV1 / VP9 / VP8 / Theora / Vorbis / AVIF labelled `Bitstream-parsing`
+- [x] `examples/decode_video.rs` rewritten to reflect the real decoder-status matrix (no fake `println!` code samples)
+- [ ] Theora pixel-copy bug-fix (small; scheduled for 0.1.6)
+- [ ] Opus SILK decoder (specialist; 0.2.0+)
+- [ ] AV1 reconstruction pipeline (specialist; 0.2.0+; issue #9)
+- [ ] VP9 reconstruction wiring (large; 0.2.0+)
+- [ ] VP8 real decode (large; 0.2.0+)
+- [ ] Vorbis full decode (specialist; 0.2.0+)
 
 ---
 
@@ -317,7 +473,7 @@ Progress tracking for in-flight Wave items. `[~]` = in progress, `[x]` = complet
 | Python pip-installable package | 0.2.0 | PyO3 bindings complete; maturin packaging and PyPI publish remaining |
 | WASM/WebAssembly build support | 0.3.0 | Pure-Rust stack makes this feasible; needs `wasm32-unknown-unknown` CI |
 | Hardware H.264 encoding | 2027+ | Blocked on patent expiry (est. September 2027); feature-gated, separate repo `oximedia-avc` |
-| Full ONNX Runtime integration | 0.3.0 | For ML-backed CV/scene/shot inference; must remain feature-gated for pure-Rust default |
+| ~~Full ONNX Runtime integration~~ | ~~0.3.0~~ | **Promoted to 0.1.5** — see 0.1.5 Planned section below. Delivered via Pure-Rust OxiONNX, not C++ `ort`. |
 
 ---
 
@@ -401,4 +557,4 @@ All of the following must pass before any release tag:
 
 ---
 
-*Last updated: 2026-04-15 — v0.1.3, ~2.650M SLOC, 106 crates (106 stable); facade exposes ~108 workspace library crates via 60+ feature flags; 11 new crates (hdr, spatial, cache, stream, video, cdn, neural, 360, analytics, caption-gen, pipeline); 80,393 tests passing; 1,386 unwrap() calls eliminated; NMOS IS-04/IS-05/IS-07/IS-08/IS-09/IS-11 complete; AVX-512 SIMD; CLI extended; 4 criterion benchmarks; WASM clean*
+*Last updated: 2026-04-21 — v0.1.5 active (Full ONNX Runtime via Pure-Rust OxiONNX 0.1.2); v0.1.4 stable baseline; 108 crates, 81,383 tests verified, ~2.677M SLOC; `oximedia-ml` stable (typed pipelines: SceneClassifier, ShotBoundaryDetector, AestheticScorer, ObjectDetector, FaceEmbedder); feature-gated `onnx`/`cuda`/`webgpu`/`directml`; pure-Rust default preserved*

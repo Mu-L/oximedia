@@ -1,35 +1,46 @@
 # oximedia-codec
 
-![Status: Stable](https://img.shields.io/badge/status-stable-green)
+![Status: Mixed (see decoder matrix)](https://img.shields.io/badge/status-mixed-yellow)
 
 Video and audio codec implementations for the OxiMedia multimedia framework. Pure-Rust, royalty-free codecs with image I/O support.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.4 — 2026-04-20 — 3,063 tests
+Version: 0.1.5 — 2026-04-21 — 3,063 tests
 
 ## Overview
 
-`oximedia-codec` provides encoding and decoding for royalty-free video codecs plus image I/O:
+`oximedia-codec` provides encoding and decoding for royalty-free video codecs plus image I/O.
+Decoder rows use the project-wide four-tier honesty taxonomy; see
+[`docs/codec_status.md`](../../docs/codec_status.md) for per-decoder details, what is missing
+per codec, and the effort required to close each gap.
 
-| Codec    | Status   | Feature Flag | Notes |
-|----------|----------|--------------|-------|
-| AV1      | Complete | `av1` (default) | |
-| VP9      | Complete | `vp9` | |
-| VP8      | Complete | `vp8` | |
-| Theora   | Complete | `theora` | |
-| MJPEG    | Complete | `mjpeg` | Wraps `oximedia-image` JPEG baseline; ≥28 dB PSNR at Q85 |
-| APV      | Complete | `apv` | ISO/IEC 23009-13 royalty-free intra-frame |
-| FFV1     | Complete | `ffv1` | RFC 9043 lossless |
-| Opus     | Complete | `opus` | |
-| Vorbis   | Complete | *(always)* | |
-| FLAC     | Complete | *(always)* | |
-| PCM      | Complete | *(always)* | |
-| JPEG-XL  | Complete | `jpegxl` | ISOBMFF container + streaming decode |
-| PNG/APNG | Yes      | *(always)* | |
-| WebP     | Yes      | *(always)* | |
-| GIF      | Yes      | *(always)* | |
-| AVIF     | Yes      | *(always)* | |
+| Label | Meaning |
+|-------|---------|
+| **Verified** | End-to-end decode matches a reference implementation on external fixtures. |
+| **Functional** | Real reconstruction path present and self-consistent on round-trip tests. No third-party conformance proof yet. |
+| **Bitstream-parsing** | Headers/syntax parsed; pixel/sample production is stubbed, partial, or returns empty/constant data. Useful for format inspection, not for playback. |
+| **Experimental** | API sketch; not intended to decode. |
+
+| Codec    | Encode     | Decode              | Feature Flag      | Notes |
+|----------|------------|---------------------|-------------------|-------|
+| AV1      | Functional | Bitstream-parsing   | `av1` (default)   | OBU parsing complete; pixel reconstruction pipeline is stubbed. GitHub issue #9. |
+| VP9      | Functional | Bitstream-parsing   | `vp9`             | Frame/tile parsing complete; reconstruction pipeline stages are no-ops. |
+| VP8      | Functional | Bitstream-parsing   | `vp8`             | Y plane is emitted as constant gray; no intra/inter decode. |
+| Theora   | Functional | Bitstream-parsing   | `theora`          | DCT/motion implemented but decoded pixels are copied into a dropped `Vec`. |
+| H.263    | Functional | Functional          | *(always)*        | Real macroblock decode, motion compensation, loop filter. |
+| MJPEG    | Functional | Functional          | `mjpeg`           | Wraps `oximedia-image` JPEG baseline; ≥28 dB PSNR at Q85. |
+| APV      | Functional | Functional          | `apv`             | ISO/IEC 23009-13 royalty-free intra-frame. |
+| FFV1     | Functional | Functional          | `ffv1`            | RFC 9043 lossless; CRC-32 verified. |
+| Opus     | Functional | Functional (CELT only) | `opus`         | SILK / hybrid modes are placeholders; CELT path is real. |
+| Vorbis   | Functional | Bitstream-parsing   | *(always)*        | Headers parse; `decode_audio_packet` returns empty. |
+| FLAC     | Functional | Functional / Verified | *(always)*      | CRC-16 verified; real LPC decode. |
+| PCM      | Verified   | Verified            | *(always)*        | Trivial round-trip verified. |
+| JPEG-XL  | Functional | Functional          | `jpegxl`          | ISOBMFF container + streaming decode; real modular decoder. |
+| PNG/APNG | Functional | Functional          | *(always)*        | Real unfilter + RGBA conversion. |
+| WebP     | Functional | Functional (VP8L only) | *(always)*     | Lossless only — no VP8 lossy decoder. |
+| GIF      | Functional | Functional          | *(always)*        | Real LZW decode. |
+| AVIF     | Functional | Bitstream-parsing   | *(always)*        | Depends on AV1 decoder. |
 
 ## Usage
 
@@ -37,43 +48,41 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-codec = "0.1.4"
+oximedia-codec = "0.1.5"
 # or with additional codecs:
-oximedia-codec = { version = "0.1.4", features = ["av1", "vp9", "vp8", "opus"] }
+oximedia-codec = { version = "0.1.5", features = ["av1", "vp9", "vp8", "opus"] }
 ```
 
-### AV1 Decoding
+### AV1 / VP9 / VP8 / Theora Bitstream Parsing
 
-```rust
-use oximedia_codec::{VideoDecoder, Av1Decoder};
+These decoders currently parse bitstreams but do not reconstruct pixel data
+(see the matrix above). They are useful for format inspection, extradata
+handling, and container-side work. The API shape below matches what the
+crate exposes today; the returned frames have allocated planes but do not
+contain reconstructed pixels until the work tracked in GitHub issue #9
+lands.
 
-let mut decoder = Av1Decoder::new(&codec_params)?;
-decoder.send_packet(&packet)?;
-while let Some(frame) = decoder.receive_frame()? {
-    // Process decoded frame
+```rust,ignore
+use oximedia_codec::{Av1Decoder, DecoderConfig, VideoDecoder};
+use oximedia_core::CodecId;
+
+let config = DecoderConfig {
+    codec: CodecId::Av1,
+    extradata: None,
+    threads: 0,
+    low_latency: false,
+};
+let mut decoder = Av1Decoder::new(config)?;
+decoder.send_packet(&packet_bytes, pts)?;
+while let Some(_frame) = decoder.receive_frame()? {
+    // Frame metadata (width/height/format/timestamp) is populated;
+    // pixel planes are not reconstructed in 0.1.5.
 }
 ```
 
-### VP9 Decoding
-
-```rust
-use oximedia_codec::Vp9Decoder;
-
-let mut decoder = Vp9Decoder::new(&codec_params)?;
-decoder.send_packet(&packet)?;
-while let Some(frame) = decoder.receive_frame()? {
-    // Process decoded frame
-}
-```
-
-### VP8 Decoding
-
-```rust
-use oximedia_codec::Vp8Decoder;
-
-let mut decoder = Vp8Decoder::new()?;
-let frame = decoder.decode(&packet_data)?;
-```
+`Vp9Decoder`, `Vp8Decoder`, and `TheoraDecoder` follow the same
+`VideoDecoder` trait shape. See `docs/codec_status.md` for the honest
+per-decoder status.
 
 ### Opus Decoding
 

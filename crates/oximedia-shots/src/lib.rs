@@ -108,6 +108,8 @@ pub mod golden_ratio;
 pub mod insert_cutaway;
 pub mod log;
 pub mod metrics;
+#[cfg(feature = "onnx")]
+pub mod ml;
 pub mod ml_boundary;
 pub mod pacing;
 pub mod pattern;
@@ -140,6 +142,8 @@ pub mod wipe_patterns;
 // Re-export commonly used items at crate root
 pub use error::{ShotError, ShotResult};
 pub use frame_buffer::{FloatImage, FrameBuffer, GrayImage};
+#[cfg(feature = "onnx")]
+pub use ml::MlShotDetector;
 pub use types::{
     CameraAngle, CameraMovement, CompositionAnalysis, CoverageType, MovementType, Scene, Shot,
     ShotStatistics, ShotType, TransitionType,

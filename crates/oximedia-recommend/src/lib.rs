@@ -125,8 +125,14 @@ pub mod user_profile;
 pub mod user_segment;
 pub mod watch_history;
 
+#[cfg(feature = "onnx")]
+pub mod ml;
+
 // Re-export commonly used items
 pub use error::{RecommendError, RecommendResult};
+
+#[cfg(feature = "onnx")]
+pub use ml::{rank_by_similarity, ContentEmbedding, EmbeddingExtractor};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

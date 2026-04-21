@@ -605,10 +605,15 @@ mod tests {
         // Then insert a third entry. The Metadata (priority=3) should be evicted
         // over Manifest (priority=10), all else being equal.
         let mut cache = ContentAwareCache::new(2);
-        // Insert manifest and metadata with tiny data to avoid timing noise.
+        // Insert manifest and metadata with tiny data.
         cache.insert_media("manifest".into(), vec![0u8; 1], MediaContentType::Manifest);
         cache.insert_media("meta".into(), vec![0u8; 1], MediaContentType::Metadata);
-        // Force the manifest to be "recently used" relative to metadata.
+        // Let both entries age so the score formula produces non-zero values,
+        // then refresh manifest's last_accessed.  Without this sleep the age
+        // is <1 µs on fast (Linux/CUDA) machines and both scores collapse to
+        // (1 - 1) * … = 0, making eviction order non-deterministic (flaky).
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Force the manifest to be "recently used" relative to the aged metadata.
         let _ = cache.get("manifest");
         // Insert third entry to trigger eviction.
         cache.insert_media(

@@ -6,7 +6,7 @@ Professional audio/video routing and patching system for OxiMedia.  Provides ful
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.4 | Tests: 1,313 — 2026-04-20
+Version: 0.1.5 | Tests: 1,313 — 2026-04-21
 
 ## Features
 
@@ -49,10 +49,10 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-routing = "0.1.4"
+oximedia-routing = "0.1.5"
 
 # Enable NMOS HTTP server + mDNS discovery
-# oximedia-routing = { version = "0.1.4", features = ["nmos-discovery"] }
+# oximedia-routing = { version = "0.1.5", features = ["nmos-discovery"] }
 ```
 
 ```rust

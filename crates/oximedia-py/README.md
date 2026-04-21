@@ -1,6 +1,6 @@
 # OxiMedia Python Bindings
 
-**Status: [Stable]** | Version: 0.1.4 | Tests: 838 | Updated: 2026-04-20
+**Status: [Stable]** | Version: 0.1.5 | Tests: 838 | Updated: 2026-04-21
 
 Python bindings for OxiMedia, a royalty-free multimedia processing library written in Rust.
 
@@ -20,6 +20,7 @@ Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a c
 - **Error Types**: Structured error types with categories and severity
 - **Format Information**: Container capabilities and codec queries
 - **Media Hashing**: Content hashing and fingerprinting
+- `ml` — PyO3 bindings for `oximedia-ml` typed pipelines (SceneClassifier, ShotBoundaryDetector, AestheticScorer, ObjectDetector, FaceEmbedder)
 - **Zero-copy operations** where possible
 - **Thread-safe** Python bindings
 

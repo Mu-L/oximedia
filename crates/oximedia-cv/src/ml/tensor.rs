@@ -524,7 +524,7 @@ impl Tensor {
     ///
     /// Returns an error if conversion fails.
     #[cfg(feature = "onnx")]
-    pub fn to_oxionnx_tensor(&self) -> CvResult<oxionnx_core::Tensor> {
+    pub fn to_oxionnx_tensor(&self) -> CvResult<oxionnx::Tensor> {
         let flat: Vec<f32> = match &self.data {
             TensorData::F32(arr) => arr.iter().copied().collect(),
             TensorData::U8(arr) => arr.iter().map(|&x| f32::from(x)).collect(),
@@ -539,7 +539,7 @@ impl Tensor {
             TensorData::I32(arr) => arr.shape().to_vec(),
             TensorData::I64(arr) => arr.shape().to_vec(),
         };
-        Ok(oxionnx_core::Tensor::new(flat, shape))
+        Ok(oxionnx::Tensor::new(flat, shape))
     }
 
     /// Create tensor from oxionnx Tensor.
@@ -548,7 +548,7 @@ impl Tensor {
     ///
     /// Returns an error if the shape is inconsistent with the data length.
     #[cfg(feature = "onnx")]
-    pub fn from_oxionnx_tensor(tensor: &oxionnx_core::Tensor) -> CvResult<Self> {
+    pub fn from_oxionnx_tensor(tensor: &oxionnx::Tensor) -> CvResult<Self> {
         let shape: Vec<usize> = tensor.shape.clone();
         let arr = ArrayD::from_shape_vec(IxDyn(&shape), tensor.data.clone())
             .map_err(|e| CvError::tensor_error(format!("shape error: {e}")))?;

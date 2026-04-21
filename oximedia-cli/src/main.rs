@@ -93,6 +93,7 @@ mod mam_cmd;
 mod metadata;
 mod mir_cmd;
 mod mixer_cmd;
+mod ml_cmd;
 mod monitor_cmd;
 mod multicam_cmd;
 mod ndi_cmd;
@@ -760,6 +761,7 @@ async fn main() -> Result<()> {
         Commands::Quality { command } => quality_cmd::run_quality(command, cli.json).await,
         Commands::Normalize { command } => normalize_cmd::run_normalize(command, cli.json).await,
         Commands::BatchEngine { command } => batch_cmd::run_batch_engine(command, cli.json).await,
+        Commands::Ml { command } => ml_cmd::run_ml(command, cli.json).await,
     };
 
     // Handle errors with colored output

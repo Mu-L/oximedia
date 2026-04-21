@@ -4,8 +4,8 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-v0.1.4-green.svg)](https://github.com/cool-japan/oximedia)
-[![Released](https://img.shields.io/badge/released-2026--04--20-brightgreen.svg)](https://github.com/cool-japan/oximedia)
+[![Version](https://img.shields.io/badge/version-v0.1.5-green.svg)](https://github.com/cool-japan/oximedia)
+[![Released](https://img.shields.io/badge/released-2026--04--21-brightgreen.svg)](https://github.com/cool-japan/oximedia)
 [![Crates](https://img.shields.io/badge/crates-108-blue.svg)](https://github.com/cool-japan/oximedia)
 [![SLOC](https://img.shields.io/badge/SLOC-~2.67M-blueviolet.svg)](https://github.com/cool-japan/oximedia)
 
@@ -55,18 +55,99 @@ Computer vision (object detection, motion tracking, video enhancement, quality a
 
 ## Project Scale
 
-OxiMedia is a **production-grade** framework at **v0.1.4** (released 2026-04-20):
+OxiMedia is a **production-grade** framework at **v0.1.5** (active cycle, 2026-04-21):
 
 | Metric | Value |
 |--------|-------|
 | Total crates | 108 |
-| Total SLOC (Rust) | ~2,670,000 |
-| Tests passing | 81,150+ |
-| Stable crates | 107 |
+| Total SLOC (Rust) | ~2,677,000 |
+| Tests passing | 81,383 (0 failures, 245 skipped — `cargo nextest run --workspace --all-features`) |
+| Stable crates | 108 |
 | Alpha crates | 0 |
 | Partial crates | 0 |
 | License | Apache 2.0 |
 | MSRV | Rust 1.85+ |
+
+## Sovereign ML Pipelines (v0.1.5)
+
+OxiMedia 0.1.5 adds the [`oximedia-ml`](crates/oximedia-ml/) crate — a typed
+ML pipeline layer built atop the Pure-Rust [OxiONNX](https://crates.io/crates/oxionnx)
+runtime. Inference is entirely opt-in; the default `oximedia` build still
+pulls in **zero** ONNX symbols and stays C/Fortran-free.
+
+### Available pipelines
+
+| Pipeline                          | Feature             | I/O                                             | Reference model    |
+|-----------------------------------|---------------------|-------------------------------------------------|--------------------|
+| `SceneClassifier`                 | `scene-classifier`  | 224×224 RGB → `Vec<SceneClassification>`        | Places365 / ResNet |
+| `ShotBoundaryDetector`            | `shot-boundary`     | 48×27 RGB window → `Vec<ShotBoundary>`          | TransNet V2        |
+| `AestheticScorer`                 | `aesthetic-score`   | 224×224 RGB → `AestheticScore`                  | NIMA               |
+| `ObjectDetector`                  | `object-detector`   | 640×640 RGB → `Vec<Detection>` (NMS)            | YOLOv8 (80 COCO)   |
+| `FaceEmbedder`                    | `face-embedder`     | 112×112 RGB face → 512-dim `FaceEmbedding`      | ArcFace            |
+
+### Quick start
+
+```toml
+[dependencies]
+oximedia = { version = "0.1.5", features = ["ml", "ml-scene-classifier", "ml-onnx"] }
+```
+
+```rust,ignore
+use oximedia::ml::pipelines::{SceneClassifier, SceneImage};
+use oximedia::ml::{DeviceType, TypedPipeline};
+
+let classifier = SceneClassifier::load("places365.onnx", DeviceType::auto())?;
+let image = SceneImage::new(rgb_bytes, 224, 224)?;
+for pred in classifier.run(image)? {
+    println!("class {} -> {:.3}", pred.class_index, pred.score);
+}
+```
+
+### Device selection
+
+`DeviceType::auto()` probes the strongest available backend once and
+memoises the result: **CUDA → DirectML → WebGPU → CPU**. Each backend is a
+feature flag (`cuda`, `directml`, `webgpu`); CPU is always available.
+`cuda` is native-only; every other backend — including the default CPU path
+— compiles on `wasm32-unknown-unknown`.
+
+### CLI
+
+The `oximedia ml` namespace ships three subcommands (honour `--json` for
+machine-readable output):
+
+```bash
+oximedia ml list                  # enumerate built-in pipelines + model zoo
+oximedia ml probe                 # report GPU backend availability
+oximedia ml run --pipeline scene-classifier \
+                --model places365.onnx \
+                --input frame.png \
+                --device auto \
+                --top-k 5 \
+                --dry-run
+```
+
+### Downstream integrations
+
+Several domain crates gain an `onnx` feature for an ML-backed fast path
+while keeping the Pure-Rust default intact: `oximedia-scene`
+(`MlSceneEnricher`), `oximedia-shots` (`MlShotDetector`),
+`oximedia-caption-gen` (`CaptionEncoder`), `oximedia-recommend`
+(`EmbeddingExtractor`), `oximedia-mir` (`MusicTagger`).
+
+See [`docs/ml_guide.md`](docs/ml_guide.md) for the full feature matrix,
+per-pipeline I/O contracts, device selection details, WASM support
+matrix, and roadmap.
+
+## What's New in v0.1.5
+
+Active cycle starting 2026-04-21. Theme: **Full ONNX Runtime integration via the Pure-Rust OxiONNX stack** (previously slated for 0.3.0). All inference is feature-gated; the pure-Rust default build stays C/Fortran-free.
+
+- **Pure-Rust ONNX inference via OxiONNX**: Workspace now depends on the full OxiONNX stack (`oxionnx`, `oxionnx-ops`, `oxionnx-gpu`, `oxionnx-directml`, `oxionnx-proto`) instead of the C++ `ort` runtime — preserves the COOLJAPAN Pure-Rust Policy.
+- **New `oximedia-ml` facade crate**: Central ML layer exposing `OnnxModel`, `ModelCache` (concurrent LRU model cache with `~/.cache/oximedia/models/`), `TypedPipeline<In, Out>` trait, `DeviceType::auto()` runtime probe, `ImagePreprocessor` (ImageNet normalize + letterbox + NCHW), and `ModelZoo` registry.
+- **Typed pipelines**: `SceneClassifier` (ImageNet-style top-K classifier with softmax/argsort postprocessing) and `ShotBoundaryDetector` (TransNetV2-compatible sliding window with many-hot hard/soft cut outputs) — more pipelines (`AutoCaption`, `AestheticScore`, `ObjectDetector`, `FaceEmbedder`) queued for Wave 2.
+- **Facade `ml` feature**: `oximedia::ml` module and `prelude` re-exports gated behind `ml` (off by default). Sub-features `ml-scene-classifier`, `ml-shot-boundary`, `ml-onnx` for granular opt-in; `full` feature picks them all up.
+- **55 new tests in `oximedia-ml`**: Covers preprocessing, cache eviction, pipeline contracts, and ModelInfo round-trips. Zero clippy warnings. Pure-Rust default build verified — no ONNX symbols linked unless `onnx` feature is enabled.
 
 ## What's New in v0.1.4
 
@@ -137,8 +218,8 @@ Released 2026-04-20.
 
 | Crate | Description | Status |
 |-------|-------------|--------|
-| `oximedia-codec` | Video codecs (AV1, VP9, VP8, Theora) and image I/O | Stable |
-| `oximedia-audio` | Audio codec implementations (Opus, Vorbis, FLAC, MP3) | Stable |
+| `oximedia-codec` | Video codecs (AV1, VP9, VP8, Theora) and image I/O | Stable (mixed decoder coverage — see [docs/codec_status.md](docs/codec_status.md)) |
+| `oximedia-audio` | Audio codec implementations (Opus, Vorbis, FLAC, MP3) | Stable (Vorbis decode is bitstream-parsing only — see [docs/codec_status.md](docs/codec_status.md)) |
 | `oximedia-container` | Container mux/demux (MP4, MKV, MPEG-TS, OGG) | Stable |
 | `oximedia-lut` | Color science/LUT (1D/3D, Rec.709/2020/DCI-P3/ACES, HDR) | Stable |
 | `oximedia-edl` | EDL parser/generator (CMX 3600, GVG, Sony BVE-9000) | Stable |
@@ -262,26 +343,45 @@ Released 2026-04-20.
 | Crate | Description | Status |
 |-------|-------------|--------|
 | `oximedia-py` | Python bindings via PyO3 | Stable |
-| `oximedia-jobs` | Job queue (priority scheduling, SQLite persistence, worker pool) | Stable |
+| `oximedia-ml` | Typed ML pipelines via OxiONNX (SceneClassifier, ShotBoundaryDetector, AestheticScorer, ObjectDetector, FaceEmbedder) | Stable |
 
 ## Green List (Supported Codecs)
 
-| Category | Codec | Status | Notes |
-|----------|-------|--------|-------|
-| Video | AV1 | Primary | Alliance for Open Media, royalty-free |
-| Video | VP9 | Supported | Google, royalty-free |
-| Video | VP8 | Supported | Google, royalty-free |
-| Video | Theora | Legacy | Xiph.org, royalty-free |
-| Audio | Opus | Primary | Xiph.org/IETF, royalty-free |
-| Audio | Vorbis | Supported | Xiph.org, royalty-free |
-| Audio | FLAC | Supported | Lossless, royalty-free |
-| Audio | PCM | Supported | Unencumbered |
-| Image | WebP | Supported | Google, royalty-free |
-| Image | AVIF | Supported | AOM, royalty-free |
-| Image | PNG/GIF | Supported | Unencumbered |
-| Image/Video | MJPEG | Supported | Motion JPEG, royalty-free |
-| Video | APV | Supported | Advanced Professional Video, royalty-free |
-| Image | JPEG-XL (AJXL) | Supported | Animated JPEG-XL via ISOBMFF, royalty-free |
+### Decoder Taxonomy
+
+OxiMedia classifies each decoder with a four-tier honesty label so downstream users know exactly
+what they are getting. See [`docs/codec_status.md`](docs/codec_status.md) for the full per-decoder
+breakdown, what is missing, and the effort required to close each gap.
+
+| Label | Meaning |
+|-------|---------|
+| **Verified** | End-to-end decode matches a reference implementation on external fixtures. |
+| **Functional** | Real sample reconstruction path present and self-consistent on round-trip tests. No third-party conformance proof yet. |
+| **Bitstream-parsing** | Headers and syntax are parsed; pixel/sample production is stubbed, partial, or returns empty/constant data. Useful for format inspection, not for playback. |
+| **Experimental** | API sketch; not intended to actually decode. |
+
+### Codec Matrix
+
+| Category | Codec | Encode | Decode | Notes |
+|----------|-------|--------|--------|-------|
+| Video | AV1 | Functional | **Bitstream-parsing** | Alliance for Open Media, royalty-free. OBU parsing complete; pixel reconstruction pipeline is stubbed (see issue #9). |
+| Video | VP9 | Functional | **Bitstream-parsing** | Google, royalty-free. Frame/tile parsing complete; reconstruction pipeline stages are no-ops. |
+| Video | VP8 | Functional | **Bitstream-parsing** | Google, royalty-free. Y-plane emitted as constant gray; no intra/inter decode. |
+| Video | Theora | Functional | **Bitstream-parsing** | Xiph.org, royalty-free. Real DCT/motion exist but decoded pixels are dropped before reaching `VideoFrame` (known copy bug). |
+| Video | MJPEG | Functional | Functional | Motion JPEG via `oximedia-image` JPEG baseline; ≥28 dB PSNR at Q85. |
+| Video | APV | Functional | Functional | ISO/IEC 23009-13 royalty-free intra-frame; real DCT + entropy decode. |
+| Video | FFV1 | Functional | Functional | RFC 9043 lossless; CRC-32 verified. |
+| Video | H.263 | Functional | Functional | Real macroblock decode, motion compensation, loop filter. |
+| Audio | Opus | Functional | Functional (CELT only) | Xiph.org/IETF, royalty-free. SILK and hybrid modes are placeholder. |
+| Audio | Vorbis | Functional | **Bitstream-parsing** | Xiph.org, royalty-free. Headers parse; `decode_audio_packet` returns empty. |
+| Audio | FLAC | Functional | Functional / Verified | Lossless, royalty-free; CRC-16 verified, real LPC decode. |
+| Audio | PCM | Verified | Verified | Unencumbered; trivial round-trip verified. |
+| Audio | MP3 | — | Functional | Playback-only (patents expired 2017). Full Huffman/IMDCT/synthesis filterbank. |
+| Image | PNG/APNG | Functional | Functional | Unencumbered; real unfilter + RGBA conversion. |
+| Image | GIF | Functional | Functional | Unencumbered; real LZW decode. |
+| Image | WebP (VP8L) | Functional | Functional | Google, royalty-free. Lossless only — no VP8 lossy WebP decoder. |
+| Image | AVIF | Functional | **Bitstream-parsing** | AOM, royalty-free. Depends on AV1 decoder, which is itself bitstream-parsing. |
+| Image | JPEG-XL (AJXL) | Functional | Functional | Animated JPEG-XL via ISOBMFF; real modular decoder. |
 
 ## Red List (Rejected Codecs)
 
@@ -384,14 +484,14 @@ cargo install oximedia-cli
 
 | Status | Count | Description |
 |--------|-------|-------------|
-| Stable | 107 | Feature-complete, tested, production-ready |
+| Stable | 108 | Feature-complete, tested, production-ready |
 | Alpha | 0 | Core functionality implemented, API may change |
 | Partial | 0 | Under active development, incomplete |
-| **Total** | **107** | Library crates under `crates/` (top-level `oximedia`, `oximedia-cli`, `oximedia-wasm` counted separately) |
+| **Total** | **108** | Library crates under `crates/` (top-level `oximedia`, `oximedia-cli`, `oximedia-wasm` counted separately) |
 
 ### Detailed Status Breakdown
 
-**Stable (107 crates):**
+**Stable (108 crates):**
 `oximedia-aaf`, `oximedia-accel`, `oximedia-access`, `oximedia-align`, `oximedia-analysis`,
 `oximedia-archive`, `oximedia-archive-pro`, `oximedia-audio`, `oximedia-audio-analysis`,
 `oximedia-audiopost`, `oximedia-auto`, `oximedia-automation`, `oximedia-batch`, `oximedia-bench`,
@@ -411,7 +511,7 @@ cargo install oximedia-cli
 `oximedia-server`, `oximedia-shots`, `oximedia-simd`, `oximedia-stabilize`, `oximedia-storage`,
 `oximedia-subtitle`, `oximedia-switcher`, `oximedia-timecode`, `oximedia-timeline`,
 `oximedia-timesync`, `oximedia-transcode`, `oximedia-vfx`, `oximedia-videoip`, `oximedia-virtual`,
-`oximedia-watermark`, `oximedia-workflow`, `oximedia-avi`
+`oximedia-watermark`, `oximedia-workflow`, `oximedia-avi`, `oximedia-ml`
 
 ## Building
 
@@ -435,6 +535,24 @@ cargo clippy --all -- -D warnings
 # Check documentation
 cargo doc --all --no-deps
 ```
+
+## Documentation
+
+Topic-focused guides live in [`docs/`](docs/):
+
+- [Codec Status](docs/codec_status.md) — four-tier decoder taxonomy
+  (Verified / Functional / Bitstream-parsing / Experimental) and
+  per-codec state of the world.
+- [Rate Control Guide](docs/rate_control.md) — CBR/VBR/CRF/two-pass modes,
+  VBV buffer semantics, encoder coverage matrix, and CRF-optimiser notes.
+- [SIMD Dispatch](docs/simd_dispatch.md) — `oximedia-simd` CPU feature
+  detection, AVX-512 / AVX2 / SSE4.2 / NEON / WASM tiers, and the safe
+  dispatch convention.
+- [Wave 5 Deltas](docs/wave5_deltas.md) — what shipped in 0.1.5
+  (transcode executor, HW-accel probes, BBA-1 ABR, SCTE-35, ErrorContext,
+  FormatNegotiator).
+- [ML Guide](docs/ml_guide.md) — typed ONNX pipelines, device selection,
+  and the `oximedia-ml` feature matrix.
 
 ## Policy
 

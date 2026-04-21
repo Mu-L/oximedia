@@ -72,6 +72,11 @@ pub enum RecommendError {
     #[error("Rate limited: {0}")]
     RateLimited(String),
 
+    /// ML pipeline error (only available when the `onnx` feature is enabled).
+    #[cfg(feature = "onnx")]
+    #[error("ML error: {0}")]
+    Ml(#[from] oximedia_ml::MlError),
+
     /// Generic error
     #[error("{0}")]
     Other(String),

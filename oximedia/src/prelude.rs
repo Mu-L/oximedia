@@ -688,6 +688,28 @@ pub use crate::caption_gen::*;
 #[cfg(feature = "image-transform")]
 pub use crate::image_transform::*;
 
+// ── ML (Sovereign ML pipelines) ──────────────────────────────────────────────
+//
+// Re-exports the crate-root surface of `oximedia-ml`: device selection
+// ([`DeviceType`] / [`DeviceCapabilities`]), the [`OnnxModel`] wrapper and
+// its [`ModelCache`], image preprocessing ([`ImagePreprocessor`],
+// [`PixelLayout`], [`TensorLayout`], [`InputRange`]), post-processing
+// primitives ([`BoundingBox`]), value types ([`AestheticScore`],
+// [`Detection`], [`FaceEmbedding`]), error surface ([`MlError`] /
+// [`MlResult`]), and the [`TypedPipeline`] trait itself.
+//
+// Pipeline structs (SceneClassifier, ShotBoundaryDetector, …) are
+// deliberately left out — import them directly from
+// `oximedia::ml::pipelines::*` when a given pipeline feature is active.
+
+#[cfg(feature = "ml")]
+pub use crate::ml::{
+    AestheticScore, BoundingBox, Detection, DeviceCapabilities, DeviceType, FaceEmbedding,
+    ImagePreprocessor, InputRange, MlError, MlResult, ModelCache, ModelEntry, ModelInfo, ModelZoo,
+    OnnxModel, PipelineInfo, PipelineTask, PixelLayout, TensorDType, TensorLayout, TensorSpec,
+    TypedPipeline,
+};
+
 // ── MJPEG ────────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "mjpeg")]

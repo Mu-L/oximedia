@@ -154,6 +154,9 @@ pub mod media_hash;
 pub mod mir;
 /// Audio mixer bindings (channels, mixing, panning, EQ).
 pub mod mixer_py;
+/// `oximedia.ml` submodule — typed ML pipelines (scene, shot boundary, aesthetic, detection, face).
+#[cfg(feature = "ml")]
+pub mod ml_py;
 /// System monitoring bindings (metrics, alerts, health checks).
 pub mod monitor_py;
 /// MP4/ISOBMFF container demuxer bindings.
@@ -567,6 +570,10 @@ fn oximedia(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // oximedia.test submodule
     test_media::register_submodule(m)?;
+
+    // oximedia.ml submodule (feature-gated)
+    #[cfg(feature = "ml")]
+    ml_py::register_submodule(m)?;
 
     Ok(())
 }

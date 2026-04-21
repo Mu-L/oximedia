@@ -14,7 +14,7 @@ workspace = true
 
 [features]
 default = []
-onnx = ["dep:oxionnx", "dep:oxionnx-core"]
+onnx = ["dep:oxionnx"]
 cuda = ["onnx", "oxionnx/cuda"]
 rocm = ["onnx"]
 tensorrt = ["onnx"]
@@ -24,7 +24,6 @@ oximedia-core = { workspace = true }
 oximedia-codec = { workspace = true, default-features = true }
 thiserror = { workspace = true }
 oxionnx = { workspace = true, optional = true }
-oxionnx-core = { workspace = true, optional = true }
 ndarray = { workspace = true }
 bytes = { workspace = true }
 rayon = { workspace = true }

@@ -181,11 +181,15 @@ mod tests {
     /// Creates a temporary file with `contents`, returns its path.
     fn make_temp_file(contents: &[u8]) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
+        // Use PID + total-nanos-since-epoch so parallel nextest processes
+        // running within the same wall-clock second do not collide.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
         path.push(format!(
-            "oximedia_mmap_test_{}.bin",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.subsec_nanos())
+            "oximedia_mmap_test_{}_{}.bin",
+            std::process::id(),
+            nanos,
         ));
         let mut f = std::fs::File::create(&path).expect("create temp file");
         f.write_all(contents).expect("write temp file");

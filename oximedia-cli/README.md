@@ -223,4 +223,4 @@ scale = "1920:-1"
 
 Apache-2.0
 
-Version: 0.1.4 — 2026-04-20 — 19 tests
+Version: 0.1.5 — 2026-04-20 — 19 tests

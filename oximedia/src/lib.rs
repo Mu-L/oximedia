@@ -147,8 +147,15 @@ pub use oximedia_core::{
     CodecId, MediaType, OxiError, OxiResult, PixelFormat, Rational, SampleFormat, Timestamp,
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use oximedia_io::FileSource;
 /// I/O primitives: byte readers and media source abstractions.
-pub use oximedia_io::{BitReader, FileSource, MediaSource, MemorySource};
+///
+/// `FileSource` is only re-exported off `wasm32-unknown-unknown` — WASM
+/// targets have no `std::fs`, so the file-backed source is omitted and
+/// callers are expected to use [`MemorySource`] or a custom
+/// [`MediaSource`] implementation.
+pub use oximedia_io::{BitReader, MediaSource, MemorySource};
 
 /// Container layer: probing, demuxing, packets, stream descriptors.
 pub use oximedia_container::{
@@ -1445,6 +1452,60 @@ pub mod caption_gen {
 pub mod image_transform {
     //! Image transformation operations: resize, crop, rotate, flip, and color conversion.
     pub use oximedia_image_transform::*;
+}
+
+/// Sovereign ML pipelines: Pure-Rust ONNX inference (scene classification, shot boundary
+/// detection, aesthetic scoring, object detection, face embedding).
+///
+/// Enable with `features = ["ml"]`. Combine with `ml-scene-classifier`, `ml-shot-boundary`,
+/// `ml-aesthetic-score`, `ml-object-detector`, `ml-face-embedder`, and `ml-onnx` to select
+/// individual pipelines and the ONNX runtime itself.
+///
+/// ## WebAssembly support
+///
+/// Every `ml-*` feature above compiles cleanly on `wasm32-unknown-unknown`,
+/// including `ml-onnx` (the OxiONNX Pure-Rust runtime is WASM-friendly).
+/// The only exception is `cuda`, which transitively depends on
+/// `libloading` for NVIDIA driver binding and therefore is **native
+/// only**. See [`oximedia_ml`] crate docs for the full feature /
+/// target matrix.
+#[cfg(feature = "ml")]
+pub mod ml {
+    //! Sovereign ML pipelines built on OxiONNX (Pure-Rust, patent-free).
+    //!
+    //! This module is a flat re-export of the [`oximedia_ml`] crate;
+    //! consult that crate's documentation for the full type index,
+    //! pipeline contracts, and doc-tests. The brief guide below is a
+    //! pointer into the most common entry points.
+    //!
+    //! ## Entry points
+    //!
+    //! * [`DeviceType::auto`](oximedia_ml::DeviceType::auto) — pick the
+    //!   strongest available backend (CUDA → DirectML → WebGPU → CPU),
+    //!   memoised for the lifetime of the process.
+    //! * [`ModelCache`](oximedia_ml::ModelCache) — thread-safe LRU
+    //!   cache of `Arc<OnnxModel>` keyed by canonical model path.
+    //! * [`TypedPipeline`](oximedia_ml::TypedPipeline) — trait
+    //!   implemented by every built-in pipeline.
+    //!
+    //! ## Pipelines (feature-gated)
+    //!
+    //! | Feature                 | Pipeline                                                   |
+    //! |-------------------------|-------------------------------------------------------------|
+    //! | `ml-scene-classifier`   | [`oximedia_ml::pipelines::SceneClassifier`] (Places365)    |
+    //! | `ml-shot-boundary`      | [`oximedia_ml::pipelines::ShotBoundaryDetector`] (TransNet)|
+    //! | `ml-aesthetic-score`    | [`oximedia_ml::pipelines::AestheticScorer`] (NIMA)         |
+    //! | `ml-object-detector`    | [`oximedia_ml::pipelines::ObjectDetector`] (YOLOv8)        |
+    //! | `ml-face-embedder`      | [`oximedia_ml::pipelines::FaceEmbedder`] (ArcFace)         |
+    //!
+    //! ## Target matrix
+    //!
+    //! Builds on every target that OxiONNX supports — including
+    //! `wasm32-unknown-unknown`. The `cuda` feature is native-only
+    //! (libloading requires `cfg(any(unix, windows))`); every other
+    //! `ml-*` feature is WASM-compatible and runs on the CPU path by
+    //! default (or on WebGPU via the `webgpu` feature).
+    pub use oximedia_ml::*;
 }
 
 /// Motion JPEG (MJPEG) intra-frame video codec.

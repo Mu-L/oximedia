@@ -59,6 +59,8 @@ pub mod diarization;
 pub mod forced_narrative;
 pub mod language_detect;
 pub mod line_breaking;
+#[cfg(feature = "onnx")]
+pub mod ml;
 pub mod multi_language;
 pub mod multi_language_sync;
 pub mod multilang;
@@ -94,7 +96,14 @@ pub use wcag::{
 // ─── Error type ─────────────────────────────────────────────────────────────
 
 /// Errors produced by caption generation operations.
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+///
+/// Note: `Clone` and `PartialEq` are intentionally *not* derived because the
+/// feature-gated [`CaptionGenError::Ml`] variant wraps [`oximedia_ml::MlError`]
+/// which implements neither trait. Equality and cloning of error values are
+/// uncommon for caption-generation callers (errors typically flow through `?`
+/// once and are rendered via `Display`), so dropping those derives is the
+/// minimum-impact way of extending the enum for ML.
+#[derive(Debug, thiserror::Error)]
 pub enum CaptionGenError {
     /// A speech-to-caption alignment operation failed.
     #[error("alignment error: {0}")]
@@ -115,7 +124,18 @@ pub enum CaptionGenError {
     /// Parsing of caption data or configuration failed.
     #[error("parse error: {0}")]
     ParseError(String),
+
+    /// An ML pipeline error surfaced from [`oximedia_ml`] (only available when
+    /// the `onnx` feature is enabled).
+    #[cfg(feature = "onnx")]
+    #[error("ml error: {0}")]
+    Ml(#[from] oximedia_ml::MlError),
 }
 
+/// Result alias used by caption-generation APIs.
+pub type CaptionGenResult<T> = std::result::Result<T, CaptionGenError>;
+
 pub use burn_in::{BurnInConfig, SubtitleBurnIn, SubtitlePosition};
+#[cfg(feature = "onnx")]
+pub use ml::{greedy_decode, top_k_sample, CaptionEncoder, EncoderOutput};
 pub use multilang::{CaptionEntry, LanguageCode, MultiLangCaption, MultiLangCaptionBuilder};

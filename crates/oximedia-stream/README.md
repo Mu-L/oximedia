@@ -126,4 +126,4 @@ Licensed under the terms specified in the workspace root.
 
 Copyright (c) COOLJAPAN OU (Team Kitasan)
 
-Version: 0.1.4 — 2026-04-20 — 569 tests
+Version: 0.1.5 — 2026-04-21 — 569 tests

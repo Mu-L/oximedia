@@ -73,6 +73,7 @@ oximedia-dedup.workspace = true
 oximedia-archive-pro.workspace = true
 oximedia-dolbyvision.workspace = true
 oximedia-auto.workspace = true
+oximedia-ml = { workspace = true, optional = true, features = ["all-pipelines"] }
 chrono.workspace = true
 bytes.workspace = true
 oxiarc-deflate.workspace = true
@@ -90,3 +91,4 @@ vp9 = []
 vp8 = []
 opus = []
 cv2 = []
+ml = ["dep:oximedia-ml"]

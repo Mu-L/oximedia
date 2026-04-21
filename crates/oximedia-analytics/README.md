@@ -8,7 +8,7 @@ Media engagement analytics — viewer behavior, A/B testing, retention curves, a
 
 Part of the [OxiMedia](https://github.com/cool-japan/oximedia) sovereign media framework.
 
-Version: 0.1.4 — 2026-04-20 — 327 tests
+Version: 0.1.5 — 2026-04-21 — 327 tests
 
 ## Features
 

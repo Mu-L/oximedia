@@ -99,6 +99,8 @@ pub mod face_landmark;
 pub mod features;
 pub mod lighting_analysis;
 pub mod location;
+#[cfg(feature = "onnx")]
+pub mod ml;
 pub mod mood;
 pub mod motion_energy;
 pub mod object_tracker;
@@ -125,6 +127,9 @@ pub mod visual_rhythm;
 
 // Re-export commonly used items at crate root
 pub use error::{SceneError, SceneResult};
+
+#[cfg(feature = "onnx")]
+pub use ml::MlSceneEnricher;
 
 /// Common types and utilities used across modules.
 pub mod common {

@@ -139,12 +139,21 @@ pub mod tempo_map;
 pub mod tuning_detect;
 pub mod vocal_detect;
 
+#[cfg(feature = "onnx")]
+pub mod ml;
+
 mod error;
 mod types;
 mod utils;
 
 pub use error::{MirError, MirResult};
+
 pub use midi::{AudioToMidi, AudioToMidiConfig, MidiNote, MidiTempo, MidiTranscription};
+#[cfg(feature = "onnx")]
+pub use ml::{
+    activate_and_rank, apply_activation, MusicTagger, MusicTags, TagActivation, TagActivationScore,
+    DEFAULT_TOP_K,
+};
 pub use streaming::{
     StreamingAnalysisSummary, StreamingAnalyzer, StreamingConfig, StreamingFrameFeatures,
 };

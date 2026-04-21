@@ -276,7 +276,7 @@ impl Session {
     /// ```
     pub fn run(&self, inputs: &[Tensor]) -> CvResult<Vec<Tensor>> {
         // Convert our tensors to oxionnx tensors
-        let oxi_inputs: Vec<oxionnx_core::Tensor> = inputs
+        let oxi_inputs: Vec<oxionnx::Tensor> = inputs
             .iter()
             .map(super::tensor::Tensor::to_oxionnx_tensor)
             .collect::<CvResult<Vec<_>>>()?;

@@ -84,6 +84,7 @@ oximedia-dedup.workspace = true
 oximedia-batch = { workspace = true, features = ["sqlite"] }
 oximedia-archive-pro.workspace = true
 oximedia-dolbyvision.workspace = true
+oximedia-ml = { workspace = true, optional = true }
 uuid = { workspace = true }
 tokio.workspace = true
 clap.workspace = true
@@ -102,5 +103,19 @@ chrono.workspace = true
 humantime = "2"
 dirs = "6"
 
+[features]
+default = []
+# Enable the `oximedia ml ...` subcommand family.
+#
+# Without this feature, the `ml` subcommand is still wired into the clap
+# dispatcher so users get a friendly "--features ml" error message rather
+# than `clap` treating the verb as unknown. Turning this on pulls in the
+# Pure-Rust `oximedia-ml` crate (with serde, for --json output).
+ml = ["dep:oximedia-ml", "oximedia-ml/serde"]
+# Enable every built-in pipeline in the `ml` command surface.
+ml-all-pipelines = ["ml", "oximedia-ml/all-pipelines"]
+
 [dev-dependencies]
 tempfile.workspace = true
+assert_cmd = "2"
+predicates = "3"

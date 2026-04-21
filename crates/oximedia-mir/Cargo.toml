@@ -27,10 +27,22 @@ mood = []
 spectral = []
 rhythm = []
 harmonic = []
+## Opt-in ML-assisted music tagging / genre classification via the
+## Pure-Rust `oximedia-ml` pipeline. Enabling `onnx` pulls in
+## `oximedia-ml` with its `onnx` feature so callers can load a genre /
+## music-tagging ONNX model and receive ranked `(label, score)`
+## predictions. Default builds remain free of ONNX symbols.
+onnx = [
+    "dep:oximedia-ml",
+    "oximedia-ml/onnx",
+]
+## Enable CUDA dispatch for the ML-assisted music tagger.
+cuda = ["onnx", "oximedia-ml/cuda"]
 
 [dependencies]
 oximedia-core = { workspace = true }
 oximedia-audio = { workspace = true }
+oximedia-ml = { workspace = true, optional = true }
 thiserror = { workspace = true }
 oxifft = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

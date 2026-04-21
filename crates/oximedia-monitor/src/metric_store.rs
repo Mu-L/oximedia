@@ -62,10 +62,13 @@ impl MetricSample {
         self.recorded_at.elapsed().as_secs_f64() * 1_000.0
     }
 
-    /// `true` if this sample is older than `max_age`.
+    /// `true` if this sample is at least as old as `max_age`.
+    ///
+    /// Uses `>=` so that `prune_old(Duration::ZERO)` removes all samples
+    /// regardless of sub-nanosecond elapsed time on fast systems.
     #[must_use]
     pub fn is_expired(&self, max_age: Duration) -> bool {
-        self.recorded_at.elapsed() > max_age
+        self.recorded_at.elapsed() >= max_age
     }
 }
 

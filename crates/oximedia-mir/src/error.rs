@@ -32,6 +32,11 @@ pub enum MirError {
     /// Model error.
     #[error("Model error: {0}")]
     ModelError(String),
+
+    /// ML pipeline error (only available when the `onnx` feature is enabled).
+    #[cfg(feature = "onnx")]
+    #[error("ML error: {0}")]
+    Ml(#[from] oximedia_ml::MlError),
 }
 
 /// Result type for MIR operations.

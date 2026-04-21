@@ -121,6 +121,7 @@ oximedia-360 = { workspace = true, optional = true }
 oximedia-analytics = { workspace = true, optional = true }
 oximedia-caption-gen = { workspace = true, optional = true }
 oximedia-image-transform = { workspace = true, optional = true }
+oximedia-ml = { workspace = true, optional = true }
 
 [features]
 default = []
@@ -422,6 +423,21 @@ caption-gen = ["dep:oximedia-caption-gen"]
 ## Enable image transformation (resize, crop, rotate, flip, color conversion)
 image-transform = ["dep:oximedia-image-transform"]
 
+## Enable Sovereign ML pipelines (Pure-Rust OxiONNX-backed scene classification, shot boundary, aesthetic scoring, object detection, face embedding)
+ml = ["dep:oximedia-ml"]
+## ML pipeline: scene classifier (requires `ml`, `onnx` features on oximedia-ml to actually run inference)
+ml-scene-classifier = ["ml", "oximedia-ml/scene-classifier"]
+## ML pipeline: shot boundary detector (requires `ml`, `onnx` features for real inference; heuristic fallback is always available)
+ml-shot-boundary = ["ml", "oximedia-ml/shot-boundary"]
+## ML pipeline: NIMA-style aesthetic quality scorer (requires `ml` and implicitly the `onnx` backend)
+ml-aesthetic-score = ["ml", "oximedia-ml/aesthetic-score"]
+## ML pipeline: YOLOv8-compatible object detector (requires `ml` and implicitly the `onnx` backend)
+ml-object-detector = ["ml", "oximedia-ml/object-detector"]
+## ML pipeline: ArcFace/FaceNet-compatible face embedder (requires `ml` and implicitly the `onnx` backend)
+ml-face-embedder = ["ml", "oximedia-ml/face-embedder"]
+## ML runtime: enable the pure-Rust ONNX inference backend
+ml-onnx = ["ml", "oximedia-ml/onnx"]
+
 ## Enable Motion JPEG (MJPEG) intra-frame video codec
 mjpeg = ["dep:oximedia-codec", "oximedia-codec/mjpeg"]
 
@@ -529,6 +545,12 @@ full = [
     "analytics",
     "caption-gen",
     "image-transform",
+    "ml",
+    "ml-scene-classifier",
+    "ml-shot-boundary",
+    "ml-aesthetic-score",
+    "ml-object-detector",
+    "ml-face-embedder",
     "mjpeg",
     "apv",
 ]
@@ -616,3 +638,18 @@ required-features = ["quality", "metering", "transcode", "timecode", "workflow",
 name = "nmos_server_demo"
 path = "../examples/nmos_server_demo.rs"
 required-features = ["routing"]
+
+[[example]]
+name = "ml_scene_classify"
+path = "../examples/ml_scene_classify.rs"
+required-features = ["ml", "ml-scene-classifier"]
+
+[[example]]
+name = "ml_auto_caption"
+path = "../examples/ml_auto_caption.rs"
+required-features = ["ml"]
+
+[[example]]
+name = "ml_model_zoo"
+path = "../examples/ml_model_zoo.rs"
+required-features = ["ml"]

@@ -292,7 +292,7 @@ Compressed media packet.
 
 Apache-2.0
 
-Version: 0.1.4 — 2026-04-20 — 505 tests
+Version: 0.1.5 — 2026-04-20 — 505 tests
 
 ## See Also
 

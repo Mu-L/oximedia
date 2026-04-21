@@ -67,6 +67,11 @@ pub enum ShotError {
     /// Item not found.
     #[error("Not found: {0}")]
     NotFound(String),
+
+    /// ML pipeline error (only available when the `onnx` feature is enabled).
+    #[cfg(feature = "onnx")]
+    #[error("ML error: {0}")]
+    MlError(#[from] oximedia_ml::MlError),
 }
 
 impl From<oximedia_cv::error::CvError> for ShotError {

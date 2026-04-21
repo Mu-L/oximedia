@@ -2,7 +2,7 @@
 
 FFmpeg CLI argument compatibility layer for [OxiMedia](https://github.com/cool-japan/oximedia).
 
-Version: 0.1.4 — 2026-04-20 — 366 tests
+Version: 0.1.5 — 2026-04-21 — 366 tests
 
 ## Overview
 
