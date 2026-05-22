@@ -9,32 +9,32 @@
 - Dependencies: oximedia-core, ndarray, rayon, serde
 
 ## Enhancements
-- [ ] Replace `unreachable!()` in `QualityAssessor::assess_no_reference` with proper error return
+- [x] Replace `unreachable!()` in `QualityAssessor::assess_no_reference` with proper error return (verified 2026-05-16; src/lib.rs:450 returns Err(OxiError::InvalidData) for non-NR metrics)
 - [x] Add per-region quality assessment in SSIM/PSNR (compute metrics for specific frame regions)
-- [ ] Implement configurable VMAF model selection in `VmafCalculator` (phone model, 4K model)
-- [ ] Extend `temporal_quality` with scene-aware temporal pooling (reset stats at scene cuts)
-- [ ] Add chroma plane quality assessment in SSIM (currently luma-only in many implementations)
-- [ ] Implement quality metric confidence intervals based on frame count
+- [x] Implement configurable VMAF model selection in `VmafCalculator` (phone model, 4K model) (verified 2026-05-16; src/vmaf_like.rs:50 VmafModel enum Phone/Hdtv/FourK/Custom, VmafModelWeights:63)
+- [ ] Extend `temporal_quality` with scene-aware temporal pooling (reset stats at scene cuts) (verified-open 2026-05-16: no scene_cut/SceneCut handling in temporal_quality.rs)
+- [x] Add chroma plane quality assessment in SSIM (currently luma-only in many implementations) (verified 2026-05-16; src/ssim.rs:34 chroma_weight, cb/cr SSIM computation:115-140)
+- [x] Implement quality metric confidence intervals based on frame count (verified 2026-05-16; src/confidence.rs:81 ConfidenceInterval, ConfidenceCalculator:161)
 - [x] Extend `quality_gate` with multi-metric composite gates (pass only if SSIM > X AND VMAF > Y)
 - [x] Add `quality_report` export to CSV format for spreadsheet analysis
 
 ## New Features
-- [ ] Implement LPIPS (Learned Perceptual Image Patch Similarity) metric using pre-trained weights
-- [ ] Add video quality assessment for HDR content (PQ/HLG-aware metrics)
-- [ ] Implement real-time quality monitoring (running average with configurable window)
-- [ ] Add A/B quality comparison tool — rank multiple encodes by perceptual quality
-- [ ] Implement quality-bitrate curve generation (encode at multiple CRF values, plot VMAF vs bitrate)
-- [ ] Add motion-compensated temporal quality analysis (account for frame motion in temporal metrics)
-- [ ] Implement CIEDE2000 color difference metric for color fidelity assessment
-- [ ] Add quality heatmap generation — spatial map of per-pixel quality for visualization
+- [x] Implement LPIPS (Learned Perceptual Image Patch Similarity) metric using pre-trained weights (verified 2026-05-16; src/lpips.rs:128 LpipsCalculator, LpipsConfig:30, LpipsResult:88)
+- [x] Add video quality assessment for HDR content (PQ/HLG-aware metrics) (verified 2026-05-16; src/hdr_quality.rs:104 HdrQualityAssessor, analyze_frame:174)
+- [x] Implement real-time quality monitoring (running average with configurable window) (verified 2026-05-16; src/realtime_monitor.rs:29 MonitorConfig sliding window, RealtimeMonitor:600 lines)
+- [x] Add A/B quality comparison tool — rank multiple encodes by perceptual quality (verified 2026-05-16; src/ab_compare.rs:121 ranked CandidateMetrics, AbComparator)
+- [x] Implement quality-bitrate curve generation (encode at multiple CRF values, plot VMAF vs bitrate) (verified 2026-05-16; src/quality_bitrate_curve.rs:150 QualityBitrateCurve, QualityBitrateCurveBuilder:481)
+- [x] Add motion-compensated temporal quality analysis (account for frame motion in temporal metrics) (verified 2026-05-16; src/motion_compensated.rs:117 MotionCompensatedResult, MotionCompensatedAnalyzer:71)
+- [x] Implement CIEDE2000 color difference metric for color fidelity assessment (verified 2026-05-16; src/ciede2000.rs:105 Ciede2000Calculator, delta_e_2000:130)
+- [x] Add quality heatmap generation — spatial map of per-pixel quality for visualization (verified 2026-05-16; src/quality_heatmap.rs:102 QualityHeatmap, HeatmapGenerator:162)
 
 ## Performance
-- [ ] Implement SIMD-optimized SSIM computation using portable_simd or manual intrinsics
-- [ ] Add GPU-accelerated PSNR/SSIM computation via compute shaders
-- [ ] Parallelize `BatchAssessment` across frames using rayon with configurable thread count
-- [ ] Optimize `VifCalculator` steerable pyramid decomposition with FFT-based filtering
-- [ ] Cache Gaussian kernel weights in SSIM calculator to avoid recomputation per frame
-- [ ] Use pre-allocated buffers in `Frame` operations to reduce allocation in tight loops
+- [x] Implement SIMD-optimized SSIM computation using portable_simd or manual intrinsics (verified 2026-05-16; src/ssim_simd.rs:70 SsimSIMD SIMD_LANES=8 f32 chunks, portable_simd-style accumulation)
+- [ ] Add GPU-accelerated PSNR/SSIM computation via compute shaders (verified-open 2026-05-16: no wgpu/compute shader in quality crate)
+- [x] Parallelize `BatchAssessment` across frames using rayon with configurable thread count (verified 2026-05-16; src/batch.rs:228 par_iter()+zip par_iter())
+- [ ] Optimize `VifCalculator` steerable pyramid decomposition with FFT-based filtering (verified-open 2026-05-16: vif.rs uses spatial convolution only, no FFT)
+- [x] Cache Gaussian kernel weights in SSIM calculator to avoid recomputation per frame (verified 2026-05-16; src/ssim_simd.rs:366 test_gaussian_kernel_cache_sum_to_one, kernel cached at construction)
+- [ ] Use pre-allocated buffers in `Frame` operations to reduce allocation in tight loops (verified-open 2026-05-16: no buffer pool/pre-alloc in Frame operations)
 
 ## Testing
 - [ ] Add golden reference tests — compare metric outputs against known-correct values from published papers

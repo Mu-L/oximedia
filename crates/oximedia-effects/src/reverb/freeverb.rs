@@ -7,7 +7,7 @@
 
 #![allow(clippy::cast_precision_loss)]
 
-use crate::{AudioEffect, ReverbConfig};
+use crate::{utils::delay_line::DelayLine, AudioEffect, ReverbConfig};
 
 /// Number of comb filters per channel.
 const NUM_COMBS: usize = 8;
@@ -45,11 +45,15 @@ const ALLPASS_DELAYS_R: [usize; NUM_ALLPASSES] = [
 ];
 
 /// Comb filter with feedback and damping.
+///
+/// Internally uses a pre-allocated [`DelayLine`] ring buffer rather than a
+/// raw `Vec<f32>` — no allocations occur during audio processing.
 #[derive(Debug, Clone)]
 struct CombFilter {
-    buffer: Vec<f32>,
-    buffer_size: usize,
-    buffer_idx: usize,
+    /// Circular delay line (size = comb delay + 1).
+    delay_line: DelayLine,
+    /// Delay length in samples (one less than the delay-line size).
+    delay: usize,
     filterstore: f32,
     feedback: f32,
     damp1: f32,
@@ -58,10 +62,14 @@ struct CombFilter {
 
 impl CombFilter {
     fn new(size: usize) -> Self {
+        let size = size.max(1);
+        // DelayLine capacity is `size + 1` so that `read(size)` is valid.
+        // The comb feedback path reads the sample written exactly `size` steps
+        // ago, which is equivalent to the oldest slot in the original Vec-based
+        // circular buffer of length `size`.
         Self {
-            buffer: vec![0.0; size],
-            buffer_size: size,
-            buffer_idx: 0,
+            delay_line: DelayLine::new(size + 1),
+            delay: size,
             filterstore: 0.0,
             feedback: 0.0,
             damp1: 0.0,
@@ -69,20 +77,17 @@ impl CombFilter {
         }
     }
 
+    #[inline]
     fn process(&mut self, input: f32) -> f32 {
-        let output = self.buffer[self.buffer_idx];
+        // Read the sample that was written `delay` steps ago (oldest in loop).
+        let output = self.delay_line.read(self.delay);
 
-        // Apply one-pole lowpass filter (damping)
+        // One-pole low-pass damping applied to the feedback path.
         self.filterstore = output * self.damp2 + self.filterstore * self.damp1;
 
-        // Store input + filtered feedback
-        self.buffer[self.buffer_idx] = input + self.filterstore * self.feedback;
-
-        // Advance buffer index
-        self.buffer_idx += 1;
-        if self.buffer_idx >= self.buffer_size {
-            self.buffer_idx = 0;
-        }
+        // Write new sample: dry input plus the filtered, fed-back output.
+        self.delay_line
+            .write(input + self.filterstore * self.feedback);
 
         output
     }
@@ -97,48 +102,44 @@ impl CombFilter {
     }
 
     fn clear(&mut self) {
-        self.buffer.fill(0.0);
+        self.delay_line.clear();
         self.filterstore = 0.0;
-        self.buffer_idx = 0;
     }
 }
 
 /// All-pass filter for reverb with configurable diffusion coefficient.
+///
+/// Internally uses a pre-allocated [`DelayLine`] ring buffer.
 #[derive(Debug, Clone)]
 struct AllPass {
-    buffer: Vec<f32>,
-    buffer_size: usize,
-    buffer_idx: usize,
+    /// Circular delay line (size = allpass delay + 1).
+    delay_line: DelayLine,
+    /// Delay length in samples.
+    delay: usize,
     /// Diffusion coefficient (typically 0.5, but varied per-channel for decorrelation).
     diffusion: f32,
 }
 
 impl AllPass {
     fn new(size: usize, diffusion: f32) -> Self {
+        let size = size.max(1);
         Self {
-            buffer: vec![0.0; size],
-            buffer_size: size,
-            buffer_idx: 0,
+            delay_line: DelayLine::new(size + 1),
+            delay: size,
             diffusion,
         }
     }
 
+    #[inline]
     fn process(&mut self, input: f32) -> f32 {
-        let bufout = self.buffer[self.buffer_idx];
+        let bufout = self.delay_line.read(self.delay);
         let output = -input + bufout;
-        self.buffer[self.buffer_idx] = input + bufout * self.diffusion;
-
-        self.buffer_idx += 1;
-        if self.buffer_idx >= self.buffer_size {
-            self.buffer_idx = 0;
-        }
-
+        self.delay_line.write(input + bufout * self.diffusion);
         output
     }
 
     fn clear(&mut self) {
-        self.buffer.fill(0.0);
-        self.buffer_idx = 0;
+        self.delay_line.clear();
     }
 }
 
@@ -179,10 +180,10 @@ pub struct Freeverb {
     wet2: f32,
     dry: f32,
 
-    // Pre-delay buffers (separate for L/R in true stereo mode)
-    predelay_buffer_l: Vec<f32>,
-    predelay_buffer_r: Vec<f32>,
-    predelay_write_pos: usize,
+    // Pre-delay ring buffers (separate for L/R in true stereo mode).
+    // Each is a pre-allocated DelayLine — no allocations during processing.
+    predelay_buffer_l: DelayLine,
+    predelay_buffer_r: DelayLine,
     predelay_samples: usize,
 
     /// Cross-feed amount for true stereo (0.0 = fully independent, 1.0 = fully shared).
@@ -255,11 +256,13 @@ impl Freeverb {
             })
             .collect();
 
-        // Pre-delay buffers
+        // Pre-delay ring buffers — pre-allocated, zero-alloc during processing.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let predelay_samples = ((config.predelay_ms * sample_rate) / 1000.0) as usize;
-        let predelay_buffer_l = vec![0.0; predelay_samples.max(1)];
-        let predelay_buffer_r = vec![0.0; predelay_samples.max(1)];
+        let predelay_size = predelay_samples.max(1);
+        // +1 so that `read(predelay_samples)` is within the valid delay range.
+        let predelay_buffer_l = DelayLine::new(predelay_size + 1);
+        let predelay_buffer_r = DelayLine::new(predelay_size + 1);
 
         let mut reverb = Self {
             combs_l,
@@ -274,7 +277,6 @@ impl Freeverb {
             dry: 0.0,
             predelay_buffer_l,
             predelay_buffer_r,
-            predelay_write_pos: 0,
             predelay_samples,
             cross_feed: 0.15, // Default: slight cross-feed for natural image
             stereo_mode,
@@ -373,31 +375,32 @@ impl Freeverb {
 
     /// Process a stereo sample pair.
     fn process_sample_internal(&mut self, input_l: f32, input_r: f32) -> (f32, f32) {
-        // Apply pre-delay with separate L/R buffers
+        // Apply pre-delay using DelayLine ring buffers.
+        // `read(N)` retrieves the sample written N steps ago; `write(x)` stores
+        // the new sample and advances the internal write position.
         let (delayed_l, delayed_r) = if self.predelay_samples > 0 {
-            let del_l = self.predelay_buffer_l[self.predelay_write_pos];
-            let del_r = self.predelay_buffer_r[self.predelay_write_pos];
+            let del_l = self.predelay_buffer_l.read(self.predelay_samples);
+            let del_r = self.predelay_buffer_r.read(self.predelay_samples);
 
             match self.stereo_mode {
                 StereoMode::MonoToStereo => {
-                    // Classic: sum to mono, feed both channels
+                    // Classic: sum to mono, feed both channels.
                     let mono = (input_l + input_r) * 0.5;
-                    self.predelay_buffer_l[self.predelay_write_pos] = mono;
-                    self.predelay_buffer_r[self.predelay_write_pos] = mono;
+                    self.predelay_buffer_l.write(mono);
+                    self.predelay_buffer_r.write(mono);
                 }
                 StereoMode::TrueStereo => {
-                    // True stereo: blend toward mono with cross-feed amount
-                    // cf=0: fully independent, cf=1: mono (both get average)
+                    // True stereo: blend toward mono with cross-feed amount.
+                    // cf=0: fully independent, cf=1: mono (both get average).
                     let cf = self.cross_feed;
                     let mono = (input_l + input_r) * 0.5;
                     let direct_l = input_l * (1.0 - cf) + mono * cf;
                     let direct_r = input_r * (1.0 - cf) + mono * cf;
-                    self.predelay_buffer_l[self.predelay_write_pos] = direct_l;
-                    self.predelay_buffer_r[self.predelay_write_pos] = direct_r;
+                    self.predelay_buffer_l.write(direct_l);
+                    self.predelay_buffer_r.write(direct_r);
                 }
             }
 
-            self.predelay_write_pos = (self.predelay_write_pos + 1) % self.predelay_samples;
             (del_l, del_r)
         } else {
             match self.stereo_mode {
@@ -482,9 +485,8 @@ impl AudioEffect for Freeverb {
         for ap in &mut self.allpasses_r {
             ap.clear();
         }
-        self.predelay_buffer_l.fill(0.0);
-        self.predelay_buffer_r.fill(0.0);
-        self.predelay_write_pos = 0;
+        self.predelay_buffer_l.clear();
+        self.predelay_buffer_r.clear();
     }
 
     fn set_sample_rate(&mut self, sample_rate: f32) {
@@ -792,5 +794,49 @@ mod tests {
             assert!(l.is_finite());
             assert!(r.is_finite());
         }
+    }
+
+    /// Regression test: verify that after the Vec<f32> → DelayLine ring-buffer
+    /// migration the reverb still produces bounded, finite output.
+    ///
+    /// Processes an impulse followed by a long silence window and checks that:
+    /// 1. All output samples are finite (no NaN / inf).
+    /// 2. The reverb tail carries non-trivial energy (reverb is actually working).
+    /// 3. The total output energy is finite (tail eventually decays to near-zero).
+    #[test]
+    fn delay_line_migration_output_bounded_and_decaying() {
+        // Use a moderate room size so the tail is audible but not infinitely
+        // long.  feedback ≈ 0.5 * 0.28 + 0.7 = 0.84 which decays within ~1 s.
+        let config = ReverbConfig::default()
+            .with_room_size(0.5)
+            .with_wet(0.8)
+            .with_dry(0.2);
+        let mut reverb = Freeverb::new(config, 48000.0);
+
+        // Feed an impulse.
+        reverb.process_sample(1.0);
+
+        // Drain 48000 samples (≈1 second): all must be finite; accumulate total energy.
+        let mut total_energy = 0.0_f32;
+        for i in 0..48_000usize {
+            let s = reverb.process_sample(0.0);
+            assert!(
+                s.is_finite(),
+                "freeverb sample {i} not finite after migration: {s}"
+            );
+            total_energy += s * s;
+        }
+
+        // After a 1-second impulse response the total energy must be:
+        //   > 0 : reverb is doing work
+        //   < 1e6 : tail is not diverging
+        assert!(
+            total_energy > 1e-4,
+            "reverb tail should carry non-zero energy: {total_energy}"
+        );
+        assert!(
+            total_energy < 1.0e6,
+            "reverb tail energy is diverging (migration bug?): {total_energy}"
+        );
     }
 }

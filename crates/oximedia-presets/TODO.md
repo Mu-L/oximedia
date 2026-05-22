@@ -10,7 +10,7 @@
 - [x] Add preset inheritance in `PresetLibrary` — derive presets from base presets with overrides
 - [x] Implement `PresetRegistry` fuzzy search (Levenshtein distance) for typo-tolerant lookups
 - [x] Extend `OptimalPreset::select()` to consider resolution and frame rate, not just bitrate
-- [ ] Add platform spec auto-update mechanism in `platform` modules (fetch latest requirements)
+- [ ] Add platform spec auto-update mechanism in `platform` modules (fetch latest requirements) (verified-open 2026-05-16: no HTTP fetch/auto-update in platform/ modules)
 - [x] Implement preset compatibility matrix — check if source media matches preset requirements
 - [x] Extend `preset_chain` to validate chained preset compatibility (output format of N matches input of N+1)
 - [x] Add `preset_scoring` weight customization per use-case (latency-sensitive vs quality-sensitive)

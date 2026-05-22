@@ -14,9 +14,24 @@ categories = ["multimedia", "network-programming"]
 [lints]
 workspace = true
 
+[features]
+default = []
+# Enables async manifest serialization (`write_async`) using `tokio` for I/O.
+async = ["dep:tokio"]
+
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+bytes = { workspace = true }
+quick-xml = { workspace = true }
+oximedia-container = { workspace = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[[example]]
+name = "live_streaming_pipeline"

@@ -14,8 +14,8 @@
 
 mod helpers;
 
-use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use std::time::Duration;
 
 // ============================================================================
@@ -705,8 +705,9 @@ fn av1_restoration_filter_benchmark(c: &mut Criterion) {
                 let mut output = frame.clone();
                 for i in 1..output.len() - 1 {
                     output[i] = ((u16::from(frame[i - 1])
-                                + u16::from(frame[i]) * 2
-                                + u16::from(frame[i + 1])) / 4) as u8;
+                        + u16::from(frame[i]) * 2
+                        + u16::from(frame[i + 1]))
+                        / 4) as u8;
                 }
                 black_box(output);
             });

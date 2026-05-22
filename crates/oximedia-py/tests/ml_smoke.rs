@@ -11,7 +11,7 @@
 
 #![cfg(feature = "ml")]
 
-use oximedia::ml_py::register_submodule;
+use oximedia_py::ml_py::register_submodule;
 use pyo3::ffi::c_str;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;

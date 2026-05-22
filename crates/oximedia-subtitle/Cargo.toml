@@ -31,7 +31,7 @@ unicode-bidi = "0.3"
 unicode-segmentation = "1.13"
 
 # XML parsing for TTML
-quick-xml = "0.39"
+quick-xml = { workspace = true }
 
 [features]
 default = []

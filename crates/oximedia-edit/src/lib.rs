@@ -131,6 +131,7 @@ pub mod pip;
 pub mod proxy;
 pub mod render;
 pub mod render_queue;
+pub mod render_source;
 pub mod ripple;
 pub mod selection;
 pub mod slip_slide;

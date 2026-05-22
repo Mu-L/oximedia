@@ -377,6 +377,44 @@ mod tests {
         assert!(buf.is_empty());
     }
 
+    /// Verifies that the pool free-list stays at or below max_pooled=2 across
+    /// 10 simulated encrypt→decrypt cycles where each cycle acquires a scratch
+    /// buffer, fills it with ciphertext-like data, then drops (returns) it.
+    #[test]
+    fn test_buf_pool_reuse_across_encrypts() {
+        use crate::aes_ctr::AesCtr;
+
+        let pool = BufPool::new(256, 2);
+        let cipher = AesCtr::new_128(&[0xA5u8; 16]);
+        let nonce = [0x01u8; 8];
+        let plaintext: Vec<u8> = (0u8..=127).collect();
+
+        for cycle in 0..10u64 {
+            // Acquire scratch buffer from pool
+            let mut scratch = pool.acquire();
+
+            // Encrypt into the scratch buffer
+            let ct = cipher.encrypt(&plaintext, &nonce, cycle);
+            scratch.extend_from_slice(&ct);
+
+            // Decrypt using the ciphertext in scratch
+            let _pt = cipher.decrypt(&scratch, &nonce, cycle);
+
+            // Drop scratch — returns to pool
+            drop(scratch);
+
+            // Free list must never exceed max_pooled=2
+            assert!(
+                pool.idle_count() <= 2,
+                "free list exceeded max_pooled=2 at cycle {cycle}"
+            );
+        }
+
+        // After 10 cycles, exactly 10 acquire/return pairs must have been recorded.
+        assert_eq!(pool.total_acquired(), 10, "expected 10 acquire calls");
+        assert_eq!(pool.total_returned(), 10, "expected 10 return calls");
+    }
+
     #[test]
     fn test_concurrent_acquire_and_drop() {
         use std::thread;

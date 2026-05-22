@@ -41,12 +41,23 @@ impl CodecMatrix {
             CodecId::RawVideo => matches!(container.as_str(), "y4m" | "mkv" | "avi"),
             CodecId::Mjpeg => matches!(container.as_str(), "mov" | "mkv" | "avi" | "mp4"),
             CodecId::Apv => matches!(container.as_str(), "mp4" | "isobmff" | "mkv"),
+            CodecId::ProRes => matches!(container.as_str(), "mov" | "mkv" | "mp4"),
+            CodecId::Dnxhd => matches!(container.as_str(), "mxf" | "mov" | "mkv"),
+            CodecId::Mpeg2 => matches!(container.as_str(), "ts" | "ps" | "mpeg" | "mp4" | "mkv"),
+            CodecId::Jpeg2000 => matches!(container.as_str(), "jp2" | "mxf" | "mkv"),
+            CodecId::JpegLs => {
+                matches!(container.as_str(), "jls" | "jpg" | "dicom" | "dcm" | "png")
+            }
+            CodecId::JpegXs => {
+                matches!(container.as_str(), "ts" | "mxf" | "mp4" | "isobmff" | "mkv")
+            }
             CodecId::Opus => matches!(container.as_str(), "webm" | "mkv" | "ogg" | "opus"),
             CodecId::Vorbis => matches!(container.as_str(), "webm" | "mkv" | "ogg"),
             CodecId::Flac => matches!(
                 container.as_str(),
                 "flac" | "mkv" | "ogg" | "mp4" | "isobmff"
             ),
+            CodecId::Alac => matches!(container.as_str(), "mp4" | "m4a" | "mov" | "caf" | "mkv"),
             CodecId::Mp3 => matches!(container.as_str(), "mp3" | "mkv" | "mp4"),
             CodecId::Pcm => matches!(container.as_str(), "wav" | "mkv" | "aiff"),
             // Image codecs — typically not in containers
@@ -78,9 +89,15 @@ impl CodecMatrix {
             CodecId::RawVideo => &["y4m", "mkv"],
             CodecId::Mjpeg => &["mov", "mkv", "avi", "mp4"],
             CodecId::Apv => &["mp4", "isobmff", "mkv"],
+            CodecId::Dnxhd => &["mxf", "mov", "mkv"],
+            CodecId::Mpeg2 => &["ts", "ps", "mpeg", "mp4", "mkv"],
+            CodecId::Jpeg2000 => &["jp2", "mxf", "mkv"],
+            CodecId::JpegLs => &["jls", "dicom", "dcm"],
+            CodecId::JpegXs => &["ts", "mxf", "mp4", "isobmff", "mkv"],
             CodecId::Opus => &["webm", "mkv", "ogg", "opus"],
             CodecId::Vorbis => &["webm", "mkv", "ogg"],
             CodecId::Flac => &["flac", "mkv", "ogg"],
+            CodecId::Alac => &["mp4", "m4a", "mov", "caf", "mkv"],
             CodecId::Mp3 => &["mp3", "mkv"],
             CodecId::Pcm => &["wav", "mkv", "aiff"],
             CodecId::WebVtt => &["webm", "mkv"],

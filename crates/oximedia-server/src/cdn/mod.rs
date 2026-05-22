@@ -5,7 +5,7 @@ mod gcs;
 mod s3;
 mod uploader;
 
-pub use azure::AzureUploader;
-pub use gcs::GcsUploader;
-pub use s3::S3Uploader;
+pub use azure::{AzureCdnUploader, AzureUploader};
+pub use gcs::{GcsCdnUploader, GcsUploader};
+pub use s3::{CdnError, S3CdnUploader, S3Uploader};
 pub use uploader::{CdnBackend, CdnConfig, CdnUploader, UploadJob};

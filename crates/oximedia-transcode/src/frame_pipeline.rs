@@ -41,6 +41,23 @@ pub enum VideoFrameOp {
         /// Linear gain factor.
         gain: f32,
     },
+    /// Deinterlace (YADIF-lite: blend odd/even lines, eliminate comb artefacts).
+    ///
+    /// For each odd-indexed row, replaces it with the average of the row above and
+    /// the row below. Even rows are passed through unchanged.
+    Deinterlace,
+    /// Adjust brightness, contrast, and saturation at the pixel level.
+    ///
+    /// All factors are multiplicative: 1.0 = no change, > 1.0 increases,
+    /// < 1.0 decreases.
+    ColorCorrect {
+        /// Brightness factor (applied as uniform luma gain).
+        brightness: f32,
+        /// Contrast factor (stretches luma range around midpoint 0.5).
+        contrast: f32,
+        /// Saturation factor (scales Cb/Cr chroma deviation from luma).
+        saturation: f32,
+    },
 }
 
 /// An operation applied to raw audio data (interleaved i16 or f32 PCM).
@@ -189,6 +206,63 @@ fn apply_video_ops(data: &mut Vec<u8>, width: &mut u32, height: &mut u32, ops: &
                     // adjust luma (R channel as proxy for luma in RGBA)
                     let v = (*byte as f32 * g).clamp(0.0, 255.0) as u8;
                     *byte = v;
+                }
+            }
+
+            VideoFrameOp::Deinterlace => {
+                let row_bytes = (*width as usize) * 4;
+                let rows = *height as usize;
+                // Guard: need at least 3 rows and data must be large enough.
+                if rows < 3 || data.len() < rows * row_bytes {
+                    continue;
+                }
+                // For each odd-indexed row (1, 3, 5, …) blend with its neighbours.
+                let mut y = 1usize;
+                while y < rows - 1 {
+                    let prev_start = (y - 1) * row_bytes;
+                    let curr_start = y * row_bytes;
+                    let next_start = (y + 1) * row_bytes;
+                    for x in 0..row_bytes {
+                        let blended =
+                            ((data[prev_start + x] as u16 + data[next_start + x] as u16) / 2) as u8;
+                        data[curr_start + x] = blended;
+                    }
+                    y += 2;
+                }
+            }
+
+            VideoFrameOp::ColorCorrect {
+                brightness,
+                contrast,
+                saturation,
+            } => {
+                let br = *brightness;
+                let co = *contrast;
+                let sa = *saturation;
+                let mid = 0.5_f32;
+                for pixel in data.chunks_exact_mut(4) {
+                    let r = pixel[0] as f32 / 255.0;
+                    let g = pixel[1] as f32 / 255.0;
+                    let b = pixel[2] as f32 / 255.0;
+                    // Brightness
+                    let (r, g, b) = (r * br, g * br, b * br);
+                    // Contrast: stretch around mid-grey
+                    let (r, g, b) = (
+                        mid + (r - mid) * co,
+                        mid + (g - mid) * co,
+                        mid + (b - mid) * co,
+                    );
+                    // Saturation: interpolate towards luminance
+                    let luma = 0.299 * r + 0.587 * g + 0.114 * b;
+                    let (r, g, b) = (
+                        luma + (r - luma) * sa,
+                        luma + (g - luma) * sa,
+                        luma + (b - luma) * sa,
+                    );
+                    pixel[0] = (r.clamp(0.0, 1.0) * 255.0) as u8;
+                    pixel[1] = (g.clamp(0.0, 1.0) * 255.0) as u8;
+                    pixel[2] = (b.clamp(0.0, 1.0) * 255.0) as u8;
+                    // alpha (pixel[3]) is unchanged
                 }
             }
         }
@@ -652,6 +726,21 @@ pub fn wire_hdr_into_pipeline(
     Ok(())
 }
 
+// ─── Test-only public shim ────────────────────────────────────────────────────
+
+/// Public shim for `apply_video_ops` used in integration tests.
+///
+/// Only compiled in test builds; not part of the public API.
+#[cfg(test)]
+pub fn apply_video_ops_pub(
+    data: &mut Vec<u8>,
+    width: &mut u32,
+    height: &mut u32,
+    ops: &[VideoFrameOp],
+) {
+    apply_video_ops(data, width, height, ops);
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -913,5 +1002,117 @@ mod tests {
             out.as_ref().and_then(|m| m.transfer_function),
             Some(TransferFunction::Hlg)
         );
+    }
+
+    // --- Slice 5: new VideoFrameOp variants ---
+
+    /// `Deinterlace` must blend odd-indexed rows with their vertical neighbours.
+    #[test]
+    fn test_apply_video_ops_deinterlace() {
+        // 3-row × 1-pixel RGBA frame.
+        // Row 0: [  0,   0,   0, 255]
+        // Row 1: [200, 200, 200, 255]  ← odd, should be blended
+        // Row 2: [100, 100, 100, 255]
+        let mut data: Vec<u8> = vec![
+            0, 0, 0, 255, // row 0
+            200, 200, 200, 255, // row 1 (odd)
+            100, 100, 100, 255, // row 2
+        ];
+        let mut w = 1u32;
+        let mut h = 3u32;
+        apply_video_ops(&mut data, &mut w, &mut h, &[VideoFrameOp::Deinterlace]);
+        // Row 1 = avg(row0, row2) = avg(0, 100) = 50 for every RGB channel
+        assert_eq!(data[4], 50, "row1 R blended to 50");
+        assert_eq!(data[5], 50, "row1 G blended to 50");
+        assert_eq!(data[6], 50, "row1 B blended to 50");
+        assert_eq!(data[7], 255, "row1 alpha unchanged");
+    }
+
+    /// `Deinterlace` on a single-row image must be a no-op (< 3 rows guard).
+    #[test]
+    fn test_apply_video_ops_deinterlace_too_small() {
+        let original: Vec<u8> = vec![128, 64, 32, 255];
+        let mut data = original.clone();
+        let mut w = 1u32;
+        let mut h = 1u32;
+        apply_video_ops(&mut data, &mut w, &mut h, &[VideoFrameOp::Deinterlace]);
+        assert_eq!(data, original, "single-row frame must not be modified");
+    }
+
+    /// `ColorCorrect` with all factors = 1.0 must be a no-op (identity transform).
+    #[test]
+    fn test_apply_video_ops_color_correct_identity() {
+        let mut data: Vec<u8> = vec![100, 150, 200, 255];
+        let orig = data.clone();
+        let mut w = 1u32;
+        let mut h = 1u32;
+        apply_video_ops(
+            &mut data,
+            &mut w,
+            &mut h,
+            &[VideoFrameOp::ColorCorrect {
+                brightness: 1.0,
+                contrast: 1.0,
+                saturation: 1.0,
+            }],
+        );
+        // After identity transform values should be within rounding tolerance (±2).
+        assert!((data[0] as i16 - orig[0] as i16).abs() <= 2, "R identity");
+        assert!((data[1] as i16 - orig[1] as i16).abs() <= 2, "G identity");
+        assert!((data[2] as i16 - orig[2] as i16).abs() <= 2, "B identity");
+        assert_eq!(data[3], 255, "alpha unchanged");
+    }
+
+    /// `ColorCorrect` with saturation=0 must collapse R, G, B to the luma value.
+    #[test]
+    fn test_apply_video_ops_color_correct_desaturate() {
+        // Pure red pixel: R=255, G=0, B=0
+        let mut data: Vec<u8> = vec![255, 0, 0, 255];
+        let mut w = 1u32;
+        let mut h = 1u32;
+        apply_video_ops(
+            &mut data,
+            &mut w,
+            &mut h,
+            &[VideoFrameOp::ColorCorrect {
+                brightness: 1.0,
+                contrast: 1.0,
+                saturation: 0.0,
+            }],
+        );
+        // Expected luma ≈ 0.299 * 255 ≈ 76
+        let expected_u8 = (0.299_f32 * 255.0_f32) as u8;
+        assert!(
+            (data[0] as i16 - expected_u8 as i16).abs() <= 2,
+            "R should be ~luma ({expected_u8}), got {}",
+            data[0]
+        );
+        assert_eq!(data[3], 255, "alpha unchanged");
+    }
+
+    /// `ColorCorrect` with brightness=2.0 must double all channels (clamped at 255).
+    #[test]
+    fn test_apply_video_ops_color_correct_brightness_double() {
+        let mut data: Vec<u8> = vec![100, 80, 60, 200];
+        let mut w = 1u32;
+        let mut h = 1u32;
+        apply_video_ops(
+            &mut data,
+            &mut w,
+            &mut h,
+            &[VideoFrameOp::ColorCorrect {
+                brightness: 2.0,
+                contrast: 1.0,
+                saturation: 1.0,
+            }],
+        );
+        // Each channel scaled by brightness then contrast (1.0) = ×2 (within rounding).
+        // R: 100/255 * 2.0 ≈ 0.784 → 200; G: 80/255 * 2.0 ≈ 0.627 → 160
+        assert!(
+            (data[0] as i16 - 200).abs() <= 3,
+            "R doubled: expected ~200, got {}",
+            data[0]
+        );
+        assert_eq!(data[3], 200, "alpha unchanged");
     }
 }

@@ -734,6 +734,206 @@ impl FolderManager {
     }
 }
 
+// ── FolderSync: filesystem watcher → MamStorage upload ──────────────────────
+
+use crate::event_bus::MamEvent;
+use crate::storage::MamStorage;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use tokio::sync::broadcast;
+
+/// Errors produced by [`FolderSync`].
+#[derive(Debug, thiserror::Error)]
+pub enum FolderSyncError {
+    /// The notify watcher could not be started.
+    #[error("Watch error: {0}")]
+    Watch(String),
+    /// A storage operation failed.
+    #[error("Storage error: {0}")]
+    Storage(#[from] crate::storage::MamStorageError),
+    /// An I/O error occurred.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+impl From<notify::Error> for FolderSyncError {
+    fn from(e: notify::Error) -> Self {
+        Self::Watch(e.to_string())
+    }
+}
+
+/// Watches a directory for new/modified files and uploads them to `MamStorage`,
+/// emitting [`MamEvent`] notifications via a broadcast channel.
+pub struct FolderSync {
+    watched_path: PathBuf,
+    storage: Arc<MamStorage>,
+    event_tx: broadcast::Sender<MamEvent>,
+}
+
+impl FolderSync {
+    /// Create a new `FolderSync`.
+    ///
+    /// `event_tx` is used to broadcast [`MamEvent::AssetIngested`] and
+    /// [`MamEvent::AssetDeleted`] whenever the watched folder changes.
+    #[must_use]
+    pub fn new(
+        watched_path: PathBuf,
+        storage: Arc<MamStorage>,
+        event_tx: broadcast::Sender<MamEvent>,
+    ) -> Self {
+        Self {
+            watched_path,
+            storage,
+            event_tx,
+        }
+    }
+
+    /// Start watching the directory for filesystem events.
+    ///
+    /// This method spawns a background task; it returns as soon as the watcher
+    /// is registered.  On each `Create` or `Modify` event the file is
+    /// fingerprinted, uploaded (de-duplicated by fingerprint), and an
+    /// [`MamEvent::AssetIngested`] event is broadcast.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FolderSyncError::Watch`] if the watcher cannot be registered.
+    pub async fn start(&self) -> std::result::Result<(), FolderSyncError> {
+        use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+        use std::sync::mpsc;
+
+        let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
+        let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())?;
+        watcher.watch(&self.watched_path, RecursiveMode::Recursive)?;
+
+        let storage = Arc::clone(&self.storage);
+        let event_tx = self.event_tx.clone();
+
+        tokio::task::spawn_blocking(move || {
+            // Keep watcher alive
+            let _watcher = watcher;
+            let mut seen: HashSet<String> = HashSet::new();
+
+            for res in rx {
+                match res {
+                    Ok(event) => {
+                        use notify::EventKind;
+                        match &event.kind {
+                            EventKind::Create(_) | EventKind::Modify(_) => {
+                                for path in &event.paths {
+                                    if path.is_file() {
+                                        let path_str = path.to_string_lossy().to_string();
+                                        if let Ok(data) = std::fs::read(path) {
+                                            let fp = Self::fingerprint_bytes(&data);
+                                            if seen.contains(&fp) {
+                                                continue;
+                                            }
+                                            seen.insert(fp.clone());
+                                            let key = path_str.clone();
+                                            let size = data.len() as u64;
+
+                                            // Upload asynchronously via a nested Tokio handle.
+                                            let storage2 = Arc::clone(&storage);
+                                            let key2 = key.clone();
+                                            tokio::runtime::Handle::try_current()
+                                                .map(|handle| {
+                                                    handle.block_on(async move {
+                                                        if let Err(e) =
+                                                            storage2.put(&key2, &data).await
+                                                        {
+                                                            tracing::warn!(
+                                                                "FolderSync upload failed: {e}"
+                                                            );
+                                                        }
+                                                    });
+                                                })
+                                                .ok();
+
+                                            let _ = event_tx.send(MamEvent::AssetIngested {
+                                                asset_id: fp,
+                                                path: path_str,
+                                                size_bytes: size,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            EventKind::Remove(_) => {
+                                for path in &event.paths {
+                                    let _ = event_tx.send(MamEvent::AssetDeleted {
+                                        asset_id: path.to_string_lossy().to_string(),
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("FolderSync watch error: {e}");
+                    }
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Walk the watched directory once, uploading any files not yet known.
+    ///
+    /// Returns the number of newly uploaded files.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FolderSyncError::Io`] if directory traversal fails, or
+    /// [`FolderSyncError::Storage`] if any upload fails.
+    pub async fn sync_once(&self) -> std::result::Result<usize, FolderSyncError> {
+        let mut count = 0usize;
+        let mut seen: HashSet<String> = HashSet::new();
+
+        let mut read_dir = tokio::fs::read_dir(&self.watched_path).await?;
+        while let Some(entry) = read_dir.next_entry().await? {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let data = tokio::fs::read(&path).await?;
+            let fp = Self::fingerprint_bytes(&data);
+            if seen.contains(&fp) {
+                continue;
+            }
+            seen.insert(fp.clone());
+
+            let key = path.to_string_lossy().to_string();
+            let size = data.len() as u64;
+
+            // Check if already present; upload only if not.
+            if !self.storage.exists(&key).await.unwrap_or(false) {
+                self.storage.put(&key, &data).await?;
+                let _ = self.event_tx.send(MamEvent::AssetIngested {
+                    asset_id: fp,
+                    path: key,
+                    size_bytes: size,
+                });
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    /// Compute a SHA-256 fingerprint for `data`, returned as a hex string.
+    #[must_use]
+    fn fingerprint_bytes(data: &[u8]) -> String {
+        // Use sha2 (already a MAM dep) for simple content fingerprinting.
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(data);
+        hash.iter().fold(String::with_capacity(64), |mut acc, b| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

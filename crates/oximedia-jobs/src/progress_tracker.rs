@@ -93,7 +93,11 @@ impl ProgressTracker {
     /// Requires at least 2 distinct updates to produce a meaningful estimate.
     /// Returns `None` when insufficient data is available or the job is complete.
     #[must_use]
-    #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation
+    )]
     pub fn estimated_remaining_secs(&self) -> Option<u64> {
         if self.updates.len() < 2 {
             return None;
@@ -343,10 +347,7 @@ mod tests {
         let eta = tracker.estimated_remaining_secs().expect("should have ETA");
         // Expected: ~50 s remaining (steps 6-10, 10 s each).
         // Allow ±5 s tolerance for rounding.
-        assert!(
-            eta >= 45 && eta <= 55,
-            "expected ~50, got {eta}"
-        );
+        assert!(eta >= 45 && eta <= 55, "expected ~50, got {eta}");
     }
 
     #[test]
@@ -399,9 +400,12 @@ mod tests {
         reg.register("job-a");
         reg.register("job-b");
 
-        reg.update_with_timestamp("job-a", 3, 10, "step", 1000).expect("ok");
-        reg.update_with_timestamp("job-a", 6, 10, "step", 2000).expect("ok");
-        reg.update_with_timestamp("job-b", 1, 5, "step", 500).expect("ok");
+        reg.update_with_timestamp("job-a", 3, 10, "step", 1000)
+            .expect("ok");
+        reg.update_with_timestamp("job-a", 6, 10, "step", 2000)
+            .expect("ok");
+        reg.update_with_timestamp("job-b", 1, 5, "step", 500)
+            .expect("ok");
 
         let snap_a = reg.snapshot("job-a").expect("should have snapshot");
         let snap_b = reg.snapshot("job-b").expect("should have snapshot");
@@ -417,8 +421,10 @@ mod tests {
         reg.register("complete-job");
         reg.register("incomplete-job");
 
-        reg.update_with_timestamp("complete-job", 10, 10, "done", 1000).expect("ok");
-        reg.update_with_timestamp("incomplete-job", 5, 10, "half", 500).expect("ok");
+        reg.update_with_timestamp("complete-job", 10, 10, "done", 1000)
+            .expect("ok");
+        reg.update_with_timestamp("incomplete-job", 5, 10, "half", 500)
+            .expect("ok");
 
         let completed = reg.completed_jobs();
         assert_eq!(completed.len(), 1);
@@ -429,7 +435,8 @@ mod tests {
     fn test_registry_snapshot_message() {
         let mut reg = ProgressRegistry::new();
         reg.register("msg-job");
-        reg.update_with_timestamp("msg-job", 1, 10, "hello world", 100).expect("ok");
+        reg.update_with_timestamp("msg-job", 1, 10, "hello world", 100)
+            .expect("ok");
         let snap = reg.snapshot("msg-job").expect("should exist");
         assert_eq!(snap.last_message, "hello world");
     }

@@ -17,10 +17,12 @@ workspace = true
 
 [features]
 default = []
+onnx = ["dep:oxionnx"]
 
 [dependencies]
 thiserror.workspace = true
 scirs2-core.workspace = true
 rayon.workspace = true
+oxionnx = { workspace = true, optional = true }
 
 [dev-dependencies]

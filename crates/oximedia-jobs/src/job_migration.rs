@@ -46,8 +46,8 @@ impl ExportedJob {
         source_queue: impl Into<String>,
         reason: impl Into<String>,
     ) -> Result<Self, MigrationError> {
-        let job_json = serde_json::to_string(job)
-            .map_err(|e| MigrationError::Serialise(e.to_string()))?;
+        let job_json =
+            serde_json::to_string(job).map_err(|e| MigrationError::Serialise(e.to_string()))?;
         Ok(Self {
             job_json,
             source_queue: source_queue.into(),
@@ -58,8 +58,7 @@ impl ExportedJob {
 
     /// Deserialise back to a `Job`.
     pub fn to_job(&self) -> Result<Job, MigrationError> {
-        serde_json::from_str(&self.job_json)
-            .map_err(|e| MigrationError::Deserialise(e.to_string()))
+        serde_json::from_str(&self.job_json).map_err(|e| MigrationError::Deserialise(e.to_string()))
     }
 }
 

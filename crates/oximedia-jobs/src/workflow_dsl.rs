@@ -261,8 +261,7 @@ impl WorkflowDefinition {
         self.steps
             .iter()
             .filter(|s| {
-                !completed.contains(&s.name)
-                    && s.depends_on.iter().all(|d| completed.contains(d))
+                !completed.contains(&s.name) && s.depends_on.iter().all(|d| completed.contains(d))
             })
             .collect()
     }
@@ -389,8 +388,14 @@ mod tests {
         assert_eq!(order.len(), 3);
         // ingest must come before transcode
         let pos_ingest = order.iter().position(|&n| n == "ingest").expect("ingest");
-        let pos_transcode = order.iter().position(|&n| n == "transcode").expect("transcode");
-        let pos_thumb = order.iter().position(|&n| n == "thumbnail").expect("thumbnail");
+        let pos_transcode = order
+            .iter()
+            .position(|&n| n == "transcode")
+            .expect("transcode");
+        let pos_thumb = order
+            .iter()
+            .position(|&n| n == "thumbnail")
+            .expect("thumbnail");
         assert!(pos_ingest < pos_transcode);
         assert!(pos_transcode < pos_thumb);
     }
@@ -460,7 +465,10 @@ mod tests {
         let wf = WorkflowDefinition::new("wf")
             .var("bucket", "s3://my-bucket")
             .var("region", "eu-west-1");
-        assert_eq!(wf.variables.get("bucket").map(String::as_str), Some("s3://my-bucket"));
+        assert_eq!(
+            wf.variables.get("bucket").map(String::as_str),
+            Some("s3://my-bucket")
+        );
         assert_eq!(wf.variables.len(), 2);
     }
 

@@ -115,7 +115,7 @@
 //! are always errors:
 //! ```
 //! use std::io::{Read, Cursor};
-//! use bitstream_io::{BigEndian, BitReader, BitRead};
+//! use oximedia_bitstream::{BigEndian, BitReader, BitRead};
 //! let data = [0; 10];
 //! let mut r = BitReader::endian(Cursor::new(&data), BigEndian);
 //! let x: Result<u32, _> = r.read_var(64);  // reading 64 bits to u32 always fails at runtime
@@ -130,7 +130,7 @@
 //! are small enough for the type being read/written at compile-time:
 //! ```rust,compile_fail
 //! use std::io::{Read, Cursor};
-//! use bitstream_io::{BigEndian, BitReader, BitRead};
+//! use oximedia_bitstream::{BigEndian, BitReader, BitRead};
 //! let data = [0; 10];
 //! let mut r = BitReader::endian(Cursor::new(&data), BigEndian);
 //! let x: Result<u32, _> = r.read::<64, _>();  // doesn't compile at all

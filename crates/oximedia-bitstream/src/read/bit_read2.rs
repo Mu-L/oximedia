@@ -25,8 +25,8 @@ use super::{
 ///
 /// # Example
 /// ```
-/// use bitstream_io::BitRead2 as BitRead;
-/// use bitstream_io::{BitReader, BigEndian};
+/// use oximedia_bitstream::BitRead2 as BitRead;
+/// use oximedia_bitstream::{BitReader, BigEndian};
 /// let byte = &[0b1111_0000];
 /// let mut reader = BitReader::endian(byte.as_slice(), BigEndian);
 /// assert_eq!(reader.read::<u8>(4).unwrap(), 0b1111);

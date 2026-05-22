@@ -11,6 +11,7 @@ use oximedia_compat_ffmpeg::{parse_and_translate, DiagnosticKind, ParsedFilter, 
 use std::path::PathBuf;
 use tracing::warn;
 
+use crate::progress::ProgressFormat;
 use crate::transcode::{self, TranscodeOptions};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -20,11 +21,15 @@ use crate::transcode::{self, TranscodeOptions};
 /// Run the FFmpeg-compatible command with the provided argument list.
 ///
 /// The `dry_run` flag suppresses actual execution and only prints the plan.
+/// The `--explain` flag prints a human-readable translation table then exits.
 pub async fn run(args: Vec<String>) -> Result<()> {
     if args.is_empty() {
         print_ffcompat_help();
         return Ok(());
     }
+
+    // Check for --explain anywhere in args (OxiMedia extension).
+    let explain_mode = args.iter().any(|a| a == "--explain");
 
     // Check for --dry-run / --plan anywhere in args (OxiMedia extension).
     // We remove it before passing to the compat parser so it doesn't confuse
@@ -35,7 +40,7 @@ pub async fn run(args: Vec<String>) -> Result<()> {
 
     let filtered_args: Vec<String> = args
         .into_iter()
-        .filter(|a| a != "--dry-run" && a != "--plan" && a != "-dry-run")
+        .filter(|a| a != "--dry-run" && a != "--plan" && a != "-dry-run" && a != "--explain")
         .collect();
 
     let result = parse_and_translate(&filtered_args);
@@ -88,6 +93,12 @@ pub async fn run(args: Vec<String>) -> Result<()> {
 
     if result.has_errors() {
         anyhow::bail!("translation failed with errors; see diagnostics above");
+    }
+
+    // --explain: print the full argument → field translation table and exit.
+    if explain_mode {
+        print_explain_table(&result.jobs);
+        return Ok(());
     }
 
     // Print the translated jobs summary.
@@ -243,6 +254,7 @@ async fn execute_job(job: &TranscodeJob) -> Result<()> {
         threads: num_cpus(),
         overwrite: job.overwrite,
         resume: false,
+        progress_format: ProgressFormat::Plain,
     };
 
     transcode::transcode(options).await
@@ -342,6 +354,122 @@ fn num_cpus() -> usize {
 // Help text
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Explain mode
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Print a human-readable translation table: `arg → field = value`.
+///
+/// This is the `--explain` mode — it shows exactly what each FFmpeg argument
+/// mapped to in the OxiMedia transcode model, then returns without executing.
+fn print_explain_table(jobs: &[TranscodeJob]) {
+    println!(
+        "{} Translation table (--explain mode):",
+        "oximedia-ff:".cyan().bold()
+    );
+    println!();
+
+    for (idx, job) in jobs.iter().enumerate() {
+        println!("{} Job {} of {}", "──".dimmed(), idx + 1, jobs.len());
+        println!("  {:20} = {}", "-i".yellow(), job.input_path);
+        println!("  {:20} = {}", "<output>".yellow(), job.output_path);
+
+        if let Some(vc) = &job.video_codec {
+            println!("  {:20} = {}", "-c:v".yellow(), vc);
+        }
+        if let Some(ac) = &job.audio_codec {
+            println!("  {:20} = {}", "-c:a".yellow(), ac);
+        }
+        if let Some(vb) = &job.video_bitrate {
+            println!("  {:20} = {}", "-b:v".yellow(), vb);
+        }
+        if let Some(ab) = &job.audio_bitrate {
+            println!("  {:20} = {}", "-b:a".yellow(), ab);
+        }
+        if let Some(crf) = job.crf {
+            println!("  {:20} = {:.1}", "-crf".yellow(), crf);
+        }
+        if !job.video_filters.is_empty() {
+            println!(
+                "  {:20} = {} filter(s)",
+                "-vf".yellow(),
+                job.video_filters.len()
+            );
+        }
+        if !job.audio_filters.is_empty() {
+            println!(
+                "  {:20} = {} filter(s)",
+                "-af".yellow(),
+                job.audio_filters.len()
+            );
+        }
+        if let Some(seek) = &job.seek {
+            println!("  {:20} = {}", "-ss".yellow(), seek);
+        }
+        if let Some(dur) = &job.duration {
+            println!("  {:20} = {}", "-t".yellow(), dur);
+        }
+        if let Some(fmt) = &job.format {
+            println!("  {:20} = {}", "-f".yellow(), fmt);
+        }
+        if let Some(preset) = &job.preset {
+            println!("  {:20} = {}", "-preset".yellow(), preset);
+        }
+        if let Some(tune) = &job.tune {
+            println!("  {:20} = {}", "-tune".yellow(), tune);
+        }
+        if let Some(profile) = &job.profile {
+            println!("  {:20} = {}", "-profile:v".yellow(), profile);
+        }
+        if let Some(pass) = job.pass {
+            println!("  {:20} = {}", "-pass".yellow(), pass);
+        }
+        if job.overwrite {
+            println!("  {:20} = yes", "-y".yellow());
+        }
+        if job.no_video {
+            println!("  {:20} = yes", "-vn".yellow());
+        }
+        if job.no_audio {
+            println!("  {:20} = yes", "-an".yellow());
+        }
+        if !job.map.is_empty() {
+            println!("  {:20} = {} selector(s)", "-map".yellow(), job.map.len());
+        }
+        for (k, v) in &job.metadata {
+            println!("  {:20} = {}={}", "-metadata".yellow(), k, v);
+        }
+        if !job.map_metadata.is_empty() {
+            println!(
+                "  {:20} = {} directive(s)",
+                "-map_metadata".yellow(),
+                job.map_metadata.len()
+            );
+        }
+        if let Some(hw) = &job.hwaccel {
+            println!(
+                "  {:20} = {} ({})",
+                "-hwaccel".yellow(),
+                hw.backend,
+                hw.description
+            );
+        }
+        if !job.muxer_options.is_empty() {
+            println!(
+                "  {:20} = {} option(s)",
+                "muxer opts".yellow(),
+                job.muxer_options.len()
+            );
+        }
+        println!();
+    }
+
+    println!(
+        "{} Use --dry-run to also skip execution without the translation details.",
+        "note:".cyan()
+    );
+}
+
 /// Print brief usage information for the ffcompat command.
 fn print_ffcompat_help() {
     println!("{}", "OxiMedia FFmpeg-compatible interface".cyan().bold());
@@ -353,6 +481,7 @@ fn print_ffcompat_help() {
     println!();
     println!("Options (OxiMedia extensions):");
     println!("  --dry-run / --plan    Print what would be done without executing.");
+    println!("  --explain             Print the arg→field translation table and exit.");
     println!();
     println!("Examples:");
     println!("  oximedia ff -i input.mkv -c:v libaom-av1 -crf 28 -c:a libopus output.webm");

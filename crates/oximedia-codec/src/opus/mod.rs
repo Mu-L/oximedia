@@ -19,10 +19,13 @@
 //! This implementation provides:
 //!
 //! - Complete packet parsing and frame structure handling
-//! - Range decoder for entropy coding
+//! - A normative RFC 6716 §4.1 range decoder for entropy coding
 //! - MDCT transforms for CELT mode
-//! - Basic CELT decoder for mono audio
-//! - Stub implementations for SILK and hybrid modes
+//! - A CELT decoder for music content
+//! - A normative RFC 6716 §4.2 SILK decoder (NLSF, LTP, shell-coded
+//!   excitation, LTP+LPC synthesis) for speech content
+//! - A real hybrid decoder that decodes SILK then CELT from one shared
+//!   range-coded bitstream (RFC 6716 §3.1)
 //!
 //! # Example
 //!
@@ -46,6 +49,9 @@ pub mod packet;
 pub mod range_decoder;
 pub mod range_encoder;
 pub mod silk;
+pub mod silk_decoder;
+pub mod silk_range;
+pub mod silk_tables;
 pub mod vad;
 
 use crate::{AudioFrame, CodecError, CodecResult, SampleFormat};
@@ -262,10 +268,10 @@ impl OpusDecoder {
             }
             OpusMode::Hybrid => {
                 if let Some(hybrid) = &mut self.hybrid {
-                    // For hybrid mode, we need to split the data between SILK and CELT
-                    // This is a simplification - real implementation would parse the split
-                    let mid = data.len() / 2;
-                    hybrid.decode(&data[..mid], &data[mid..], output, frame_size)?;
+                    // Hybrid mode: the SILK and CELT layers share one
+                    // range-coded bitstream (RFC 6716 §3.1). The whole frame
+                    // payload is passed as a single stream — no byte split.
+                    hybrid.decode(data, output, frame_size)?;
                 } else {
                     return Err(CodecError::InvalidData(
                         "Hybrid decoder not initialized".to_string(),

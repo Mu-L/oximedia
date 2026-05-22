@@ -736,6 +736,124 @@ pub fn compare_images(image1: &Image, image2: &Image) -> DedupResult<VisualSimil
     })
 }
 
+/// Configuration for SSIM-based thumbnail duplicate detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SsimConfig {
+    /// Width of the grayscale thumbnail used for SSIM comparison. Must be >= 4.
+    pub thumbnail_width: u32,
+    /// Height of the grayscale thumbnail used for SSIM comparison. Must be >= 4.
+    pub thumbnail_height: u32,
+}
+
+impl Default for SsimConfig {
+    fn default() -> Self {
+        Self {
+            thumbnail_width: 8,
+            thumbnail_height: 8,
+        }
+    }
+}
+
+/// Find SSIM duplicates among a list of files using a custom config.
+///
+/// Each file is read as raw bytes and used to build a deterministic synthetic
+/// thumbnail of the configured resolution. Files that cannot be read are
+/// silently skipped. Pairs whose SSIM exceeds `threshold` are grouped.
+///
+/// # Errors
+///
+/// Returns an error if any path processing fails unexpectedly.
+pub fn find_ssim_duplicates_with_config(
+    files: &[std::path::PathBuf],
+    threshold: f64,
+    config: &SsimConfig,
+) -> crate::DedupResult<Vec<crate::report::DuplicateGroup>> {
+    let tw = (config.thumbnail_width.max(4)) as usize;
+    let th = (config.thumbnail_height.max(4)) as usize;
+    let pixel_count = tw * th;
+
+    // Build (path, thumbnail-image) pairs; skip unreadable files.
+    let mut images: Vec<(std::path::PathBuf, Image)> = Vec::new();
+    for path in files {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        // Derive a deterministic grayscale thumbnail from the raw bytes.
+        // Repeat / truncate the file bytes to fill the pixel grid.
+        let mut pixel_data = vec![0u8; pixel_count];
+        for (i, px) in pixel_data.iter_mut().enumerate() {
+            *px = if bytes.is_empty() {
+                0u8
+            } else {
+                bytes[i % bytes.len()]
+            };
+        }
+        if let Ok(img) = Image::from_data(tw, th, 1, pixel_data) {
+            images.push((path.clone(), img));
+        }
+    }
+
+    if images.len() < 2 {
+        return Ok(Vec::new());
+    }
+
+    let ssim_params = SsimParams::default();
+    let mut groups: Vec<crate::report::DuplicateGroup> = Vec::new();
+    let mut assigned = vec![false; images.len()];
+
+    for i in 0..images.len() {
+        if assigned[i] {
+            continue;
+        }
+        let mut group_files: Vec<String> = vec![images[i].0.to_string_lossy().to_string()];
+        let mut best_score = 0.0f64;
+
+        for j in (i + 1)..images.len() {
+            if assigned[j] {
+                continue;
+            }
+            let ssim = compute_ssim(&images[i].1, &images[j].1, &ssim_params);
+            if ssim >= threshold {
+                group_files.push(images[j].0.to_string_lossy().to_string());
+                assigned[j] = true;
+                if ssim > best_score {
+                    best_score = ssim;
+                }
+            }
+        }
+
+        if group_files.len() > 1 {
+            assigned[i] = true;
+            groups.push(crate::report::DuplicateGroup {
+                files: group_files,
+                scores: vec![crate::report::SimilarityScore {
+                    method: "ssim".to_string(),
+                    score: best_score,
+                    metadata: Vec::new(),
+                }],
+            });
+        }
+    }
+
+    Ok(groups)
+}
+
+/// Find SSIM duplicates among a list of files using the default 8×8 config.
+///
+/// This is a convenience wrapper around [`find_ssim_duplicates_with_config`]
+/// with a default [`SsimConfig`] (8×8 thumbnails).
+///
+/// # Errors
+///
+/// Returns an error if any path processing fails unexpectedly.
+pub fn find_ssim_duplicates(
+    files: &[std::path::PathBuf],
+    threshold: f64,
+) -> crate::DedupResult<Vec<crate::report::DuplicateGroup>> {
+    find_ssim_duplicates_with_config(files, threshold, &SsimConfig::default())
+}
+
 /// Visual similarity metrics.
 #[derive(Debug, Clone)]
 pub struct VisualSimilarity {
@@ -962,5 +1080,81 @@ mod tests {
         let img = create_test_image(64, 64);
         let result = compare_images(&img, &img).expect("should succeed");
         assert!(result.whash_similarity > 0.9);
+    }
+
+    // ---- SsimConfig / find_ssim_duplicates tests ----
+
+    #[test]
+    fn test_ssim_config_default_is_8x8() {
+        let cfg = SsimConfig::default();
+        assert_eq!(cfg.thumbnail_width, 8);
+        assert_eq!(cfg.thumbnail_height, 8);
+    }
+
+    #[test]
+    fn test_ssim_config_custom_16x16() {
+        let config = SsimConfig {
+            thumbnail_width: 16,
+            thumbnail_height: 16,
+        };
+        let dir = std::env::temp_dir().join("oximedia_ssim_16x16");
+        let _ = std::fs::create_dir_all(&dir);
+        let f1 = dir.join("a.bin");
+        let f2 = dir.join("b.bin");
+        std::fs::write(&f1, &[128u8; 256]).expect("write f1");
+        std::fs::write(&f2, &[200u8; 256]).expect("write f2");
+        let result = find_ssim_duplicates_with_config(&[f1, f2], 0.5, &config);
+        assert!(result.is_ok(), "16x16 config should run without error");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_ssim_config_default_matches_legacy() {
+        let dir = std::env::temp_dir().join("oximedia_ssim_legacy");
+        let _ = std::fs::create_dir_all(&dir);
+        let f1 = dir.join("a.bin");
+        let f2 = dir.join("b.bin");
+        std::fs::write(&f1, &[64u8; 64]).expect("write f1");
+        std::fs::write(&f2, &[64u8; 64]).expect("write f2");
+        let r1 =
+            find_ssim_duplicates(&[f1.clone(), f2.clone()], 0.5).expect("legacy should succeed");
+        let r2 = find_ssim_duplicates_with_config(&[f1, f2], 0.5, &SsimConfig::default())
+            .expect("config should succeed");
+        assert_eq!(r1.len(), r2.len(), "default config should match legacy");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_ssim_duplicates_identical_files_grouped() {
+        let dir = std::env::temp_dir().join("oximedia_ssim_identical");
+        let _ = std::fs::create_dir_all(&dir);
+        let f1 = dir.join("same_a.bin");
+        let f2 = dir.join("same_b.bin");
+        // Use a 32×32 thumbnail so the SSIM sliding window (default size 11)
+        // has room to compute enough windows. With 8×8 the window would exceed
+        // the image bounds and compute_ssim returns 0.0 by design.
+        let config = SsimConfig {
+            thumbnail_width: 32,
+            thumbnail_height: 32,
+        };
+        // Identical content → SSIM should be 1.0 → grouped at any threshold.
+        let payload = vec![42u8; 1024];
+        std::fs::write(&f1, &payload).expect("write f1");
+        std::fs::write(&f2, &payload).expect("write f2");
+        let groups =
+            find_ssim_duplicates_with_config(&[f1, f2], 0.9, &config).expect("should succeed");
+        assert_eq!(groups.len(), 1, "identical files should form one group");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_ssim_single_file_returns_empty() {
+        let dir = std::env::temp_dir().join("oximedia_ssim_single");
+        let _ = std::fs::create_dir_all(&dir);
+        let f1 = dir.join("solo.bin");
+        std::fs::write(&f1, &[0u8; 32]).expect("write");
+        let groups = find_ssim_duplicates(&[f1], 0.5).expect("should succeed");
+        assert!(groups.is_empty(), "single file cannot form a group");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

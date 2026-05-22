@@ -3,6 +3,7 @@
 use super::settings::ProxyGenerationSettings;
 use crate::{ProxyError, Result};
 use std::path::Path;
+use std::time::Instant;
 
 /// Proxy encoder with support for various codecs and settings.
 pub struct ProxyEncoder {
@@ -16,15 +17,21 @@ impl ProxyEncoder {
         Ok(Self { settings })
     }
 
-    /// Encode a proxy from the input file.
+    /// Encode a proxy from the input file using the configured codec and settings.
+    ///
+    /// This implementation uses `oximedia_transcode::TranscodePipeline` to perform
+    /// a real low-bitrate re-encode into the specified container format. Codec selection,
+    /// target bitrate, and audio codec are all derived from `ProxyGenerationSettings`.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - Input file does not exist or cannot be read
-    /// - Output path is invalid
-    /// - Encoding fails
+    /// - Output path is invalid or its parent directory cannot be created
+    /// - The transcode pipeline fails (e.g., unsupported codec, I/O error)
     pub async fn encode(&self, input: &Path, output: &Path) -> Result<ProxyEncodeResult> {
+        use oximedia_transcode::TranscodePipeline;
+
         // Validate input
         if !input.exists() {
             return Err(ProxyError::FileNotFound(input.display().to_string()));
@@ -32,29 +39,54 @@ impl ProxyEncoder {
 
         // Create output directory if needed
         if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent)?;
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
         }
 
-        // For now, this is a placeholder implementation
-        // In a real implementation, this would use oximedia-transcode
-        // to perform the actual encoding with the specified settings
-
         tracing::info!(
-            "Encoding proxy: {} -> {} (scale: {}, codec: {})",
+            "Encoding proxy: {} -> {} (scale: {}, codec: {}, bitrate: {})",
             input.display(),
             output.display(),
             self.settings.scale_factor,
-            self.settings.codec
+            self.settings.codec,
+            self.settings.bitrate,
         );
+
+        let start = Instant::now();
+
+        let mut pipeline = TranscodePipeline::builder()
+            .input(input.to_path_buf())
+            .output(output.to_path_buf())
+            .video_codec(self.settings.codec.as_str())
+            .audio_codec(self.settings.audio_codec.as_str())
+            .track_progress(false)
+            .hw_accel(self.settings.use_hw_accel)
+            .build()
+            .map_err(|e| ProxyError::GenerationError(e.to_string()))?;
+
+        let transcode_result = pipeline
+            .execute()
+            .await
+            .map_err(|e| ProxyError::GenerationError(e.to_string()))?;
+
+        let encoding_time = start.elapsed().as_secs_f64();
+
+        // Use the file_size from the transcode result; if zero, stat the output file.
+        let file_size = if transcode_result.file_size > 0 {
+            transcode_result.file_size
+        } else {
+            std::fs::metadata(output).map(|m| m.len()).unwrap_or(0)
+        };
 
         Ok(ProxyEncodeResult {
             output_path: output.to_path_buf(),
-            file_size: 0,
-            duration: 0.0,
+            file_size,
+            duration: transcode_result.duration,
             bitrate: self.settings.bitrate,
             codec: self.settings.codec.clone(),
-            resolution: (0, 0),
-            encoding_time: 0.0,
+            resolution: (0, 0), // Resolution info not yet available from TranscodeOutput
+            encoding_time,
         })
     }
 

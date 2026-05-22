@@ -465,4 +465,45 @@ mod tests {
         let sm = ShardMap::default();
         assert_eq!(sm.node_count(), 0);
     }
+
+    /// Verify that the BTreeMap-based O(log n) lookup produces identical results
+    /// to a naive linear scan over all virtual nodes.
+    #[test]
+    fn test_consistent_hash_lookup_binary_matches_linear() {
+        let mut sm = ShardMap::new();
+        for i in 0..5_u32 {
+            sm.add_node(NodeId::new(&format!("node-{i}"), &format!("Node {i}")));
+        }
+
+        // Collect ring entries as a sorted Vec for a reference linear scan
+        let ring_vec: Vec<(u64, String)> = sm.ring.iter().map(|(&h, v)| (h, v.clone())).collect();
+
+        let linear_lookup = |key: &str| -> Option<&str> {
+            if ring_vec.is_empty() {
+                return None;
+            }
+            let hash = ShardMap::hash_key(key);
+            // Linear scan for first entry >= hash (ring is sorted)
+            ring_vec
+                .iter()
+                .find(|(h, _)| *h >= hash)
+                .or_else(|| ring_vec.first())
+                .map(|(_, id)| id.as_str())
+        };
+
+        // Run 1000 queries and compare
+        let queries: Vec<String> = (0..1000_u32).map(|i| format!("key-{i}")).collect();
+        let mut mismatches = 0_u32;
+        for q in &queries {
+            let btree_result = sm.lookup(q);
+            let linear_result = linear_lookup(q);
+            if btree_result != linear_result {
+                mismatches += 1;
+            }
+        }
+        assert_eq!(
+            mismatches, 0,
+            "BTreeMap lookup and linear scan disagree on {mismatches} of 1000 queries"
+        );
+    }
 }

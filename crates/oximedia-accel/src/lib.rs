@@ -12,7 +12,7 @@
 //! - **CPU Fallback**: Automatic fallback to CPU implementations
 //! - **Safe Vulkan**: Uses vulkano for safe Vulkan API access
 //!
-//! # Architecture
+//! # Backend Architecture
 //!
 //! The acceleration layer is designed around the [`HardwareAccel`] trait,
 //! which provides a unified interface for both GPU and CPU implementations.
@@ -27,6 +27,53 @@
 //!   │ VulkanAccel│         │ CpuFallback│
 //!   └────────────┘         └────────────┘
 //! ```
+//!
+//! # GPU Data-Flow Architecture
+//!
+//! The way data travels between the host (CPU) and the GPU depends on the
+//! memory architecture of the selected device.
+//!
+//! ## Discrete GPU path (PCIe staging required)
+//!
+//! Used when [`device::DevicePreference::Discrete`] is selected (the default) and the
+//! GPU has its own dedicated VRAM connected via PCIe.  Two DMA transfers are
+//! required — one to upload and one to download — through a host-visible
+//! *staging buffer*:
+//!
+//! ```text
+//! Host (CPU) buffer
+//!       │  (host-write)
+//!       ▼
+//! Staging buffer (host-visible | device-local)
+//!       │  (DMA transfer over PCIe)
+//!       ▼
+//! GPU VRAM (device-local)
+//!       │  (compute shader)
+//!       ▼
+//! Staging buffer (host-visible | device-local)
+//!       │  (DMA transfer over PCIe)
+//!       ▼
+//! Host (CPU) buffer  (host-read)
+//! ```
+//!
+//! ## Integrated GPU path (UMA, direct map)
+//!
+//! Used when [`device::DevicePreference::Integrated`] is selected and the GPU
+//! shares system RAM (Unified Memory Architecture).  No staging copy is needed
+//! because the same physical allocation is both host-visible and device-local:
+//!
+//! ```text
+//! Unified memory (host-visible | device-local)
+//!       │  (zero-copy compute shader)
+//!       ▼
+//! Unified memory  (result in same allocation)
+//! ```
+//!
+//! The discrete path maximises GPU throughput at the cost of PCIe bandwidth;
+//! the integrated path eliminates that overhead but shares memory bandwidth
+//! with the CPU.  `AccelContext::new()` picks the discrete path by default;
+//! pass a custom [`device::DeviceSelector`] to `AccelContext::with_device_selector`
+//! to choose otherwise.
 //!
 //! # Example
 //!
@@ -57,6 +104,7 @@
 
 pub mod accel_profile;
 pub mod accel_stats;
+pub mod bilateral_gpu;
 pub mod buffer;
 pub mod cache;
 pub mod cpu_fallback;
@@ -78,6 +126,7 @@ mod stress_tests;
 pub mod subgroup;
 pub mod task_graph;
 pub mod task_scheduler;
+pub mod temporal_nr;
 pub mod traits;
 pub mod vulkan;
 pub mod webgpu_backend;
@@ -108,6 +157,16 @@ pub use ops::histogram_gpu::{compute_histogram, GpuHistogram, HISTOGRAM_BINS};
 
 // Re-export WebGPU backend
 pub use webgpu_backend::{WebGpuAccelBackend, WebGpuAdapterInfo, WebGpuBackendState};
+
+// Re-export bilateral spatial NR (CPU always, GPU when `webgpu` feature on)
+#[cfg(feature = "webgpu")]
+pub use bilateral_gpu::BilateralGpu;
+pub use bilateral_gpu::{bilateral_cpu, BilateralParams, MAX_BILATERAL_RADIUS};
+
+// Re-export temporal NR
+#[cfg(feature = "webgpu")]
+pub use temporal_nr::TemporalNr;
+pub use temporal_nr::{temporal_nr_cpu, TemporalNrParams};
 
 // Re-export workgroup auto-tuning
 pub use workgroup::{compute_optimal_workgroup, OpType};

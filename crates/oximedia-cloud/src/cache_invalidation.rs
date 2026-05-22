@@ -102,9 +102,7 @@ fn wildcard_match_inner(pattern: &[u8], text: &[u8]) -> bool {
         // Pattern exhausted but text is not — no match.
         (None, Some(_)) => false,
         // `**` — try skipping zero or more characters (including `/`).
-        (Some(b'*'), Some(_))
-            if pattern.len() >= 2 && pattern[1] == b'*' =>
-        {
+        (Some(b'*'), Some(_)) if pattern.len() >= 2 && pattern[1] == b'*' => {
             let rest_pat = &pattern[2..];
             // Skip the optional `/` separator after `**`.
             let rest_pat = if rest_pat.first() == Some(&b'/') {
@@ -135,9 +133,7 @@ fn wildcard_match_inner(pattern: &[u8], text: &[u8]) -> bool {
             false
         }
         // Literal character match.
-        (Some(pc), Some(tc)) => {
-            *pc == *tc && wildcard_match_inner(&pattern[1..], &text[1..])
-        }
+        (Some(pc), Some(tc)) => *pc == *tc && wildcard_match_inner(&pattern[1..], &text[1..]),
         // Pattern has chars but text is exhausted.
         (Some(_), None) => {
             // A trailing `*` or `**` can match empty.
@@ -510,13 +506,21 @@ impl std::fmt::Debug for InvalidationTracker {
 fn uuid_v4_simple() -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
+
+    // Monotonic counter ensures uniqueness even when SystemTime resolution
+    // collapses multiple calls into the same instant inside a tight loop.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
 
     let mut h = DefaultHasher::new();
     SystemTime::now().hash(&mut h);
     std::thread::current().id().hash(&mut h);
+    seq.hash(&mut h);
     let a = h.finish();
     h.write_u64(a ^ 0xDEAD_BEEF_CAFE_BABE);
+    h.write_u64(seq);
     let b = h.finish();
     format!("{:016x}{:016x}", a, b)
 }
@@ -553,16 +557,17 @@ mod tests {
     fn test_wildcard_star_matches() {
         let p = InvalidationPattern::Wildcard("/static/*.js".into());
         assert!(p.matches("/static/app.js"));
-        assert!(!p.matches("/static/nested/app.js"),
-            "single * should not cross /");
+        assert!(
+            !p.matches("/static/nested/app.js"),
+            "single * should not cross /"
+        );
     }
 
     #[test]
     fn test_wildcard_double_star_matches() {
         let p = InvalidationPattern::Wildcard("/static/**.js".into());
         assert!(p.matches("/static/app.js"));
-        assert!(p.matches("/static/nested/deep/app.js"),
-            "** should cross /");
+        assert!(p.matches("/static/nested/deep/app.js"), "** should cross /");
     }
 
     #[test]
@@ -605,7 +610,9 @@ mod tests {
     fn test_tracker_mark_in_progress() {
         let tracker = InvalidationTracker::new(100);
         let id = tracker
-            .submit(InvalidationRequest::new(InvalidationPattern::Exact("/a".into())))
+            .submit(InvalidationRequest::new(InvalidationPattern::Exact(
+                "/a".into(),
+            )))
             .expect("submit");
         tracker
             .mark_in_progress(&id, Some("cf-inv-123".into()))
@@ -636,14 +643,19 @@ mod tests {
         let id = tracker.submit(req).expect("submit");
         tracker.mark_region_complete(&id, "us-east-1").expect("ok");
         tracker.mark_region_failed(&id, "eu-west-1").expect("ok");
-        assert_eq!(tracker.status(&id), Some(InvalidationStatus::PartialSuccess));
+        assert_eq!(
+            tracker.status(&id),
+            Some(InvalidationStatus::PartialSuccess)
+        );
     }
 
     #[test]
     fn test_tracker_superseded() {
         let tracker = InvalidationTracker::new(100);
         let id = tracker
-            .submit(InvalidationRequest::new(InvalidationPattern::Tag("v1".into())))
+            .submit(InvalidationRequest::new(InvalidationPattern::Tag(
+                "v1".into(),
+            )))
             .expect("submit");
         tracker.mark_superseded(&id).expect("supersede");
         assert_eq!(tracker.status(&id), Some(InvalidationStatus::Superseded));
@@ -655,8 +667,7 @@ mod tests {
         let tracker = InvalidationTracker::new(3);
         let mut ids = Vec::new();
         for i in 0..5 {
-            let req =
-                InvalidationRequest::new(InvalidationPattern::Exact(format!("/key/{}", i)));
+            let req = InvalidationRequest::new(InvalidationPattern::Exact(format!("/key/{}", i)));
             ids.push(tracker.submit(req).expect("submit"));
         }
         assert_eq!(tracker.record_count(), 3);
@@ -678,7 +689,9 @@ mod tests {
         }));
 
         let id = tracker
-            .submit(InvalidationRequest::new(InvalidationPattern::Exact("/x".into())))
+            .submit(InvalidationRequest::new(InvalidationPattern::Exact(
+                "/x".into(),
+            )))
             .expect("submit");
         tracker.mark_in_progress(&id, None).expect("in_progress");
         // submit + mark_in_progress = 2 callbacks.

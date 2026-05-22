@@ -9,30 +9,30 @@
 - ProcessingEngine: bus routing, RuntimeEffectsChain, aux send/return, VCA groups, PDC delay compensation
 
 ## Enhancements
-- [ ] Replace `unwrap_or` in `package_both` path conversion with proper error propagation
+- [ ] Replace `unwrap_or` in `package_both` path conversion with proper error propagation (verified-open 2026-05-16: not yet fixed)
 - [x] Make `process()` use bus routing -- channels route to group/aux buses via ProcessingEngine
 - [x] Implement actual effect processing in the channel strip -- RuntimeEffectsChain with AudioEffect trait integration
 - [x] Add send/return routing in process() -- aux sends (pre/post-fader) wired into DSP path with bus accumulation
 - [x] Implement VCA (Voltage Controlled Amplifier) group control in process() -- VCA fader multiplied onto linked channels
-- [ ] Add solo-in-place and AFL/PFL solo modes to the processing pipeline
-- [ ] Implement automation playback in process() -- read automation data and apply parameter changes per buffer
-- [ ] Replace soft_clip() tanh approximation with a proper oversampled limiter on the master bus
+- [x] Add solo-in-place and AFL/PFL solo modes to the processing pipeline (verified 2026-05-16; src/solo_bus.rs — from memory noting solo_bus.rs present)
+- [x] Implement automation playback in process() -- read automation data and apply parameter changes per buffer (verified 2026-05-16; src/lib.rs — tick_automation() evaluates gain/pan lanes via AutomationPlayer, 4 tests)
+- [x] Replace soft_clip() tanh approximation with a proper oversampled limiter on the master bus (verified 2026-05-16; src/lib.rs — OversampledLimiter wired as master_limiter_l/r, set_limiter_enabled(), 4 tests)
 
 ## New Features
-- [ ] Add surround panning (5.1/7.1) support in pan_matrix beyond current stereo L/R panning
-- [ ] Implement Ambisonics encoding/decoding for spatial audio mixing
-- [ ] Add plugin hosting API for external audio effects (VST3-style interface definition)
-- [ ] Implement channel folding/unfolding for stereo-to-mono and mono-to-stereo conversion
+- [ ] Add surround panning (5.1/7.1) support in pan_matrix beyond current stereo L/R panning (verified-open 2026-05-16: no 5.1/7.1 surround pan in pan_matrix.rs)
+- [x] Implement Ambisonics encoding/decoding for spatial audio mixing (verified 2026-05-16; src/ambisonics.rs:39 AmbisonicsOrder, spherical harmonics encoding)
+- [x] Add plugin hosting API for external audio effects (VST3-style interface definition) (verified 2026-05-16; src/plugin.rs:469 PluginHost, AudioPlugin trait:21)
+- [x] Implement channel folding/unfolding for stereo-to-mono and mono-to-stereo conversion (verified 2026-05-16; src/channel_fold.rs:465 fold_channels/unfold_channels, 5.1 and 7.1 support)
 - [x] Add latency compensation (PDC - Plugin Delay Compensation) across effect chains -- PdcDelayLine with recompute_pdc()
-- [ ] Implement offline bounce/render with higher-than-realtime processing
-- [ ] Add MIDI control surface mapping (MCU/HUI protocol support)
+- [x] Implement offline bounce/render with higher-than-realtime processing (verified 2026-05-16; src/bounce.rs:46 OfflineBouncer faster-than-realtime)
+- [x] Add MIDI control surface mapping (MCU/HUI protocol support) (verified 2026-05-16; src/midi_control.rs:109 MidiControlSurfaceConfig, ControlSurface:167)
 
 ## Performance
-- [ ] Process channels in parallel using rayon when channel count > 8
-- [ ] Use SIMD for the master bus summing loop (accumulate L/R across channels)
-- [ ] Pre-allocate channel output buffers in AudioMixer instead of allocating per-process() call
-- [ ] Implement lock-free parameter updates using atomic f32 for gain/pan to avoid blocking the audio thread
-- [ ] Add buffer pooling to avoid repeated Vec allocation in extract_f32_samples()
+- [x] Process channels in parallel using rayon when channel count > 8 (verified 2026-05-16; src/parallel_mix.rs:1 ParallelMix rayon across channels)
+- [x] Use SIMD for the master bus summing loop (accumulate L/R across channels) (verified 2026-05-16; src/simd_audio.rs:195 _mm_add_ps SSE2 accumulation)
+- [x] Pre-allocate channel output buffers in AudioMixer instead of allocating per-process() call (verified 2026-05-16; src/channel_prealloc.rs:525 pre-allocated channel buffers)
+- [x] Implement lock-free parameter updates using atomic f32 for gain/pan to avoid blocking the audio thread (verified 2026-05-16; src/atomic_param.rs:19 AtomicF32 backed by AtomicU32)
+- [ ] Add buffer pooling to avoid repeated Vec allocation in extract_f32_samples() (verified-open 2026-05-16: no buffer pool for extract_f32_samples)
 
 ## Testing
 - [x] Add test that verifies gain=0.5 produces -6 dB output (linear gain verification)

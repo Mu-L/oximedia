@@ -8,22 +8,22 @@
 
 ## Enhancements
 - [x] Add workflow branching/conditional paths in `dag` (if-else nodes that choose next task based on previous task output)
-- [ ] Implement parallel fan-out/fan-in pattern in `executor` for tasks with shared dependencies
-- [ ] Extend `retry_policy` with circuit breaker pattern (stop retrying after N consecutive failures across workflows)
-- [ ] Add `workflow_migration` actual schema migration logic (currently likely scaffolding -- implement versioned DB migrations)
-- [ ] Extend `triggers` with webhook triggers (HTTP POST starts workflow) beyond cron and file-watch
-- [ ] Implement workflow pause/resume in `executor` with checkpoint serialization for long-running workflows
+- [x] Implement parallel fan-out/fan-in pattern in `executor` for tasks with shared dependencies (verified 2026-05-16; src/fanout.rs:552 lines)
+- [x] Extend `retry_policy` with circuit breaker pattern (stop retrying after N consecutive failures across workflows) (verified 2026-05-16; src/circuit_breaker.rs:751 lines)
+- [x] Add `workflow_migration` actual schema migration logic (currently likely scaffolding -- implement versioned DB migrations) (verified 2026-05-16; src/workflow_migration.rs:123 MigrationStep, MigrationError enum)
+- [x] Extend `triggers` with webhook triggers (HTTP POST starts workflow) beyond cron and file-watch (verified 2026-05-16; src/webhook_trigger.rs:532 lines)
+- [x] Implement workflow pause/resume in `executor` with checkpoint serialization for long-running workflows (verified 2026-05-16; src/pause_resume.rs:684 lines)
 - [x] Add dynamic resource scaling in `resource_pool` based on queue depth (auto-allocate more workers under load)
 - [x] Extend `notification_system` with Slack, email, and PagerDuty integration via webhook URLs
-- [ ] Improve `cost_tracking` with actual cloud cost API integration (estimate compute cost per task based on duration and resource type)
+- [ ] Improve `cost_tracking` with actual cloud cost API integration (estimate compute cost per task based on duration and resource type) (verified-open 2026-05-16: no cloud_api/external API integration in cost_tracking.rs)
 
 ## New Features
 - [x] Implement `workflow_compose` module for composing smaller workflows into larger meta-workflows
-- [ ] Add `workflow_import_export` for importing/exporting workflows as portable YAML/JSON bundles
+- [x] Add `workflow_import_export` for importing/exporting workflows as portable YAML/JSON bundles (verified 2026-05-16; src/workflow_import_export.rs:815 lines)
 - [x] Implement `workflow_diff` module for comparing two workflow versions and showing added/removed/changed tasks
-- [ ] Add `workflow_simulation` dry-run mode that traces execution path without actually running tasks
+- [x] Add `workflow_simulation` dry-run mode that traces execution path without actually running tasks (verified 2026-05-16; src/workflow_simulation.rs:1182 lines)
 - [x] Implement `workflow_marketplace` module for sharing and discovering reusable workflow templates
-- [ ] Add `event_bus` module for publish/subscribe event-driven communication between workflow tasks
+- [x] Add `event_bus` module for publish/subscribe event-driven communication between workflow tasks (verified 2026-05-16; src/event_bus.rs:825 lines)
 - [x] Implement `workflow_dashboard` data provider module that aggregates metrics for web UI consumption
 - [x] Add `workflow_health_check` module for periodic validation of workflow engine health (DB connectivity, queue depth, stuck tasks)
 

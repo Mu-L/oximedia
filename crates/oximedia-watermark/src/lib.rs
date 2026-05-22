@@ -121,14 +121,20 @@ pub mod wm_strength;
 // Re-exports
 pub use attacks::RobustnessTest;
 pub use bark_masking::BarkMaskingModel;
+pub use dct_watermark::{AdaptiveDctEmbedder, AdaptiveDctSelector};
 pub use detector::{BlindDetector, DetectionResult, NonBlindDetector};
 pub use error::{WatermarkError, WatermarkResult};
 pub use gold_code::{generate_gold_sequence, GoldCodeGenerator};
 pub use metrics::{calculate_metrics, QualityMetrics};
 pub use multichannel::{ChannelLayout, EmbedStrategy, MultiChannelDetector, MultiChannelEmbedder};
+pub use payload_encoder::{ReedSolomonConfig, RsConfigError};
 pub use robustness_suite::{RobustnessReport, RobustnessSuite};
+pub use spread_spectrum::{correlate_scalar, correlate_simd, InPlaceFftEmbedder};
 pub use video_watermark::{
     VideoFrame, VideoWatermarkConfig, VideoWatermarkDetector, VideoWatermarkEmbedder,
+};
+pub use wm_strength::{
+    compute_psnr_f32, WatermarkEmbedder as StrengthTunerEmbedder, WatermarkStrengthTuner,
 };
 
 /// Watermarking algorithm type.

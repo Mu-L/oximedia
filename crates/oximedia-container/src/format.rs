@@ -63,6 +63,14 @@ pub enum ContainerFormat {
     /// and piping raw YUV video between tools. Supports various chroma
     /// subsampling modes (420, 422, 444, mono).
     Y4m,
+
+    /// Adobe FLV (Flash Video) container (.flv).
+    ///
+    /// Tag-based container originally designed for Adobe Flash and widely
+    /// produced by RTMP livestreaming pipelines. The format specification
+    /// (Adobe VFFS v10) is openly licensed.  Only patent-free codecs are
+    /// supported: MP3/PCM audio, Sorenson H.263 video.
+    Flv,
 }
 
 impl ContainerFormat {
@@ -90,6 +98,7 @@ impl ContainerFormat {
             Self::WebVtt => &["vtt", "webvtt"],
             Self::Srt => &["srt"],
             Self::Y4m => &["y4m", "yuv4mpeg"],
+            Self::Flv => &["flv"],
         }
     }
 
@@ -116,6 +125,7 @@ impl ContainerFormat {
             Self::WebVtt => "text/vtt",
             Self::Srt => "application/x-subrip",
             Self::Y4m => "video/x-raw-yuv4mpeg2",
+            Self::Flv => "video/x-flv",
         }
     }
 
@@ -142,6 +152,7 @@ impl ContainerFormat {
             Self::WebVtt => "WebVTT",
             Self::Srt => "SubRip",
             Self::Y4m => "YUV4MPEG2",
+            Self::Flv => "FLV",
         }
     }
 
@@ -158,7 +169,13 @@ impl ContainerFormat {
     #[must_use]
     pub const fn supports_video(self) -> bool {
         match self {
-            Self::Matroska | Self::WebM | Self::Mp4 | Self::Ogg | Self::MpegTs | Self::Y4m => true,
+            Self::Matroska
+            | Self::WebM
+            | Self::Mp4
+            | Self::Ogg
+            | Self::MpegTs
+            | Self::Y4m
+            | Self::Flv => true,
             Self::Wav | Self::Flac | Self::WebVtt | Self::Srt => false,
         }
     }
@@ -173,7 +190,8 @@ impl ContainerFormat {
             | Self::Ogg
             | Self::Wav
             | Self::Flac
-            | Self::MpegTs => true,
+            | Self::MpegTs
+            | Self::Flv => true,
             Self::WebVtt | Self::Srt | Self::Y4m => false,
         }
     }
@@ -185,7 +203,7 @@ impl ContainerFormat {
             Self::Matroska | Self::WebM | Self::Mp4 | Self::MpegTs | Self::WebVtt | Self::Srt => {
                 true
             }
-            Self::Ogg | Self::Wav | Self::Flac | Self::Y4m => false,
+            Self::Ogg | Self::Wav | Self::Flac | Self::Y4m | Self::Flv => false,
         }
     }
 }

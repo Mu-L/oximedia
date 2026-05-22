@@ -740,3 +740,303 @@ mod tests {
         assert_eq!(executor.max_parallel, 4);
     }
 }
+
+// ─── ITU-T P.910 spatial / temporal / motion complexity ──────────────────────
+
+/// Per-sequence spatial, temporal, and motion complexity metrics (ITU-T P.910).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComputedComplexity {
+    /// Spatial Information (SI) — standard deviation of Sobel magnitude per frame, averaged.
+    pub si: f64,
+    /// Temporal Information (TI) — standard deviation of inter-frame pixel difference, averaged.
+    pub ti: f64,
+    /// Mean block-SAD for 16×16 macroblocks compared to the previous frame.
+    pub motion_sad_mean: f64,
+}
+
+/// Error produced by the complexity analysis functions.
+#[derive(Debug, thiserror::Error)]
+pub enum ComplexityError {
+    /// No frames available to analyse.
+    #[error("no frames provided for complexity analysis")]
+    NoFrames,
+    /// Frame dimensions are too small (need at least 3×3 for Sobel).
+    #[error("frame is too small ({width}×{height}): need at least 3×3")]
+    FrameTooSmall {
+        /// Frame width in pixels.
+        width: usize,
+        /// Frame height in pixels.
+        height: usize,
+    },
+    /// Frame luma plane length does not match width×height.
+    #[error("luma plane length {got} does not match {width}×{height}={expected}")]
+    LumaSizeMismatch {
+        /// Actual byte count of the luma plane.
+        got: usize,
+        /// Declared frame width.
+        width: usize,
+        /// Declared frame height.
+        height: usize,
+        /// Expected byte count (`width × height`).
+        expected: usize,
+    },
+}
+
+// ── Internal luma extraction ───────────────────────────────────────────────────
+
+/// Extract the luma (Y) plane as `f64` values in [0, 255] from a `VideoFrame`.
+///
+/// Supports planar YUV formats where the luma plane is always the first plane.
+fn extract_luma(frame: &oximedia_codec::VideoFrame) -> Option<(Vec<f64>, usize, usize)> {
+    let w = frame.width as usize;
+    let h = frame.height as usize;
+    if w == 0 || h == 0 {
+        return None;
+    }
+
+    // Prefer the first plane (Y for planar YUV, or R for packed RGB).
+    let plane = frame.planes.first()?;
+    let raw = &plane.data;
+    if raw.len() < w * h {
+        return None;
+    }
+
+    let luma: Vec<f64> = raw[..w * h].iter().map(|&b| b as f64).collect();
+    Some((luma, w, h))
+}
+
+// ── SI: Spatial Information ────────────────────────────────────────────────────
+
+/// Compute the 3×3 Sobel magnitude at every interior pixel and return the
+/// standard deviation of those magnitudes.  Border pixels are skipped.
+///
+/// SI = σ( |∇|Sobel(frame)| )
+pub fn compute_si(luma: &[f64], width: usize, height: usize) -> Result<f64, ComplexityError> {
+    if width < 3 || height < 3 {
+        return Err(ComplexityError::FrameTooSmall { width, height });
+    }
+    let expected = width * height;
+    if luma.len() != expected {
+        return Err(ComplexityError::LumaSizeMismatch {
+            got: luma.len(),
+            width,
+            height,
+            expected,
+        });
+    }
+
+    let pixel = |row: usize, col: usize| luma[row * width + col];
+
+    let mut magnitudes: Vec<f64> = Vec::with_capacity((width - 2) * (height - 2));
+
+    for row in 1..(height - 1) {
+        for col in 1..(width - 1) {
+            // Sobel Gx: [-1 0 +1; -2 0 +2; -1 0 +1]
+            let gx = -pixel(row - 1, col - 1)
+                + pixel(row - 1, col + 1)
+                + -2.0 * pixel(row, col - 1)
+                + 2.0 * pixel(row, col + 1)
+                + -pixel(row + 1, col - 1)
+                + pixel(row + 1, col + 1);
+
+            // Sobel Gy: [-1 -2 -1;  0  0  0; +1 +2 +1]
+            let gy = -pixel(row - 1, col - 1) - 2.0 * pixel(row - 1, col) - pixel(row - 1, col + 1)
+                + pixel(row + 1, col - 1)
+                + 2.0 * pixel(row + 1, col)
+                + pixel(row + 1, col + 1);
+
+            magnitudes.push((gx * gx + gy * gy).sqrt());
+        }
+    }
+
+    Ok(stddev(&magnitudes))
+}
+
+// ── TI: Temporal Information ───────────────────────────────────────────────────
+
+/// Compute the standard deviation of the per-pixel absolute difference between
+/// two consecutive frames' luma planes.
+///
+/// `TI = σ( |frame[t] − frame[t-1]| )`
+pub fn compute_ti(
+    curr: &[f64],
+    prev: &[f64],
+    width: usize,
+    height: usize,
+) -> Result<f64, ComplexityError> {
+    let expected = width * height;
+    if curr.len() != expected {
+        return Err(ComplexityError::LumaSizeMismatch {
+            got: curr.len(),
+            width,
+            height,
+            expected,
+        });
+    }
+    if prev.len() != expected {
+        return Err(ComplexityError::LumaSizeMismatch {
+            got: prev.len(),
+            width,
+            height,
+            expected,
+        });
+    }
+
+    let diff: Vec<f64> = curr
+        .iter()
+        .zip(prev.iter())
+        .map(|(&c, &p)| (c - p).abs())
+        .collect();
+    Ok(stddev(&diff))
+}
+
+// ── Motion: 16×16 block SAD ────────────────────────────────────────────────────
+
+/// Compute the mean Sum-of-Absolute-Differences (SAD) over all aligned 16×16
+/// macroblocks between two consecutive luma frames.
+///
+/// Blocks that extend outside the frame boundary are skipped.
+pub fn compute_motion_sad(
+    curr: &[f64],
+    prev: &[f64],
+    width: usize,
+    height: usize,
+) -> Result<f64, ComplexityError> {
+    let expected = width * height;
+    if curr.len() != expected {
+        return Err(ComplexityError::LumaSizeMismatch {
+            got: curr.len(),
+            width,
+            height,
+            expected,
+        });
+    }
+    if prev.len() != expected {
+        return Err(ComplexityError::LumaSizeMismatch {
+            got: prev.len(),
+            width,
+            height,
+            expected,
+        });
+    }
+
+    const BLOCK: usize = 16;
+    let cols = width / BLOCK;
+    let rows = height / BLOCK;
+
+    if cols == 0 || rows == 0 {
+        // Frame smaller than one macroblock — return 0.
+        return Ok(0.0);
+    }
+
+    let mut total_sad = 0.0_f64;
+    let mut block_count = 0_usize;
+
+    for br in 0..rows {
+        for bc in 0..cols {
+            let mut block_sad = 0.0_f64;
+            for dy in 0..BLOCK {
+                let row = br * BLOCK + dy;
+                let offset = row * width + bc * BLOCK;
+                for dx in 0..BLOCK {
+                    block_sad += (curr[offset + dx] - prev[offset + dx]).abs();
+                }
+            }
+            total_sad += block_sad;
+            block_count += 1;
+        }
+    }
+
+    if block_count == 0 {
+        Ok(0.0)
+    } else {
+        Ok(total_sad / block_count as f64)
+    }
+}
+
+// ── Sequence analysis entry-point ─────────────────────────────────────────────
+
+/// Analyse a slice of `VideoFrame`s and return aggregate ITU-T P.910 complexity
+/// metrics (SI, TI, motion SAD mean) averaged across all frames.
+///
+/// Frame `t = 0` contributes to SI only (no previous frame for TI/motion).
+pub fn analyze_sequence(
+    frames: &[oximedia_codec::VideoFrame],
+) -> Result<ComputedComplexity, ComplexityError> {
+    if frames.is_empty() {
+        return Err(ComplexityError::NoFrames);
+    }
+
+    let mut si_values: Vec<f64> = Vec::with_capacity(frames.len());
+    let mut ti_values: Vec<f64> = Vec::with_capacity(frames.len().saturating_sub(1));
+    let mut sad_values: Vec<f64> = Vec::with_capacity(frames.len().saturating_sub(1));
+
+    let mut prev_luma: Option<(Vec<f64>, usize, usize)> = None;
+
+    for frame in frames {
+        let (luma, w, h) = match extract_luma(frame) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        // SI for every frame — silently skip frames that are too small for Sobel.
+        if let Ok(si) = compute_si(&luma, w, h) {
+            si_values.push(si);
+        }
+
+        // TI and motion require a previous frame
+        if let Some((ref prev_l, pw, ph)) = prev_luma {
+            if pw == w && ph == h {
+                if let Ok(ti) = compute_ti(&luma, prev_l, w, h) {
+                    ti_values.push(ti);
+                }
+                if let Ok(sad) = compute_motion_sad(&luma, prev_l, w, h) {
+                    sad_values.push(sad);
+                }
+            }
+        }
+
+        prev_luma = Some((luma, w, h));
+    }
+
+    let si = if si_values.is_empty() {
+        0.0
+    } else {
+        mean(&si_values)
+    };
+    let ti = if ti_values.is_empty() {
+        0.0
+    } else {
+        mean(&ti_values)
+    };
+    let motion_sad_mean = if sad_values.is_empty() {
+        0.0
+    } else {
+        mean(&sad_values)
+    };
+
+    Ok(ComputedComplexity {
+        si,
+        ti,
+        motion_sad_mean,
+    })
+}
+
+// ── Statistics helpers (private to this module) ───────────────────────────────
+
+fn mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.iter().sum::<f64>() / values.len() as f64
+}
+
+fn stddev(values: &[f64]) -> f64 {
+    let n = values.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let m = mean(values);
+    let variance = values.iter().map(|&v| (v - m).powi(2)).sum::<f64>() / n as f64;
+    variance.sqrt()
+}

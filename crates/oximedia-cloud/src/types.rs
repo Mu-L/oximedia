@@ -69,6 +69,32 @@ pub trait CloudStorage: Send + Sync {
 
     /// Get storage statistics
     async fn get_stats(&self, prefix: &str) -> Result<StorageStats>;
+
+    /// Server-side copy between objects, optionally across buckets.
+    ///
+    /// When `from_bucket` or `to_bucket` is `None`, the provider's default
+    /// bucket is used.  Providers that support native server-side copy (S3,
+    /// GCS, Azure, B2) should override this with a direct API call; the
+    /// default implementation falls back to a download-then-upload cycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the source cannot be read or the destination write
+    /// fails.
+    async fn server_side_copy(
+        &self,
+        from_key: &str,
+        to_key: &str,
+        from_bucket: Option<&str>,
+        to_bucket: Option<&str>,
+    ) -> Result<()> {
+        // Default fallback: download from source then upload to destination.
+        // Providers with native copy support should override this.
+        let _ = from_bucket; // bucket routing is provider-specific
+        let _ = to_bucket;
+        let data = self.download(from_key).await?;
+        self.upload(to_key, data).await
+    }
 }
 
 /// Information about a cloud object

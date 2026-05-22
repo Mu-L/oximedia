@@ -434,7 +434,11 @@ fn i420_to_nv12_scalar(
 // AVX2 implementations (x86_64 only)
 // =============================================================================
 
+// SIMD intrinsics always use unaligned load/store variants (_mm_loadu_si128
+// etc.) which accept any alignment. The cast_ptr_alignment lint is a false
+// positive here because the intrinsic itself handles the misalignment.
 #[cfg(target_arch = "x86_64")]
+#[allow(clippy::cast_ptr_alignment)]
 mod avx2_impl {
     use std::arch::x86_64::*;
 
@@ -451,8 +455,8 @@ mod avx2_impl {
         dst_v: *mut u8,
     ) {
         // Load 16 chroma samples for U and V.
-        let u16 = _mm_loadu_si128(src_u as *const __m128i);
-        let v16 = _mm_loadu_si128(src_v as *const __m128i);
+        let u16 = _mm_loadu_si128(src_u.cast::<__m128i>());
+        let v16 = _mm_loadu_si128(src_v.cast::<__m128i>());
 
         // Replicate each byte: _mm_unpacklo_epi8(x, x) = [x0,x0,x1,x1,...,x7,x7]
         //                       _mm_unpackhi_epi8(x, x) = [x8,x8,...,x15,x15]
@@ -462,15 +466,15 @@ mod avx2_impl {
         let v_hi = _mm_unpackhi_epi8(v16, v16);
 
         // Combine into 256-bit: [u0,u0,...,u7,u7, u8,u8,...,u15,u15]
-        _mm256_storeu_si256(dst_u as *mut __m256i, _mm256_set_m128i(u_hi, u_lo));
-        _mm256_storeu_si256(dst_v as *mut __m256i, _mm256_set_m128i(v_hi, v_lo));
+        _mm256_storeu_si256(dst_u.cast::<__m256i>(), _mm256_set_m128i(u_hi, u_lo));
+        _mm256_storeu_si256(dst_v.cast::<__m256i>(), _mm256_set_m128i(v_hi, v_lo));
     }
 
     /// Deinterleave 32 NV12 UV bytes into 16 U bytes and 16 V bytes.
     #[target_feature(enable = "avx2")]
     #[inline]
     pub(super) unsafe fn deinterleave_uv_avx2(src_uv: *const u8, dst_u: *mut u8, dst_v: *mut u8) {
-        let uv = _mm256_loadu_si256(src_uv as *const __m256i);
+        let uv = _mm256_loadu_si256(src_uv.cast::<__m256i>());
         // Mask for even bytes (U) and odd bytes (V)
         let mask_u = _mm256_set1_epi16(0x00FF_u16 as i16);
         let u_vals = _mm256_and_si256(uv, mask_u); // i16 with U in low byte
@@ -483,21 +487,27 @@ mod avx2_impl {
         let v_perm = _mm256_permute4x64_epi64::<0b_11_01_10_00>(v_packed);
 
         // Store 16 bytes (only low 128 bits contain valid data after perm)
-        _mm_storeu_si128(dst_u as *mut __m128i, _mm256_extracti128_si256::<0>(u_perm));
-        _mm_storeu_si128(dst_v as *mut __m128i, _mm256_extracti128_si256::<0>(v_perm));
+        _mm_storeu_si128(
+            dst_u.cast::<__m128i>(),
+            _mm256_extracti128_si256::<0>(u_perm),
+        );
+        _mm_storeu_si128(
+            dst_v.cast::<__m128i>(),
+            _mm256_extracti128_si256::<0>(v_perm),
+        );
     }
 
     /// Interleave 16 U and 16 V bytes into 32 NV12 UV bytes.
     #[target_feature(enable = "avx2")]
     #[inline]
     pub(super) unsafe fn interleave_uv_avx2(src_u: *const u8, src_v: *const u8, dst_uv: *mut u8) {
-        let u8 = _mm_loadu_si128(src_u as *const __m128i);
-        let v8 = _mm_loadu_si128(src_v as *const __m128i);
+        let u8 = _mm_loadu_si128(src_u.cast::<__m128i>());
+        let v8 = _mm_loadu_si128(src_v.cast::<__m128i>());
         // Interleave bytes: lo = [u0,v0,...,u7,v7], hi = [u8,v8,...,u15,v15]
         let lo = _mm_unpacklo_epi8(u8, v8);
         let hi = _mm_unpackhi_epi8(u8, v8);
         // Store all 32 NV12 bytes in one 256-bit write.
-        _mm256_storeu_si256(dst_uv as *mut __m256i, _mm256_set_m128i(hi, lo));
+        _mm256_storeu_si256(dst_uv.cast::<__m256i>(), _mm256_set_m128i(hi, lo));
     }
 
     /// Horizontal average of consecutive pairs of u8 values.
@@ -506,7 +516,7 @@ mod avx2_impl {
     #[target_feature(enable = "avx2")]
     #[inline]
     pub(super) unsafe fn avg_pairs_avx2(src: *const u8, dst: *mut u8) {
-        let v = _mm256_loadu_si256(src as *const __m256i);
+        let v = _mm256_loadu_si256(src.cast::<__m256i>());
         let mask = _mm256_set1_epi16(0x00FF_u16 as i16);
         let even = _mm256_and_si256(v, mask); // even positions (0,2,4,...)
         let odd = _mm256_srli_epi16::<8>(v); // odd positions (1,3,5,...)
@@ -516,7 +526,7 @@ mod avx2_impl {
         let rounded = _mm256_srli_epi16::<1>(_mm256_add_epi16(sum, one));
         let packed = _mm256_packus_epi16(rounded, rounded);
         let perm = _mm256_permute4x64_epi64::<0b_11_01_10_00>(packed);
-        _mm_storeu_si128(dst as *mut __m128i, _mm256_extracti128_si256::<0>(perm));
+        _mm_storeu_si128(dst.cast::<__m128i>(), _mm256_extracti128_si256::<0>(perm));
     }
 }
 

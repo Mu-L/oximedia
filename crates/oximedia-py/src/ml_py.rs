@@ -386,9 +386,11 @@ impl PyOnnxModel {
     /// Load an ONNX model from disk onto the given device.
     #[staticmethod]
     #[pyo3(signature = (path, device=None))]
-    fn load(path: &str, device: Option<PyMlDeviceType>) -> PyResult<Self> {
+    fn load(py: Python<'_>, path: &str, device: Option<PyMlDeviceType>) -> PyResult<Self> {
         let dev = device.map(|d| d.inner()).unwrap_or_else(DeviceType::auto);
-        let model = map_ml(OnnxModel::load(path, dev))?;
+        let path_owned: String = path.to_string();
+        // Loading parses & validates the model graph; release the GIL for it.
+        let model = map_ml(py.detach(move || OnnxModel::load(&path_owned, dev)))?;
         Ok(Self::from_arc(Arc::new(model)))
     }
 
@@ -396,13 +398,15 @@ impl PyOnnxModel {
     #[staticmethod]
     #[pyo3(signature = (data, device=None, virtual_path=None))]
     fn load_from_bytes(
+        py: Python<'_>,
         data: &[u8],
         device: Option<PyMlDeviceType>,
         virtual_path: Option<&str>,
     ) -> PyResult<Self> {
         let dev = device.map(|d| d.inner()).unwrap_or_else(DeviceType::auto);
         let vp = PathBuf::from(virtual_path.unwrap_or("<bytes>"));
-        let model = map_ml(OnnxModel::load_from_bytes(data, dev, vp))?;
+        let buf: Vec<u8> = data.to_vec();
+        let model = map_ml(py.detach(move || OnnxModel::load_from_bytes(&buf, dev, vp)))?;
         Ok(Self::from_arc(Arc::new(model)))
     }
 
@@ -614,9 +618,10 @@ impl PySceneClassifier {
     /// Load a classifier from an ONNX model path onto the given device.
     #[staticmethod]
     #[pyo3(signature = (path, device=None))]
-    fn load(path: &str, device: Option<PyMlDeviceType>) -> PyResult<Self> {
+    fn load(py: Python<'_>, path: &str, device: Option<PyMlDeviceType>) -> PyResult<Self> {
         let dev = device.map(|d| d.inner()).unwrap_or_else(DeviceType::auto);
-        let inner = map_ml(SceneClassifier::load(path, dev))?;
+        let path_owned: String = path.to_string();
+        let inner = map_ml(py.detach(move || SceneClassifier::load(&path_owned, dev)))?;
         Ok(Self { inner })
     }
 
@@ -635,10 +640,15 @@ impl PySceneClassifier {
     /// Run the classifier on a single RGB image.
     ///
     /// `image` is a numpy uint8 array of shape `(H, W, 3)`.
-    fn run(&self, image: PyReadonlyArray3<'_, u8>) -> PyResult<Vec<PySceneClassification>> {
+    fn run(
+        &self,
+        py: Python<'_>,
+        image: PyReadonlyArray3<'_, u8>,
+    ) -> PyResult<Vec<PySceneClassification>> {
         let (pixels, width, height) = extract_image(&image)?;
         let scene = map_ml(SceneImage::new(pixels, width, height))?;
-        let results = map_ml(self.inner.run(scene))?;
+        let inner = &self.inner;
+        let results = map_ml(py.detach(move || inner.run(scene)))?;
         Ok(results
             .into_iter()
             .map(PySceneClassification::from)
@@ -709,9 +719,10 @@ impl PyShotBoundaryDetector {
     /// Load an ONNX shot-boundary model from disk.
     #[staticmethod]
     #[pyo3(signature = (path, device=None))]
-    fn load(path: &str, device: Option<PyMlDeviceType>) -> PyResult<Self> {
+    fn load(py: Python<'_>, path: &str, device: Option<PyMlDeviceType>) -> PyResult<Self> {
         let dev = device.map(|d| d.inner()).unwrap_or_else(DeviceType::auto);
-        let inner = map_ml(ShotBoundaryDetector::load(path, dev))?;
+        let path_owned: String = path.to_string();
+        let inner = map_ml(py.detach(move || ShotBoundaryDetector::load(&path_owned, dev)))?;
         Ok(Self { inner })
     }
 
@@ -740,7 +751,11 @@ impl PyShotBoundaryDetector {
     ///
     /// `window` is a numpy uint8 array of shape `(N, H, W, 3)` where
     /// `N` is the number of frames in the sliding window.
-    fn run(&self, window: PyReadonlyArray4<'_, u8>) -> PyResult<Vec<PyShotBoundary>> {
+    fn run(
+        &self,
+        py: Python<'_>,
+        window: PyReadonlyArray4<'_, u8>,
+    ) -> PyResult<Vec<PyShotBoundary>> {
         let dims = window.shape();
         if dims.len() != 4 || dims[3] != 3 {
             return Err(PyValueError::new_err(format!(
@@ -766,7 +781,8 @@ impl PyShotBoundaryDetector {
             frames.push(frame);
         }
 
-        let boundaries = map_ml(self.inner.run(frames))?;
+        let inner = &self.inner;
+        let boundaries = map_ml(py.detach(move || inner.run(frames)))?;
         Ok(boundaries.into_iter().map(PyShotBoundary::from).collect())
     }
 
@@ -826,17 +842,19 @@ impl PyAestheticScorer {
     /// Load a scorer from an ONNX model path.
     #[staticmethod]
     #[pyo3(signature = (path, device=None))]
-    fn load(path: &str, device: Option<PyMlDeviceType>) -> PyResult<Self> {
+    fn load(py: Python<'_>, path: &str, device: Option<PyMlDeviceType>) -> PyResult<Self> {
         let dev = device.map(|d| d.inner()).unwrap_or_else(DeviceType::auto);
-        let inner = map_ml(AestheticScorer::load(path, dev))?;
+        let path_owned: String = path.to_string();
+        let inner = map_ml(py.detach(move || AestheticScorer::load(&path_owned, dev)))?;
         Ok(Self { inner })
     }
 
     /// Score a single RGB image of shape `(H, W, 3)`.
-    fn run(&self, image: PyReadonlyArray3<'_, u8>) -> PyResult<PyAestheticScore> {
+    fn run(&self, py: Python<'_>, image: PyReadonlyArray3<'_, u8>) -> PyResult<PyAestheticScore> {
         let (pixels, width, height) = extract_image(&image)?;
         let aesthetic = map_ml(AestheticImage::new(pixels, width, height))?;
-        let score = map_ml(self.inner.run(aesthetic))?;
+        let inner = &self.inner;
+        let score = map_ml(py.detach(move || inner.run(aesthetic)))?;
         Ok(score.into())
     }
 
@@ -895,17 +913,19 @@ impl PyObjectDetector {
     /// Load a detector from an ONNX model path.
     #[staticmethod]
     #[pyo3(signature = (path, device=None))]
-    fn load(path: &str, device: Option<PyMlDeviceType>) -> PyResult<Self> {
+    fn load(py: Python<'_>, path: &str, device: Option<PyMlDeviceType>) -> PyResult<Self> {
         let dev = device.map(|d| d.inner()).unwrap_or_else(DeviceType::auto);
-        let inner = map_ml(ObjectDetector::load(path, dev))?;
+        let path_owned: String = path.to_string();
+        let inner = map_ml(py.detach(move || ObjectDetector::load(&path_owned, dev)))?;
         Ok(Self { inner })
     }
 
     /// Run the detector on a single RGB image of shape `(H, W, 3)`.
-    fn run(&self, image: PyReadonlyArray3<'_, u8>) -> PyResult<Vec<PyDetection>> {
+    fn run(&self, py: Python<'_>, image: PyReadonlyArray3<'_, u8>) -> PyResult<Vec<PyDetection>> {
         let (pixels, width, height) = extract_image(&image)?;
         let frame = map_ml(DetectorImage::new(pixels, width, height))?;
-        let dets = map_ml(self.inner.run(frame))?;
+        let inner = &self.inner;
+        let dets = map_ml(py.detach(move || inner.run(frame)))?;
         Ok(dets.into_iter().map(PyDetection::from).collect())
     }
 
@@ -987,17 +1007,19 @@ impl PyFaceEmbedder {
     /// Load an embedder from an ONNX model path.
     #[staticmethod]
     #[pyo3(signature = (path, device=None))]
-    fn load(path: &str, device: Option<PyMlDeviceType>) -> PyResult<Self> {
+    fn load(py: Python<'_>, path: &str, device: Option<PyMlDeviceType>) -> PyResult<Self> {
         let dev = device.map(|d| d.inner()).unwrap_or_else(DeviceType::auto);
-        let inner = map_ml(FaceEmbedder::load(path, dev))?;
+        let path_owned: String = path.to_string();
+        let inner = map_ml(py.detach(move || FaceEmbedder::load(&path_owned, dev)))?;
         Ok(Self { inner })
     }
 
     /// Embed an aligned RGB face crop of shape `(H, W, 3)`.
-    fn run(&self, image: PyReadonlyArray3<'_, u8>) -> PyResult<PyFaceEmbedding> {
+    fn run(&self, py: Python<'_>, image: PyReadonlyArray3<'_, u8>) -> PyResult<PyFaceEmbedding> {
         let (pixels, width, height) = extract_image(&image)?;
         let face = map_ml(FaceImage::new(pixels, width, height))?;
-        let emb = map_ml(self.inner.run(face))?;
+        let inner = &self.inner;
+        let emb = map_ml(py.detach(move || inner.run(face)))?;
         Ok(emb.into())
     }
 

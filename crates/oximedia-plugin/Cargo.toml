@@ -27,7 +27,7 @@ default = []
 dynamic-loading = ["libloading"]
 
 [dependencies.libloading]
-version = "0.9"
+workspace = true
 optional = true
 
 [dev-dependencies]

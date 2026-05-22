@@ -1429,7 +1429,22 @@ fn select_time_range(track: &Mp4TrackState, base_dts: u64, end_dts: u64) -> (usi
 /// Builds a minimal `sidx` (Segment Index Box, ISO 14496-12 §8.16.3).
 ///
 /// Emits exactly one reference entry covering the subsequent `moof`+`mdat`.
-fn build_sidx(
+/// Build a `sidx` (Segment Index) box for a fragmented MP4 / DASH subsegment.
+///
+/// The returned `Vec<u8>` is a fully-formed `sidx` full-box (version=1)
+/// containing a single reference entry. Useful for downstream packagers
+/// emitting DASH-IF live segments where each `moof`+`mdat` is preceded by a
+/// `sidx` describing its size, duration, and SAP presence.
+///
+/// # Parameters
+///
+/// - `reference_id`: Track ID referenced by this index (must match `tfhd.track_ID`).
+/// - `timescale`: Ticks per second; matches the media `mdhd.timescale`.
+/// - `earliest_pts`: Earliest presentation time of the subsegment in `timescale` units.
+/// - `referenced_size`: Total size in bytes of the subsegment data being indexed.
+/// - `subsegment_duration`: Duration of the subsegment in `timescale` units.
+/// - `is_sap`: `true` if the subsegment starts with a Stream Access Point.
+pub fn build_sidx(
     reference_id: u32,
     timescale: u32,
     earliest_pts: u64,

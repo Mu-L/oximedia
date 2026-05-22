@@ -26,7 +26,7 @@ pub trait ByteRead {
     /// # Examples
     /// ```
     /// use std::io::Read;
-    /// use bitstream_io::{BigEndian, ByteReader, ByteRead};
+    /// use oximedia_bitstream::{BigEndian, ByteReader, ByteRead};
     /// let data = [0b00000000, 0b11111111];
     /// let mut reader = ByteReader::endian(data.as_slice(), BigEndian);
     /// assert_eq!(reader.read::<u16>().unwrap(), 0b0000000011111111);
@@ -34,7 +34,7 @@ pub trait ByteRead {
     ///
     /// ```
     /// use std::io::Read;
-    /// use bitstream_io::{LittleEndian, ByteReader, ByteRead};
+    /// use oximedia_bitstream::{LittleEndian, ByteReader, ByteRead};
     /// let data = [0b00000000, 0b11111111];
     /// let mut reader = ByteReader::endian(data.as_slice(), LittleEndian);
     /// assert_eq!(reader.read::<u16>().unwrap(), 0b1111111100000000);
@@ -52,7 +52,7 @@ pub trait ByteRead {
     /// # Examples
     /// ```
     /// use std::io::Read;
-    /// use bitstream_io::{BigEndian, ByteReader, ByteRead, LittleEndian};
+    /// use oximedia_bitstream::{BigEndian, ByteReader, ByteRead, LittleEndian};
     /// let data = [0b00000000, 0b11111111];
     /// let mut reader = ByteReader::endian(data.as_slice(), BigEndian);
     /// assert_eq!(reader.read_as::<LittleEndian, u16>().unwrap(), 0b1111111100000000);
@@ -60,7 +60,7 @@ pub trait ByteRead {
     ///
     /// ```
     /// use std::io::Read;
-    /// use bitstream_io::{BigEndian, ByteReader, ByteRead, LittleEndian};
+    /// use oximedia_bitstream::{BigEndian, ByteReader, ByteRead, LittleEndian};
     /// let data = [0b00000000, 0b11111111];
     /// let mut reader = ByteReader::endian(data.as_slice(), LittleEndian);
     /// assert_eq!(reader.read_as::<BigEndian, u16>().unwrap(), 0b0000000011111111);

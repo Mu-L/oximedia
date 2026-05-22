@@ -8,25 +8,25 @@
 - Dependencies: thiserror, serde, serde_json (minimal -- no external media deps)
 
 ## Enhancements
-- [ ] Integrate with oximedia-core frame types instead of standalone data structures for interop with other crates
-- [ ] Extend `icvfx::composite` to support multi-layer compositing (foreground talent + LED content + CG overlay)
-- [ ] Add real lens distortion models (Brown-Conrady, fisheye) to `lens` module beyond basic radial correction
+- [ ] Integrate with oximedia-core frame types instead of standalone data structures for interop with other crates (verified-open 2026-05-16: no oximedia-core types in lib.rs)
+- [ ] Extend `icvfx::composite` to support multi-layer compositing (foreground talent + LED content + CG overlay) (verified-open 2026-05-16: not yet fully implemented)
+- [x] Add real lens distortion models (Brown-Conrady, fisheye) to `lens` module beyond basic radial correction (verified 2026-05-16; src/lens/distortion.rs:15 BrownConrady variant, equidistant fisheye:16, k1..k6:30)
 - [x] Implement actual frustum-to-LED-panel UV mapping in `projection_map` with sub-pixel accuracy
 - [x] Extend `color::pipeline` with ACES color management support (ACEScg working space, RRT+ODT transforms)
 - [x] Add latency measurement and compensation in `sync::genlock` for tracking-to-render pipeline
-- [ ] Improve `mocap` integration with standard mocap data formats (BVH, C3D, FBX skeleton import)
+- [x] Improve `mocap` integration with standard mocap data formats (BVH, C3D, FBX skeleton import) (verified 2026-05-16; src/mocap/mod.rs BVH+C3D parsers, src/mocap/bvh.rs:1)
 - [x] Extend `multicam::manager` with automatic camera selection based on talent tracking position
 - [x] Add thermal drift compensation to `volume_calibration` for LED panels that shift color temperature over time
 
 ## New Features
-- [ ] Implement `ar_overlay` module for augmented reality marker-based object placement on live camera feed
-- [ ] Add `stage_visualization` module for 3D wireframe preview of stage layout, LED panels, and camera positions
-- [ ] Implement `talent_tracking` module using 2D pose estimation for automatic talent masking without green screen
-- [ ] Add `set_extension` module for extending physical sets with virtual elements beyond LED wall boundaries
-- [ ] Implement `hdri_capture` module for capturing real-world lighting and applying to virtual scenes
-- [ ] Add `previz` module for pre-visualization workflows (storyboard-to-virtual-set blocking)
-- [ ] Implement `remote_session` module for remote virtual production monitoring and control over network
-- [ ] Add `stage_safety` module for tracking safe zones, warning when talent/equipment approach LED wall boundaries
+- [x] Implement `ar_overlay` module for augmented reality marker-based object placement on live camera feed (verified 2026-05-16; src/ar_overlay.rs:955 lines)
+- [x] Add `stage_visualization` module for 3D wireframe preview of stage layout, LED panels, and camera positions (verified 2026-05-16; src/stage_visualization.rs:696 lines)
+- [x] Implement `talent_tracking` module using 2D pose estimation for automatic talent masking without green screen (verified 2026-05-16; src/talent_tracking.rs:827 lines)
+- [x] Add `set_extension` module for extending physical sets with virtual elements beyond LED wall boundaries (verified 2026-05-16; src/set_extension.rs:557 lines)
+- [x] Implement `hdri_capture` module for capturing real-world lighting and applying to virtual scenes (verified 2026-05-16; src/hdri_capture.rs:655 lines)
+- [x] Add `previz` module for pre-visualization workflows (storyboard-to-virtual-set blocking) (verified 2026-05-16; src/previz.rs:544 lines)
+- [x] Implement `remote_session` module for remote virtual production monitoring and control over network (verified 2026-05-16; src/remote_session.rs:1057 lines)
+- [x] Add `stage_safety` module for tracking safe zones, warning when talent/equipment approach LED wall boundaries (verified 2026-05-16; src/stage_safety.rs:702 lines)
 
 ## Performance
 - [ ] Implement GPU-accelerated frustum rendering in `led::render` for real-time 4K+ LED wall content

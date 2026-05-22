@@ -3,8 +3,114 @@
 //! Provides a [`PayloadFormat`] taxonomy, an [`EncodedPayload`] wrapper, and
 //! a [`PayloadEncoder`] that serialises/deserialises arbitrary byte payloads
 //! into a bit-stream suitable for watermark embedding algorithms.
+//!
+//! Additionally provides [`ReedSolomonConfig`] for configurable Reed-Solomon
+//! error-correction parameters that can be wired into the payload pipeline.
 
 #![allow(dead_code)]
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Reed-Solomon configuration
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Configuration for Reed-Solomon forward error correction over GF(2⁸).
+///
+/// | Parameter | Meaning |
+/// |-----------|---------|
+/// | `n`       | Total codeword length in symbols (data + parity).  Must be ≤ 255 for GF(2⁸). |
+/// | `k`       | Number of pure data symbols. Must satisfy `k < n`. |
+///
+/// The number of parity symbols (and thus the error-correction capability) is
+/// `n − k`.  A codeword can correct up to `⌊(n−k)/2⌋` symbol errors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReedSolomonConfig {
+    /// Total codeword length (data + parity symbols).  Must be ≤ 255.
+    pub n: usize,
+    /// Number of data symbols.  Must satisfy `k < n`.
+    pub k: usize,
+}
+
+impl Default for ReedSolomonConfig {
+    /// Default matches the historical hardcoded values: `n = 16`, `k = 8`.
+    fn default() -> Self {
+        Self { n: 16, k: 8 }
+    }
+}
+
+/// Errors produced when validating or constructing a [`ReedSolomonConfig`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RsConfigError {
+    /// `k` must be strictly less than `n`.
+    KNotLessThanN {
+        /// Supplied `n`.
+        n: usize,
+        /// Supplied `k`.
+        k: usize,
+    },
+    /// `n` exceeds the GF(2⁸) symbol limit of 255.
+    NExceedsGfLimit {
+        /// Supplied `n`.
+        n: usize,
+    },
+    /// `k` must be at least 1.
+    KIsZero,
+}
+
+impl std::fmt::Display for RsConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KNotLessThanN { n, k } => {
+                write!(f, "Reed-Solomon: k ({k}) must be < n ({n})")
+            }
+            Self::NExceedsGfLimit { n } => {
+                write!(f, "Reed-Solomon: n ({n}) must be ≤ 255 (GF(2⁸) limit)")
+            }
+            Self::KIsZero => write!(f, "Reed-Solomon: k must be ≥ 1"),
+        }
+    }
+}
+
+impl std::error::Error for RsConfigError {}
+
+impl ReedSolomonConfig {
+    /// Validate the configuration, returning an error if any constraint is violated.
+    ///
+    /// Constraints:
+    /// * `k ≥ 1`
+    /// * `k < n`
+    /// * `n ≤ 255` (GF(2⁸) symbol limit for the `reed-solomon-erasure` crate)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RsConfigError`] if any constraint is violated.
+    pub fn validate(&self) -> Result<(), RsConfigError> {
+        if self.k == 0 {
+            return Err(RsConfigError::KIsZero);
+        }
+        if self.k >= self.n {
+            return Err(RsConfigError::KNotLessThanN {
+                n: self.n,
+                k: self.k,
+            });
+        }
+        if self.n > 255 {
+            return Err(RsConfigError::NExceedsGfLimit { n: self.n });
+        }
+        Ok(())
+    }
+
+    /// Number of parity symbols (`n − k`).
+    #[must_use]
+    pub fn parity_symbols(&self) -> usize {
+        self.n - self.k
+    }
+
+    /// Maximum number of correctable symbol errors (`⌊(n−k)/2⌋`).
+    #[must_use]
+    pub fn max_correctable_errors(&self) -> usize {
+        self.parity_symbols() / 2
+    }
+}
 
 /// Payload serialisation format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -120,16 +226,45 @@ impl std::fmt::Display for PayloadEncodeError {
 }
 
 /// Encodes and decodes byte payloads according to a chosen [`PayloadFormat`].
+///
+/// An optional [`ReedSolomonConfig`] can be attached to document the RS
+/// parameters that will be used by the surrounding pipeline.  The encoder
+/// itself does *not* run RS coding — that is handled by [`crate::payload::PayloadCodec`].
 pub struct PayloadEncoder {
     /// Format used by this encoder instance.
     format: PayloadFormat,
+    /// Optional Reed-Solomon configuration associated with this encoder.
+    rs_config: Option<ReedSolomonConfig>,
 }
 
 impl PayloadEncoder {
-    /// Create a new encoder for the given format.
+    /// Create a new encoder for the given format with no associated RS config.
     #[must_use]
     pub fn new(format: PayloadFormat) -> Self {
-        Self { format }
+        Self {
+            format,
+            rs_config: None,
+        }
+    }
+
+    /// Attach a [`ReedSolomonConfig`] to this encoder, returning the updated encoder.
+    ///
+    /// The config is validated immediately.  Returns an error if the parameters
+    /// are out of range (see [`ReedSolomonConfig::validate`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RsConfigError`] if the RS configuration is invalid.
+    pub fn with_rs_config(mut self, config: ReedSolomonConfig) -> Result<Self, RsConfigError> {
+        config.validate()?;
+        self.rs_config = Some(config);
+        Ok(self)
+    }
+
+    /// Return the attached Reed-Solomon configuration, if any.
+    #[must_use]
+    pub fn rs_config(&self) -> Option<&ReedSolomonConfig> {
+        self.rs_config.as_ref()
     }
 
     /// Active format.
@@ -418,5 +553,68 @@ mod tests {
     fn test_encoder_format_accessor() {
         let enc = PayloadEncoder::new(PayloadFormat::LengthPrefixed);
         assert_eq!(enc.format(), PayloadFormat::LengthPrefixed);
+    }
+
+    // ── Item 1: ReedSolomonConfig ─────────────────────────────────────────────
+
+    #[test]
+    fn test_rs_config_custom_params() {
+        // n=32, k=16 → 16 parity symbols, 8 correctable errors
+        let cfg = ReedSolomonConfig { n: 32, k: 16 };
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.parity_symbols(), 16);
+        assert_eq!(cfg.max_correctable_errors(), 8);
+
+        // Attach to encoder via builder
+        let enc = PayloadEncoder::new(PayloadFormat::Raw)
+            .with_rs_config(cfg.clone())
+            .expect("config should be valid in test");
+        let attached = enc.rs_config().expect("rs_config should be set in test");
+        assert_eq!(attached.n, 32);
+        assert_eq!(attached.k, 16);
+
+        // Encoded payload is still plain bytes
+        let data = b"Hello RS";
+        let ep = enc.encode(data).expect("should succeed in test");
+        let decoded = enc.decode(&ep).expect("should succeed in test");
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_rs_config_invalid_params_rejected() {
+        // k >= n
+        let err = ReedSolomonConfig { n: 8, k: 8 }.validate();
+        assert!(matches!(err, Err(RsConfigError::KNotLessThanN { .. })));
+
+        let err = ReedSolomonConfig { n: 4, k: 7 }.validate();
+        assert!(matches!(err, Err(RsConfigError::KNotLessThanN { .. })));
+
+        // n > 255
+        let err = ReedSolomonConfig { n: 256, k: 128 }.validate();
+        assert!(matches!(err, Err(RsConfigError::NExceedsGfLimit { .. })));
+
+        // k == 0
+        let err = ReedSolomonConfig { n: 8, k: 0 }.validate();
+        assert!(matches!(err, Err(RsConfigError::KIsZero)));
+
+        // builder should propagate the error
+        let result = PayloadEncoder::new(PayloadFormat::Raw)
+            .with_rs_config(ReedSolomonConfig { n: 8, k: 8 });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rs_config_default() {
+        let cfg = ReedSolomonConfig::default();
+        assert_eq!(cfg.n, 16);
+        assert_eq!(cfg.k, 8);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_rs_config_boundary_n255() {
+        // n == 255 is exactly the GF(2^8) limit — should be accepted
+        let cfg = ReedSolomonConfig { n: 255, k: 128 };
+        assert!(cfg.validate().is_ok());
     }
 }

@@ -19,18 +19,18 @@
 - [x] Implement progressive JPEG output option in `transform.rs` for faster perceived loading
 - [x] Add cache-control header generation to `negotiation.rs` based on transform parameters
 - [x] Extend `parser.rs` with named preset support (e.g., `/cdn-cgi/image/preset=thumbnail/photo.jpg`)
-- [ ] Add aspect ratio preservation enforcement in `transform.rs` when both width and height are set
+- [ ] Add aspect ratio preservation enforcement in `transform.rs` when both width and height are set (verified-open 2026-05-16: no enforce_aspect_ratio fn in transform.rs; FitMode::Contain partially addresses this)
 
 ## New Features
 - [x] Add a `watermark.rs` module for image watermark overlay (text and image) with configurable position and opacity
 - [x] Implement a `face_detect.rs` module for smart cropping based on face detection
 - [x] Add a `blur_region.rs` module for selective region blurring (privacy, NSFW)
-- [ ] Implement a `responsive.rs` module for srcset/picture element generation with multiple breakpoints
-- [ ] Add an `animation.rs` module for GIF/WebP animation resize and optimization
-- [ ] Implement an `origin_fetch.rs` module for fetching source images from remote URLs with caching
-- [ ] Add a `metrics.rs` module for tracking transform request statistics (hit rate, latency, format distribution)
-- [ ] Implement a `batch_transform.rs` module for processing multiple transform variants in a single request
-- [ ] Add an `image_analysis.rs` module for dominant color extraction and blur hash generation
+- [x] Implement a `responsive.rs` module for srcset/picture element generation with multiple breakpoints (verified 2026-05-16; src/responsive.rs:74 Breakpoint, 569 lines)
+- [x] Add an `animation.rs` module for GIF/WebP animation resize and optimization (verified 2026-05-16; src/animation.rs:591 lines)
+- [x] Implement an `origin_fetch.rs` module for fetching source images from remote URLs with caching (verified 2026-05-16; src/origin_fetch.rs:59 FetchResponse, OriginFetcher, 512 lines)
+- [x] Add a `metrics.rs` module for tracking transform request statistics (hit rate, latency, format distribution) (verified 2026-05-16; src/metrics.rs:58 TransformMetrics, 529 lines)
+- [x] Implement a `batch_transform.rs` module for processing multiple transform variants in a single request (verified 2026-05-16; src/batch_transform.rs:137 BatchTransformRequest, 548 lines)
+- [x] Add an `image_analysis.rs` module for dominant color extraction and blur hash generation (verified 2026-05-16; src/image_analysis.rs:19 BlurHashEncoder, DominantColorExtractor, 668 lines)
 
 ## Performance
 - [ ] Add response caching layer with content-addressable storage keyed on transform params hash

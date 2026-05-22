@@ -1,6 +1,6 @@
 # OxiMedia Python Bindings
 
-**Status: [Stable]** | Version: 0.1.6 | Tests: 838 | Updated: 2026-04-26
+**Status: [Stable]** | Version: 0.1.7 | Tests: 838 | Updated: 2026-05-21
 
 Python bindings for OxiMedia, a royalty-free multimedia processing library written in Rust.
 
@@ -155,6 +155,63 @@ for packet in packets:
 # Finalize
 muxer.write_trailer()
 ```
+
+### Zero-Copy NumPy Access
+
+`VideoFrame.plane(i)`, `AudioFrame.samples`, and `cv2_compat.Mat` implement
+the PyO3 buffer protocol, so NumPy can wrap the underlying Rust buffer
+without copying:
+
+```python
+import oximedia
+import numpy as np
+
+# Decode a video file
+decoder = oximedia.Av1Decoder()
+# ... feed packets, get frames ...
+frame = ...  # an oximedia.VideoFrame returned by the decoder
+
+# Zero-copy numpy view of plane 0 (Y in YUV420P)
+plane0 = np.asarray(frame.plane(0))
+print(plane0.shape, plane0.dtype)  # (height, width, 1) uint8
+
+# Audio interleaved samples as a numpy view
+audio = oximedia.AudioFrame(...)
+samples = np.asarray(audio.samples)
+```
+
+Each call to `plane(i)` / `samples` returns its own buffer view, so multiple
+concurrent views of the same frame are safe.
+
+## Command-Line Interface
+
+The package ships a `python -m oximedia` entry point (installed with the
+wheel — no separate console script needed):
+
+```bash
+# Probe a media file (text or JSON output)
+python -m oximedia probe input.mkv
+python -m oximedia probe input.mkv --json
+
+# Transcode using a built-in preset
+python -m oximedia transcode input.mkv output.webm --preset youtube-1080p
+python -m oximedia transcode input.mkv output.webm --crf 28
+
+# Quality assessment between two files
+python -m oximedia quality reference.mp4 distorted.mp4 --metric all
+
+# cv2-style colour conversion / format conversion
+python -m oximedia cv2 cvt-color input.png output.png --code BGR2RGB
+python -m oximedia cv2 convert input.bmp output.jpg
+
+# Inspect available presets / codecs / version
+python -m oximedia presets
+python -m oximedia codecs
+python -m oximedia version
+```
+
+Run `python -m oximedia --help` (or `python -m oximedia <subcommand> --help`)
+for the full argument list.
 
 ## Supported Codecs
 

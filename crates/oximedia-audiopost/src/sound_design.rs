@@ -2,6 +2,10 @@
 //! Sound design tools including synthesizers and spatial audio.
 
 use crate::error::{AudioPostError, AudioPostResult};
+use oximedia_effects::chorus_flanger::ChorusEffect;
+use oximedia_effects::distortion::waveshaper::{DistortionAlgorithm, DistortionEffect};
+use oximedia_effects::reverb::freeverb::Freeverb;
+use oximedia_effects::{AudioEffect, ReverbConfig};
 use std::f32::consts::PI;
 
 /// Additive synthesizer
@@ -762,5 +766,100 @@ mod tests {
     fn test_time_stretcher() {
         let stretcher = TimeStretcher::new(48000, 1024).expect("failed to create");
         assert_eq!(stretcher.window_size, 1024);
+    }
+}
+
+// ── Signal-flow effects chain ─────────────────────────────────────────────────
+
+/// A configurable signal-flow chain that wires reverb → chorus → distortion.
+///
+/// Each stage is optional and can be added via the builder methods
+/// [`with_reverb`](SoundDesignChain::with_reverb),
+/// [`with_chorus`](SoundDesignChain::with_chorus), and
+/// [`with_distortion`](SoundDesignChain::with_distortion).
+///
+/// The final output is gain-staged to [-1.0, 1.0] to prevent clipping.
+pub struct SoundDesignChain {
+    sample_rate: u32,
+    reverb: Option<Freeverb>,
+    chorus: Option<ChorusEffect>,
+    distortion: Option<DistortionEffect>,
+}
+
+impl SoundDesignChain {
+    /// Create a new empty chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioPostError::InvalidSampleRate`] for a zero sample rate.
+    pub fn new(sample_rate: u32) -> AudioPostResult<Self> {
+        if sample_rate == 0 {
+            return Err(AudioPostError::InvalidSampleRate(sample_rate));
+        }
+        Ok(Self {
+            sample_rate,
+            reverb: None,
+            chorus: None,
+            distortion: None,
+        })
+    }
+
+    /// Add a Freeverb reverb stage with the supplied configuration.
+    #[must_use]
+    pub fn with_reverb(mut self, config: ReverbConfig) -> Self {
+        self.reverb = Some(Freeverb::new(config, self.sample_rate as f32));
+        self
+    }
+
+    /// Add a multi-voice chorus stage.
+    #[must_use]
+    pub fn with_chorus(mut self, voices: usize) -> Self {
+        self.chorus = Some(ChorusEffect::new(self.sample_rate, voices));
+        self
+    }
+
+    /// Add a waveshaper distortion stage.
+    #[must_use]
+    pub fn with_distortion(mut self, algorithm: DistortionAlgorithm) -> Self {
+        self.distortion = Some(DistortionEffect::new(algorithm));
+        self
+    }
+
+    /// Process `input` through the enabled stages and return the result.
+    ///
+    /// The output is clamped to [-1.0, 1.0] after each active stage to
+    /// prevent inter-stage gain blow-up.
+    pub fn process(&mut self, input: &[f32]) -> Vec<f32> {
+        if input.is_empty() {
+            return Vec::new();
+        }
+
+        let mut buf: Vec<f32> = input.to_vec();
+
+        // Stage 1 – Reverb (Freeverb stereo-to-mono average).
+        if let Some(ref mut rev) = self.reverb {
+            let mut left = buf.clone();
+            let mut right = buf.clone();
+            rev.process_stereo(&mut left, &mut right);
+            buf = left
+                .iter()
+                .zip(right.iter())
+                .map(|(l, r)| ((l + r) * 0.5).clamp(-1.0, 1.0))
+                .collect();
+        }
+
+        // Stage 2 – Chorus.
+        if let Some(ref mut chorus) = self.chorus {
+            let out = chorus.process(&buf);
+            buf = out.into_iter().map(|s| s.clamp(-1.0, 1.0)).collect();
+        }
+
+        // Stage 3 – Distortion.
+        if let Some(ref dist) = self.distortion {
+            let out = dist.process(&buf);
+            buf = out.into_iter().map(|s| s.clamp(-1.0, 1.0)).collect();
+        }
+
+        buf
     }
 }

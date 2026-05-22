@@ -532,6 +532,27 @@ impl LlHlsPlaylist {
         let current_part = self.pending_parts.len() as u32;
         LlHlsPlaylistState::new(current_msn, current_part, current_part)
     }
+
+    /// Render the current playlist asynchronously into an [`tokio::io::AsyncWrite`] sink.
+    ///
+    /// Equivalent to [`Self::generate_media_playlist`] followed by an async
+    /// `write_all`. Enabled only when the `async` Cargo feature is on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::IoError`] if the underlying writer fails.
+    #[cfg(feature = "async")]
+    pub async fn write_async<W: tokio::io::AsyncWrite + Unpin>(
+        &self,
+        w: &mut W,
+    ) -> Result<(), StreamError> {
+        use tokio::io::AsyncWriteExt;
+        let s = self.generate_media_playlist();
+        w.write_all(s.as_bytes())
+            .await
+            .map_err(|e| StreamError::IoError(format!("ll-hls write: {e}")))?;
+        Ok(())
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

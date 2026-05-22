@@ -2,11 +2,15 @@
 //!
 //! This module implements spread spectrum watermarking, which embeds
 //! watermark bits by spreading them using pseudorandom sequences.
+//!
+//! The [`InPlaceFftEmbedder`] provides an optimised variant that pre-allocates
+//! FFT scratch buffers once at construction time and reuses them across
+//! multiple `embed_in_place` calls, significantly reducing allocator pressure.
 
 use crate::error::{WatermarkError, WatermarkResult};
 use crate::payload::{generate_pn_sequence, pack_bits, unpack_bits, PayloadCodec};
 use crate::psychoacoustic::PsychoacousticModel;
-use oxifft::Complex;
+use oxifft::{Complex, Direction, Flags, Plan};
 
 /// Spread spectrum watermarking configuration.
 #[derive(Debug, Clone)]
@@ -357,6 +361,211 @@ impl SpreadSpectrumDetector {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// In-place FFT embedder (Item 4)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A spread-spectrum frequency-domain embedder that **pre-allocates** FFT
+/// scratch buffers once and reuses them across [`embed_in_place`] calls.
+///
+/// The ordinary [`SpreadSpectrumEmbedder`] allocates a new `Vec<Complex<f32>>`
+/// for every FFT call.  `InPlaceFftEmbedder` holds pre-built
+/// [`Plan<f32>`](oxifft::Plan) objects and a pair of reusable scratch buffers,
+/// so that repeated embedding of many frames does not repeatedly hit the
+/// allocator.
+///
+/// [`embed_in_place`]: InPlaceFftEmbedder::embed_in_place
+pub struct InPlaceFftEmbedder {
+    /// Embedding strength.
+    pub strength: f32,
+    /// Chip rate (spreading factor).
+    pub chip_rate: usize,
+    /// Secret key for PN sequence generation.
+    pub key: u64,
+    /// Number of frequency-domain samples per frame.
+    frame_size: usize,
+    /// Pre-built forward FFT plan.
+    fwd_plan: Plan<f32>,
+    /// Pre-built inverse FFT plan.
+    inv_plan: Plan<f32>,
+    /// Reusable complex input/output buffer (length = `frame_size`).
+    buf_a: Vec<Complex<f32>>,
+    /// Reusable complex buffer for intermediate FFT output (length = `frame_size`).
+    buf_b: Vec<Complex<f32>>,
+}
+
+impl InPlaceFftEmbedder {
+    /// Construct an embedder that pre-allocates buffers for `frame_size`-point FFTs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatermarkError`] if the FFT planner cannot create a plan for
+    /// the given `frame_size` (must be a power of two or a size supported by
+    /// OxiFFT's radix algorithms).
+    pub fn new(
+        frame_size: usize,
+        strength: f32,
+        chip_rate: usize,
+        key: u64,
+    ) -> WatermarkResult<Self> {
+        let fwd_plan = Plan::<f32>::dft_1d(frame_size, Direction::Forward, Flags::ESTIMATE)
+            .ok_or_else(|| {
+                WatermarkError::InvalidParameter(format!(
+                    "OxiFFT cannot plan a {frame_size}-point forward FFT"
+                ))
+            })?;
+        let inv_plan = Plan::<f32>::dft_1d(frame_size, Direction::Backward, Flags::ESTIMATE)
+            .ok_or_else(|| {
+                WatermarkError::InvalidParameter(format!(
+                    "OxiFFT cannot plan a {frame_size}-point inverse FFT"
+                ))
+            })?;
+
+        Ok(Self {
+            strength: strength.clamp(0.0, 1.0),
+            chip_rate,
+            key,
+            frame_size,
+            fwd_plan,
+            inv_plan,
+            buf_a: vec![Complex::new(0.0, 0.0); frame_size],
+            buf_b: vec![Complex::new(0.0, 0.0); frame_size],
+        })
+    }
+
+    /// Embed `payload` bits into `signal` in-place, reusing the pre-allocated
+    /// scratch buffers.
+    ///
+    /// The signal is processed in non-overlapping frames of `frame_size` samples.
+    /// Each frame receives up to 8 watermark bits via frequency-domain modification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WatermarkError::InsufficientCapacity`] if `signal` is too
+    /// short to embed `payload`.
+    pub fn embed_in_place(&mut self, signal: &mut [f32], payload: &[u8]) -> WatermarkResult<()> {
+        let codec = PayloadCodec::new(16, 8)?;
+        let encoded = codec.encode(payload)?;
+        let bits = unpack_bits(&encoded, encoded.len() * 8);
+
+        let hop = self.frame_size;
+        let required_frames = bits.len().div_ceil(8);
+        let required_len = required_frames * hop;
+        if signal.len() < required_len {
+            return Err(WatermarkError::InsufficientCapacity {
+                needed: required_len,
+                have: signal.len(),
+            });
+        }
+
+        let mut bit_idx = 0;
+
+        for frame_idx in 0..required_frames {
+            if bit_idx >= bits.len() {
+                break;
+            }
+
+            let frame_start = frame_idx * hop;
+            if frame_start + self.frame_size > signal.len() {
+                break;
+            }
+
+            // Fill input buffer (reuse buf_a).
+            for (i, c) in self.buf_a.iter_mut().enumerate() {
+                *c = Complex::new(signal[frame_start + i], 0.0);
+            }
+
+            // Forward FFT: buf_a → buf_b.
+            self.fwd_plan.execute(&self.buf_a.clone(), &mut self.buf_b);
+
+            // Embed up to 8 bits into mid-frequency bins.
+            let start_bin = self.frame_size / 8;
+            let end_bin = start_bin + self.chip_rate;
+
+            for _ in 0..8 {
+                if bit_idx >= bits.len() {
+                    break;
+                }
+                let bit = bits[bit_idx];
+                let pn_seq = generate_pn_sequence(self.chip_rate, self.key + bit_idx as u64);
+                let bit_val: f32 = if bit { 1.0 } else { -1.0 };
+
+                for (i, &pn) in pn_seq.iter().enumerate().take(self.chip_rate) {
+                    let bin = start_bin + i;
+                    if bin >= end_bin || bin >= self.buf_b.len() / 2 {
+                        break;
+                    }
+                    let wm = self.strength * bit_val * f32::from(pn);
+                    self.buf_b[bin] += Complex::new(wm, 0.0);
+                    let mirror = self.frame_size - bin;
+                    if mirror < self.buf_b.len() {
+                        self.buf_b[mirror] += Complex::new(wm, 0.0);
+                    }
+                }
+                bit_idx += 1;
+            }
+
+            // Inverse FFT: buf_b → buf_a.
+            // Plan::execute (Backward) returns an un-normalised transform.
+            // The allocating path uses oxifft::ifft() which normalises by 1/N
+            // and then additionally multiplies by the outer `scale = 1/N`, so the
+            // effective scale factor is 1/N². Replicate that here: divide by N²
+            // so that both paths produce identical output.
+            self.inv_plan.execute(&self.buf_b.clone(), &mut self.buf_a);
+
+            #[allow(clippy::cast_precision_loss)]
+            let scale = 1.0 / (self.frame_size as f32 * self.frame_size as f32);
+            for (i, c) in self.buf_a.iter().enumerate().take(self.frame_size) {
+                if frame_start + i < signal.len() {
+                    signal[frame_start + i] = c.re * scale;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SIMD-optimised correlation (Item 6)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Compute the cross-correlation (dot product) between `signal` and `code`
+/// using a SIMD-accelerated implementation when available.
+///
+/// Falls back to a pure scalar implementation when neither AVX2 (x86_64) nor
+/// NEON (aarch64) is detected at runtime, or when the slices are shorter than
+/// the SIMD vector width.
+///
+/// Uses [`scirs2_core::simd_aligned::simd_dot_aligned_f32`] which provides
+/// runtime-dispatched SIMD acceleration (AVX2 / NEON) via a safe API.
+///
+/// # Panics
+///
+/// Does not panic.  When the crate's `simd_aligned` module returns an error
+/// (lengths differ), the function silently falls back to the scalar path.
+#[must_use]
+pub fn correlate_simd(signal: &[f32], code: &[f32]) -> f32 {
+    let n = signal.len().min(code.len());
+    if n == 0 {
+        return 0.0;
+    }
+
+    // scirs2_core::simd_aligned::simd_dot_aligned_f32 is a safe function that
+    // provides runtime SIMD dispatch (AVX2 / NEON) without requiring any
+    // `unsafe` in this crate.
+    match scirs2_core::simd_aligned::simd_dot_aligned_f32(&signal[..n], &code[..n]) {
+        Ok(result) => result,
+        Err(_) => correlate_scalar(&signal[..n], &code[..n]),
+    }
+}
+
+/// Pure scalar cross-correlation fallback.
+#[must_use]
+pub fn correlate_scalar(signal: &[f32], code: &[f32]) -> f32 {
+    signal.iter().zip(code.iter()).map(|(&s, &c)| s * c).sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +641,125 @@ mod tests {
 
         let capacity = embedder.capacity(44100); // 1 second
         assert!(capacity > 0);
+    }
+
+    // ── Item 4: InPlaceFftEmbedder ───────────────────────────────────────────
+
+    #[test]
+    fn test_in_place_fft_matches_allocating() {
+        // Embed the same payload with both the allocating and in-place embedders
+        // and verify the outputs are identical.
+        let frame_size = 2048;
+        let strength = 0.1;
+        let chip_rate = 64;
+        let key = 99_u64;
+        let payload = b"WM";
+
+        // Allocating embedder reference.
+        let alloc_config = SpreadSpectrumConfig {
+            strength,
+            chip_rate,
+            frequency_domain: true,
+            psychoacoustic: false,
+            key,
+        };
+        let alloc_embedder = SpreadSpectrumEmbedder::new(alloc_config, 44100, frame_size)
+            .expect("should succeed in test");
+
+        // Build a signal long enough for the payload.
+        let encoded = alloc_embedder
+            .codec
+            .encode(payload)
+            .expect("should succeed in test");
+        let num_bits = encoded.len() * 8;
+        let required_frames = num_bits.div_ceil(8);
+        let signal_len = (required_frames + 1) * frame_size;
+        let original: Vec<f32> = (0..signal_len)
+            .map(|i| (i as f32 * 0.001).sin() * 0.5)
+            .collect();
+
+        let alloc_result = alloc_embedder
+            .embed(&original, payload)
+            .expect("alloc embed should succeed in test");
+
+        // In-place embedder.
+        let mut inplace_embedder = InPlaceFftEmbedder::new(frame_size, strength, chip_rate, key)
+            .expect("in-place embedder should initialise in test");
+        let mut inplace_signal = original.clone();
+        inplace_embedder
+            .embed_in_place(&mut inplace_signal, payload)
+            .expect("in-place embed should succeed in test");
+
+        // Results must be identical (same algorithm, same buffers).
+        for (i, (&a, &b)) in alloc_result.iter().zip(inplace_signal.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "mismatch at sample {i}: alloc={a} vs in-place={b}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_in_place_fft_buffer_reuse() {
+        // Verify that the same embedder can be called twice and produces the
+        // same output (i.e. scratch buffers are properly reset between calls).
+        let frame_size = 2048;
+        let payload = b"X";
+        // PayloadCodec(16,8) encodes 1 byte to ~35 bytes = 280 bits → 35 frames.
+        // Use 40 frames for headroom.
+        let signal_len = 40 * frame_size;
+
+        let original: Vec<f32> = vec![0.1f32; signal_len];
+
+        let mut embedder =
+            InPlaceFftEmbedder::new(frame_size, 0.05, 32, 7).expect("should succeed in test");
+
+        let mut sig1 = original.clone();
+        embedder
+            .embed_in_place(&mut sig1, payload)
+            .expect("first embed should succeed in test");
+
+        let mut sig2 = original.clone();
+        embedder
+            .embed_in_place(&mut sig2, payload)
+            .expect("second embed should succeed in test");
+
+        // Both passes on the same original must produce identical results.
+        for (i, (&a, &b)) in sig1.iter().zip(sig2.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "buffer-reuse mismatch at sample {i}: first={a} vs second={b}"
+            );
+        }
+    }
+
+    // ── Item 6: correlate_simd ───────────────────────────────────────────────
+
+    #[test]
+    fn test_correlate_simd_matches_scalar() {
+        let signal: Vec<f32> = (0..256).map(|i| (i as f32) * 0.01).collect();
+        let code: Vec<f32> = (0..256)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+
+        let scalar = correlate_scalar(&signal, &code);
+        let simd = correlate_simd(&signal, &code);
+
+        assert!(
+            (scalar - simd).abs() < 1e-3,
+            "SIMD result {simd} differs from scalar {scalar}"
+        );
+    }
+
+    #[test]
+    fn test_correlate_simd_all_zeros() {
+        let signal = vec![0.0f32; 512];
+        let code = vec![1.0f32; 512];
+        assert_eq!(correlate_simd(&signal, &code), 0.0);
+    }
+
+    #[test]
+    fn test_correlate_simd_empty() {
+        assert_eq!(correlate_simd(&[], &[]), 0.0);
     }
 }

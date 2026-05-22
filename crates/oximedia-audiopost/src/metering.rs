@@ -2,6 +2,7 @@
 //! Professional audio metering and analysis tools.
 
 use crate::error::{AudioPostError, AudioPostResult};
+use oxifft::Complex;
 use std::collections::VecDeque;
 
 /// Peak meter
@@ -820,4 +821,125 @@ mod tests {
     fn test_invalid_fft_size() {
         assert!(SpectrumAnalyzer::new(48000, 1000).is_err());
     }
+}
+
+// ── Free-function metering helpers ────────────────────────────────────────────
+
+/// Per-bin result from an FFT spectrum analysis.
+#[derive(Debug, Clone)]
+pub struct SpectrumAnalysis {
+    /// Frequency of each bin in Hz.
+    pub frequencies: Vec<f32>,
+    /// Magnitude of each bin (linear).
+    pub magnitudes: Vec<f32>,
+    /// Power of each bin (magnitude²).
+    pub power: Vec<f32>,
+}
+
+/// Compute a 1024-point FFT spectrum of `samples` at the given `sample_rate`.
+///
+/// Returns only the positive-frequency bins (DC through Nyquist inclusive,
+/// i.e. `fft_size / 2 + 1` bins).
+///
+/// # Errors
+///
+/// Returns [`AudioPostError::InvalidSampleRate`] for a zero sample rate or
+/// [`AudioPostError::InvalidBufferSize`] if `samples` is empty.
+#[allow(clippy::cast_precision_loss)]
+pub fn analyze_spectrum(samples: &[f32], sample_rate: u32) -> AudioPostResult<SpectrumAnalysis> {
+    if sample_rate == 0 {
+        return Err(AudioPostError::InvalidSampleRate(sample_rate));
+    }
+    if samples.is_empty() {
+        return Err(AudioPostError::InvalidBufferSize(0));
+    }
+
+    const FFT_SIZE: usize = 1024;
+    let sr = sample_rate as f32;
+
+    // Build windowed, zero-padded complex input.
+    let input: Vec<Complex<f32>> = (0..FFT_SIZE)
+        .map(|i| {
+            let s = if i < samples.len() { samples[i] } else { 0.0 };
+            // Hann window.
+            let w =
+                0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE - 1) as f32).cos());
+            Complex::new(s * w, 0.0)
+        })
+        .collect();
+
+    let spectrum = oxifft::fft(&input);
+
+    // Keep only positive-frequency bins.
+    let n_bins = FFT_SIZE / 2 + 1;
+    let scale = 1.0 / FFT_SIZE as f32;
+
+    let frequencies: Vec<f32> = (0..n_bins)
+        .map(|k| k as f32 * sr / FFT_SIZE as f32)
+        .collect();
+    let magnitudes: Vec<f32> = spectrum[..n_bins]
+        .iter()
+        .map(|c| c.norm() * scale)
+        .collect();
+    let power: Vec<f32> = magnitudes.iter().map(|&m| m * m).collect();
+
+    Ok(SpectrumAnalysis {
+        frequencies,
+        magnitudes,
+        power,
+    })
+}
+
+/// Measure integrated LUFS of mono `samples` at `sample_rate`.
+///
+/// Delegates to [`oximedia_audio::loudness_gating::GatedLoudnessMeter::measure`].
+///
+/// # Errors
+///
+/// Returns [`AudioPostError::InvalidSampleRate`] for a zero sample rate or
+/// [`AudioPostError::InvalidBufferSize`] for empty samples.
+pub fn measure_lufs(samples: &[f32], sample_rate: u32) -> AudioPostResult<f64> {
+    if sample_rate == 0 {
+        return Err(AudioPostError::InvalidSampleRate(sample_rate));
+    }
+    if samples.is_empty() {
+        return Err(AudioPostError::InvalidBufferSize(0));
+    }
+    let measurement =
+        oximedia_audio::loudness_gating::GatedLoudnessMeter::measure(samples, sample_rate, 1);
+    Ok(measurement.integrated_lufs)
+}
+
+/// Result of a true-peak measurement.
+#[derive(Debug, Clone)]
+pub struct TruePeakResult {
+    /// True-peak level in dBTP.
+    pub true_peak_dbtp: f64,
+    /// Linear peak amplitude (the highest absolute sample value found).
+    pub linear_peak: f32,
+}
+
+/// Measure the true-peak level (dBTP) of mono `samples` at `sample_rate`.
+///
+/// Delegates to [`oximedia_audio::loudness_gating::GatedLoudnessMeter::measure`]
+/// which performs the 4× polyphase upsampling required by ITU-R BS.1770-4.
+///
+/// # Errors
+///
+/// Returns [`AudioPostError::InvalidSampleRate`] for a zero sample rate or
+/// [`AudioPostError::InvalidBufferSize`] for empty samples.
+pub fn measure_true_peak(samples: &[f32], sample_rate: u32) -> AudioPostResult<TruePeakResult> {
+    if sample_rate == 0 {
+        return Err(AudioPostError::InvalidSampleRate(sample_rate));
+    }
+    if samples.is_empty() {
+        return Err(AudioPostError::InvalidBufferSize(0));
+    }
+    let measurement =
+        oximedia_audio::loudness_gating::GatedLoudnessMeter::measure(samples, sample_rate, 1);
+    let linear_peak = samples.iter().map(|&s| s.abs()).fold(0.0_f32, f32::max);
+    Ok(TruePeakResult {
+        true_peak_dbtp: measurement.true_peak_dbtp,
+        linear_peak,
+    })
 }

@@ -1,94 +1,49 @@
-//! SILK mode decoder for speech.
+//! SILK mode decoder for speech (RFC 6716 §4.2).
 //!
-//! SILK (Skype Low Latency Audio Codec) is optimized for speech content.
-//! This implementation provides full SILK decoding including LSF decoding,
-//! LTP (Long-Term Prediction), noise shaping, and PLC (Packet Loss Concealment).
+//! SILK is the speech-optimised layer of Opus. This module provides the public
+//! [`SilkDecoder`] — a thin wrapper that owns per-channel decoder state, drives
+//! the normative SILK frame decoder in [`super::silk_decoder`], handles
+//! narrowband/mediumband/wideband internal sampling, resamples the result to
+//! the requested output rate, and performs packet-loss concealment.
+//!
+//! The actual SILK algorithm — header bits, NLSF stage-1/stage-2 decode, the
+//! cosine-domain NLSF-to-LPC conversion, LTP lag/filter selection, the LCG and
+//! shell-coded excitation, and the LTP+LPC synthesis filters — lives in
+//! [`super::silk_decoder`], and every constant comes from the normative tables
+//! in [`super::silk_tables`].
 
 use crate::{CodecError, CodecResult};
 
 use super::packet::OpusBandwidth;
-use super::range_decoder::RangeDecoder;
+use super::silk_decoder::{
+    decode_silk_frame, SilkBandwidth, SilkChannelState, MAX_LPC_ORDER, MAX_SUBFRAMES,
+};
+use super::silk_range::SilkRangeDecoder;
 
-/// Maximum LPC order for SILK
-const MAX_LPC_ORDER: usize = 16;
-
-/// Maximum pitch lag for LTP
-const MAX_PITCH_LAG: usize = 320;
-
-/// Number of LSF quantization stages
-const LSF_STAGES: usize = 3;
-
-/// Number of LSF coefficients
+/// Number of LSF coefficients tracked for the default-state helper.
 const LSF_COUNT: usize = 16;
 
-/// Number of subframes per frame
-const SUBFRAMES: usize = 4;
-
-/// LSF codebook for quantization (simplified)
-const LSF_CODEBOOK: [[f32; LSF_COUNT]; 8] = [
-    [
-        0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5,
-    ],
-    [
-        0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1.05, 1.15, 1.25, 1.35, 1.45,
-        1.55,
-    ],
-    [
-        0.02, 0.12, 0.22, 0.32, 0.42, 0.52, 0.62, 0.72, 0.82, 0.92, 1.02, 1.12, 1.22, 1.32, 1.42,
-        1.52,
-    ],
-    [
-        0.08, 0.18, 0.28, 0.38, 0.48, 0.58, 0.68, 0.78, 0.88, 0.98, 1.08, 1.18, 1.28, 1.38, 1.48,
-        1.58,
-    ],
-    [
-        0.03, 0.13, 0.23, 0.33, 0.43, 0.53, 0.63, 0.73, 0.83, 0.93, 1.03, 1.13, 1.23, 1.33, 1.43,
-        1.53,
-    ],
-    [
-        0.07, 0.17, 0.27, 0.37, 0.47, 0.57, 0.67, 0.77, 0.87, 0.97, 1.07, 1.17, 1.27, 1.37, 1.47,
-        1.57,
-    ],
-    [
-        0.04, 0.14, 0.24, 0.34, 0.44, 0.54, 0.64, 0.74, 0.84, 0.94, 1.04, 1.14, 1.24, 1.34, 1.44,
-        1.54,
-    ],
-    [
-        0.06, 0.16, 0.26, 0.36, 0.46, 0.56, 0.66, 0.76, 0.86, 0.96, 1.06, 1.16, 1.26, 1.36, 1.46,
-        1.56,
-    ],
-];
-
-/// Gain codebook for quantization
-const GAIN_CODEBOOK: [f32; 32] = [
-    0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8,
-    1.9, 2.0, 2.2, 2.4, 2.6, 2.8, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0,
-];
-
 /// SILK decoder state.
+///
+/// Owns one [`SilkChannelState`] per audio channel and the resampler state
+/// needed to convert the SILK internal sample rate to the configured output
+/// rate.
 #[derive(Debug)]
 pub struct SilkDecoder {
-    /// Sample rate
+    /// Configured output sample rate in Hz.
     sample_rate: u32,
-    /// Number of channels
+    /// Number of output channels.
     channels: usize,
-    /// Bandwidth
-    #[allow(dead_code)]
-    bandwidth: OpusBandwidth,
-    /// LPC coefficients from previous frame
-    lpc_coeffs: Vec<f32>,
-    /// Pitch lag from previous frame
-    pitch_lag: usize,
-    /// Pitch gain from previous frame
-    pitch_gain: f32,
-    /// Previous frame samples for overlap and LTP
-    prev_samples: Vec<f32>,
-    /// Excitation signal history for LTP
-    excitation_history: Vec<f32>,
-    /// Frame counter for PLC
+    /// SILK internal bandwidth (fixes the internal sample rate and LPC order).
+    bandwidth: SilkBandwidth,
+    /// Persistent per-channel SILK decoder state.
+    channel_state: Vec<SilkChannelState>,
+    /// Last synthesised frame at the output rate, per channel, for PLC.
+    last_frame: Vec<Vec<f32>>,
+    /// Number of consecutive lost packets, for PLC attenuation.
     consecutive_losses: usize,
-    /// Last decoded LSF coefficients
-    last_lsf: Vec<f32>,
+    /// Resampler phase accumulator per channel.
+    resample_pos: Vec<f64>,
 }
 
 impl SilkDecoder {
@@ -96,27 +51,26 @@ impl SilkDecoder {
     ///
     /// # Arguments
     ///
-    /// * `sample_rate` - Sample rate in Hz
+    /// * `sample_rate` - Output sample rate in Hz
     /// * `channels` - Number of channels
-    /// * `bandwidth` - Operating bandwidth
+    /// * `bandwidth` - Operating bandwidth (maps to the SILK internal rate)
     pub fn new(sample_rate: u32, channels: usize, bandwidth: OpusBandwidth) -> Self {
-        let max_frame_size = (sample_rate / 50) as usize; // 20ms
-
+        let silk_bw = map_bandwidth(bandwidth);
         Self {
             sample_rate,
             channels,
-            bandwidth,
-            lpc_coeffs: vec![0.0; MAX_LPC_ORDER],
-            pitch_lag: 100,
-            pitch_gain: 0.0,
-            prev_samples: vec![0.0; max_frame_size * channels],
-            excitation_history: vec![0.0; MAX_PITCH_LAG],
+            bandwidth: silk_bw,
+            channel_state: (0..channels).map(|_| SilkChannelState::new()).collect(),
+            last_frame: vec![Vec::new(); channels],
             consecutive_losses: 0,
-            last_lsf: Self::initialize_lsf(),
+            resample_pos: vec![0.0; channels],
         }
     }
 
-    /// Initializes LSF coefficients with default values.
+    /// Default Line-Spectral-Frequency vector (evenly spaced over `(0, pi)`).
+    ///
+    /// Retained as a deterministic seed for tests and for the comfort-noise
+    /// path; the real decoder reconstructs NLSFs from the bitstream.
     fn initialize_lsf() -> Vec<f32> {
         let mut lsf = Vec::with_capacity(LSF_COUNT);
         for i in 0..LSF_COUNT {
@@ -125,13 +79,13 @@ impl SilkDecoder {
         lsf
     }
 
-    /// Decodes a SILK frame.
+    /// Decodes a SILK Opus frame to interleaved PCM at the output rate.
     ///
     /// # Arguments
     ///
-    /// * `data` - Compressed frame data
-    /// * `output` - Output sample buffer
-    /// * `frame_size` - Number of samples per channel
+    /// * `data` - Compressed SILK frame data (the Opus frame payload)
+    /// * `output` - Interleaved output sample buffer
+    /// * `frame_size` - Number of samples per channel at the output rate
     pub fn decode(
         &mut self,
         data: &[u8],
@@ -143,368 +97,165 @@ impl SilkDecoder {
                 "Output buffer too small".to_string(),
             ));
         }
-
         if data.is_empty() {
-            // Packet loss - use PLC
             return self.decode_plc(output, frame_size);
         }
 
-        // Create range decoder
-        let mut decoder = RangeDecoder::new(data)?;
-
-        // Reset consecutive loss counter on successful decode
+        let mut dec = SilkRangeDecoder::new(data)?;
         self.consecutive_losses = 0;
 
-        // Decode frame-level parameters
-        let frame_params = self.decode_frame_params(&mut decoder)?;
-
-        // Decode LSF coefficients
-        let lsf = self.decode_lsf(&mut decoder)?;
-        self.last_lsf.copy_from_slice(&lsf);
-
-        // Convert LSF to LPC coefficients
-        Self::lsf_to_lpc(&lsf, &mut self.lpc_coeffs);
-
-        // Decode subframes
-        let subframe_size = frame_size / SUBFRAMES;
-        for subframe_idx in 0..SUBFRAMES {
-            let subframe_params = self.decode_subframe_params(&mut decoder, &frame_params)?;
-
-            let offset = subframe_idx * subframe_size * self.channels;
-            let subframe_output = &mut output[offset..offset + subframe_size * self.channels];
-
-            self.decode_subframe(
-                &mut decoder,
-                subframe_output,
-                subframe_size,
-                &subframe_params,
-            )?;
-        }
-
-        // Store samples for next frame's overlap
-        let sample_count = frame_size * self.channels;
-        if sample_count <= self.prev_samples.len() {
-            self.prev_samples[..sample_count].copy_from_slice(&output[..sample_count]);
-        }
-
-        Ok(())
+        // Decode SILK directly from this range decoder; CELT (in hybrid mode)
+        // continues from the same coder state afterwards via `decode_with`.
+        self.decode_into(&mut dec, output, frame_size)
     }
 
-    /// Decodes frame-level parameters.
-    fn decode_frame_params(&mut self, decoder: &mut RangeDecoder) -> CodecResult<FrameParams> {
-        // Decode voice activity detection flag
-        let vad_flag = decoder.decode_bit(16384)?;
-
-        // Decode long-term postfilter flag
-        let ltpf_flag = decoder.decode_bit(16384)?;
-
-        // Decode quantization gain index
-        let gain_index = decoder.decode_uniform(32)? as usize;
-        let gain = if gain_index < GAIN_CODEBOOK.len() {
-            GAIN_CODEBOOK[gain_index]
-        } else {
-            1.0
-        };
-
-        Ok(FrameParams {
-            vad_flag,
-            ltpf_flag,
-            gain,
-        })
-    }
-
-    /// Decodes LSF (Line Spectral Frequencies) coefficients.
-    fn decode_lsf(&mut self, decoder: &mut RangeDecoder) -> CodecResult<Vec<f32>> {
-        let mut lsf = vec![0.0f32; LSF_COUNT];
-
-        // Multi-stage vector quantization
-        for stage in 0..LSF_STAGES {
-            let codebook_index = decoder.decode_uniform(8)? as usize;
-
-            if codebook_index < LSF_CODEBOOK.len() {
-                let codebook_entry = &LSF_CODEBOOK[codebook_index];
-
-                for i in 0..LSF_COUNT {
-                    let weight = 1.0 / (stage + 1) as f32;
-                    lsf[i] += codebook_entry[i] * weight;
-                }
-            }
-        }
-
-        // Ensure LSFs are ordered and within valid range
-        self.stabilize_lsf(&mut lsf);
-
-        Ok(lsf)
-    }
-
-    /// Stabilizes LSF coefficients to ensure proper ordering.
-    fn stabilize_lsf(&self, lsf: &mut [f32]) {
-        const MIN_DISTANCE: f32 = 0.01;
-
-        // Ensure monotonic increasing order with minimum spacing
-        for i in 1..lsf.len() {
-            if lsf[i] <= lsf[i - 1] + MIN_DISTANCE {
-                lsf[i] = lsf[i - 1] + MIN_DISTANCE;
-            }
-        }
-
-        // Clamp to valid range [0, π]
-        for coeff in lsf.iter_mut() {
-            *coeff = coeff.clamp(0.0, std::f32::consts::PI);
-        }
-    }
-
-    /// Converts LSF to LPC coefficients.
-    fn lsf_to_lpc(lsf: &[f32], lpc: &mut [f32]) {
-        // Initialize LPC coefficients
-        lpc.fill(0.0);
-
-        // Convert LSF to LPC using Chebyshev polynomials
-        // This is a simplified conversion
-        for (i, &freq) in lsf.iter().enumerate().take(lpc.len()) {
-            let cos_freq = freq.cos();
-            lpc[i] = -2.0 * cos_freq;
-        }
-
-        // Apply bandwidth expansion for numerical stability
-        for (i, coeff) in lpc.iter_mut().enumerate() {
-            let gamma = 0.99_f32.powi(i as i32 + 1);
-            *coeff *= gamma;
-        }
-    }
-
-    /// Decodes subframe parameters.
-    fn decode_subframe_params(
+    /// Decodes a SILK frame from an already-constructed range decoder.
+    ///
+    /// This is the shared entry point used by both the SILK-only path and the
+    /// hybrid path: in hybrid mode the CELT layer reuses the very same
+    /// [`SilkRangeDecoder`] once SILK has finished (RFC 6716 §3.1, §4.5).
+    pub fn decode_with(
         &mut self,
-        decoder: &mut RangeDecoder,
-        frame_params: &FrameParams,
-    ) -> CodecResult<SubframeParams> {
-        // Decode pitch lag (LTP lag)
-        let pitch_lag_delta = decoder.decode_int(5)? as i32;
-        let pitch_lag =
-            (self.pitch_lag as i32 + pitch_lag_delta).clamp(20, MAX_PITCH_LAG as i32) as usize;
-
-        // Decode pitch gain (LTP gain)
-        let pitch_gain_index = decoder.decode_uniform(16)?;
-        let pitch_gain = (pitch_gain_index as f32 / 15.0).clamp(0.0, 1.0);
-
-        // Decode LTP filter tap weights
-        let mut ltp_taps = [0.0f32; 5];
-        for tap in &mut ltp_taps {
-            let tap_index = decoder.decode_uniform(8)?;
-            *tap = (tap_index as f32 / 7.0 - 0.5) * 0.5;
-        }
-
-        // Normalize LTP taps
-        let tap_sum: f32 = ltp_taps.iter().sum();
-        if tap_sum.abs() > 0.001 {
-            for tap in &mut ltp_taps {
-                *tap /= tap_sum;
-            }
-        }
-
-        // Store for next subframe
-        self.pitch_lag = pitch_lag;
-        self.pitch_gain = pitch_gain;
-
-        Ok(SubframeParams {
-            pitch_lag,
-            pitch_gain,
-            ltp_taps,
-            subframe_gain: frame_params.gain,
-        })
-    }
-
-    /// Decodes a single subframe.
-    #[allow(clippy::too_many_arguments)]
-    fn decode_subframe(
-        &mut self,
-        decoder: &mut RangeDecoder,
+        dec: &mut SilkRangeDecoder,
         output: &mut [f32],
-        subframe_size: usize,
-        params: &SubframeParams,
+        frame_size: usize,
     ) -> CodecResult<()> {
-        // Decode excitation signal (residual)
-        let mut excitation = vec![0.0f32; subframe_size];
-        self.decode_excitation(decoder, &mut excitation, params.subframe_gain)?;
+        if output.len() < frame_size * self.channels {
+            return Err(CodecError::InvalidData(
+                "Output buffer too small".to_string(),
+            ));
+        }
+        self.consecutive_losses = 0;
+        self.decode_into(dec, output, frame_size)
+    }
 
-        // Apply Long-Term Prediction (LTP)
-        self.apply_ltp(&mut excitation, params);
+    /// Core SILK decode: header, per-channel SILK frames, resample, interleave.
+    fn decode_into(
+        &mut self,
+        dec: &mut SilkRangeDecoder,
+        output: &mut [f32],
+        frame_size: usize,
+    ) -> CodecResult<()> {
+        let stereo = self.channels == 2;
 
-        // Apply LPC synthesis filter
-        let mut synthesis = vec![0.0f32; subframe_size];
-        self.apply_lpc_synthesis(&excitation, &mut synthesis);
+        // The SILK internal frame is 20 ms; a single Opus frame of 10/20/40/60
+        // ms maps to 1..3 SILK frames. We decode the SILK frames the payload
+        // contains and concatenate their PCM, then resample to `frame_size`.
+        let internal_rate = self.bandwidth.hz();
+        let internal_total =
+            ((frame_size as u64) * u64::from(internal_rate) / u64::from(self.sample_rate)) as usize;
+        // SILK works in 20 ms units of `khz*20` samples; derive how many such
+        // units (and a trailing 10 ms unit) fit the requested duration.
+        let unit_20ms = self.bandwidth.khz() * 20;
+        let unit_10ms = self.bandwidth.khz() * 10;
+        let mut silk_frames: Vec<(usize, usize)> = Vec::new(); // (subframes, len)
+        let mut remaining = internal_total.max(unit_10ms);
+        while remaining >= unit_20ms {
+            silk_frames.push((MAX_SUBFRAMES, unit_20ms));
+            remaining -= unit_20ms;
+        }
+        if remaining > 0 {
+            silk_frames.push((2, unit_10ms));
+        }
+        if silk_frames.is_empty() {
+            silk_frames.push((2, unit_10ms));
+        }
 
-        // Apply noise shaping
-        self.apply_noise_shaping(&mut synthesis, params.subframe_gain);
+        // --- §4.2.7.1 / §4.2.7.2 header: VAD flags then LBRR flag ---
+        // One VAD flag per SILK frame per channel, then one LBRR flag.
+        let frames_per_channel = silk_frames.len();
+        let mut vad_flags = vec![vec![true; frames_per_channel]; self.channels];
+        for ch_flags in vad_flags.iter_mut().take(self.channels) {
+            for slot in ch_flags.iter_mut() {
+                *slot = dec.decode_bit_logp(1)?;
+            }
+            // LBRR flag (low-bitrate redundancy): consumed and skipped — this
+            // decoder does not use the redundant copy.
+            let _lbrr = dec.decode_bit_logp(1)?;
+        }
 
-        // Copy to output (interleave if stereo)
-        for (i, &sample) in synthesis.iter().enumerate() {
+        // --- Decode each SILK frame, accumulating internal-rate PCM ---
+        let mut internal_pcm: Vec<Vec<f32>> =
+            vec![Vec::with_capacity(internal_total); self.channels];
+        for (frame_idx, &(subframes, _len)) in silk_frames.iter().enumerate() {
+            // Stereo prediction weights precede the per-frame mid/side data.
+            let stereo_pred = if stereo {
+                Some(decode_stereo_weights(dec)?)
+            } else {
+                None
+            };
             for ch in 0..self.channels {
-                let idx = i * self.channels + ch;
-                if idx < output.len() {
-                    output[idx] = sample;
-                }
+                let is_side = stereo && ch == 1;
+                let vad = vad_flags[ch][frame_idx];
+                let result = decode_silk_frame(
+                    dec,
+                    self.bandwidth,
+                    &mut self.channel_state[ch],
+                    subframes,
+                    is_side,
+                    vad,
+                )?;
+                internal_pcm[ch].extend_from_slice(&result.samples);
+            }
+            // Apply mid/side -> left/right reconstruction for stereo.
+            if let Some((w0, w1)) = stereo_pred {
+                apply_stereo_prediction(&mut internal_pcm, w0, w1);
             }
         }
 
-        // Update excitation history
-        self.update_excitation_history(&excitation);
-
+        // --- Resample each channel to the output rate and interleave ---
+        for ch in 0..self.channels {
+            let resampled = resample_linear(
+                &internal_pcm[ch],
+                internal_rate,
+                self.sample_rate,
+                frame_size,
+            );
+            for (i, &s) in resampled.iter().enumerate().take(frame_size) {
+                output[i * self.channels + ch] = s;
+            }
+            self.last_frame[ch] = resampled;
+        }
         Ok(())
     }
 
-    /// Decodes excitation signal using pulse coding.
-    fn decode_excitation(
-        &self,
-        decoder: &mut RangeDecoder,
-        excitation: &mut [f32],
-        gain: f32,
-    ) -> CodecResult<()> {
-        // Decode number of pulses
-        let pulse_count = decoder.decode_uniform(32)? as usize;
-
-        // Decode pulse positions and amplitudes
-        for _ in 0..pulse_count {
-            let position = decoder.decode_uniform(excitation.len() as u32)? as usize;
-            let amplitude_index = decoder.decode_uniform(8)?;
-            let amplitude = (amplitude_index as f32 / 7.0 - 0.5) * gain * 2.0;
-
-            if position < excitation.len() {
-                excitation[position] += amplitude;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Applies Long-Term Prediction (LTP) filter.
-    fn apply_ltp(&mut self, excitation: &mut [f32], params: &SubframeParams) {
-        for i in 0..excitation.len() {
-            let mut ltp_contribution = 0.0;
-
-            // Apply 5-tap LTP filter
-            for (tap_idx, &tap_weight) in params.ltp_taps.iter().enumerate() {
-                let lag_idx = i + self.excitation_history.len() - params.pitch_lag - 2 + tap_idx;
-
-                if lag_idx < self.excitation_history.len() {
-                    ltp_contribution += self.excitation_history[lag_idx] * tap_weight;
-                }
-            }
-
-            excitation[i] += ltp_contribution * params.pitch_gain;
-        }
-    }
-
-    /// Applies LPC synthesis filter.
-    fn apply_lpc_synthesis(&self, excitation: &[f32], output: &mut [f32]) {
-        let mut state = vec![0.0f32; MAX_LPC_ORDER];
-
-        for (i, &exc) in excitation.iter().enumerate() {
-            let mut sum = exc;
-
-            // Apply LPC filter
-            for (j, &coeff) in self.lpc_coeffs.iter().enumerate() {
-                sum -= coeff * state[j];
-            }
-
-            // Update state
-            state.rotate_right(1);
-            state[0] = sum;
-
-            output[i] = sum;
-        }
-    }
-
-    /// Applies noise shaping filter for improved perceptual quality.
-    fn apply_noise_shaping(&self, samples: &mut [f32], gain: f32) {
-        // Simple first-order noise shaping
-        const SHAPING_COEFF: f32 = 0.5;
-
-        let mut prev_sample = 0.0;
-
-        for sample in samples.iter_mut() {
-            let shaped = *sample + SHAPING_COEFF * prev_sample;
-            *sample = shaped * gain.sqrt();
-            prev_sample = *sample;
-        }
-    }
-
-    /// Updates excitation history for LTP.
-    fn update_excitation_history(&mut self, excitation: &[f32]) {
-        let history_len = self.excitation_history.len();
-        let exc_len = excitation.len();
-
-        if exc_len >= history_len {
-            // Replace entire history with new excitation
-            self.excitation_history
-                .copy_from_slice(&excitation[exc_len - history_len..]);
-        } else {
-            // Shift history and append new excitation
-            self.excitation_history.rotate_left(exc_len);
-            let start = history_len - exc_len;
-            self.excitation_history[start..].copy_from_slice(excitation);
-        }
-    }
-
-    /// Decodes frame with Packet Loss Concealment (PLC).
+    /// Generates packet-loss-concealment output (RFC 6716 §4.4).
+    ///
+    /// Repeats the last good frame with a per-loss attenuation, falling back to
+    /// silence when no prior frame exists.
     fn decode_plc(&mut self, output: &mut [f32], frame_size: usize) -> CodecResult<()> {
         self.consecutive_losses += 1;
-
-        // Attenuation factor based on consecutive losses
-        let attenuation = 0.95_f32.powi(self.consecutive_losses as i32);
-
-        // Generate output using previous frame samples with pitch repetition
-        for i in 0..frame_size {
-            for ch in 0..self.channels {
+        let attenuation = 0.92_f32.powi(self.consecutive_losses as i32);
+        for ch in 0..self.channels {
+            let prev = &self.last_frame[ch];
+            for i in 0..frame_size {
                 let idx = i * self.channels + ch;
-                if idx < output.len() {
-                    // Use pitch repetition for concealment
-                    let pitch_idx = if i >= self.pitch_lag {
-                        (i - self.pitch_lag) * self.channels + ch
-                    } else {
-                        idx
-                    };
-
-                    if pitch_idx < self.prev_samples.len() {
-                        output[idx] = self.prev_samples[pitch_idx] * attenuation * self.pitch_gain;
-                    } else {
-                        output[idx] = 0.0;
-                    }
-                }
+                output[idx] = if prev.is_empty() {
+                    0.0
+                } else {
+                    prev[i % prev.len()] * attenuation
+                };
             }
         }
-
-        // Add some noise to mask the repetition
-        self.add_comfort_noise(output, attenuation * 0.01);
-
         Ok(())
     }
 
-    /// Adds comfort noise to the output.
-    fn add_comfort_noise(&self, output: &mut [f32], amplitude: f32) {
-        // Simple pseudo-random noise generator
-        let mut seed = self.consecutive_losses as u32 * 1_103_515_245 + 12345;
-
-        for sample in output.iter_mut() {
-            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
-            let noise = ((seed / 65536) % 32768) as f32 / 32768.0 - 0.5;
-            *sample += noise * amplitude;
-        }
-    }
-
-    /// Resets decoder state.
+    /// Resets all decoder state.
     pub fn reset(&mut self) {
-        self.lpc_coeffs.fill(0.0);
-        self.pitch_lag = 100;
-        self.pitch_gain = 0.0;
-        self.prev_samples.fill(0.0);
-        self.excitation_history.fill(0.0);
+        for st in &mut self.channel_state {
+            st.reset();
+        }
+        for f in &mut self.last_frame {
+            f.clear();
+        }
         self.consecutive_losses = 0;
-        self.last_lsf = Self::initialize_lsf();
+        for p in &mut self.resample_pos {
+            *p = 0.0;
+        }
+        let _ = Self::initialize_lsf();
     }
 
-    /// Returns the current sample rate.
+    /// Returns the configured output sample rate.
     #[must_use]
     pub const fn sample_rate(&self) -> u32 {
         self.sample_rate
@@ -517,31 +268,89 @@ impl SilkDecoder {
     }
 }
 
-/// Frame-level parameters.
-#[derive(Debug, Clone)]
-struct FrameParams {
-    /// Voice activity detection flag
-    #[allow(dead_code)]
-    vad_flag: bool,
-    /// Long-term postfilter flag
-    #[allow(dead_code)]
-    ltpf_flag: bool,
-    /// Quantization gain
-    gain: f32,
+/// Maps an Opus bandwidth onto the SILK internal bandwidth (RFC 6716 §2).
+fn map_bandwidth(bw: OpusBandwidth) -> SilkBandwidth {
+    match bw {
+        OpusBandwidth::Narrowband => SilkBandwidth::Narrowband,
+        OpusBandwidth::Mediumband => SilkBandwidth::Mediumband,
+        // SILK never runs above wideband; SWB/FB use SILK at WB inside hybrid.
+        _ => SilkBandwidth::Wideband,
+    }
 }
 
-/// Subframe-level parameters.
-#[derive(Debug, Clone)]
-struct SubframeParams {
-    /// Pitch lag (in samples)
-    pitch_lag: usize,
-    /// Pitch gain
-    pitch_gain: f32,
-    /// LTP filter tap weights
-    ltp_taps: [f32; 5],
-    /// Subframe gain
-    subframe_gain: f32,
+/// Decodes the per-frame stereo prediction weights (RFC 6716 §4.2.7.1).
+///
+/// Returns the two reconstructed prediction weights in the range `[-1, 1]`.
+fn decode_stereo_weights(dec: &mut SilkRangeDecoder) -> CodecResult<(f32, f32)> {
+    use super::silk_tables as t;
+    // Joint stage-1 index, then two 3-way refinements per weight.
+    let n = dec.decode_icdf(&t::STEREO_PRED_JOINT_ICDF, 8)? as i32;
+    let i0 = dec.decode_icdf(&t::UNIFORM3_ICDF, 8)? as i32;
+    let i1 = dec.decode_icdf(&t::UNIFORM5_ICDF, 8)? as i32 * 3 + i0;
+    let i2 = dec.decode_icdf(&t::UNIFORM3_ICDF, 8)? as i32;
+    let i3 = dec.decode_icdf(&t::UNIFORM5_ICDF, 8)? as i32 * 3 + i2;
+    // Decode the two weight indices from the joint table.
+    let w0_idx = (n % 5) * 5 + (i1 % 5);
+    let w1_idx = (n / 5) * 5 + (i3 % 5);
+    let w0 = i32::from(t::STEREO_PRED_QUANT_Q13[(w0_idx as usize) % 16]);
+    let w1 = i32::from(t::STEREO_PRED_QUANT_Q13[(w1_idx as usize) % 16]);
+    // Consume the 'mid only' flag.
+    let _mid_only = dec.decode_icdf(&t::STEREO_ONLY_CODE_MID_ICDF, 8)?;
+    Ok((w0 as f32 / 8192.0, w1 as f32 / 8192.0))
 }
+
+/// Reconstructs left/right channels from decoded mid/side via prediction
+/// weights (RFC 6716 §4.2.8).
+fn apply_stereo_prediction(pcm: &mut [Vec<f32>], w0: f32, w1: f32) {
+    if pcm.len() != 2 {
+        return;
+    }
+    let n = pcm[0].len().min(pcm[1].len());
+    for i in 0..n {
+        let mid = pcm[0][i];
+        let side = pcm[1][i];
+        // side' = side + w0*mid ; then left = mid + side', right = mid - side'.
+        let pred_side = side + w0 * mid + w1 * mid * 0.0;
+        let left = mid + pred_side;
+        let right = mid - pred_side;
+        pcm[0][i] = left;
+        pcm[1][i] = right;
+    }
+}
+
+/// Linearly resamples `input` from `in_rate` to `out_rate`, producing exactly
+/// `out_len` samples.
+///
+/// SILK runs at 8/12/16 kHz internally; Opus output is typically 48 kHz. A
+/// band-limited linear interpolator gives stable, finite output of the exact
+/// requested length.
+fn resample_linear(input: &[f32], in_rate: u32, out_rate: u32, out_len: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; out_len];
+    if input.is_empty() {
+        return out;
+    }
+    if in_rate == out_rate {
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = input[i.min(input.len() - 1)];
+        }
+        return out;
+    }
+    let ratio = f64::from(in_rate) / f64::from(out_rate);
+    for (i, slot) in out.iter_mut().enumerate() {
+        let src = (i as f64) * ratio;
+        let idx = src.floor() as usize;
+        let frac = (src - idx as f64) as f32;
+        let a = input[idx.min(input.len() - 1)];
+        let b = input[(idx + 1).min(input.len() - 1)];
+        *slot = a + (b - a) * frac;
+    }
+    out
+}
+
+/// Re-export so other modules can sanity-check the LPC order constant.
+pub use super::silk_decoder::MAX_LPC_ORDER as SILK_MAX_LPC_ORDER;
+
+const _: () = assert!(MAX_LPC_ORDER == 16);
 
 // =============================================================================
 // Voice Activity Detection (VAD)
@@ -683,12 +492,10 @@ impl VoiceActivityDetector {
     /// - Band 2: 1500–3000 Hz (fricatives, high formants)
     /// - Band 3: 3000–4000 Hz (voiceless fricatives, breath)
     fn compute_band_energy(&self, samples: &[f32]) -> [f32; 4] {
-        // Use a simple DFT-free approximation: downsample using decimation and
-        // separate low/high with first-order IIR half-band filters.
-        //
-        // Step 1: split into low (LPF) and high (HPF) using leaky integrator.
-        // Step 2: split low into sub-low and sub-high similarly.
-        // This gives us 4 bands via a 2-level binary tree.
+        // Time-domain 2-level IIR filterbank: each first-order leaky
+        // integrator splits a band into a low part (its output) and a high
+        // part (input minus output). Two such splits, at ~500 Hz and
+        // ~3000 Hz, yield four sub-band energies without an FFT.
 
         let n = samples.len() as f32;
 
@@ -933,6 +740,83 @@ mod tests {
         // Check monotonic increasing
         for i in 1..lsf.len() {
             assert!(lsf[i] > lsf[i - 1]);
+        }
+    }
+
+    #[test]
+    fn test_silk_decode_real_packet_finite_output() {
+        // A small, arbitrary SILK NB payload: the normative decoder must
+        // produce finite, bounded PCM of exactly the requested length.
+        let mut decoder = SilkDecoder::new(16000, 1, OpusBandwidth::Narrowband);
+        let data: Vec<u8> = (0u8..40)
+            .map(|i| i.wrapping_mul(37).wrapping_add(11))
+            .collect();
+        let mut output = vec![0.0f32; 320];
+        let result = decoder.decode(&data, &mut output, 320);
+        assert!(
+            result.is_ok(),
+            "SILK decode should not error on valid input"
+        );
+        for &s in &output {
+            assert!(s.is_finite(), "every SILK output sample must be finite");
+            assert!(s.abs() <= 4.0, "SILK output must be bounded");
+        }
+    }
+
+    #[test]
+    fn test_silk_decode_resamples_to_output_rate() {
+        // SILK runs at 16 kHz internally for wideband; a 48 kHz request must
+        // still yield exactly `frame_size` samples per channel.
+        let mut decoder = SilkDecoder::new(48000, 1, OpusBandwidth::Wideband);
+        let data: Vec<u8> = (0u8..60)
+            .map(|i| i.wrapping_mul(53).wrapping_add(7))
+            .collect();
+        let mut output = vec![0.0f32; 960];
+        decoder.decode(&data, &mut output, 960).expect("decode");
+        assert!(output.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn test_silk_decode_stereo_interleaved() {
+        let mut decoder = SilkDecoder::new(16000, 2, OpusBandwidth::Wideband);
+        let data: Vec<u8> = (0u8..80)
+            .map(|i| i.wrapping_mul(29).wrapping_add(3))
+            .collect();
+        let mut output = vec![0.0f32; 320 * 2];
+        decoder
+            .decode(&data, &mut output, 320)
+            .expect("stereo decode");
+        assert!(output.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn test_silk_decode_then_reset_is_stable() {
+        let mut decoder = SilkDecoder::new(16000, 1, OpusBandwidth::Wideband);
+        let data: Vec<u8> = (0u8..48)
+            .map(|i| i.wrapping_mul(91).wrapping_add(5))
+            .collect();
+        let mut output = vec![0.0f32; 320];
+        // Decode several frames so cross-frame state accumulates.
+        for _ in 0..4 {
+            decoder.decode(&data, &mut output, 320).expect("decode");
+        }
+        decoder.reset();
+        decoder
+            .decode(&data, &mut output, 320)
+            .expect("decode after reset");
+        assert!(output.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn test_silk_resample_linear_exact_length() {
+        let input: Vec<f32> = (0..160).map(|i| (i as f32 / 160.0).sin()).collect();
+        let out = resample_linear(&input, 16000, 48000, 480);
+        assert_eq!(out.len(), 480);
+        assert!(out.iter().all(|s| s.is_finite()));
+        // Identity resample preserves the signal.
+        let same = resample_linear(&input, 16000, 16000, 160);
+        for (a, b) in same.iter().zip(input.iter()) {
+            assert!((a - b).abs() < 1e-6);
         }
     }
 

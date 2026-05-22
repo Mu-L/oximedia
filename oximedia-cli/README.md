@@ -153,6 +153,21 @@ The CLI supports FFmpeg-style options for familiarity:
 | `-r` | `-r` | Frame rate |
 | `-y` | `-y` | Overwrite output |
 
+## Companion Binaries
+
+In addition to the primary `oximedia` multitool, the crate ships two
+companion binaries:
+
+- `oximedia-ff` — drop-in FFmpeg replacement that translates argv through
+  the `oximedia-compat-ffmpeg` layer and executes the resulting jobs.
+  Supports `--dry-run`, `--plan`, `--explain`, and `--json` (emits the
+  structured `TranslateResult` to stdout for tooling/CI consumption).
+- `oximedia-cv2` — opt-in OpenCV-style helper layered on
+  `oximedia-compat-cv2`. Use `oximedia-cv2 --list-functions` /
+  `--list-constants` to enumerate the supported surface; the constants
+  list is reflected at build time from the underlying
+  `oximedia-compat-cv2` crate so it never drifts.
+
 ## Global Options
 
 | Option | Description |

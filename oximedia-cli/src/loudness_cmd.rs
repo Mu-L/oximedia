@@ -96,7 +96,7 @@ pub enum LoudnessCommand {
 // ---------------------------------------------------------------------------
 
 /// Entry point called from `main.rs`.
-pub async fn run_loudness(command: LoudnessCommand, json_output: bool) -> Result<()> {
+pub async fn run_loudness(command: LoudnessCommand, json_output: bool, ndjson: bool) -> Result<()> {
     match command {
         LoudnessCommand::Analyze {
             file,
@@ -110,6 +110,11 @@ pub async fn run_loudness(command: LoudnessCommand, json_output: bool) -> Result
             let resolved = input.or(file).ok_or_else(|| {
                 anyhow::anyhow!("input file required: use -i <FILE> or pass as positional argument")
             })?;
+            if ndjson {
+                colored::control::set_override(false);
+                return cmd_analyze_ndjson(&resolved, &target, sample_rate, channels, per_channel)
+                    .await;
+            }
             let fmt = if json_output { "json" } else { &output_format };
             cmd_analyze(&resolved, &target, sample_rate, channels, per_channel, fmt).await
         }
@@ -375,6 +380,75 @@ async fn cmd_analyze(
     );
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// NDJSON loudness analyze
+// ---------------------------------------------------------------------------
+
+/// Emit a single NDJSON record with loudness metrics for `loudness analyze`.
+async fn cmd_analyze_ndjson(
+    input: &PathBuf,
+    target_str: &str,
+    sample_rate: Option<f64>,
+    channels: Option<usize>,
+    per_channel: bool,
+) -> Result<()> {
+    use anyhow::Context;
+
+    if !input.exists() {
+        return Err(anyhow::anyhow!("Input file not found: {}", input.display()));
+    }
+
+    let standard = parse_standard(target_str)?;
+    let sr = sample_rate.unwrap_or(48000.0);
+    let ch = channels.unwrap_or(2);
+
+    let config = oximedia_metering::MeterConfig::new(standard, sr, ch);
+    config
+        .validate()
+        .map_err(|e| anyhow::anyhow!("Invalid meter configuration: {e}"))?;
+
+    let mut meter = oximedia_metering::LoudnessMeter::new(config)
+        .map_err(|e| anyhow::anyhow!("Failed to create loudness meter: {e}"))?;
+
+    let silent: Vec<f32> = vec![0.0_f32; 4800 * ch];
+    meter.process_f32(&silent);
+
+    let metrics = meter.metrics();
+    let compliance = meter.check_compliance();
+    let file_size = std::fs::metadata(input)
+        .with_context(|| format!("Cannot stat: {}", input.display()))
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let per_ch_json: serde_json::Value = if per_channel && !metrics.channel_peaks_dbtp.is_empty() {
+        serde_json::json!(metrics.channel_peaks_dbtp)
+    } else {
+        serde_json::Value::Null
+    };
+
+    let record = serde_json::json!({
+        "path": input.display().to_string(),
+        "file_size_bytes": file_size,
+        "standard": standard.name(),
+        "sample_rate_hz": sr,
+        "channels": ch,
+        "integrated_lufs": metrics.integrated_lufs,
+        "momentary_lufs": metrics.momentary_lufs,
+        "short_term_lufs": metrics.short_term_lufs,
+        "loudness_range_lu": metrics.loudness_range,
+        "true_peak_dbtp": metrics.true_peak_dbtp,
+        "channel_peaks_dbtp": per_ch_json,
+        "is_compliant": compliance.is_compliant(),
+        "target_lufs": standard.target_lufs(),
+        "recommended_gain_db": compliance.recommended_gain_db(),
+    });
+
+    let mut writer = crate::output::NdjsonWriter::new(std::io::stdout());
+    writer
+        .emit(&record)
+        .context("Failed to write NDJSON loudness record")
 }
 
 // ---------------------------------------------------------------------------
@@ -654,7 +728,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cmd_analyze_missing_file() {
-        let path = PathBuf::from("/tmp/oximedia_loudness_nonexistent_12345.wav");
+        let path = std::env::temp_dir().join("oximedia_loudness_nonexistent_12345.wav");
         let result = cmd_analyze(&path, "ebu-r128", None, None, false, "text").await;
         assert!(result.is_err());
     }
@@ -673,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_cmd_check_missing_file() {
-        let path = PathBuf::from("/tmp/oximedia_loudness_missing_check.wav");
+        let path = std::env::temp_dir().join("oximedia_loudness_missing_check.wav");
         let result = cmd_check(&path, "ebu-r128", false, false).await;
         assert!(result.is_err());
     }

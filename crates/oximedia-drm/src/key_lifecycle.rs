@@ -2,6 +2,62 @@
 //!
 //! Provides full lifecycle management for DRM content keys including
 //! generation, storage, expiry, usage tracking, and secure export.
+//!
+//! # Key Lifecycle State Diagram
+//!
+//! ```text
+//! ┌───────────┐
+//! │ Generated │  Key material is produced (random bytes or KDF output).
+//! └─────┬─────┘  Stored in ContentKey with created_at timestamp.
+//!       │ wrap()
+//!       ▼
+//! ┌─────────┐
+//! │ Wrapped │  Key material is encrypted under a Key Encryption Key (KEK).
+//! └─────┬───┘  See key_wrap.rs for AES-KW / RSA-OAEP wrapping.
+//!       │ distribute() / deliver_license()
+//!       ▼
+//! ┌─────────────┐
+//! │ Distributed │  License request matched; wrapped key sent to client CDM.
+//! └──────┬──────┘  Audit event written (see audit_trail.rs).
+//!        │ client_ack() or implicit (license_type = Streaming)
+//!        ▼
+//! ┌────────┐
+//! │ Active │  Key is in use for encrypt / decrypt operations.
+//! └───┬────┘  usage_count incremented on each use; max_usage checked.
+//!     │
+//!     ├──── expires_at reached ──────────────────────┐
+//!     │                                              ▼
+//!     │ rotate() (see key_rotation.rs)        ┌──────────┐
+//!     ▼                                       │ Revoked  │  Key invalidated before
+//! ┌─────────┐                                 └────┬─────┘  natural expiry (device
+//! │ Rotated │  New key becomes Active; old key     │         revocation, compliance).
+//! └────┬────┘  enters overlap window for ongoing   │ destroy()
+//!      │       segment decryption.                 ▼
+//!      │ overlap_window expires               ┌───────────┐
+//!      │                                      │ Destroyed │  Key material zeroed and
+//!      └──────────────────────────────────────►            │  removed from all stores.
+//!                                             └───────────┘
+//! ```
+//!
+//! ## State Transition Details
+//!
+//! | Transition          | Trigger                                     | Data structures involved                        |
+//! |---------------------|---------------------------------------------|-------------------------------------------------|
+//! | Generated → Wrapped | `KeyStore::generate_and_store`              | [`ContentKey`], `key_wrap::wrap_key`            |
+//! | Wrapped → Distributed | License server grants entitlement         | `entitlement::Entitlement`, `license_server`    |
+//! | Distributed → Active | Client CDM acknowledges license            | `managed_license::ManagedLicense`               |
+//! | Active → Rotated    | `key_rotation_schedule::RotationSchedule`   | `key_rotation_schedule::RotationSchedule`       |
+//! | Active → Revoked    | Policy engine / device registry revocation  | `policy_engine::PolicyEngine`, `device_registry`|
+//! | Rotated → Destroyed | Overlap window expiry                       | `KeyStore::remove_key`                          |
+//! | Revoked → Destroyed | `KeyStore::remove_key`                      | `audit_trail::AuditTrail` logs destroy event    |
+//!
+//! ## Orphan Recovery
+//!
+//! If a key enters the `Distributed` state but no client acknowledgement arrives
+//! within the license `playback_duration`, the `ManagedLicense` expiry timer
+//! fires and the key is treated as `Revoked`.  `KeyStore::remove_key` can then
+//! be called to reach `Destroyed`.  Audit records are preserved even after
+//! key material destruction so compliance reports remain accurate.
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

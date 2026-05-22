@@ -14,12 +14,12 @@
 - Dependencies: oximedia-core, quick-xml, encoding_rs, serde, bytes
 
 ## Enhancements
-- [ ] Add ID3v2.4 UTF-8 text encoding preference in `id3v2.rs` (currently defaults to UTF-16)
-- [ ] Extend `vorbis.rs` with multi-value tag support (repeated keys per Vorbis Comment spec)
-- [ ] Add `itunes.rs` support for all iTunes atom types including tempo, compilation, gapless flags
-- [ ] Implement `xmp.rs` structured property support (arrays, alternatives, bags per XMP spec)
-- [ ] Extend `exif.rs` with Makernote parsing for Canon, Nikon, Sony camera-specific tags
-- [ ] Add `matroska.rs` support for nested Matroska tag elements (Targets/SimpleTags hierarchy)
+- [x] Add ID3v2.4 UTF-8 text encoding preference in `id3v2.rs` (currently defaults to UTF-16) (verified 2026-05-16; src/id3v2.rs:42 prefers UTF-8 for v2.4, falls back to UTF-16 for v2.3)
+- [x] Extend `vorbis.rs` with multi-value tag support (repeated keys per Vorbis Comment spec) (verified 2026-05-16; src/vorbis.rs:25 VorbisCommentMultiValue, test_vorbis_comments_multivalue:349)
+- [x] Add `itunes.rs` support for all iTunes atom types including tempo, compilation, gapless flags (verified 2026-05-16; src/itunes.rs:411 test_parse_compilation, compilation/gapless/tempo atoms)
+- [x] Implement `xmp.rs` structured property support (arrays, alternatives, bags per XMP spec) (verified 2026-05-16; src/xmp.rs:32 XmpArrayKind, XmpArray struct:76)
+- [x] Extend `exif.rs` with Makernote parsing for Canon, Nikon, Sony camera-specific tags (verified 2026-05-16; src/exif.rs:19 Makernote Support Canon/Nikon IFD)
+- [x] Add `matroska.rs` support for nested Matroska tag elements (Targets/SimpleTags hierarchy) (verified 2026-05-16; src/matroska.rs:127 MatroskaTargets, SimpleTags nested:173)
 - [x] Implement `metadata_sanitize.rs` with configurable sanitization rules (strip GPS, strip personal data)
 - [x] Extend `metadata_diff.rs` with three-way merge for resolving concurrent metadata edits
 
@@ -29,10 +29,10 @@
 - [x] Add a `lyrics.rs` module for synchronized lyrics (ID3 SYLT, LRC format) and unsynchronized lyrics
 - [x] Implement a `musicbrainz.rs` module for MusicBrainz tag mappings and MBID validation
 - [x] Add a `replaygain.rs` module for ReplayGain metadata (track gain, album gain, peak)
-- [ ] Implement a `c2pa.rs` module for Content Credentials / C2PA provenance metadata
-- [ ] Add a `podcast.rs` module for podcast-specific metadata (iTunes podcast tags, RSS mapping)
+- [x] Implement a `c2pa.rs` module for Content Credentials / C2PA provenance metadata (verified 2026-05-16; src/c2pa.rs:1100 lines C2PA manifest store)
+- [x] Add a `podcast.rs` module for podcast-specific metadata (iTunes podcast tags, RSS mapping) (verified 2026-05-16; src/podcast.rs:866 lines PodcastNamespace 2.0)
 - [x] Implement a `geotag.rs` module for GPS coordinate extraction, display, and reverse geocoding
-- [ ] Add a `metadata_streaming.rs` module for parsing metadata from streaming data (partial buffers)
+- [x] Add a `metadata_streaming.rs` module for parsing metadata from streaming data (partial buffers) (verified 2026-05-16; src/metadata_streaming.rs:750 lines StreamingMetadataParser)
 
 ## Performance
 - [ ] Add lazy parsing in `id3v2.rs` (parse frame headers only, defer body parsing until accessed)

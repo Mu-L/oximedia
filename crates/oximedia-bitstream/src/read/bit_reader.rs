@@ -217,7 +217,7 @@ impl<R: io::Read, E: Endianness> BitRead for BitReader<R, E> {
     /// # Examples
     /// ```
     /// use std::io::Read;
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     /// let data = [0b10110111];
     /// let mut reader = BitReader::endian(data.as_slice(), BigEndian);
     /// assert!(reader.skip(3).is_ok());
@@ -226,7 +226,7 @@ impl<R: io::Read, E: Endianness> BitRead for BitReader<R, E> {
     ///
     /// ```
     /// use std::io::Read;
-    /// use bitstream_io::{LittleEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{LittleEndian, BitReader, BitRead};
     /// let data = [0b10110111];
     /// let mut reader = BitReader::endian(data.as_slice(), LittleEndian);
     /// assert!(reader.skip(3).is_ok());
@@ -252,7 +252,7 @@ impl<R: io::Read, E: Endianness> BitRead for BitReader<R, E> {
     /// # Example
     /// ```
     /// use std::io::Read;
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     /// let data = b"foobar";
     /// let mut reader = BitReader::endian(data.as_slice(), BigEndian);
     /// assert!(reader.skip(24).is_ok());
@@ -295,7 +295,7 @@ where
     /// # Example
     /// ```
     /// use std::io::{Read, Cursor, SeekFrom};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     /// let data = [0x00, 0xFF];
     /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
     /// assert_eq!(reader.position_in_bits().unwrap(), 0);
@@ -336,7 +336,7 @@ where
     /// ```
     /// use std::fs::read;
     /// use std::io::{Read, Cursor, SeekFrom};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     /// let data = [0x00, 0xFF];
     /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
     /// assert_eq!(reader.position_in_bits().unwrap(), 0);

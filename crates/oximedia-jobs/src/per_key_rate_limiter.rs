@@ -135,8 +135,14 @@ pub enum RateLimitError {
 impl fmt::Display for RateLimitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::LimitExceeded { key, retry_after_secs } => {
-                write!(f, "rate limit exceeded for '{key}'; retry after {retry_after_secs}s")
+            Self::LimitExceeded {
+                key,
+                retry_after_secs,
+            } => {
+                write!(
+                    f,
+                    "rate limit exceeded for '{key}'; retry after {retry_after_secs}s"
+                )
             }
             Self::ConfigError(msg) => write!(f, "rate limit config error: {msg}"),
         }
@@ -161,7 +167,11 @@ pub struct RateLimiterConfig {
 impl RateLimiterConfig {
     /// Create a config from three explicit limits.
     #[must_use]
-    pub fn new(per_user_limit: RateLimit, per_tag_limit: RateLimit, global_limit: RateLimit) -> Self {
+    pub fn new(
+        per_user_limit: RateLimit,
+        per_tag_limit: RateLimit,
+        global_limit: RateLimit,
+    ) -> Self {
         Self {
             per_user_limit,
             per_tag_limit,
@@ -271,7 +281,9 @@ impl RateLimiter {
         let count = state.prune_and_count(now, limit.window_secs);
         if count >= limit.max_per_window {
             // Calculate retry-after: time until the oldest in-window request expires.
-            let oldest = state.oldest_in_window(now, limit.window_secs).unwrap_or(now);
+            let oldest = state
+                .oldest_in_window(now, limit.window_secs)
+                .unwrap_or(now);
             let retry_after_secs = (oldest + limit.window_secs).saturating_sub(now);
             return Err(RateLimitError::LimitExceeded {
                 key: raw_key.to_string(),
@@ -295,10 +307,7 @@ impl RateLimiter {
     /// # Errors
     ///
     /// Returns [`RateLimitError::LimitExceeded`] when any limit is exhausted.
-    pub fn check_and_consume(
-        &mut self,
-        key: &RateLimitKey,
-    ) -> Result<(), RateLimitError> {
+    pub fn check_and_consume(&mut self, key: &RateLimitKey) -> Result<(), RateLimitError> {
         self.check_and_consume_at(key, current_unix_secs())
     }
 
@@ -316,14 +325,29 @@ impl RateLimiter {
         // --- Check phase (no mutations to timestamp log) -------------------
         if let Some(user_id) = &key.user_id {
             let raw = format!("user:{user_id}");
-            Self::check_limit(&mut self.windows, &raw, &self.config.per_user_limit.clone(), now)?;
+            Self::check_limit(
+                &mut self.windows,
+                &raw,
+                &self.config.per_user_limit.clone(),
+                now,
+            )?;
         }
         if let Some(tag) = &key.tag {
             let raw = format!("tag:{tag}");
-            Self::check_limit(&mut self.windows, &raw, &self.config.per_tag_limit.clone(), now)?;
+            Self::check_limit(
+                &mut self.windows,
+                &raw,
+                &self.config.per_tag_limit.clone(),
+                now,
+            )?;
         }
         // Always check global limit.
-        Self::check_limit(&mut self.windows, "global", &self.config.global_limit.clone(), now)?;
+        Self::check_limit(
+            &mut self.windows,
+            "global",
+            &self.config.global_limit.clone(),
+            now,
+        )?;
 
         // --- Record phase (all checks passed) ------------------------------
         if let Some(user_id) = &key.user_id {
@@ -353,18 +377,41 @@ impl RateLimiter {
 
         if let Some(user_id) = &key.user_id {
             let raw = format!("user:{user_id}");
-            let used = count_window(&self.windows, &raw, now, self.config.per_user_limit.window_secs);
-            let rem = self.config.per_user_limit.max_per_window.saturating_sub(used);
+            let used = count_window(
+                &self.windows,
+                &raw,
+                now,
+                self.config.per_user_limit.window_secs,
+            );
+            let rem = self
+                .config
+                .per_user_limit
+                .max_per_window
+                .saturating_sub(used);
             min_remaining = min_remaining.min(rem);
         }
         if let Some(tag) = &key.tag {
             let raw = format!("tag:{tag}");
-            let used = count_window(&self.windows, &raw, now, self.config.per_tag_limit.window_secs);
-            let rem = self.config.per_tag_limit.max_per_window.saturating_sub(used);
+            let used = count_window(
+                &self.windows,
+                &raw,
+                now,
+                self.config.per_tag_limit.window_secs,
+            );
+            let rem = self
+                .config
+                .per_tag_limit
+                .max_per_window
+                .saturating_sub(used);
             min_remaining = min_remaining.min(rem);
         }
         // Global
-        let used = count_window(&self.windows, "global", now, self.config.global_limit.window_secs);
+        let used = count_window(
+            &self.windows,
+            "global",
+            now,
+            self.config.global_limit.window_secs,
+        );
         let global_rem = self.config.global_limit.max_per_window.saturating_sub(used);
         min_remaining = min_remaining.min(global_rem);
 
@@ -384,7 +431,10 @@ impl RateLimiter {
     pub fn reset_after_secs_at(&self, key: &RateLimitKey, now: u64) -> u64 {
         // Use the user window as the reference when present, else tag, else global.
         let (raw, window_secs) = if let Some(user_id) = &key.user_id {
-            (format!("user:{user_id}"), self.config.per_user_limit.window_secs)
+            (
+                format!("user:{user_id}"),
+                self.config.per_user_limit.window_secs,
+            )
         } else if let Some(tag) = &key.tag {
             (format!("tag:{tag}"), self.config.per_tag_limit.window_secs)
         } else {
@@ -454,9 +504,13 @@ mod tests {
         let mut limiter = make_limiter(3, 60);
         let key = RateLimitKey::user("bob");
         for _ in 0..3 {
-            limiter.check_and_consume_at(&key, 1000).expect("should pass");
+            limiter
+                .check_and_consume_at(&key, 1000)
+                .expect("should pass");
         }
-        let err = limiter.check_and_consume_at(&key, 1000).expect_err("should fail");
+        let err = limiter
+            .check_and_consume_at(&key, 1000)
+            .expect_err("should fail");
         assert!(matches!(err, RateLimitError::LimitExceeded { .. }));
     }
 
@@ -483,8 +537,12 @@ mod tests {
 
         let key_a = RateLimitKey::user("user-a");
         let key_b = RateLimitKey::user("user-b");
-        limiter.check_and_consume_at(&key_a, 1000).expect("ok for a");
-        limiter.check_and_consume_at(&key_b, 1000).expect("ok for b");
+        limiter
+            .check_and_consume_at(&key_a, 1000)
+            .expect("ok for a");
+        limiter
+            .check_and_consume_at(&key_b, 1000)
+            .expect("ok for b");
         // Each user has consumed their 1 allowed request.
         assert!(limiter.check_and_consume_at(&key_a, 1001).is_err());
         assert!(limiter.check_and_consume_at(&key_b, 1001).is_err());
@@ -537,8 +595,12 @@ mod tests {
 
         let key_a = RateLimitKey::user("f1");
         let key_b = RateLimitKey::user("f2");
-        limiter.check_and_consume_at(&key_a, 1000).expect("first ok");
-        limiter.check_and_consume_at(&key_b, 1000).expect("second ok");
+        limiter
+            .check_and_consume_at(&key_a, 1000)
+            .expect("first ok");
+        limiter
+            .check_and_consume_at(&key_b, 1000)
+            .expect("second ok");
         // Global exhausted regardless of which user.
         assert!(limiter.check_and_consume_at(&key_a, 1001).is_err());
     }

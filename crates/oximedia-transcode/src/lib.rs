@@ -180,6 +180,7 @@ pub mod presets;
 pub mod quality_ladder_gen;
 pub mod rate_distortion;
 pub mod resolution_select;
+pub mod running_stats;
 pub mod scene_cut;
 pub mod stage_graph;
 /// Watermark and graphic overlay embedding during transcoding.

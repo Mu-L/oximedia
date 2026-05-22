@@ -2,6 +2,12 @@
 //!
 //! Provides commands for uploading, downloading, cloud transcoding,
 //! job status, and cost estimation across S3, Azure, and GCS providers.
+//!
+//! Upload and download operations require provider-specific environment variables:
+//!
+//! - **S3 / AWS**: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`
+//! - **Azure**: `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_KEY`
+//! - **GCS**: `GOOGLE_APPLICATION_CREDENTIALS` (service account JSON path)
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
@@ -275,6 +281,189 @@ pub async fn handle_cloud_command(command: CloudCommand, json_output: bool) -> R
 }
 
 // ---------------------------------------------------------------------------
+// Provider credential resolution
+// ---------------------------------------------------------------------------
+
+/// Cloud provider kinds, normalised from CLI argument strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderKind {
+    S3,
+    Azure,
+    Gcs,
+}
+
+impl ProviderKind {
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "s3" | "aws" => Some(Self::S3),
+            "azure" => Some(Self::Azure),
+            "gcs" | "google" => Some(Self::Gcs),
+            _ => None,
+        }
+    }
+}
+
+/// Resolved credentials for a provider.
+#[derive(Debug)]
+struct ProviderCredentials {
+    kind: ProviderKind,
+    region: String,
+    /// S3/Azure access key or storage-account name.
+    access_key: Option<String>,
+    /// S3/Azure secret key.
+    secret_key: Option<String>,
+}
+
+/// Read and validate provider credentials from environment variables.
+///
+/// Returns `Err` with a descriptive message (naming the missing variable) if
+/// any required credential is absent.  Never panics.
+fn resolve_credentials(provider: &str, region: Option<&str>) -> Result<ProviderCredentials> {
+    let kind = ProviderKind::from_str(provider).ok_or_else(|| {
+        anyhow::anyhow!("unknown provider: {provider}; supported: s3, azure, gcs")
+    })?;
+
+    match kind {
+        ProviderKind::S3 => {
+            let access_key = std::env::var("AWS_ACCESS_KEY_ID").map_err(|_| {
+                anyhow::anyhow!(
+                    "AWS_ACCESS_KEY_ID environment variable not set; \
+                     configure credentials before uploading to S3"
+                )
+            })?;
+            let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| {
+                anyhow::anyhow!(
+                    "AWS_SECRET_ACCESS_KEY environment variable not set; \
+                     configure credentials before uploading to S3"
+                )
+            })?;
+            let resolved_region = region
+                .map(String::from)
+                .or_else(|| std::env::var("AWS_REGION").ok())
+                .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+                .unwrap_or_else(|| "us-east-1".to_string());
+            Ok(ProviderCredentials {
+                kind,
+                region: resolved_region,
+                access_key: Some(access_key),
+                secret_key: Some(secret_key),
+            })
+        }
+        ProviderKind::Azure => {
+            let account = std::env::var("AZURE_STORAGE_ACCOUNT").map_err(|_| {
+                anyhow::anyhow!(
+                    "AZURE_STORAGE_ACCOUNT environment variable not set; \
+                     configure credentials before uploading to Azure"
+                )
+            })?;
+            let key = std::env::var("AZURE_STORAGE_KEY").map_err(|_| {
+                anyhow::anyhow!(
+                    "AZURE_STORAGE_KEY environment variable not set; \
+                     configure credentials before uploading to Azure"
+                )
+            })?;
+            Ok(ProviderCredentials {
+                kind,
+                region: region.unwrap_or("global").to_string(),
+                access_key: Some(account),
+                secret_key: Some(key),
+            })
+        }
+        ProviderKind::Gcs => {
+            // GCS relies on Application Default Credentials; check the env var
+            // that most GCS SDK implementations respect.
+            let _creds = std::env::var("GOOGLE_APPLICATION_CREDENTIALS").map_err(|_| {
+                anyhow::anyhow!(
+                    "GOOGLE_APPLICATION_CREDENTIALS environment variable not set; \
+                     set it to the path of a service account JSON file before uploading to GCS"
+                )
+            })?;
+            Ok(ProviderCredentials {
+                kind,
+                region: region.unwrap_or("us-central1").to_string(),
+                access_key: None,
+                secret_key: None,
+            })
+        }
+    }
+}
+
+/// Build a `UnifiedConfig` from resolved credentials.
+fn build_unified_config(
+    creds: &ProviderCredentials,
+    bucket: &str,
+) -> oximedia_storage::UnifiedConfig {
+    use oximedia_storage::{StorageProvider, UnifiedConfig};
+
+    match creds.kind {
+        ProviderKind::S3 => {
+            let mut cfg = UnifiedConfig {
+                provider: StorageProvider::S3,
+                bucket: bucket.to_string(),
+                region: Some(creds.region.clone()),
+                endpoint: None,
+                access_key: creds.access_key.clone(),
+                secret_key: creds.secret_key.clone(),
+                project_id: None,
+                credentials_file: None,
+                transfer_acceleration: false,
+                path_style: false,
+                max_connections: 10,
+                timeout_seconds: 300,
+                enable_cache: false,
+                cache_dir: None,
+                max_cache_size: 10 * 1024 * 1024 * 1024,
+                retry: oximedia_storage::RetryConfig::default(),
+                pool_config: oximedia_storage::ConnectionPoolConfig::default(),
+            };
+            // Ensure access_key / secret_key are set for explicit credentials
+            if let (Some(ak), Some(sk)) = (&creds.access_key, &creds.secret_key) {
+                cfg = cfg.with_credentials(ak.clone(), sk.clone());
+            }
+            cfg
+        }
+        ProviderKind::Azure => UnifiedConfig {
+            provider: StorageProvider::Azure,
+            bucket: bucket.to_string(),
+            region: None,
+            endpoint: None,
+            access_key: creds.access_key.clone(),
+            secret_key: creds.secret_key.clone(),
+            project_id: None,
+            credentials_file: None,
+            transfer_acceleration: false,
+            path_style: false,
+            max_connections: 10,
+            timeout_seconds: 300,
+            enable_cache: false,
+            cache_dir: None,
+            max_cache_size: 10 * 1024 * 1024 * 1024,
+            retry: oximedia_storage::RetryConfig::default(),
+            pool_config: oximedia_storage::ConnectionPoolConfig::default(),
+        },
+        ProviderKind::Gcs => UnifiedConfig {
+            provider: StorageProvider::GCS,
+            bucket: bucket.to_string(),
+            region: Some(creds.region.clone()),
+            endpoint: None,
+            access_key: None,
+            secret_key: None,
+            project_id: None,
+            credentials_file: None,
+            transfer_acceleration: false,
+            path_style: false,
+            max_connections: 10,
+            timeout_seconds: 300,
+            enable_cache: false,
+            cache_dir: None,
+            max_cache_size: 10 * 1024 * 1024 * 1024,
+            retry: oximedia_storage::RetryConfig::default(),
+            pool_config: oximedia_storage::ConnectionPoolConfig::default(),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Upload
 // ---------------------------------------------------------------------------
 
@@ -284,7 +473,7 @@ async fn run_upload(
     bucket: &str,
     key: &Option<String>,
     region: &Option<String>,
-    multipart: bool,
+    _multipart: bool,
     bandwidth_limit: Option<u32>,
     json_output: bool,
 ) -> Result<()> {
@@ -302,7 +491,28 @@ async fn run_upload(
             .to_string_lossy()
             .to_string()
     });
-    let region_str = region.as_deref().unwrap_or("us-east-1");
+
+    // Validate credentials up-front; this returns a clear error message if any
+    // required environment variable is missing — never returns a simulation string.
+    let creds = resolve_credentials(provider, region.as_deref())?;
+    let region_str = creds.region.clone();
+
+    let config = build_unified_config(&creds, bucket);
+
+    // Perform the upload using the real oximedia-storage backend.
+    let etag = upload_file_via_storage(config, creds.kind, input, &remote_key, meta.len())
+        .await
+        .with_context(|| format!("Upload to {}/{} failed", bucket, remote_key))?;
+
+    if let Some(limit) = bandwidth_limit {
+        // Bandwidth limiting is handled at the OS / network layer; log intent.
+        if !json_output {
+            eprintln!(
+                "Note: requested bandwidth limit {} KB/s (advisory only)",
+                limit
+            );
+        }
+    }
 
     if json_output {
         let result = serde_json::json!({
@@ -312,10 +522,8 @@ async fn run_upload(
             "key": remote_key,
             "region": region_str,
             "size_bytes": meta.len(),
-            "multipart": multipart,
-            "bandwidth_limit_kbps": bandwidth_limit,
-            "status": "ready",
-            "message": "Upload configured; cloud credentials required for execution",
+            "etag": etag,
+            "status": "uploaded",
         });
         let s = serde_json::to_string_pretty(&result).context("Failed to serialize")?;
         println!("{s}");
@@ -332,27 +540,90 @@ async fn run_upload(
             "File size:",
             meta.len() as f64 / (1024.0 * 1024.0)
         );
-        println!(
-            "{:22} {}",
-            "Multipart:",
-            if multipart { "enabled" } else { "disabled" }
-        );
-        if let Some(limit) = bandwidth_limit {
-            println!("{:22} {} KB/s", "Bandwidth limit:", limit);
-        }
-        println!();
-        println!(
-            "{}",
-            "Note: Cloud credentials must be configured for actual upload.".yellow()
-        );
-        println!(
-            "{}",
-            "Set environment variables (AWS_ACCESS_KEY_ID, etc.) or use a credentials file."
-                .dimmed()
-        );
+        println!("{:22} {}", "ETag:", etag);
+        println!("{:22} {}", "Status:", "uploaded".green().bold());
     }
 
     Ok(())
+}
+
+/// Dispatch file upload to the appropriate storage backend.
+///
+/// Uses compile-time feature gates to ensure only compiled backends are called.
+/// Returns the ETag string on success.
+async fn upload_file_via_storage(
+    config: oximedia_storage::UnifiedConfig,
+    kind: ProviderKind,
+    file_path: &std::path::Path,
+    key: &str,
+    _size: u64,
+) -> Result<String> {
+    use oximedia_storage::UploadOptions;
+
+    let opts = UploadOptions::default();
+
+    match kind {
+        ProviderKind::S3 => {
+            #[cfg(feature = "s3")]
+            {
+                use oximedia_storage::CloudStorage as _;
+                let storage = oximedia_storage::s3::S3Storage::new(config)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to create S3 client: {}", e))?;
+                storage
+                    .upload_file(key, file_path, opts)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("S3 upload failed: {}", e))
+            }
+            #[cfg(not(feature = "s3"))]
+            {
+                let _ = (config, file_path, key, opts);
+                Err(anyhow::anyhow!(
+                    "S3 backend is not compiled in; rebuild oximedia-cli with --features s3"
+                ))
+            }
+        }
+        ProviderKind::Azure => {
+            #[cfg(feature = "azure")]
+            {
+                use oximedia_storage::CloudStorage as _;
+                let storage = oximedia_storage::azure::AzureStorage::new(config)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to create Azure client: {}", e))?;
+                storage
+                    .upload_file(key, file_path, opts)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Azure upload failed: {}", e))
+            }
+            #[cfg(not(feature = "azure"))]
+            {
+                let _ = (config, file_path, key, opts);
+                Err(anyhow::anyhow!(
+                    "Azure backend is not compiled in; rebuild oximedia-cli with --features azure"
+                ))
+            }
+        }
+        ProviderKind::Gcs => {
+            #[cfg(feature = "gcs")]
+            {
+                use oximedia_storage::CloudStorage as _;
+                let storage = oximedia_storage::gcs::GcsStorage::new(config)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to create GCS client: {}", e))?;
+                storage
+                    .upload_file(key, file_path, opts)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("GCS upload failed: {}", e))
+            }
+            #[cfg(not(feature = "gcs"))]
+            {
+                let _ = (config, file_path, key, opts);
+                Err(anyhow::anyhow!(
+                    "GCS backend is not compiled in; rebuild oximedia-cli with --features gcs"
+                ))
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +639,18 @@ async fn run_download(
     json_output: bool,
 ) -> Result<()> {
     validate_provider(provider)?;
-    let region_str = region.as_deref().unwrap_or("us-east-1");
+
+    // Validate credentials up-front.
+    let creds = resolve_credentials(provider, region.as_deref())?;
+    let region_str = creds.region.clone();
+    let config = build_unified_config(&creds, bucket);
+
+    // Perform the download using the real oximedia-storage backend.
+    download_file_via_storage(config, creds.kind, key, output)
+        .await
+        .with_context(|| format!("Download of {}/{} failed", bucket, key))?;
+
+    let file_size = std::fs::metadata(output).map(|m| m.len()).unwrap_or(0);
 
     if json_output {
         let result = serde_json::json!({
@@ -378,8 +660,8 @@ async fn run_download(
             "key": key,
             "region": region_str,
             "output": output.display().to_string(),
-            "status": "ready",
-            "message": "Download configured; cloud credentials required for execution",
+            "size_bytes": file_size,
+            "status": "downloaded",
         });
         let s = serde_json::to_string_pretty(&result).context("Failed to serialize")?;
         println!("{s}");
@@ -391,14 +673,90 @@ async fn run_download(
         println!("{:22} {}", "Remote key:", key);
         println!("{:22} {}", "Region:", region_str);
         println!("{:22} {}", "Output:", output.display());
-        println!();
         println!(
-            "{}",
-            "Note: Cloud credentials must be configured for actual download.".yellow()
+            "{:22} {:.2} MB",
+            "File size:",
+            file_size as f64 / (1024.0 * 1024.0)
         );
+        println!("{:22} {}", "Status:", "downloaded".green().bold());
     }
 
     Ok(())
+}
+
+/// Dispatch file download to the appropriate storage backend.
+async fn download_file_via_storage(
+    config: oximedia_storage::UnifiedConfig,
+    kind: ProviderKind,
+    key: &str,
+    output: &std::path::Path,
+) -> Result<()> {
+    use oximedia_storage::DownloadOptions;
+
+    let opts = DownloadOptions::default();
+
+    match kind {
+        ProviderKind::S3 => {
+            #[cfg(feature = "s3")]
+            {
+                use oximedia_storage::CloudStorage as _;
+                let storage = oximedia_storage::s3::S3Storage::new(config)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to create S3 client: {}", e))?;
+                storage
+                    .download_file(key, output, opts)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("S3 download failed: {}", e))
+            }
+            #[cfg(not(feature = "s3"))]
+            {
+                let _ = (config, key, output, opts);
+                Err(anyhow::anyhow!(
+                    "S3 backend is not compiled in; rebuild oximedia-cli with --features s3"
+                ))
+            }
+        }
+        ProviderKind::Azure => {
+            #[cfg(feature = "azure")]
+            {
+                use oximedia_storage::CloudStorage as _;
+                let storage = oximedia_storage::azure::AzureStorage::new(config)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to create Azure client: {}", e))?;
+                storage
+                    .download_file(key, output, opts)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Azure download failed: {}", e))
+            }
+            #[cfg(not(feature = "azure"))]
+            {
+                let _ = (config, key, output, opts);
+                Err(anyhow::anyhow!(
+                    "Azure backend is not compiled in; rebuild oximedia-cli with --features azure"
+                ))
+            }
+        }
+        ProviderKind::Gcs => {
+            #[cfg(feature = "gcs")]
+            {
+                use oximedia_storage::CloudStorage as _;
+                let storage = oximedia_storage::gcs::GcsStorage::new(config)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to create GCS client: {}", e))?;
+                storage
+                    .download_file(key, output, opts)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("GCS download failed: {}", e))
+            }
+            #[cfg(not(feature = "gcs"))]
+            {
+                let _ = (config, key, output, opts);
+                Err(anyhow::anyhow!(
+                    "GCS backend is not compiled in; rebuild oximedia-cli with --features gcs"
+                ))
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,60 +764,20 @@ async fn run_download(
 // ---------------------------------------------------------------------------
 
 async fn run_transcode(
-    provider: &str,
-    bucket: &str,
-    input_key: &str,
-    output_key: &str,
-    preset: &Option<String>,
-    region: &Option<String>,
-    json_output: bool,
+    _provider: &str,
+    _bucket: &str,
+    _input_key: &str,
+    _output_key: &str,
+    _preset: &Option<String>,
+    _region: &Option<String>,
+    _json_output: bool,
 ) -> Result<()> {
-    validate_provider(provider)?;
-    let region_str = region.as_deref().unwrap_or("us-east-1");
-    let preset_str = preset.as_deref().unwrap_or("av1-1080p");
-
-    // Generate a synthetic job ID
-    let job_id = format!(
-        "job-{:08x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    );
-
-    if json_output {
-        let result = serde_json::json!({
-            "command": "transcode",
-            "provider": format_provider(provider),
-            "bucket": bucket,
-            "input_key": input_key,
-            "output_key": output_key,
-            "preset": preset_str,
-            "region": region_str,
-            "job_id": job_id,
-            "status": "submitted",
-            "message": "Transcode job submitted (simulation); cloud API required for real execution",
-        });
-        let s = serde_json::to_string_pretty(&result).context("Failed to serialize")?;
-        println!("{s}");
-    } else {
-        println!("{}", "Cloud Transcode".green().bold());
-        println!("{}", "=".repeat(60));
-        println!("{:22} {}", "Provider:", format_provider(provider));
-        println!("{:22} {}", "Bucket:", bucket);
-        println!("{:22} {}", "Input key:", input_key);
-        println!("{:22} {}", "Output key:", output_key);
-        println!("{:22} {}", "Preset:", preset_str);
-        println!("{:22} {}", "Region:", region_str);
-        println!("{:22} {}", "Job ID:", job_id.cyan());
-        println!();
-        println!(
-            "{}",
-            "Note: Cloud API credentials are required for actual transcoding.".yellow()
-        );
-    }
-
-    Ok(())
+    // Managed cloud transcoding (AWS MediaConvert, Azure Media Services, etc.) is not
+    // implemented in OxiMedia.  Use `oximedia transcode` for local transcoding.
+    Err(anyhow::anyhow!(
+        "managed cloud transcoding is not available; \
+         use 'oximedia transcode' for local transcoding instead"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -467,39 +785,17 @@ async fn run_transcode(
 // ---------------------------------------------------------------------------
 
 async fn run_status(
-    provider: &str,
-    job_id: &str,
-    region: &Option<String>,
-    json_output: bool,
+    _provider: &str,
+    _job_id: &str,
+    _region: &Option<String>,
+    _json_output: bool,
 ) -> Result<()> {
-    validate_provider(provider)?;
-    let region_str = region.as_deref().unwrap_or("us-east-1");
-
-    if json_output {
-        let result = serde_json::json!({
-            "command": "status",
-            "provider": format_provider(provider),
-            "job_id": job_id,
-            "region": region_str,
-            "status": "unknown",
-            "message": "Job status lookup requires cloud API credentials",
-        });
-        let s = serde_json::to_string_pretty(&result).context("Failed to serialize")?;
-        println!("{s}");
-    } else {
-        println!("{}", "Cloud Job Status".green().bold());
-        println!("{}", "=".repeat(60));
-        println!("{:22} {}", "Provider:", format_provider(provider));
-        println!("{:22} {}", "Job ID:", job_id);
-        println!("{:22} {}", "Region:", region_str);
-        println!();
-        println!(
-            "{}",
-            "Note: Cloud API credentials are required for status lookup.".yellow()
-        );
-    }
-
-    Ok(())
+    // Job status tracking requires a managed cloud transcoding service.
+    // OxiMedia does not integrate with AWS MediaConvert, Azure Media Services, etc.
+    Err(anyhow::anyhow!(
+        "cloud job status requires a managed cloud transcoding service; \
+         use 'oximedia transcode' for local jobs"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -633,5 +929,49 @@ mod tests {
         assert!(total > 0.0);
         // Sanity: 100GB S3 + 50GB egress + 120min transcode should be > $5
         assert!(total > 5.0);
+    }
+
+    #[test]
+    fn unknown_provider_returns_err() {
+        match resolve_credentials("unknown-provider-xyz", None) {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("unknown") || msg.contains("provider"),
+                    "got: {msg}"
+                );
+            }
+            Ok(_) => panic!("expected error for unknown provider"),
+        }
+    }
+
+    #[test]
+    fn s3_missing_key_id_returns_err() {
+        // This test is only reliable when AWS credentials are absent in the environment.
+        // We check the error message shape when the var happens to be missing.
+        let result = resolve_credentials("s3", None);
+        if let Err(e) = result {
+            let msg = e.to_string();
+            // Must mention AWS_ACCESS_KEY_ID or credentials — never "simulation"
+            assert!(
+                msg.contains("AWS_ACCESS_KEY_ID") || msg.contains("credentials"),
+                "expected credential mention, got: {msg}"
+            );
+            assert!(
+                !msg.to_lowercase().contains("simulation"),
+                "must not say simulation: {msg}"
+            );
+        }
+        // If result is Ok (creds are set in the environment), that's also fine.
+    }
+
+    #[test]
+    fn provider_kind_from_str_roundtrip() {
+        assert_eq!(ProviderKind::from_str("s3"), Some(ProviderKind::S3));
+        assert_eq!(ProviderKind::from_str("aws"), Some(ProviderKind::S3));
+        assert_eq!(ProviderKind::from_str("azure"), Some(ProviderKind::Azure));
+        assert_eq!(ProviderKind::from_str("gcs"), Some(ProviderKind::Gcs));
+        assert_eq!(ProviderKind::from_str("google"), Some(ProviderKind::Gcs));
+        assert_eq!(ProviderKind::from_str("dropbox"), None);
     }
 }

@@ -1,5 +1,6 @@
 //! AWS Media Services integration
 
+use aws_sdk_cloudwatch::Client as CloudWatchClient;
 use aws_sdk_mediaconvert::Client as MediaConvertClient;
 use aws_sdk_medialive::Client as MediaLiveClient;
 use aws_sdk_mediapackage::Client as MediaPackageClient;
@@ -13,6 +14,7 @@ pub struct AwsMediaServices {
     media_convert: MediaConvertClient,
     media_live: MediaLiveClient,
     media_package: MediaPackageClient,
+    cloud_watch: CloudWatchClient,
 }
 
 impl AwsMediaServices {
@@ -30,11 +32,13 @@ impl AwsMediaServices {
         let media_convert = MediaConvertClient::new(&config);
         let media_live = MediaLiveClient::new(&config);
         let media_package = MediaPackageClient::new(&config);
+        let cloud_watch = CloudWatchClient::new(&config);
 
         Ok(Self {
             media_convert,
             media_live,
             media_package,
+            cloud_watch,
         })
     }
 
@@ -344,21 +348,67 @@ impl AwsMediaServices {
 
     /// Get `CloudWatch` metrics for a `MediaConvert` job.
     ///
-    /// Returns a map of metric name to value. The simplified implementation
-    /// returns zero-valued placeholders; a full production implementation
-    /// would query the CloudWatch SDK with dimension `MediaType=Job`.
+    /// Queries the CloudWatch `GetMetricStatistics` API for the metrics:
+    /// - `JobDuration` (returned as `duration_seconds`)
+    /// - `InputFileSize` (returned as `input_size_bytes`)
+    /// - `OutputFileSize` (returned as `output_size_bytes`)
+    ///
+    /// Uses a 24-hour lookback window with a 86400-second period and `Sum` statistic.
     ///
     /// # Errors
     ///
-    /// Returns an error if retrieving metrics fails
-    #[allow(clippy::unused_async)]
-    pub async fn get_metrics(&self, _job_id: &str) -> Result<HashMap<String, f64>> {
-        let mut metrics = HashMap::new();
-        metrics.insert("duration_seconds".to_string(), 0.0);
-        metrics.insert("input_size_bytes".to_string(), 0.0);
-        metrics.insert("output_size_bytes".to_string(), 0.0);
+    /// Returns `CloudError::MediaService` if the CloudWatch API call fails.
+    pub async fn get_metrics(&self, job_id: &str) -> Result<HashMap<String, f64>> {
+        use aws_sdk_cloudwatch::types::{Dimension, Statistic};
+        use aws_smithy_types::DateTime as SmithyDateTime;
+        use chrono::Utc;
 
-        Ok(metrics)
+        let now = Utc::now();
+        let start = now - chrono::Duration::seconds(86_400);
+
+        let end_time = SmithyDateTime::from_secs(now.timestamp());
+        let start_time = SmithyDateTime::from_secs(start.timestamp());
+
+        // Map of (CW metric name, output key)
+        let metric_defs: &[(&str, &str)] = &[
+            ("JobDuration", "duration_seconds"),
+            ("InputFileSize", "input_size_bytes"),
+            ("OutputFileSize", "output_size_bytes"),
+        ];
+
+        let mut result = HashMap::new();
+
+        for (cw_metric, output_key) in metric_defs {
+            let dimension = Dimension::builder().name("Job").value(job_id).build();
+
+            let resp = self
+                .cloud_watch
+                .get_metric_statistics()
+                .namespace("AWS/MediaConvert")
+                .metric_name(*cw_metric)
+                .dimensions(dimension)
+                .start_time(start_time)
+                .end_time(end_time)
+                .period(86_400)
+                .statistics(Statistic::Sum)
+                .send()
+                .await
+                .map_err(|e| {
+                    CloudError::MediaService(format!(
+                        "CloudWatch GetMetricStatistics failed for {cw_metric}: {e}"
+                    ))
+                })?;
+
+            let value = resp
+                .datapoints()
+                .iter()
+                .filter_map(|dp| dp.sum())
+                .fold(0.0_f64, |acc, v| acc + v);
+
+            result.insert((*output_key).to_string(), value);
+        }
+
+        Ok(result)
     }
 }
 

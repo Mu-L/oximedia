@@ -28,6 +28,7 @@ use oximedia_normalize::{Normalizer, NormalizerConfig, ProcessingMode};
 #[pyfunction]
 #[pyo3(signature = (samples, sample_rate, channels=2, standard="ebu-r128", max_gain_db=20.0))]
 pub fn normalize_loudness(
+    py: Python<'_>,
     samples: Vec<f32>,
     sample_rate: f64,
     channels: usize,
@@ -36,24 +37,28 @@ pub fn normalize_loudness(
 ) -> PyResult<Vec<f32>> {
     let std = parse_standard(standard)?;
 
-    let mut config = NormalizerConfig::new(std, sample_rate, channels);
-    config.processing_mode = ProcessingMode::TwoPass;
-    config.max_gain_db = max_gain_db;
+    // Release GIL for the CPU-intensive two-pass EBU R128 analysis and normalization
+    let result = py.detach(move || -> Result<Vec<f32>, String> {
+        let mut config = NormalizerConfig::new(std, sample_rate, channels);
+        config.processing_mode = ProcessingMode::TwoPass;
+        config.max_gain_db = max_gain_db;
 
-    let mut normalizer = Normalizer::new(config).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create normalizer: {}", e))
-    })?;
+        let mut normalizer =
+            Normalizer::new(config).map_err(|e| format!("Failed to create normalizer: {}", e))?;
 
-    // Pass 1: analysis
-    normalizer.analyze_f32(&samples);
+        // Pass 1: analysis
+        normalizer.analyze_f32(&samples);
 
-    // Pass 2: apply gain
-    let mut output = vec![0.0f32; samples.len()];
-    normalizer.process_f32(&samples, &mut output).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("Normalization processing failed: {}", e))
-    })?;
+        // Pass 2: apply gain
+        let mut output = vec![0.0f32; samples.len()];
+        normalizer
+            .process_f32(&samples, &mut output)
+            .map_err(|e| format!("Normalization processing failed: {}", e))?;
 
-    Ok(output)
+        Ok(output)
+    });
+
+    result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
 /// Parse a standard string into the `oximedia_metering::Standard` enum.
@@ -91,6 +96,7 @@ fn parse_standard(s: &str) -> PyResult<Standard> {
 #[pyfunction]
 #[pyo3(signature = (samples, sample_rate, threshold_db=-20.0, ratio=4.0, attack_ms=5.0, release_ms=50.0))]
 pub fn apply_compressor(
+    py: Python<'_>,
     samples: Vec<f32>,
     sample_rate: f32,
     threshold_db: f32,
@@ -109,36 +115,39 @@ pub fn apply_compressor(
         ));
     }
 
-    let threshold_linear = db_to_linear(threshold_db);
-    let attack_coeff = time_to_coeff(attack_ms * 0.001, sample_rate);
-    let release_coeff = time_to_coeff(release_ms * 0.001, sample_rate);
+    // Release GIL for the sample-by-sample envelope following and gain computation
+    Ok(py.detach(move || {
+        let threshold_linear = db_to_linear(threshold_db);
+        let attack_coeff = time_to_coeff(attack_ms * 0.001, sample_rate);
+        let release_coeff = time_to_coeff(release_ms * 0.001, sample_rate);
 
-    let mut envelope = 0.0f32;
-    let mut output = Vec::with_capacity(samples.len());
+        let mut envelope = 0.0f32;
+        let mut output = Vec::with_capacity(samples.len());
 
-    for &sample in &samples {
-        let abs_sample = sample.abs();
+        for &sample in &samples {
+            let abs_sample = sample.abs();
 
-        // Envelope follower
-        if abs_sample > envelope {
-            envelope = attack_coeff * envelope + (1.0 - attack_coeff) * abs_sample;
-        } else {
-            envelope = release_coeff * envelope + (1.0 - release_coeff) * abs_sample;
+            // Envelope follower
+            if abs_sample > envelope {
+                envelope = attack_coeff * envelope + (1.0 - attack_coeff) * abs_sample;
+            } else {
+                envelope = release_coeff * envelope + (1.0 - release_coeff) * abs_sample;
+            }
+
+            // Gain computation
+            let gain = if envelope > threshold_linear && envelope > 1e-10 {
+                let overshoot_db = linear_to_db(envelope) - threshold_db;
+                let gain_reduction_db = overshoot_db * (1.0 - 1.0 / ratio);
+                db_to_linear(-gain_reduction_db)
+            } else {
+                1.0
+            };
+
+            output.push(sample * gain);
         }
 
-        // Gain computation
-        let gain = if envelope > threshold_linear && envelope > 1e-10 {
-            let overshoot_db = linear_to_db(envelope) - threshold_db;
-            let gain_reduction_db = overshoot_db * (1.0 - 1.0 / ratio);
-            db_to_linear(-gain_reduction_db)
-        } else {
-            1.0
-        };
-
-        output.push(sample * gain);
-    }
-
-    Ok(output)
+        output
+    }))
 }
 
 // ---------------------------------------------------------------------------

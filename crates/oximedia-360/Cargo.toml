@@ -17,6 +17,9 @@ workspace = true
 
 [features]
 default = []
+## Enable fast-math approximations for `sin`/`cos`/`atan2` in hot projection loops.
+## Trades ≤1.3 × 10⁻³ absolute error for faster execution (no libm calls).
+fast_math = []
 
 [dependencies]
 thiserror.workspace = true

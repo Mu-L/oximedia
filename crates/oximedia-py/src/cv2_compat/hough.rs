@@ -26,52 +26,54 @@ pub fn hough_lines(
 ) -> PyResult<Py<PyAny>> {
     let _ = (srn, stn);
     let (data, h, w, ch) = extract_img(py, &image)?;
-    let binary: Vec<bool> = (0..h * w).map(|i| data[i * ch] > 0).collect();
 
-    let rho_res = rho;
-    let theta_res = theta;
-    let max_rho = ((h as f64).hypot(w as f64) + 1.0) / rho_res;
-    let n_rho = max_rho as usize * 2 + 1;
-    let n_theta = ((max_theta - min_theta) / theta_res).ceil() as usize + 1;
+    // Release GIL for the O(H*W*N_theta) accumulator voting
+    let lines = py.detach(move || {
+        let binary: Vec<bool> = (0..h * w).map(|i| data[i * ch] > 0).collect();
 
-    // Accumulator
-    let mut acc = vec![0i32; n_rho * n_theta];
+        let rho_res = rho;
+        let theta_res = theta;
+        let max_rho = ((h as f64).hypot(w as f64) + 1.0) / rho_res;
+        let n_rho = max_rho as usize * 2 + 1;
+        let n_theta = ((max_theta - min_theta) / theta_res).ceil() as usize + 1;
 
-    let thetas: Vec<f64> = (0..n_theta)
-        .map(|i| min_theta + i as f64 * theta_res)
-        .collect();
-    let cos_t: Vec<f64> = thetas.iter().map(|&t| t.cos()).collect();
-    let sin_t: Vec<f64> = thetas.iter().map(|&t| t.sin()).collect();
+        let mut acc = vec![0i32; n_rho * n_theta];
 
-    for y in 0..h {
-        for x in 0..w {
-            if !binary[y * w + x] {
-                continue;
-            }
-            for ti in 0..n_theta {
-                let rho_val = x as f64 * cos_t[ti] + y as f64 * sin_t[ti];
-                let ri = ((rho_val / rho_res) + max_rho) as usize;
-                if ri < n_rho {
-                    acc[ri * n_theta + ti] += 1;
+        let thetas: Vec<f64> = (0..n_theta)
+            .map(|i| min_theta + i as f64 * theta_res)
+            .collect();
+        let cos_t: Vec<f64> = thetas.iter().map(|&t| t.cos()).collect();
+        let sin_t: Vec<f64> = thetas.iter().map(|&t| t.sin()).collect();
+
+        for y in 0..h {
+            for x in 0..w {
+                if !binary[y * w + x] {
+                    continue;
+                }
+                for ti in 0..n_theta {
+                    let rho_val = x as f64 * cos_t[ti] + y as f64 * sin_t[ti];
+                    let ri = ((rho_val / rho_res) + max_rho) as usize;
+                    if ri < n_rho {
+                        acc[ri * n_theta + ti] += 1;
+                    }
                 }
             }
         }
-    }
 
-    // Extract lines above threshold, sorted by votes descending
-    let mut lines: Vec<(f64, f64, i32)> = Vec::new();
-    for ri in 0..n_rho {
-        for ti in 0..n_theta {
-            let votes = acc[ri * n_theta + ti];
-            if votes >= threshold {
-                let rho_val = (ri as f64 - max_rho) * rho_res;
-                let theta_val = thetas[ti];
-                lines.push((rho_val, theta_val, votes));
+        let mut lines: Vec<(f64, f64, i32)> = Vec::new();
+        for ri in 0..n_rho {
+            for ti in 0..n_theta {
+                let votes = acc[ri * n_theta + ti];
+                if votes >= threshold {
+                    let rho_val = (ri as f64 - max_rho) * rho_res;
+                    let theta_val = thetas[ti];
+                    lines.push((rho_val, theta_val, votes));
+                }
             }
         }
-    }
-
-    lines.sort_by(|a, b| b.2.cmp(&a.2));
+        lines.sort_by(|a, b| b.2.cmp(&a.2));
+        lines
+    });
 
     let list = PyList::new(py, lines.iter().map(|&(r, t, _)| (r, t)))?;
     Ok(list.into())
@@ -95,45 +97,50 @@ pub fn hough_lines_p(
 ) -> PyResult<Py<PyAny>> {
     let _ = (rho, theta, max_line_gap);
     let (data, h, w, ch) = extract_img(py, &image)?;
-    let binary: Vec<bool> = (0..h * w).map(|i| data[i * ch] > 0).collect();
 
-    let mut segments: Vec<((i32, i32), (i32, i32))> = Vec::new();
+    // Release GIL for the run-length scanning over rows and columns
+    let segments = py.detach(move || {
+        let binary: Vec<bool> = (0..h * w).map(|i| data[i * ch] > 0).collect();
+        let mut segments: Vec<((i32, i32), (i32, i32))> = Vec::new();
 
-    // Horizontal scan: find runs of active edge pixels
-    for y in 0..h {
-        let mut run_start: Option<usize> = None;
-        for x in 0..=w {
-            let active = x < w && binary[y * w + x];
-            if active && run_start.is_none() {
-                run_start = Some(x);
-            } else if !active {
-                if let Some(xs) = run_start.take() {
-                    let length = (x - xs) as f64;
-                    if length >= min_line_length && length >= threshold as f64 {
-                        segments.push(((xs as i32, y as i32), (x as i32 - 1, y as i32)));
+        // Horizontal scan: find runs of active edge pixels
+        for y in 0..h {
+            let mut run_start: Option<usize> = None;
+            for x in 0..=w {
+                let active = x < w && binary[y * w + x];
+                if active && run_start.is_none() {
+                    run_start = Some(x);
+                } else if !active {
+                    if let Some(xs) = run_start.take() {
+                        let length = (x - xs) as f64;
+                        if length >= min_line_length && length >= threshold as f64 {
+                            segments.push(((xs as i32, y as i32), (x as i32 - 1, y as i32)));
+                        }
                     }
                 }
             }
         }
-    }
 
-    // Vertical scan: find runs of active edge pixels
-    for x in 0..w {
-        let mut run_start: Option<usize> = None;
-        for y in 0..=h {
-            let active = y < h && binary[y * w + x];
-            if active && run_start.is_none() {
-                run_start = Some(y);
-            } else if !active {
-                if let Some(ys) = run_start.take() {
-                    let length = (y - ys) as f64;
-                    if length >= min_line_length && length >= threshold as f64 {
-                        segments.push(((x as i32, ys as i32), (x as i32, y as i32 - 1)));
+        // Vertical scan: find runs of active edge pixels
+        for x in 0..w {
+            let mut run_start: Option<usize> = None;
+            for y in 0..=h {
+                let active = y < h && binary[y * w + x];
+                if active && run_start.is_none() {
+                    run_start = Some(y);
+                } else if !active {
+                    if let Some(ys) = run_start.take() {
+                        let length = (y - ys) as f64;
+                        if length >= min_line_length && length >= threshold as f64 {
+                            segments.push(((x as i32, ys as i32), (x as i32, y as i32 - 1)));
+                        }
                     }
                 }
             }
         }
-    }
+
+        segments
+    });
 
     let list = PyList::new(py, segments.iter().map(|&(a, b)| (a, b)))?;
     Ok(list.into())
@@ -160,72 +167,73 @@ pub fn hough_circles(
     let _ = (method, dp, param1);
     let (data, h, w, ch) = extract_img(py, &image)?;
 
-    let gray: Vec<u8> = if ch == 1 {
-        data
-    } else {
-        (0..h * w)
-            .map(|i| {
-                let off = i * ch;
-                (0.299 * data[off + 2] as f32
-                    + 0.587 * data[off + 1] as f32
-                    + 0.114 * data[off] as f32) as u8
-            })
-            .collect()
-    };
+    // Release GIL for the O(R_range * H * W * 36) circle accumulator voting
+    let circles = py.detach(move || {
+        let gray: Vec<u8> = if ch == 1 {
+            data
+        } else {
+            (0..h * w)
+                .map(|i| {
+                    let off = i * ch;
+                    (0.299 * data[off + 2] as f32
+                        + 0.587 * data[off + 1] as f32
+                        + 0.114 * data[off] as f32) as u8
+                })
+                .collect()
+        };
 
-    let min_r = min_radius.max(1) as usize;
-    let max_r = if max_radius <= 0 {
-        w.min(h) / 2
-    } else {
-        max_radius as usize
-    };
-    let threshold = param2 as i32;
-    let min_dist_sq = min_dist * min_dist;
+        let min_r = min_radius.max(1) as usize;
+        let max_r = if max_radius <= 0 {
+            w.min(h) / 2
+        } else {
+            max_radius as usize
+        };
+        let threshold = param2 as i32;
+        let min_dist_sq = min_dist * min_dist;
 
-    let mut circles: Vec<(f32, f32, f32, i32)> = Vec::new(); // (cx, cy, r, votes)
+        let mut circles: Vec<(f32, f32, f32, i32)> = Vec::new(); // (cx, cy, r, votes)
 
-    for r in min_r..=max_r {
-        let mut acc = vec![0i32; h * w];
+        for r in min_r..=max_r {
+            let mut acc = vec![0i32; h * w];
 
-        // For each bright pixel, vote for candidate circle centres at distance r
-        for y in 0..h {
-            for x in 0..w {
-                if gray[y * w + x] < 50 {
-                    continue; // rough edge threshold
+            for y in 0..h {
+                for x in 0..w {
+                    if gray[y * w + x] < 50 {
+                        continue;
+                    }
+                    for step in 0..36 {
+                        let angle = step as f64 * PI / 18.0;
+                        let cx = x as f64 + r as f64 * angle.cos();
+                        let cy = y as f64 + r as f64 * angle.sin();
+                        let cxi = cx as i64;
+                        let cyi = cy as i64;
+                        if cxi >= 0 && cxi < w as i64 && cyi >= 0 && cyi < h as i64 {
+                            acc[cyi as usize * w + cxi as usize] += 1;
+                        }
+                    }
                 }
-                for step in 0..36 {
-                    let angle = step as f64 * PI / 18.0;
-                    let cx = x as f64 + r as f64 * angle.cos();
-                    let cy = y as f64 + r as f64 * angle.sin();
-                    let cxi = cx as i64;
-                    let cyi = cy as i64;
-                    if cxi >= 0 && cxi < w as i64 && cyi >= 0 && cyi < h as i64 {
-                        acc[cyi as usize * w + cxi as usize] += 1;
+            }
+
+            for cy in r..h.saturating_sub(r) {
+                for cx in r..w.saturating_sub(r) {
+                    let votes = acc[cy * w + cx];
+                    if votes >= threshold {
+                        let too_close = circles.iter().any(|&(ex, ey, _, _)| {
+                            let dx = cx as f64 - ex as f64;
+                            let dy = cy as f64 - ey as f64;
+                            dx * dx + dy * dy < min_dist_sq
+                        });
+                        if !too_close {
+                            circles.push((cx as f32, cy as f32, r as f32, votes));
+                        }
                     }
                 }
             }
         }
 
-        // Collect maxima above threshold while respecting minimum distance
-        for cy in r..h.saturating_sub(r) {
-            for cx in r..w.saturating_sub(r) {
-                let votes = acc[cy * w + cx];
-                if votes >= threshold {
-                    let too_close = circles.iter().any(|&(ex, ey, _, _)| {
-                        let dx = cx as f64 - ex as f64;
-                        let dy = cy as f64 - ey as f64;
-                        dx * dx + dy * dy < min_dist_sq
-                    });
-                    if !too_close {
-                        circles.push((cx as f32, cy as f32, r as f32, votes));
-                    }
-                }
-            }
-        }
-    }
-
-    // Sort by votes descending
-    circles.sort_by(|a, b| b.3.cmp(&a.3));
+        circles.sort_by(|a, b| b.3.cmp(&a.3));
+        circles
+    });
 
     let list = PyList::new(py, circles.iter().map(|&(x, y, r, _)| (x, y, r)))?;
     Ok(list.into())

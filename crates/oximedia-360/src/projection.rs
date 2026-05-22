@@ -7,6 +7,10 @@ use std::collections::HashMap;
 
 use crate::VrError;
 
+// Fast-math trig re-exports: used in hot projection loops when `fast_math` feature is on.
+#[cfg(feature = "fast_math")]
+use crate::sampling::{fast_atan2, fast_cos, fast_sin};
+
 // ─── Coordinate types ────────────────────────────────────────────────────────
 
 /// A point on the unit sphere expressed in spherical coordinates.
@@ -102,9 +106,23 @@ pub fn sphere_to_equirect(s: &SphericalCoord) -> UvCoord {
 /// The dominant axis selects the face; the two remaining components are
 /// divided by the dominant one to obtain the face-local UV.
 pub fn sphere_to_cube_face(s: &SphericalCoord) -> CubeFaceCoord {
-    let x = s.elevation_rad.cos() * s.azimuth_rad.sin();
-    let y = s.elevation_rad.sin();
-    let z = s.elevation_rad.cos() * s.azimuth_rad.cos();
+    #[cfg(feature = "fast_math")]
+    let (sin_az, cos_az, sin_el, cos_el) = (
+        fast_sin(s.azimuth_rad),
+        fast_cos(s.azimuth_rad),
+        fast_sin(s.elevation_rad),
+        fast_cos(s.elevation_rad),
+    );
+    #[cfg(not(feature = "fast_math"))]
+    let (sin_az, cos_az, sin_el, cos_el) = (
+        s.azimuth_rad.sin(),
+        s.azimuth_rad.cos(),
+        s.elevation_rad.sin(),
+        s.elevation_rad.cos(),
+    );
+    let x = cos_el * sin_az;
+    let y = sin_el;
+    let z = cos_el * cos_az;
 
     let ax = x.abs();
     let ay = y.abs();
@@ -199,6 +217,9 @@ pub fn cube_face_to_sphere(c: &CubeFaceCoord) -> SphericalCoord {
     let (nx, ny, nz) = (x / len, y / len, z / len);
 
     let elevation_rad = ny.asin();
+    #[cfg(feature = "fast_math")]
+    let azimuth_rad = fast_atan2(nx, nz);
+    #[cfg(not(feature = "fast_math"))]
     let azimuth_rad = nx.atan2(nz);
 
     SphericalCoord {

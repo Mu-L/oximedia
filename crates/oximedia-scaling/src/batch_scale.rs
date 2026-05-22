@@ -909,11 +909,14 @@ mod tests {
                     ProgressEvent::BatchCancelled { .. } => "cancelled",
                     ProgressEvent::BatchFinished { .. } => "finished",
                 };
-                ev_clone.lock().unwrap().push(label.to_string());
+                ev_clone
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(label.to_string());
             });
 
         let _ = job.process_all();
-        let received = events.lock().unwrap();
+        let received = events.lock().unwrap_or_else(|e| e.into_inner());
         // 2 items * (started + completed) + BatchFinished = 5 events
         assert_eq!(received.len(), 5);
         assert_eq!(received[0], "started");
@@ -941,13 +944,19 @@ mod tests {
         )
         .with_progress_callback(move |event| {
             if let ProgressEvent::ItemFailed { source, .. } = event {
-                fp_clone.lock().unwrap().push(source);
+                fp_clone
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(source);
             }
         });
 
         let summary = job.process_all();
         assert_eq!(summary.failed, 1);
-        assert_eq!(failed_paths.lock().unwrap().len(), 1);
+        assert_eq!(
+            failed_paths.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            1
+        );
     }
 
     #[test]
@@ -979,12 +988,13 @@ mod tests {
                 skipped,
             } = event
             {
-                *fin_clone.lock().unwrap() = Some((completed, failed, skipped));
+                *fin_clone.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((completed, failed, skipped));
             }
         });
 
         let _ = job.process_all();
-        let result = finished.lock().unwrap();
+        let result = finished.lock().unwrap_or_else(|e| e.into_inner());
         let (c, f, s) = result.expect("BatchFinished should have been emitted");
         assert_eq!(c, 2);
         assert_eq!(f, 1);

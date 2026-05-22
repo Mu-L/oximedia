@@ -565,3 +565,330 @@ fn test_read_tiled_exr_2x2_tiles() {
 
     let _ = std::fs::remove_file(&temp_path);
 }
+
+// -------------------------------------------------------------------------
+// Tiled EXR compression-dispatch tests
+//
+// These exercise the tile-path decompression dispatch for every compression
+// scheme. They mirror the structure of `build_tiled_exr` but compress each
+// tile's pixel buffer with the matching `compress_*` function, then verify
+// `read_exr` decodes the tiled image back through the corresponding
+// `decompress_*` function.
+// -------------------------------------------------------------------------
+
+/// Builds a tiled EXR binary with the given compression applied to each tile.
+///
+/// The geometry matches `build_tiled_exr`: a 4×4 RGB-half image split into
+/// 2×2-pixel tiles (4 tiles total). Half-float channels are used so that the
+/// 16-bit codecs (PIZ, B44, B44A) operate on their native element width.
+///
+/// `tile_values` supplies the per-tile (R, G, B) half-float bit patterns in
+/// row-major tile order: (0,0), (1,0), (0,1), (1,1).
+fn build_tiled_exr_compressed(
+    compression: ExrCompression,
+    tile_values: &[(u16, u16, u16); 4],
+) -> Vec<u8> {
+    use super::compress::{
+        compress_b44, compress_b44a, compress_dwaa, compress_dwab, compress_piz, compress_pxr24,
+        compress_rle, compress_zip,
+    };
+    use super::types::EXR_MAGIC;
+    use byteorder::{LittleEndian, WriteBytesExt};
+
+    let mut buf: Vec<u8> = Vec::new();
+
+    // --- Magic + version (tiled bit set) ---
+    buf.write_u32::<LittleEndian>(EXR_MAGIC).expect("magic");
+    let version_word: u32 = 2 | (0x0200_u32 << 8);
+    buf.write_u32::<LittleEndian>(version_word)
+        .expect("version");
+
+    let write_str = |buf: &mut Vec<u8>, s: &str| {
+        buf.extend_from_slice(s.as_bytes());
+        buf.push(0);
+    };
+    let write_attr_raw = |buf: &mut Vec<u8>, name: &str, attr_type: &str, data: &[u8]| {
+        write_str(buf, name);
+        write_str(buf, attr_type);
+        buf.write_u32::<LittleEndian>(data.len() as u32)
+            .expect("attr size");
+        buf.extend_from_slice(data);
+    };
+
+    // --- channels attribute (RGB half-float) ---
+    {
+        let mut ch_data: Vec<u8> = Vec::new();
+        for ch_name in &["R", "G", "B"] {
+            ch_data.extend_from_slice(ch_name.as_bytes());
+            ch_data.push(0);
+            // pixel_type = 1 (Half)
+            ch_data.write_u32::<LittleEndian>(1).expect("ch type");
+            ch_data.push(0); // pLinear
+            ch_data.extend_from_slice(&[0u8; 3]); // reserved
+            ch_data.write_u32::<LittleEndian>(1).expect("x_sampling");
+            ch_data.write_u32::<LittleEndian>(1).expect("y_sampling");
+        }
+        ch_data.push(0);
+        write_attr_raw(&mut buf, "channels", "chlist", &ch_data);
+    }
+
+    // --- compression (variant discriminant maps to the EXR compression byte) ---
+    write_attr_raw(&mut buf, "compression", "compression", &[compression as u8]);
+
+    // --- dataWindow / displayWindow (4×4) ---
+    for attr in &["dataWindow", "displayWindow"] {
+        let mut d: Vec<u8> = Vec::new();
+        d.write_i32::<LittleEndian>(0).expect("xMin");
+        d.write_i32::<LittleEndian>(0).expect("yMin");
+        d.write_i32::<LittleEndian>(3).expect("xMax");
+        d.write_i32::<LittleEndian>(3).expect("yMax");
+        write_attr_raw(&mut buf, attr, "box2i", &d);
+    }
+
+    // --- lineOrder ---
+    write_attr_raw(&mut buf, "lineOrder", "lineOrder", &[0u8]);
+
+    // --- pixelAspectRatio ---
+    {
+        let mut d: Vec<u8> = Vec::new();
+        d.write_f32::<LittleEndian>(1.0).expect("par");
+        write_attr_raw(&mut buf, "pixelAspectRatio", "float", &d);
+    }
+
+    // --- screenWindowCenter ---
+    {
+        let mut d: Vec<u8> = Vec::new();
+        d.write_f32::<LittleEndian>(0.0).expect("swc x");
+        d.write_f32::<LittleEndian>(0.0).expect("swc y");
+        write_attr_raw(&mut buf, "screenWindowCenter", "v2f", &d);
+    }
+
+    // --- screenWindowWidth ---
+    {
+        let mut d: Vec<u8> = Vec::new();
+        d.write_f32::<LittleEndian>(1.0).expect("sww");
+        write_attr_raw(&mut buf, "screenWindowWidth", "float", &d);
+    }
+
+    // --- tiledesc (2×2 tiles, SINGLE_LEVEL) ---
+    {
+        let mut d: Vec<u8> = Vec::new();
+        d.write_u32::<LittleEndian>(2).expect("tile_width");
+        d.write_u32::<LittleEndian>(2).expect("tile_height");
+        d.push(0);
+        write_attr_raw(&mut buf, "tiledesc", "tiledesc", &d);
+    }
+
+    // End of header
+    buf.push(0);
+
+    // --- Tile offset table (4 tiles × i64 LE, patched after) ---
+    let offset_table_pos = buf.len();
+    for _ in 0..4usize {
+        buf.write_i64::<LittleEndian>(0)
+            .expect("offset placeholder");
+    }
+
+    // --- Tile data ---
+    // tile_order: (col, row) in row-major order — idx = row * 2 + col.
+    let tile_order: &[(i32, i32)] = &[(0, 0), (1, 0), (0, 1), (1, 1)];
+    let mut tile_file_offsets: Vec<i64> = Vec::with_capacity(4);
+
+    for (idx, &(tile_col, tile_row)) in tile_order.iter().enumerate() {
+        tile_file_offsets.push(buf.len() as i64);
+
+        buf.write_i32::<LittleEndian>(tile_col).expect("tile_x");
+        buf.write_i32::<LittleEndian>(tile_row).expect("tile_y");
+        buf.write_i32::<LittleEndian>(0).expect("level_x");
+        buf.write_i32::<LittleEndian>(0).expect("level_y");
+
+        // Raw interleaved RGB-half pixel buffer: 2×2 pixels × 3 channels × 2 bytes.
+        let (r, g, b) = tile_values[idx];
+        let mut raw: Vec<u8> = Vec::with_capacity(2 * 2 * 3 * 2);
+        for _ in 0..4u8 {
+            raw.extend_from_slice(&r.to_le_bytes());
+            raw.extend_from_slice(&g.to_le_bytes());
+            raw.extend_from_slice(&b.to_le_bytes());
+        }
+
+        // Compress the tile buffer with the matching codec.
+        let pixel_data = match compression {
+            ExrCompression::None => raw,
+            ExrCompression::Rle => compress_rle(&raw).expect("rle compress"),
+            ExrCompression::Zip | ExrCompression::Zips => compress_zip(&raw).expect("zip compress"),
+            ExrCompression::Piz => compress_piz(&raw).expect("piz compress"),
+            ExrCompression::Pxr24 => compress_pxr24(&raw).expect("pxr24 compress"),
+            ExrCompression::B44 => compress_b44(&raw).expect("b44 compress"),
+            ExrCompression::B44a => compress_b44a(&raw).expect("b44a compress"),
+            ExrCompression::Dwaa => compress_dwaa(&raw).expect("dwaa compress"),
+            ExrCompression::Dwab => compress_dwab(&raw).expect("dwab compress"),
+        };
+
+        buf.write_i32::<LittleEndian>(pixel_data.len() as i32)
+            .expect("pixel_data_size");
+        buf.extend_from_slice(&pixel_data);
+    }
+
+    // Patch tile offset table.
+    for (i, &off) in tile_file_offsets.iter().enumerate() {
+        let pos = offset_table_pos + i * 8;
+        buf[pos..pos + 8].copy_from_slice(&off.to_le_bytes());
+    }
+
+    buf
+}
+
+/// Builds the raw interleaved RGB-half pixel buffer for one 2×2 tile.
+fn raw_tile_buffer(r: u16, g: u16, b: u16) -> Vec<u8> {
+    let mut raw: Vec<u8> = Vec::with_capacity(2 * 2 * 3 * 2);
+    for _ in 0..4u8 {
+        raw.extend_from_slice(&r.to_le_bytes());
+        raw.extend_from_slice(&g.to_le_bytes());
+        raw.extend_from_slice(&b.to_le_bytes());
+    }
+    raw
+}
+
+/// Runs `compress_*` then `decompress_*` for `compression` on a raw tile
+/// buffer, returning the exact bytes the tile path's decompressor must yield.
+///
+/// This makes the dispatch tests definitive: the tile-path output is compared
+/// against the very same codec round-trip, so a test fails only if `tile.rs`
+/// routes to the wrong (or no) decompressor — not because of any codec-level
+/// lossiness, which is identical on both sides.
+fn codec_roundtrip(compression: ExrCompression, raw: &[u8]) -> Vec<u8> {
+    use super::compress::{
+        compress_b44, compress_b44a, compress_dwaa, compress_dwab, compress_piz, compress_pxr24,
+        compress_rle, compress_zip, decompress_b44, decompress_b44a, decompress_dwaa,
+        decompress_dwab, decompress_piz, decompress_pxr24, decompress_rle, decompress_zip,
+    };
+    match compression {
+        ExrCompression::None => raw.to_vec(),
+        ExrCompression::Rle => {
+            decompress_rle(&compress_rle(raw).expect("rle compress")).expect("rle decompress")
+        }
+        ExrCompression::Zip | ExrCompression::Zips => {
+            decompress_zip(&compress_zip(raw).expect("zip compress")).expect("zip decompress")
+        }
+        ExrCompression::Piz => {
+            decompress_piz(&compress_piz(raw).expect("piz compress")).expect("piz decompress")
+        }
+        ExrCompression::Pxr24 => decompress_pxr24(&compress_pxr24(raw).expect("pxr24 compress"))
+            .expect("pxr24 decompress"),
+        ExrCompression::B44 => {
+            decompress_b44(&compress_b44(raw).expect("b44 compress")).expect("b44 decompress")
+        }
+        ExrCompression::B44a => {
+            decompress_b44a(&compress_b44a(raw).expect("b44a compress")).expect("b44a decompress")
+        }
+        ExrCompression::Dwaa => {
+            decompress_dwaa(&compress_dwaa(raw).expect("dwaa compress")).expect("dwaa decompress")
+        }
+        ExrCompression::Dwab => {
+            decompress_dwab(&compress_dwab(raw).expect("dwab compress")).expect("dwab decompress")
+        }
+    }
+}
+
+/// Decodes a tiled EXR built with `compression` and asserts every tile's
+/// pixels match the codec round-trip of that tile's raw buffer exactly.
+fn decode_and_check_tiled(compression: ExrCompression, tile_values: &[(u16, u16, u16); 4]) {
+    use std::io::Write as _;
+
+    let exr_bytes = build_tiled_exr_compressed(compression, tile_values);
+
+    let mut temp_path = std::env::temp_dir();
+    temp_path.push(format!("oximedia_test_tiled_exr_{compression:?}.exr"));
+
+    {
+        let mut f = std::fs::File::create(&temp_path).expect("should create temp file");
+        f.write_all(&exr_bytes).expect("should write EXR bytes");
+    }
+
+    let read_result = read_exr(&temp_path, 0);
+    let _ = std::fs::remove_file(&temp_path);
+
+    let frame =
+        read_result.unwrap_or_else(|e| panic!("should read {compression:?} tiled EXR: {e}"));
+
+    assert_eq!(frame.width, 4, "{compression:?}: width mismatch");
+    assert_eq!(frame.height, 4, "{compression:?}: height mismatch");
+    assert_eq!(frame.components, 3, "{compression:?}: should be RGB");
+
+    let data = frame.data.as_slice().expect("data should be interleaved");
+    // 4 × 4 × 3 channels × 2 bytes (half) = 96 bytes.
+    assert_eq!(data.len(), 96, "{compression:?}: data length mismatch");
+
+    // bytes_per_pixel = 6, row stride = 4 × 6 = 24.
+    // The first row of every tile lands at: row*2*24 + col*2*6, and a tile's
+    // first row is the first `actual_tile_w * bpp` = 12 bytes of its buffer.
+    let tile_row0_offsets: [usize; 4] = [
+        0,              // tile (0,0)
+        2 * 6,          // tile (1,0)
+        2 * 24,         // tile (0,1)
+        2 * 24 + 2 * 6, // tile (1,1)
+    ];
+
+    for (idx, &(r, g, b)) in tile_values.iter().enumerate() {
+        let expected = codec_roundtrip(compression, &raw_tile_buffer(r, g, b));
+        // Compare the tile's first decoded row (12 bytes) against the codec
+        // round-trip's first row — proof tile.rs invoked the right decoder.
+        let off = tile_row0_offsets[idx];
+        assert_eq!(
+            &data[off..off + 12],
+            &expected[..12],
+            "{compression:?} tile {idx}: tile-path decode differs from codec round-trip"
+        );
+    }
+}
+
+/// Distinct per-tile half-float bit patterns used by the dispatch tests.
+const TILED_CODEC_VALUES: [(u16, u16, u16); 4] = [
+    (0x1000, 0x1100, 0x1200),
+    (0x2000, 0x2100, 0x2200),
+    (0x3000, 0x3100, 0x3200),
+    (0x4000, 0x4100, 0x4200),
+];
+
+#[test]
+fn test_read_tiled_exr_piz() {
+    decode_and_check_tiled(ExrCompression::Piz, &TILED_CODEC_VALUES);
+}
+
+#[test]
+fn test_read_tiled_exr_pxr24() {
+    decode_and_check_tiled(ExrCompression::Pxr24, &TILED_CODEC_VALUES);
+}
+
+#[test]
+fn test_read_tiled_exr_b44() {
+    decode_and_check_tiled(ExrCompression::B44, &TILED_CODEC_VALUES);
+}
+
+#[test]
+fn test_read_tiled_exr_b44a() {
+    decode_and_check_tiled(ExrCompression::B44a, &TILED_CODEC_VALUES);
+}
+
+#[test]
+fn test_read_tiled_exr_dwaa() {
+    decode_and_check_tiled(ExrCompression::Dwaa, &TILED_CODEC_VALUES);
+}
+
+#[test]
+fn test_read_tiled_exr_dwab() {
+    decode_and_check_tiled(ExrCompression::Dwab, &TILED_CODEC_VALUES);
+}
+
+#[test]
+fn test_read_tiled_exr_rle_half() {
+    // Sanity check: the half-float tiled builder also works through an
+    // already-supported codec (RLE).
+    decode_and_check_tiled(ExrCompression::Rle, &TILED_CODEC_VALUES);
+}
+
+#[test]
+fn test_read_tiled_exr_zip_half() {
+    // Same, through ZIP.
+    decode_and_check_tiled(ExrCompression::Zip, &TILED_CODEC_VALUES);
+}

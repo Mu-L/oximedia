@@ -13,15 +13,15 @@
 - [x] Add LUT size validation and automatic resampling when chaining LUTs of different sizes in `lut_chain.rs`
 - [x] Implement `lut_validate.rs` monotonicity checks for 1D LUTs and smoothness checks for 3D LUTs
 - [x] Add `lut_analysis.rs` gamut coverage analysis (percentage of target gamut covered by LUT transform)
-- [ ] Implement LUT inversion (analytical for 1D, iterative for 3D) in `lut_combine.rs`
-- [ ] Extend `hdr_pipeline.rs` with ACES RRT v1.2 reference rendering transform
+- [x] Implement LUT inversion (analytical for 1D, iterative for 3D) in `lut_combine.rs` (verified 2026-05-16; src/invert.rs:246 lines)
+- [x] Extend `hdr_pipeline.rs` with ACES RRT v1.2 reference rendering transform (verified 2026-05-16; src/aces.rs aces_rrt fn used in tests at line 300)
 
 ## New Features
-- [ ] Add a `clf.rs` module for Common LUT Format (CLF/DLP) read/write (Academy/ASC standard)
-- [ ] Implement a `creative_grade.rs` module with named film emulation presets (Kodak Vision3, Fuji Eterna)
-- [ ] Add a `lut_blend.rs` module for blending between two LUTs with a mix factor (crossfade grading)
-- [ ] Implement a `display_calibration.rs` module for generating display calibration LUTs
-- [ ] Add a `lut_compress.rs` module for lossy LUT compression
+- [x] Add a `clf.rs` module for Common LUT Format (CLF/DLP) read/write (Academy/ASC standard) (verified 2026-05-16; src/clf.rs:1141 lines)
+- [x] Implement a `creative_grade.rs` module with named film emulation presets (Kodak Vision3, Fuji Eterna) (verified 2026-05-16; src/creative_grade.rs:929 lines)
+- [x] Add a `lut_blend.rs` module for blending between two LUTs with a mix factor (crossfade grading) (verified 2026-05-16; src/lut_blend.rs:583 lines)
+- [x] Implement a `display_calibration.rs` module for generating display calibration LUTs (verified 2026-05-16; src/display_calibration.rs:637 lines)
+- [x] Add a `lut_compress.rs` module for lossy LUT compression (verified 2026-05-16; src/lut_compress.rs:632 lines)
 
 ## Testing
 - [ ] Add round-trip tests for all LUT formats: .cube -> parse -> write -> parse -> compare

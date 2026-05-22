@@ -6,7 +6,7 @@ Professional live production video switcher for OxiMedia. Provides a comprehensi
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.6 — 2026-04-26 — 1,015 tests
+Version: 0.1.7 — 2026-05-16 — 1,015 tests
 
 ## Features
 
@@ -41,7 +41,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-switcher = "0.1.6"
+oximedia-switcher = "0.1.7"
 ```
 
 ```rust

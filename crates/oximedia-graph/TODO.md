@@ -9,26 +9,26 @@
 - Dependencies: oximedia-core, oximedia-codec, oximedia-audio, fontdue
 
 ## Enhancements
-- [ ] Add parallel execution support to `scheduler.rs` using rayon for independent node branches
-- [ ] Extend `optimization.rs` with automatic filter fusion (merge adjacent compatible nodes)
-- [ ] Add backpressure mechanism to `data_flow.rs` to prevent memory exhaustion on slow sinks
-- [ ] Implement frame format negotiation between connected ports in `port.rs`
-- [ ] Add dynamic graph reconfiguration (hot-swap nodes) without rebuilding the entire graph
-- [ ] Extend `graph_stats.rs` with latency histograms per node and per edge
-- [ ] Add error recovery / retry semantics to `processing_graph.rs` for transient failures
-- [ ] Implement `node_cache.rs` with LRU eviction policy and configurable cache size limits
-- [ ] Add graph snapshot/restore for checkpoint-based processing in `serialize.rs`
+- [x] Add parallel execution support to `scheduler.rs` using rayon for independent node branches (verified 2026-05-16; src/scheduler.rs:33 parallelizable_groups computed by Kahn wave algorithm)
+- [x] Extend `optimization.rs` with automatic filter fusion (merge adjacent compatible nodes) (verified 2026-05-16; src/optimization.rs:225 NodeFusionPass)
+- [x] Add backpressure mechanism to `data_flow.rs` to prevent memory exhaustion on slow sinks (verified 2026-05-16; src/data_flow.rs:120 BackpressurePolicy enum, coordinator:138)
+- [x] Implement frame format negotiation between connected ports in `port.rs` (verified 2026-05-16; src/port.rs:47 PortFormat enum with Video/Audio/Data variants)
+- [ ] Add dynamic graph reconfiguration (hot-swap nodes) without rebuilding the entire graph (verified-open 2026-05-16: no hot_swap or dynamic reconfiguration in graph sources)
+- [ ] Extend `graph_stats.rs` with latency histograms per node and per edge (verified-open 2026-05-16: no latency histogram in graph_stats.rs)
+- [ ] Add error recovery / retry semantics to `processing_graph.rs` for transient failures (verified-open 2026-05-16: no retry/error recovery in processing_graph.rs)
+- [x] Implement `node_cache.rs` with LRU eviction policy and configurable cache size limits (verified 2026-05-16; src/node_cache.rs:115 NodeCache, lru fn:144)
+- [x] Add graph snapshot/restore for checkpoint-based processing in `serialize.rs` (verified 2026-05-16; src/graph_evaluator.rs:405 GraphStatsSnapshot)
 
 ## New Features
-- [x] Add a `SplitFilter` node that duplicates frames to multiple output ports (tee/fanout)
-- [x] Add a `MergeFilter` node that combines multiple input streams (e.g., picture-in-picture)
-- [x] Implement a `RateLimitFilter` to throttle frame throughput for real-time playback
-- [x] Add a `TimecodeFilter` node that stamps/modifies frame timestamps
-- [x] Implement a graph DSL parser (text-based graph description) complementing `serialize.rs`
-- [x] Add `filters/video/scale.rs` for resolution scaling within the graph pipeline
-- [x] Add `filters/video/crop.rs` for frame cropping within the graph pipeline
-- [ ] Add `filters/audio/resample.rs` for sample rate conversion within the graph pipeline
-- [ ] Implement async graph execution mode using tokio tasks for I/O-bound source/sink nodes
+- [x] Add a `SplitFilter` node that duplicates frames to multiple output ports (tee/fanout) (verified 2026-05-16; src/filters/video/split.rs:56 SplitFilter)
+- [x] Add a `MergeFilter` node that combines multiple input streams (e.g., picture-in-picture) (verified 2026-05-16; src/filters/video/merge.rs:164 MergeFilter)
+- [x] Implement a `RateLimitFilter` to throttle frame throughput for real-time playback (verified 2026-05-16; src/filters/video/rate_limit.rs:77 RateLimitFilter)
+- [x] Add a `TimecodeFilter` node that stamps/modifies frame timestamps (verified 2026-05-16; src/filters/video/mod.rs:123 TimecodeFilter)
+- [x] Implement a graph DSL parser (text-based graph description) complementing `serialize.rs` (verified 2026-05-16; src/dsl.rs)
+- [x] Add `filters/video/scale.rs` for resolution scaling within the graph pipeline (verified 2026-05-16; src/filters/video/scale.rs:802 lines)
+- [x] Add `filters/video/crop.rs` for frame cropping within the graph pipeline (verified 2026-05-16; src/filters/video/crop.rs:699 lines)
+- [x] Add `filters/audio/resample.rs` for sample rate conversion within the graph pipeline (verified 2026-05-16; src/filters/audio/resample.rs:910 lines)
+- [x] Implement async graph execution mode using tokio tasks for I/O-bound source/sink nodes (verified 2026-05-16; src/async_exec.rs:65 AsyncExecutor with tokio tasks)
 
 ## Performance
 - [ ] Add SIMD-accelerated frame copy in `frame.rs` for large video buffers

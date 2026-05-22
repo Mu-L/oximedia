@@ -2,8 +2,13 @@
 //!
 //! Provides tools to detect corrupt NAL units, PES packets, and other
 //! bitstream-level anomalies, and attempt in-place repair.
-
-#![allow(dead_code)]
+//!
+//! # Sector-aligned I/O
+//!
+//! The [`SectorAlignedReader`] wrapper aligns all read operations to a
+//! configurable sector boundary (default 4096 bytes, matching NVMe physical
+//! sector size).  This eliminates read-modify-write amplification on SSDs and
+//! improves throughput for large sequential bitstream scans.
 
 /// Categories of bitstream errors that can be detected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -285,6 +290,166 @@ impl Default for BitstreamRepair {
     }
 }
 
+// ── Sector-aligned reader ─────────────────────────────────────────────────────
+
+use std::io::{Read, Seek, SeekFrom};
+
+/// A buffered reader that aligns all underlying I/O to a configurable sector
+/// boundary, improving throughput on SSDs and NVMe devices.
+///
+/// All reads from the inner reader are rounded up to the nearest multiple of
+/// `sector_size` bytes.  The internal buffer absorbs over-reads so that
+/// callers always see exactly the bytes they requested.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::fs::File;
+/// use oximedia_repair::bitstream_repair::SectorAlignedReader;
+/// use std::io::Read;
+///
+/// let file = File::open("stream.h264").expect("open file");
+/// let mut reader = SectorAlignedReader::new(file, 4096);
+/// let mut buf = [0u8; 1024];
+/// reader.read(&mut buf).expect("read");
+/// ```
+pub struct SectorAlignedReader<R: Read + Seek> {
+    inner: R,
+    sector_size: usize,
+    /// Internal aligned buffer.
+    buf: Vec<u8>,
+    /// Logical position of the first valid byte in `buf` within the file.
+    buf_file_offset: u64,
+    /// Number of valid bytes currently in `buf`.
+    buf_len: usize,
+    /// Current logical read position within the file.
+    pos: u64,
+    /// Total file length (cached on construction for efficient Seek math).
+    file_len: u64,
+}
+
+impl<R: Read + Seek> SectorAlignedReader<R> {
+    /// Create a new `SectorAlignedReader` wrapping `inner`.
+    ///
+    /// `sector_size` must be a power of two and > 0; if not, it is rounded up
+    /// to the next power of two (minimum 512).
+    pub fn new(mut inner: R, sector_size: usize) -> Self {
+        let sector_size = sector_size.max(512).next_power_of_two();
+        let file_len = inner.seek(SeekFrom::End(0)).unwrap_or(0);
+        // Seek back to start so callers don't need to pre-seek.
+        let _ = inner.seek(SeekFrom::Start(0));
+        Self {
+            inner,
+            sector_size,
+            buf: Vec::new(),
+            buf_file_offset: 0,
+            buf_len: 0,
+            pos: 0,
+            file_len,
+        }
+    }
+
+    /// Return the sector size this reader was created with.
+    pub fn sector_size(&self) -> usize {
+        self.sector_size
+    }
+
+    /// Return the current logical read position.
+    pub fn position(&self) -> u64 {
+        self.pos
+    }
+
+    /// Ensure the internal buffer covers at least the sector that contains
+    /// `self.pos`.  If the buffer already covers `self.pos`, this is a no-op.
+    fn fill_buf_if_needed(&mut self) -> std::io::Result<()> {
+        // Check whether `self.pos` falls within the currently buffered window.
+        let buf_end = self.buf_file_offset + self.buf_len as u64;
+        if self.buf_len > 0 && self.pos >= self.buf_file_offset && self.pos < buf_end {
+            return Ok(());
+        }
+
+        // Align down to sector boundary.
+        let aligned_start = (self.pos / self.sector_size as u64) * self.sector_size as u64;
+        self.inner.seek(SeekFrom::Start(aligned_start))?;
+
+        // Read one full sector (or to EOF, whichever is smaller).
+        let remaining = self.file_len.saturating_sub(aligned_start) as usize;
+        let to_read = self.sector_size.min(remaining);
+        if to_read == 0 {
+            self.buf.clear();
+            self.buf_len = 0;
+            self.buf_file_offset = aligned_start;
+            return Ok(());
+        }
+
+        self.buf.resize(to_read, 0);
+        let mut total_read = 0usize;
+        while total_read < to_read {
+            match self.inner.read(&mut self.buf[total_read..to_read]) {
+                Ok(0) => break,
+                Ok(n) => total_read += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        self.buf_len = total_read;
+        self.buf_file_offset = aligned_start;
+        Ok(())
+    }
+}
+
+impl<R: Read + Seek> Read for SectorAlignedReader<R> {
+    fn read(&mut self, dst: &mut [u8]) -> std::io::Result<usize> {
+        if dst.is_empty() {
+            return Ok(0);
+        }
+        self.fill_buf_if_needed()?;
+
+        if self.buf_len == 0 {
+            // EOF
+            return Ok(0);
+        }
+
+        let offset_in_buf = (self.pos - self.buf_file_offset) as usize;
+        if offset_in_buf >= self.buf_len {
+            return Ok(0);
+        }
+
+        let available = self.buf_len - offset_in_buf;
+        let to_copy = dst.len().min(available);
+        dst[..to_copy].copy_from_slice(&self.buf[offset_in_buf..offset_in_buf + to_copy]);
+        self.pos += to_copy as u64;
+
+        // If we've exhausted this sector and there is more data, pre-load next
+        // sector lazily (will be triggered on the next call to `read`).
+        Ok(to_copy)
+    }
+}
+
+impl<R: Read + Seek> Seek for SectorAlignedReader<R> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let new_pos = match pos {
+            SeekFrom::Start(n) => n,
+            SeekFrom::End(n) => {
+                if n >= 0 {
+                    self.file_len.saturating_add(n as u64)
+                } else {
+                    self.file_len.saturating_sub((-n) as u64)
+                }
+            }
+            SeekFrom::Current(n) => {
+                if n >= 0 {
+                    self.pos.saturating_add(n as u64)
+                } else {
+                    self.pos.saturating_sub((-n) as u64)
+                }
+            }
+        };
+        self.pos = new_pos;
+        Ok(new_pos)
+    }
+}
+
 // ── unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -424,5 +589,74 @@ mod tests {
     fn test_bitstream_repair_default_strategy() {
         let engine = BitstreamRepair::default();
         assert_eq!(engine.strategy, RepairStrategy::Substitute);
+    }
+
+    // ── SectorAlignedReader tests ─────────────────────────────────────────────
+
+    use std::io::Write;
+
+    fn write_temp_bitstream(name: &str, data: &[u8]) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        let mut f = std::fs::File::create(&path).expect("create temp");
+        f.write_all(data).expect("write temp");
+        path
+    }
+
+    #[test]
+    fn test_sector_aligned_reader_matches_direct_read() {
+        // Write 8193 bytes (crosses a 4096-byte sector boundary + 1 extra byte).
+        let data: Vec<u8> = (0u16..8193).map(|i| (i & 0xFF) as u8).collect();
+        let path = write_temp_bitstream("sar_direct_read.bin", &data);
+
+        let file = std::fs::File::open(&path).expect("open");
+        let mut reader = SectorAlignedReader::new(file, 4096);
+
+        let mut buf = vec![0u8; data.len()];
+        let mut total = 0;
+        while total < buf.len() {
+            let n = reader.read(&mut buf[total..]).expect("read");
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+
+        assert_eq!(total, data.len(), "should read all bytes");
+        assert_eq!(
+            &buf[..total],
+            data.as_slice(),
+            "content must match direct read"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_sector_aligned_reader_alignment_correctness() {
+        // Build data that is exactly 3 sectors = 3 * 512 bytes.
+        let sector = 512usize;
+        let data: Vec<u8> = (0u16..((3 * sector) as u16))
+            .map(|i| (i & 0xFF) as u8)
+            .collect();
+        let path = write_temp_bitstream("sar_aligned.bin", &data);
+
+        let file = std::fs::File::open(&path).expect("open");
+        let mut reader = SectorAlignedReader::new(file, sector);
+        assert_eq!(reader.sector_size(), sector);
+
+        // Read 100 bytes from the middle of the second sector.
+        reader
+            .seek(SeekFrom::Start(sector as u64 + 7))
+            .expect("seek");
+        let mut buf = [0u8; 100];
+        let n = reader.read(&mut buf).expect("read");
+        assert!(n > 0);
+        // Verify correctness: byte at offset (sector + 7 + k) should be (sector+7+k) & 0xFF.
+        for (k, &byte) in buf[..n].iter().enumerate() {
+            let expected = ((sector + 7 + k) & 0xFF) as u8;
+            assert_eq!(byte, expected, "mismatch at buf[{k}]");
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 }

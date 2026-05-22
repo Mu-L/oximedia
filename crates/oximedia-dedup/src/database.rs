@@ -1,10 +1,74 @@
 //! SQLite-based deduplication database and indexing.
 //!
-//! This module provides:
-//! - Fast hash and fingerprint storage
-//! - Efficient duplicate lookup
-//! - Batch operations for performance
-//! - Index optimization and statistics
+//! # Schema
+//!
+//! ## Tables
+//!
+//! ### `files`
+//! Primary index of all known media files.
+//!
+//! | Column       | Type    | Notes                              |
+//! |--------------|---------|------------------------------------|
+//! | `id`         | INTEGER | Auto-increment primary key         |
+//! | `path`       | TEXT    | Absolute file path (UNIQUE)        |
+//! | `size`       | INTEGER | File size in bytes                 |
+//! | `hash`       | TEXT    | BLAKE3 hex digest                  |
+//! | `created_at` | INTEGER | Unix epoch (seconds, via `strftime`) |
+//! | `updated_at` | INTEGER | Unix epoch, updated on upsert      |
+//!
+//! **Indices:** `idx_files_hash` on `hash` for O(log n) duplicate lookup.
+//!
+//! ### `fingerprints`
+//! Perceptual / audio fingerprints keyed by `file_id`.
+//!
+//! | Column       | Type    | Notes                                   |
+//! |--------------|---------|-----------------------------------------|
+//! | `id`         | INTEGER | Auto-increment primary key              |
+//! | `file_id`    | INTEGER | FK → `files.id` (CASCADE DELETE)        |
+//! | `type`       | TEXT    | Fingerprint kind (`phash`, `audio`, …)  |
+//! | `data`       | TEXT    | Hex-encoded fingerprint bits            |
+//! | `created_at` | INTEGER | Unix epoch                              |
+//!
+//! **Indices:** `idx_fingerprints_type` on `type`; `idx_fingerprints_data` on `data`.
+//!
+//! ### `metadata`
+//! Optional media metadata for codec/format-based matching.
+//!
+//! | Column        | Type    | Notes                     |
+//! |---------------|---------|---------------------------|
+//! | `id`          | INTEGER | Auto-increment primary key |
+//! | `file_id`     | INTEGER | FK → `files.id`            |
+//! | `duration`    | REAL    | Duration in seconds        |
+//! | `width`       | INTEGER | Video width                |
+//! | `height`      | INTEGER | Video height               |
+//! | `bitrate`     | INTEGER | Bitrate (bits/s)           |
+//! | `framerate`   | REAL    | Frames per second          |
+//! | `sample_rate` | INTEGER | Audio sample rate (Hz)     |
+//! | `channels`    | INTEGER | Audio channel count        |
+//! | `video_codec` | TEXT    | Codec name (e.g. `av1`)   |
+//! | `audio_codec` | TEXT    | Codec name (e.g. `opus`)  |
+//! | `container`   | TEXT    | Container (e.g. `mp4`)    |
+//!
+//! ### `chunks`
+//! Rolling-hash content chunks for sub-file deduplication.
+//!
+//! | Column    | Type    | Notes                             |
+//! |-----------|---------|-----------------------------------|
+//! | `id`      | INTEGER | Auto-increment primary key        |
+//! | `file_id` | INTEGER | FK → `files.id` (CASCADE DELETE)  |
+//! | `offset`  | INTEGER | Byte offset within file           |
+//! | `size`    | INTEGER | Chunk size in bytes               |
+//! | `hash`    | TEXT    | Rolling-hash hex digest           |
+//!
+//! **Indices:** `idx_chunks_hash` on `hash`.
+//!
+//! ## Migration Strategy
+//!
+//! All `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS` statements run
+//! on every `open()` / `open_memory()` call (inside the private `initialize` helper).
+//! This is an additive-only, forward-only strategy — no DDL `ALTER TABLE` or
+//! schema version table is maintained in v0.1.x.  A proper `schema_version` table
+//! with up/down migrations will be added before the first stable release.
 
 use crate::DedupResult;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
@@ -12,6 +76,18 @@ use sqlx::Row;
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
+
+/// A single entry for bulk insertion via [`DedupDatabase::insert_batch`].
+///
+/// The file referenced by `path` **must exist on disk** at the time of the call
+/// because the implementation reads `std::fs::metadata` to obtain the file size.
+#[derive(Debug, Clone)]
+pub struct BatchFileEntry {
+    /// Absolute path to the media file.
+    pub path: String,
+    /// Hex-encoded content hash (BLAKE3 recommended).
+    pub hash: String,
+}
 
 /// SQLite database for deduplication.
 pub struct DedupDatabase {
@@ -679,6 +755,50 @@ impl DedupDatabase {
             .collect())
     }
 
+    /// Insert multiple files in a single atomic transaction for throughput.
+    ///
+    /// All entries are wrapped in a single `BEGIN IMMEDIATE … COMMIT` transaction.
+    /// If any row fails the whole batch is rolled back and the error is returned.
+    ///
+    /// Each file referenced by [`BatchFileEntry::path`] **must exist on disk** because
+    /// the method reads `std::fs::metadata` to determine file size.
+    ///
+    /// Returns the number of rows that were inserted or updated (upserted).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction cannot be started, if any file's metadata
+    /// cannot be read from disk, or if any SQL statement fails.
+    pub async fn insert_batch(&self, entries: &[BatchFileEntry]) -> DedupResult<usize> {
+        let mut tx = self.pool.begin().await?;
+        let mut count = 0usize;
+
+        for entry in entries {
+            let size = std::fs::metadata(entry.path.as_str())?.len() as i64;
+
+            sqlx::query(
+                r#"
+                INSERT INTO files (path, size, hash)
+                VALUES (?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    size = excluded.size,
+                    hash = excluded.hash,
+                    updated_at = strftime('%s', 'now')
+                "#,
+            )
+            .bind(&entry.path)
+            .bind(size)
+            .bind(&entry.hash)
+            .execute(&mut *tx)
+            .await?;
+
+            count += 1;
+        }
+
+        tx.commit().await?;
+        Ok(count)
+    }
+
     /// Begin a transaction.
     ///
     /// # Errors
@@ -907,5 +1027,101 @@ mod tests {
         assert_eq!(stats.unique_hashes, 0);
         assert_eq!(stats.duplicate_files(), 0);
         assert_eq!(stats.dedup_ratio(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_batch_insert_100_entries() {
+        let db = DedupDatabase::open_memory()
+            .await
+            .expect("failed to open in-memory DB");
+
+        let temp_dir = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+
+        // Create 100 temporary files and prepare batch entries
+        let mut entries = Vec::with_capacity(100);
+        let mut created_paths = Vec::with_capacity(100);
+        for i in 0..100usize {
+            let p = temp_dir.join(format!("dedup_batch_{nanos}_{i}.tmp"));
+            std::fs::write(&p, format!("content_{i}")).expect("write temp file");
+            entries.push(BatchFileEntry {
+                path: p.to_string_lossy().to_string(),
+                hash: format!("hash_{i:04x}"),
+            });
+            created_paths.push(p);
+        }
+
+        let inserted = db
+            .insert_batch(&entries)
+            .await
+            .expect("batch insert should succeed");
+        assert_eq!(inserted, 100, "insert_batch must return the inserted count");
+
+        let count = db.count_files().await.expect("count_files should succeed");
+        assert_eq!(count, 100, "database must contain exactly 100 files");
+
+        // Cleanup
+        for p in &created_paths {
+            std::fs::remove_file(p).ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batch_insert_vs_individual_same_results() {
+        let temp_dir = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(1);
+
+        // Build 50 temp files shared between both DBs
+        let mut created_paths = Vec::with_capacity(50);
+        let mut entries = Vec::with_capacity(50);
+        for i in 0..50usize {
+            let p = temp_dir.join(format!("dedup_cmp_{nanos}_{i}.tmp"));
+            std::fs::write(&p, format!("cmp_content_{i}")).expect("write temp file");
+            entries.push(BatchFileEntry {
+                path: p.to_string_lossy().to_string(),
+                hash: format!("cmp_hash_{i:04x}"),
+            });
+            created_paths.push(p);
+        }
+
+        // DB A — batch insert
+        let db_a = DedupDatabase::open_memory().await.expect("open DB A");
+        let inserted = db_a.insert_batch(&entries).await.expect("batch insert A");
+        assert_eq!(inserted, 50);
+
+        // DB B — individual inserts
+        let db_b = DedupDatabase::open_memory().await.expect("open DB B");
+        for entry in &entries {
+            db_b.insert_file(entry.path.as_str(), &entry.hash)
+                .await
+                .expect("individual insert B");
+        }
+
+        // Both must produce identical file count and hash distribution
+        let count_a = db_a.count_files().await.expect("count A");
+        let count_b = db_b.count_files().await.expect("count B");
+        assert_eq!(count_a, count_b, "file counts must match");
+
+        let files_a = db_a.get_all_files().await.expect("all files A");
+        let files_b = db_b.get_all_files().await.expect("all files B");
+        assert_eq!(files_a.len(), files_b.len());
+
+        // Compare sorted path lists
+        let mut paths_a: Vec<_> = files_a.iter().map(|(p, _)| p.clone()).collect();
+        let mut paths_b: Vec<_> = files_b.iter().map(|(p, _)| p.clone()).collect();
+        paths_a.sort();
+        paths_b.sort();
+        assert_eq!(paths_a, paths_b, "path sets must be identical");
+
+        // Cleanup
+        for p in &created_paths {
+            std::fs::remove_file(p).ok();
+        }
     }
 }

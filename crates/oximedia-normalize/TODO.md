@@ -10,23 +10,23 @@
 - Metadata: ReplayGain tags, R128 tags, iTunes Sound Check, loudness descriptors
 
 ## Enhancements
-- [ ] Integrate phase_correction into the main Normalizer pipeline as an optional pre-processing step
-- [ ] Wire dc_offset removal into the processing chain as a pre-processing step (before analysis)
-- [ ] Add crossfade_norm support for gapless album normalization (crossfade between tracks at target level)
-- [ ] Improve surround_norm to handle 7.1.4 Atmos layouts with proper channel weighting
+- [x] Integrate phase_correction into the main Normalizer pipeline as an optional pre-processing step (verified 2026-05-16; src/lib.rs:175 pub mod phase_correction, src/phase_correction.rs:348 lines)
+- [x] Wire dc_offset removal into the processing chain as a pre-processing step (before analysis) (verified 2026-05-16; src/dc_offset.rs:301 lines, pub mod dc_offset in lib.rs)
+- [x] Add crossfade_norm support for gapless album normalization (crossfade between tracks at target level) (verified 2026-05-16; src/crossfade_norm.rs:434 lines)
+- [x] Improve surround_norm to handle 7.1.4 Atmos layouts with proper channel weighting (verified 2026-05-16; src/surround_norm.rs:25 7.1.4 Atmos bed, src/parallel_channels.rs 7.1.4)
 
 ## New Features
 - [x] Add A/B comparison output -- generate both normalized and original for quality assessment — `ab_comparison.rs`
 - [x] Implement automatic format detection and appropriate standard selection (broadcast file -> EBU R128, music file -> Spotify) — `format_detect.rs`
-- [ ] Add podcast loudness standard (-16 LUFS for Spotify, -14 LUFS for Apple Podcasts)
-- [ ] Add cinema loudness normalization (Dolby Atmos -27 LUFS dialogue-gated measurement)
+- [x] Add podcast loudness standard (-16 LUFS for Spotify, -14 LUFS for Apple Podcasts) (verified 2026-05-16; src/podcast_loudness.rs:969 lines)
+- [x] Add cinema loudness normalization (Dolby Atmos -27 LUFS dialogue-gated measurement) (verified 2026-05-16; src/cinema_loudness.rs:25 Atmos -27 LUFS, src/dialogue_gate.rs:103 cinema preset)
 
 ## Performance
 - [x] Process channels in parallel using rayon for surround content (>2 channels) — `parallel_channels.rs`
-- [ ] Use SIMD for gain application loop (multiply all samples by gain factor)
-- [ ] Implement in-place processing mode to avoid the separate input/output buffer requirement
-- [ ] Add buffer recycling in RealtimeNormalizer to reduce allocation during streaming
-- [ ] Optimize true_peak_limiter lookahead buffer with circular buffer instead of shifting
+- [x] Use SIMD for gain application loop (multiply all samples by gain factor) (verified 2026-05-16; src/simd_gain.rs:324 lines)
+- [x] Implement in-place processing mode to avoid the separate input/output buffer requirement (verified 2026-05-16; src/peak_limiter.rs:310 process_in_place fn)
+- [ ] Add buffer recycling in RealtimeNormalizer to reduce allocation during streaming (verified-open 2026-05-16: not yet implemented)
+- [x] Optimize true_peak_limiter lookahead buffer with circular buffer instead of shifting (verified 2026-05-16; src/peak_limiter.rs:153 circular lookahead buffer, zero-copy:4)
 
 ## Testing
 - [ ] Add EBU R128 conformance test: -23 LUFS input should measure -23 LUFS after null normalization (gain=0)

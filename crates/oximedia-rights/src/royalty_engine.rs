@@ -5,6 +5,47 @@
 //! handling multiple royalty models (per-play, revenue-share, sync fees, etc.)
 //! with territory filtering, minimum/maximum payment caps, and per-rights-holder
 //! statement generation.
+//!
+//! ## Calculation Formulas
+//!
+//! ### Tiered rate formula
+//!
+//! When using `oximedia_rights::tiered_royalty::TieredRoyaltySchedule`, royalties
+//! are calculated by summing the per-tier contributions:
+//!
+//! ```text
+//! royalty = Σ(tier_i: views_in_tier_i × rate_i)
+//! ```
+//!
+//! where each `tier_i` covers a contiguous usage-count range
+//! `[threshold_min_i, threshold_max_i)` with a fixed `rate_per_unit`.
+//!
+//! ### Territory split formula
+//!
+//! When distributing a total royalty across territories:
+//!
+//! ```text
+//! territory_royalty = total_royalty × territory_share
+//! ```
+//!
+//! `territory_share` is the fraction (0.0–1.0) of the total audience or revenue
+//! attributable to that territory.  All shares must sum to 1.0.
+//! Per-territory multipliers (from `oximedia_rights::royalty::territory::Territory`)
+//! further scale the payout based on market conditions.
+//!
+//! ### Usage basis options
+//!
+//! The [`RoyaltyBasis`] enum provides three primary usage-count modes and two
+//! flat-rate modes:
+//!
+//! | Variant | Basis | Formula |
+//! |---------|-------|---------|
+//! | `PerPlay` | per-stream count | `quantity × 1.0` |
+//! | `PerDownload` | per-download count | `download_quantity × 1.0` |
+//! | `Custom(rate)` | per-event rate | `quantity × rate` |
+//! | `RevenueShare(pct)` | percentage of revenue | `total_revenue × pct` |
+//! | `SyncFee(fee)` | flat one-time fee | `fee` (if events > 0, else 0) |
+//! | `MechanicalRate` | per physical unit sold | `sale_quantity × 1.0` |
 
 #![allow(missing_docs)]
 #![allow(clippy::cast_precision_loss)]

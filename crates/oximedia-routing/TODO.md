@@ -31,18 +31,18 @@
 - [x] Optimize `CrosspointMatrix::connect` for large matrices (256x256+) using sparse representation (new_sparse + mix_bus)
 - [x] Add SIMD-optimized summing in `matrix` for mix bus computation with many active crosspoints (AVX2+SSE4.2 with runtime dispatch)
 - [x] Implement lock-free routing updates in `matrix_router` for glitch-free real-time changes
-- [ ] Cache `flow::SignalFlowGraph::validate` results and invalidate only on topology changes
-- [ ] Add zero-latency path optimization in `route_optimizer` for live monitoring chains
+- [x] Cache `flow::SignalFlowGraph::validate` results and invalidate only on topology changes (verified 2026-05-16; src/validate_cache.rs:42)
+- [x] Add zero-latency path optimization in `route_optimizer` for live monitoring chains (verified 2026-05-16; src/zero_latency.rs:175)
 
 ## Testing
 - [x] Add tests for `ChannelRemapper` with all standard layout conversions (mono/stereo/5.1/7.1)
 - [x] Test `failover_route` switchover timing under simulated signal loss conditions
 - [x] Add stress tests for `CrosspointMatrix` with rapid connect/disconnect cycles (1000 ops/sec)
-- [ ] Test `automation` timeline execution with sub-frame accuracy at various frame rates
-- [ ] Add integration tests for `nmos` discovery and registration with mock registry
+- [x] Test `automation` timeline execution with sub-frame accuracy at various frame rates (verified 2026-05-16; src/automation/timeline.rs:690)
+- [x] Add integration tests for `nmos` discovery and registration with mock registry (verified 2026-05-16; tests/nmos_mock_registry.rs — 4 IT tests, IS-04 + IS-05 mock server)
 
 ## Documentation
-- [ ] Add signal flow diagrams for common routing scenarios (live production, post-production, broadcast)
-- [ ] Document the MADI channel numbering and frame mode relationship in `madi`
-- [ ] Add NMOS IS-04/IS-05 integration guide with network configuration requirements
-- [ ] Document the gain staging chain: input gain -> matrix gain -> bus gain -> output gain
+- [ ] Add signal flow diagrams for common routing scenarios (live production, post-production, broadcast) (verified-open 2026-05-16: no diagrams found in src/)
+- [ ] Document the MADI channel numbering and frame mode relationship in `madi` (verified-open 2026-05-16: no dedicated MADI doc found in src/)
+- [ ] Add NMOS IS-04/IS-05 integration guide with network configuration requirements (verified-open 2026-05-16: no integration guide found in src/)
+- [ ] Document the gain staging chain: input gain -> matrix gain -> bus gain -> output gain (verified-open 2026-05-16: no gain staging overview doc found in src/)

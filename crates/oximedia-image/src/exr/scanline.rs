@@ -4,7 +4,11 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_wrap)]
 
-use super::compress::{compress_rle, compress_zip, decompress_rle, decompress_zip};
+use super::compress::{
+    compress_b44, compress_b44a, compress_dwaa, compress_dwab, compress_piz, compress_pxr24,
+    compress_rle, compress_zip, decompress_b44, decompress_b44a, decompress_dwaa, decompress_dwab,
+    decompress_piz, decompress_pxr24, decompress_rle, decompress_zip,
+};
 use super::types::{ExrCompression, ExrHeader};
 use crate::error::{ImageError, ImageResult};
 use crate::ImageFrame;
@@ -51,12 +55,12 @@ pub(crate) fn read_scanline_data(
             ExrCompression::None => compressed,
             ExrCompression::Rle => decompress_rle(&compressed)?,
             ExrCompression::Zip | ExrCompression::Zips => decompress_zip(&compressed)?,
-            _ => {
-                return Err(ImageError::unsupported(format!(
-                    "Compression {:?} not yet implemented",
-                    header.compression
-                )))
-            }
+            ExrCompression::Piz => decompress_piz(&compressed)?,
+            ExrCompression::Pxr24 => decompress_pxr24(&compressed)?,
+            ExrCompression::B44 => decompress_b44(&compressed)?,
+            ExrCompression::B44a => decompress_b44a(&compressed)?,
+            ExrCompression::Dwaa => decompress_dwaa(&compressed)?,
+            ExrCompression::Dwab => decompress_dwab(&compressed)?,
         };
 
         // Copy to output buffer
@@ -118,12 +122,12 @@ pub(crate) fn write_scanline_data(
             ExrCompression::None => scanline_data.to_vec(),
             ExrCompression::Rle => compress_rle(scanline_data)?,
             ExrCompression::Zip | ExrCompression::Zips => compress_zip(scanline_data)?,
-            _ => {
-                return Err(ImageError::unsupported(format!(
-                    "Compression {:?} not yet implemented",
-                    header.compression
-                )))
-            }
+            ExrCompression::Piz => compress_piz(scanline_data)?,
+            ExrCompression::Pxr24 => compress_pxr24(scanline_data)?,
+            ExrCompression::B44 => compress_b44(scanline_data)?,
+            ExrCompression::B44a => compress_b44a(scanline_data)?,
+            ExrCompression::Dwaa => compress_dwaa(scanline_data)?,
+            ExrCompression::Dwab => compress_dwab(scanline_data)?,
         };
 
         file.write_u32::<LittleEndian>(compressed.len() as u32)?;

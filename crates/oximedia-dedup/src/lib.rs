@@ -37,6 +37,50 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## Strategy Selection Guide
+//!
+//! | Strategy | Speed | Precision | Use case |
+//! |---|---|---|---|
+//! | `ExactHash` | Very fast | Perfect (no false positives) | Bit-for-bit identical files — best first pass for any library |
+//! | `Fast` | Fast | High | Quick scan: hash + perceptual + metadata; good default for large libraries |
+//! | `PerceptualHash` | Fast | Good | Visually identical images/frames that were re-encoded or lightly cropped |
+//! | `Histogram` | Fast | Moderate | Color-similar frames regardless of spatial layout |
+//! | `AudioFingerprint` | Moderate | High | Same audio in different codecs or with minor edits |
+//! | `Metadata` | Fast | Low–moderate | Likely duplicates with same duration/resolution (combine with visual pass) |
+//! | `Ssim` | Slow | Very high | Near-identical video frames where pHash gives too many false positives |
+//! | `FeatureMatch` | Slow | High | Cropped, rotated, or partially occluded duplicates |
+//! | `VisualAll` | Slow | Very high | Combined visual pipeline: pHash + Histogram + SSIM + FeatureMatch |
+//! | `All` | Very slow | Maximum | Full pipeline — all methods; use only for final authoritative scan |
+//!
+//! **Recommended workflow:**
+//! 1. Run `ExactHash` first to catch perfect duplicates cheaply.
+//! 2. Run `Fast` for a broad near-duplicate sweep.
+//! 3. Run `VisualAll` or `All` for a precision clean-up pass on the remainder.
+//!
+//! ## Detection Method Trade-offs
+//!
+//! | Method | Accuracy | CPU cost | Memory | False-positive risk | Notes |
+//! |---|---|---|---|---|---|
+//! | BLAKE3 hash | 100% | Very low | O(1) | None | Misses re-encoded or edited copies |
+//! | dHash (8×8) | High | Very low | O(1) | Low | Robust to resize; sensitive to crops |
+//! | pHash (DCT) | High | Low | O(1) | Low–medium | Better than dHash for brightness shifts |
+//! | wHash (wavelet) | High | Low | O(1) | Low | Most robust to combined transforms |
+//! | SSIM | Very high | High | O(WH) | Very low | Pixel-accurate; slow for large images |
+//! | Histogram | Moderate | Low | O(256) | Medium | Colour match only; ignores structure |
+//! | FeatureMatch | High | Very high | O(N×D) | Low | Works on crops/rotations; expensive |
+//! | AudioFingerprint | High | Moderate | O(T) | Low | Spectral-peak based; codec-agnostic |
+//! | Metadata | Low–moderate | Very low | O(1) | High | Use only as a pre-filter |
+//!
+//! **Bloom-filter pre-screening** (`DedupConfig::bloom_prescreen = true`) reduces
+//! the number of pairwise comparisons by rejecting definitely-unique items before
+//! the expensive perceptual-hash phase.  Recommended for libraries with > 10 K files.
+//!
+//! **LSH acceleration** (`DedupConfig::use_lsh = true`, default) replaces O(n²)
+//! pairwise perceptual-hash comparison with sub-quadratic approximate nearest-
+//! neighbour lookup via `BitLshIndex`.  Adjust `lsh_num_tables` (more tables →
+//! better recall, more memory) and `lsh_bits_per_table` (fewer bits → more
+//! candidates → better recall at higher CPU cost).
 
 #![warn(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
@@ -88,6 +132,7 @@ use thiserror::Error;
 
 #[cfg(feature = "sqlite")]
 pub use database::DedupDatabase;
+pub use merge_strategy::{AppliedAction, MergeExecutor, MergeReport};
 pub use report::{DuplicateGroup, DuplicateReport, SimilarityScore};
 
 // ---------------------------------------------------------------------------

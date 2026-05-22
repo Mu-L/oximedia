@@ -13,7 +13,7 @@
 - [x] Extend `search_filter` with codec-specific filters (bit depth, sample rate, frame rate, color space) — `CodecFilters` struct in lib.rs
 - [x] Implement `search_suggest` auto-complete with frequency-weighted suggestions from indexed terms — `search_suggest.rs` with `TermTrie` + `SearchSuggestor`
 - [x] Add `search_rewrite` query expansion using synonyms (e.g., "audio" -> "audio OR sound OR music") — `search_rewrite.rs` with `SynonymDictionary::media_defaults()`
-- [ ] Extend `facet::aggregation` with hierarchical facets (e.g., format -> codec -> profile)
+- [x] Extend `facet::aggregation` with hierarchical facets (e.g., format -> codec -> profile) (verified 2026-05-16; src/facet/aggregation.rs:324 HierarchicalFacet)
 - [x] Implement `search_analytics` query logging with click-through tracking for relevance tuning
 
 ## New Features
@@ -21,7 +21,7 @@
 - [x] Implement `transcript_search` module indexing speech-to-text transcripts with timestamp alignment — TF-IDF + phrase search + millisecond timestamps
 - [x] Add `geo_search` module for location-based media search using GPS metadata — Haversine radius/bbox/KNN
 - [x] Implement `duplicate_detection` module combining visual hash + audio fingerprint for finding duplicates — Hamming distance fusion with configurable weights
-- [ ] Add `scene_search` integration with oximedia-scene for searching by detected objects, scenes, or activities
+- [x] Add `scene_search` integration with oximedia-scene for searching by detected objects, scenes, or activities (verified 2026-05-16; src/scene_search.rs:464 lines)
 - [x] Implement `search_export` for exporting search results as CSV, JSON, or XML with custom field selection
 - [x] Add `saved_search` module for persisting and re-executing named search queries
 - [x] Implement `search_ab_test` for A/B testing different ranking algorithms with metrics collection

@@ -7,12 +7,12 @@
 
 ## Enhancements
 - [x] Extend `codec_map.rs` to cover all common FFmpeg codec aliases (e.g., h264_nvenc, hevc_amf -> av1 equivalents)
-- [ ] Add support for `-filter_complex` multi-input/output filter graph parsing in `filter_lex.rs`
-- [ ] Improve `diagnostics.rs` with suggestion-based error messages ("did you mean..." for mistyped codecs)
-- [ ] Extend `stream_spec.rs` to handle complex stream specifiers like `0:v:0`, `0:a:#0x1100`
-- [ ] Add `-map` flag with negative mapping support (e.g., `-map 0 -map -0:s`) in `arg_parser.rs`
-- [ ] Implement `-ss` / `-to` / `-t` seeking/duration options in `arg_parser.rs`
-- [ ] Add `-preset` / `-tune` / `-profile` translation in `codec_mapping.rs`
+- [x] Add support for `-filter_complex` multi-input/output filter graph parsing in `filter_lex.rs` (verified 2026-05-16; src/filter_lex.rs:100 semicolon-split multi-chain parsing, test:850)
+- [x] Improve `diagnostics.rs` with suggestion-based error messages ("did you mean..." for mistyped codecs) (verified 2026-05-16; src/diagnostics.rs:335 fn suggest_codec, fuzzy match:243)
+- [x] Extend `stream_spec.rs` to handle complex stream specifiers like `0:v:0`, `0:a:#0x1100` (verified 2026-05-16; src/stream_spec.rs:93 StreamSpec, Pid variant:58, program_id:101)
+- [x] Add `-map` flag with negative mapping support (e.g., `-map 0 -map -0:s`) in `arg_parser.rs` (verified 2026-05-16; src/arg_parser.rs:104 negative field, test_negative_map:1205)
+- [x] Implement `-ss` / `-to` / `-t` seeking/duration options in `arg_parser.rs` (verified 2026-05-16; src/arg_parser.rs:297 -ss parsing, :307 -t, :624 -to)
+- [x] Add `-preset` / `-tune` / `-profile` translation in `codec_mapping.rs` (verified 2026-05-16; src/encoder_options.rs:6 EncoderQualityPreset, EncoderQualityOptions:105)
 - [x] APV aliases added to codec_map.rs + codec_mapping.rs — Slice A of /ultra Wave 3 (2026-04-17) DONE
 - [x] FFmpeg compat Wave 3: filter_complex, -map stream_spec, -ss/-to/-t, ffprobe output — Slice G of /ultra Wave 3 (2026-04-17)
 
@@ -23,17 +23,17 @@
 - [x] two-pass: -pass 1/-pass 2 → PassPhase::First/Second with JSON stats file — Wave 4 Slice E
 
 ## New Features
-- [ ] Implement `ffprobe`-compatible output mode (JSON/XML/CSV format info)
-- [ ] Add `-vf` / `-af` shorthand filter chain parsing alongside `-filter_complex`
-- [ ] Implement batch mode translation for converting multiple files in one invocation
-- [ ] Add `-movflags +faststart` and similar muxer option translation in `translator.rs`
-- [ ] Implement `-hwaccel` option translation to OxiMedia GPU pipeline flags
-- [ ] Add support for concat protocol (`concat:file1|file2`) and concat demuxer syntax
-- [ ] Implement two-pass encoding translation (`-pass 1` / `-pass 2`) in `translator.rs`
-- [ ] Add `-metadata` tag translation for title, artist, comment fields
+- [ ] Implement `ffprobe`-compatible output mode (JSON/XML/CSV format info) (verified-open 2026-05-16: not yet implemented)
+- [x] Add `-vf` / `-af` shorthand filter chain parsing alongside `-filter_complex` (verified 2026-05-16; Wave 4 Slice E)
+- [ ] Implement batch mode translation for converting multiple files in one invocation (verified-open 2026-05-16: not yet implemented)
+- [ ] Add `-movflags +faststart` and similar muxer option translation in `translator.rs` (verified-open 2026-05-16: not yet implemented)
+- [ ] Implement `-hwaccel` option translation to OxiMedia GPU pipeline flags (verified-open 2026-05-16: not yet implemented)
+- [ ] Add support for concat protocol (`concat:file1|file2`) and concat demuxer syntax (verified-open 2026-05-16: not yet implemented)
+- [x] Implement two-pass encoding translation (`-pass 1` / `-pass 2`) in `translator.rs` (verified 2026-05-16; Wave 4 Slice E two-pass implementation)
+- [ ] Add `-metadata` tag translation for title, artist, comment fields (verified-open 2026-05-16: not yet implemented)
 
 ## Performance
-- [ ] Cache parsed codec map in `codec_map.rs` to avoid repeated HashMap construction
+- [x] Cache parsed codec map in `codec_map.rs` to avoid repeated HashMap construction (verified 2026-05-16; Wave 4 Slice E OnceLock singleton)
 - [ ] Optimize `filter_lex.rs` parser with zero-copy string slicing instead of String allocation
 - [ ] Pre-compile regex patterns in `arg_parser.rs` for repeated argument parsing
 

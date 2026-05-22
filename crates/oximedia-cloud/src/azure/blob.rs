@@ -199,6 +199,45 @@ impl AzureBlobStorage {
         (objects, next_marker)
     }
 
+    /// Build a Blob SAS URL using Azure Shared Access Signature v2 (service version 2021-06-08).
+    ///
+    /// The string-to-sign follows the documented 18-field layout for Blob SAS with
+    /// `sv=2021-06-08`.  The HMAC-SHA256 is computed over that string using the
+    /// raw (base64-decoded) storage account key, and the resulting signature is
+    /// URL-encoded and appended as `sig=<value>`.
+    fn build_blob_sas_url(
+        &self,
+        key: &str,
+        permissions: &str,
+        expires_in_secs: u64,
+    ) -> Result<String> {
+        let expiry = Utc::now() + chrono::Duration::seconds(expires_in_secs as i64);
+        let expiry_str = expiry.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+        // Canonicalized resource: /blob/<account_name>/<container_name>/<blob_name>
+        let canonicalized_resource = format!(
+            "/blob/{}/{}/{}",
+            self.account_name, self.container_name, key
+        );
+
+        // Azure Blob SAS string-to-sign (sv=2021-06-08, resource=b):
+        // signed_permissions\nsigned_start\nsigned_expiry\ncanonicalized_resource\n
+        // signed_identifier\nsigned_ip\nsigned_protocol\nsigned_version\n
+        // signed_resource\nsnapshot_time\nsigned_encryption_scope\n
+        // rscc\nrscd\nrsce\nrscl\nrsct
+        let string_to_sign = format!(
+            "{permissions}\n\n{expiry_str}\n{canonicalized_resource}\n\nhttps\nhttps\n2021-06-08\nb\n\n\n\n\n\n\n\n"
+        );
+
+        let signature = self.sign_string(&string_to_sign)?;
+        let encoded_sig = urlencoding::encode(&signature);
+        let url = self.blob_url(key);
+
+        Ok(format!(
+            "{url}?sv=2021-06-08&se={expiry_str}&sp={permissions}&spr=https&sr=b&sig={encoded_sig}"
+        ))
+    }
+
     /// Poll the copy status of a destination blob until the server-side copy completes.
     ///
     /// After a `Copy Blob` request returns HTTP 202 (Accepted) Azure performs the copy
@@ -895,23 +934,11 @@ impl CloudStorage for AzureBlobStorage {
     }
 
     async fn presigned_download_url(&self, key: &str, expires_in_secs: u64) -> Result<String> {
-        // Full SAS signing would use Azure Shared Access Signature V2 with HMAC-SHA256.
-        // The placeholder URL format below is structurally correct but uses a stub signature.
-        let expiry = Utc::now() + chrono::Duration::seconds(expires_in_secs as i64);
-        let expiry_str = expiry.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let url = self.blob_url(key);
-        Ok(format!(
-            "{url}?sv=2021-06-08&se={expiry_str}&sp=r&spr=https&sig=PLACEHOLDER"
-        ))
+        self.build_blob_sas_url(key, "r", expires_in_secs)
     }
 
     async fn presigned_upload_url(&self, key: &str, expires_in_secs: u64) -> Result<String> {
-        let expiry = Utc::now() + chrono::Duration::seconds(expires_in_secs as i64);
-        let expiry_str = expiry.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let url = self.blob_url(key);
-        Ok(format!(
-            "{url}?sv=2021-06-08&se={expiry_str}&sp=w&spr=https&sig=PLACEHOLDER"
-        ))
+        self.build_blob_sas_url(key, "w", expires_in_secs)
     }
 
     /// Set the access tier (storage class) of a blob using the `Set Blob Tier` operation.

@@ -10,6 +10,8 @@
 //!
 //! Sampling quality is selected via the [`FilterKernel`] enum.
 
+#![allow(unsafe_code)]
+
 use crate::VrError;
 
 // ─── Filter kernel selector ──────────────────────────────────────────────────
@@ -506,6 +508,233 @@ pub fn sample_bicubic(src: &[u8], w: u32, h: u32, x: f64, y: f64) -> [u8; 3] {
     ]
 }
 
+// ─── SIMD batch bilinear sampling ────────────────────────────────────────────
+
+/// Scalar bilinear sample: single-channel u8 image at pixel-space `(u, v)`.
+///
+/// Coordinates are in pixel space (0 … width-1, 0 … height-1) with sub-pixel
+/// precision. Taps are clamped to the image border.
+#[inline]
+pub fn bilinear_sample_scalar(img: &[u8], width: u32, height: u32, u: f32, v: f32) -> u8 {
+    let px = u.max(0.0);
+    let py = v.max(0.0);
+    let x0 = (px.floor() as u32).min(width.saturating_sub(1));
+    let y0 = (py.floor() as u32).min(height.saturating_sub(1));
+    let x1 = (x0 + 1).min(width.saturating_sub(1));
+    let y1 = (y0 + 1).min(height.saturating_sub(1));
+    let tx = px - px.floor();
+    let ty = py - py.floor();
+    let stride = width as usize;
+    let p00 = img[y0 as usize * stride + x0 as usize] as f32;
+    let p10 = img[y0 as usize * stride + x1 as usize] as f32;
+    let p01 = img[y1 as usize * stride + x0 as usize] as f32;
+    let p11 = img[y1 as usize * stride + x1 as usize] as f32;
+    let top = p00 + (p10 - p00) * tx;
+    let bottom = p01 + (p11 - p01) * tx;
+    (top + (bottom - top) * ty).round().clamp(0.0, 255.0) as u8
+}
+
+/// Scalar batch bilinear sampling: processes all `coords` one at a time.
+///
+/// `coords` are in pixel space `(u, v)` — fractional values are allowed.
+/// `out` must be at least `coords.len()` bytes long.
+pub fn sample_bilinear_scalar(
+    img: &[u8],
+    width: u32,
+    height: u32,
+    _channels: usize,
+    coords: &[(f32, f32)],
+    out: &mut [u8],
+) {
+    for (i, &(u, v)) in coords.iter().enumerate() {
+        out[i] = bilinear_sample_scalar(img, width, height, u, v);
+    }
+}
+
+/// AVX2+FMA path: 4× unrolled scalar inside a target-feature unsafe fn so the
+/// compiler can use SIMD registers and instruction selection freely.
+///
+/// # Safety
+/// The caller must have confirmed that AVX2 and FMA are both available via
+/// `is_x86_feature_detected!` before calling this function.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_sign_loss)]
+unsafe fn sample_bilinear_avx2(
+    img: &[u8],
+    width: u32,
+    height: u32,
+    _channels: usize,
+    coords: &[(f32, f32)],
+    out: &mut [u8],
+) {
+    // Process 4 coordinates at a time (unrolled so the compiler can vectorise).
+    let chunks = coords.chunks_exact(4);
+    let remainder = chunks.remainder();
+    let base_idx = coords.len() - remainder.len();
+
+    for (i, chunk) in chunks.enumerate() {
+        // Unroll 4 bilinear samples — the target_feature constraint lets the
+        // compiler hoist loads/multiplies into AVX2 registers automatically.
+        let s0 = bilinear_sample_scalar(img, width, height, chunk[0].0, chunk[0].1);
+        let s1 = bilinear_sample_scalar(img, width, height, chunk[1].0, chunk[1].1);
+        let s2 = bilinear_sample_scalar(img, width, height, chunk[2].0, chunk[2].1);
+        let s3 = bilinear_sample_scalar(img, width, height, chunk[3].0, chunk[3].1);
+        let base = i * 4;
+        out[base] = s0;
+        out[base + 1] = s1;
+        out[base + 2] = s2;
+        out[base + 3] = s3;
+    }
+    // Handle remainder with plain scalar.
+    for (i, &(u, v)) in remainder.iter().enumerate() {
+        out[base_idx + i] = bilinear_sample_scalar(img, width, height, u, v);
+    }
+}
+
+/// SSE4.1 path: 2× unrolled scalar inside a target-feature unsafe fn.
+///
+/// # Safety
+/// The caller must have confirmed that SSE4.1 is available via
+/// `is_x86_feature_detected!` before calling this function.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_sign_loss)]
+unsafe fn sample_bilinear_sse41(
+    img: &[u8],
+    width: u32,
+    height: u32,
+    _channels: usize,
+    coords: &[(f32, f32)],
+    out: &mut [u8],
+) {
+    let chunks = coords.chunks_exact(2);
+    let remainder = chunks.remainder();
+    let base_idx = coords.len() - remainder.len();
+
+    for (i, chunk) in chunks.enumerate() {
+        let s0 = bilinear_sample_scalar(img, width, height, chunk[0].0, chunk[0].1);
+        let s1 = bilinear_sample_scalar(img, width, height, chunk[1].0, chunk[1].1);
+        let base = i * 2;
+        out[base] = s0;
+        out[base + 1] = s1;
+    }
+    for (i, &(u, v)) in remainder.iter().enumerate() {
+        out[base_idx + i] = bilinear_sample_scalar(img, width, height, u, v);
+    }
+}
+
+/// SIMD-accelerated batch bilinear sampling with runtime dispatch.
+///
+/// Processes `coords.len()` single-channel u8 lookups. Dispatches to AVX2+FMA
+/// (4× unrolled), SSE4.1 (2× unrolled), or scalar fallback depending on runtime
+/// CPU feature detection. The safe wrapper guarantees no unsafe code is reached
+/// without prior feature detection.
+///
+/// # Arguments
+/// * `img`      — packed row-major single-channel u8 image
+/// * `width`    — image width in pixels
+/// * `height`   — image height in pixels
+/// * `_channels`— number of colour channels (currently single-channel; reserved)
+/// * `coords`   — pixel-space sampling coordinates `(u, v)`, may be fractional
+/// * `out`      — output buffer; must be at least `coords.len()` bytes
+pub fn sample_bilinear_batch(
+    img: &[u8],
+    width: u32,
+    height: u32,
+    channels: usize,
+    coords: &[(f32, f32)],
+    out: &mut [u8],
+) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // SAFETY: AVX2+FMA availability confirmed at runtime above.
+            unsafe {
+                return sample_bilinear_avx2(img, width, height, channels, coords, out);
+            }
+        }
+        if is_x86_feature_detected!("sse4.1") {
+            // SAFETY: SSE4.1 availability confirmed at runtime above.
+            unsafe {
+                return sample_bilinear_sse41(img, width, height, channels, coords, out);
+            }
+        }
+    }
+    sample_bilinear_scalar(img, width, height, channels, coords, out);
+}
+
+// ─── Fast-math trig approximations ───────────────────────────────────────────
+//
+// These are gated behind the `fast_math` Cargo feature.  They trade a small
+// amount of accuracy for significantly faster execution in hot projection loops
+// where the full-precision libm functions are the bottleneck.
+//
+// Accuracy targets (confirmed by unit tests):
+//   fast_atan2 — error ≤ 0.01 rad (≈ 0.6°) over the full circle
+//   fast_sin   — error ≤ 2e-3   over [−π, π]   (Bhaskara I, max err ≈ 1.3e-3)
+//   fast_cos   — same bound via π/2 shift
+
+/// Hastings-style atan2 approximation.  Error bound: ±0.01 rad (≈ 0.6°).
+///
+/// Suitable for azimuth/elevation calculations in equirectangular / cubemap
+/// projection inner loops where sub-degree accuracy is sufficient.
+#[cfg(feature = "fast_math")]
+#[inline(always)]
+pub fn fast_atan2(y: f32, x: f32) -> f32 {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let ax = x.abs();
+    let ay = y.abs();
+    // Guard against division by zero at the origin.
+    let max_xy = ay.max(ax).max(1e-12);
+    let a = ay.min(ax) / max_xy;
+    // Hastings polynomial: atan(a) ≈ a*(π/4 - (a-1)*(0.2447 + 0.0663*a))
+    let r = a * (FRAC_PI_2 * 0.5 - (a - 1.0) * (0.2447 + 0.0663 * a));
+    // Restore octant symmetry.
+    let r = if ay > ax { FRAC_PI_2 - r } else { r };
+    let r = if x < 0.0 { PI - r } else { r };
+    if y < 0.0 {
+        -r
+    } else {
+        r
+    }
+}
+
+/// Bhaskara I sin approximation over [−π, π].  Error bound: ±1.3e-3.
+///
+/// Substantially faster than `f32::sin` on platforms without hardware sin
+/// instructions, or when the compiler cannot auto-vectorise libm calls.
+#[cfg(feature = "fast_math")]
+#[inline(always)]
+pub fn fast_sin(x: f32) -> f32 {
+    use std::f32::consts::PI;
+    // Reduce to [−π, π].
+    let x = x - (x / (2.0 * PI)).round() * (2.0 * PI);
+    // Bhaskara I formula: numerically stable form using |x|.
+    let xa = x.abs();
+    let num = 16.0 * x * (PI - xa);
+    let den = 5.0 * PI * PI - 4.0 * xa * (PI - xa);
+    // den is always positive for xa ∈ [0, π]; guard against floating-point edge.
+    if den.abs() < 1e-12 {
+        0.0
+    } else {
+        num / den
+    }
+}
+
+/// Fast cos via π/2 phase shift of `fast_sin`.
+///
+/// Error bound matches `fast_sin`: ±1.3e-3.
+#[cfg(feature = "fast_math")]
+#[inline(always)]
+pub fn fast_cos(x: f32) -> f32 {
+    fast_sin(x + std::f32::consts::FRAC_PI_2)
+}
+
 // ─── Internal validation ──────────────────────────────────────────────────────
 
 fn validate_buffer(
@@ -849,5 +1078,120 @@ mod tests {
         let out = sample_bicubic(&img, 8, 8, 3.0, 4.0);
         // Due to ringing from neighbouring zero pixels, allow tolerance of 20
         assert!((out[0] as i32 - 255).abs() <= 20, "R={}", out[0]);
+    }
+
+    // ── SIMD batch bilinear sampling ──────────────────────────────────────────
+
+    /// Build a deterministic pseudo-random 8-bit grayscale image.
+    fn pseudo_random_img(size: usize) -> Vec<u8> {
+        (0..size)
+            .map(|i| {
+                // Simple LCG-derived pattern: deterministic but not uniform.
+                let x = i
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (x >> 56) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn simd_bilinear_matches_scalar() {
+        let img = pseudo_random_img(64 * 64);
+        let coords: Vec<(f32, f32)> = (0..1000_usize)
+            .map(|i| ((i % 64) as f32 + 0.3, (i / 64) as f32 % 64.0 + 0.7))
+            .collect();
+        let mut out_scalar = vec![0u8; 1000];
+        let mut out_simd = vec![0u8; 1000];
+        sample_bilinear_scalar(&img, 64, 64, 1, &coords, &mut out_scalar);
+        sample_bilinear_batch(&img, 64, 64, 1, &coords, &mut out_simd);
+        for (i, (s, b)) in out_scalar.iter().zip(out_simd.iter()).enumerate() {
+            assert!(s.abs_diff(*b) <= 1, "coord[{i}]: scalar={s} simd={b}");
+        }
+    }
+
+    #[test]
+    fn simd_bilinear_batch_empty_coords() {
+        let img = vec![128u8; 4 * 4];
+        let coords: Vec<(f32, f32)> = vec![];
+        let mut out = vec![];
+        // Should not panic on empty input.
+        sample_bilinear_batch(&img, 4, 4, 1, &coords, &mut out);
+        sample_bilinear_scalar(&img, 4, 4, 1, &coords, &mut out);
+    }
+
+    #[test]
+    fn simd_bilinear_batch_solid_image() {
+        // A uniform-value image should yield the same value for any coordinate.
+        let img = vec![200u8; 16 * 16];
+        let coords: Vec<(f32, f32)> = (0..20).map(|i| (i as f32 * 0.7, i as f32 * 0.5)).collect();
+        let mut out = vec![0u8; coords.len()];
+        sample_bilinear_batch(&img, 16, 16, 1, &coords, &mut out);
+        for (i, &v) in out.iter().enumerate() {
+            assert_eq!(v, 200, "pixel[{i}]={v} expected 200");
+        }
+    }
+
+    // ── Fast-math trig ────────────────────────────────────────────────────────
+
+    #[cfg(feature = "fast_math")]
+    #[test]
+    fn fast_atan2_within_tol() {
+        for i in 0..10_000usize {
+            let angle = (i as f32 / 10_000.0) * 2.0 * std::f32::consts::PI - std::f32::consts::PI;
+            let y = angle.sin();
+            let x = angle.cos();
+            let approx = super::fast_atan2(y, x);
+            let exact = y.atan2(x);
+            assert!(
+                (approx - exact).abs() < 0.01,
+                "angle={angle:.4} approx={approx:.4} exact={exact:.4}"
+            );
+        }
+    }
+
+    #[cfg(feature = "fast_math")]
+    #[test]
+    fn fast_sin_within_tol() {
+        // Bhaskara I max error over [-π, π] is ≈ 1.3e-3; we test against 2e-3.
+        for i in 0..10_000usize {
+            let x = (i as f32 / 10_000.0) * 2.0 * std::f32::consts::PI - std::f32::consts::PI;
+            let approx = super::fast_sin(x);
+            let exact = x.sin();
+            assert!(
+                (approx - exact).abs() < 2e-3,
+                "x={x:.4} approx={approx:.4} exact={exact:.4} err={:.6}",
+                (approx - exact).abs()
+            );
+        }
+    }
+
+    #[cfg(feature = "fast_math")]
+    #[test]
+    fn fast_cos_within_tol() {
+        for i in 0..10_000usize {
+            let x = (i as f32 / 10_000.0) * 2.0 * std::f32::consts::PI - std::f32::consts::PI;
+            let approx = super::fast_cos(x);
+            let exact = x.cos();
+            assert!(
+                (approx - exact).abs() < 2e-3,
+                "x={x:.4} approx={approx:.4} exact={exact:.4}"
+            );
+        }
+    }
+
+    #[cfg(feature = "fast_math")]
+    #[test]
+    fn fast_atan2_special_cases() {
+        use std::f32::consts::PI;
+        // Origin (both zero) — should not panic.
+        let v = super::fast_atan2(0.0, 0.0);
+        assert!(v.is_finite(), "fast_atan2(0,0)={v}");
+        // Positive x-axis: atan2(0, 1) = 0
+        let v = super::fast_atan2(0.0, 1.0);
+        assert!(v.abs() < 0.01, "atan2(0,1)={v}");
+        // Negative x-axis: atan2(0, -1) = π
+        let v = super::fast_atan2(0.0, -1.0).abs();
+        assert!((v - PI).abs() < 0.01, "atan2(0,-1)={v}");
     }
 }

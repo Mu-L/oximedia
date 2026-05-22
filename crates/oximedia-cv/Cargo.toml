@@ -21,6 +21,8 @@ onnx = ["dep:oxionnx"]
 cuda = ["onnx", "oxionnx/cuda"]
 rocm = ["onnx"]
 tensorrt = ["onnx"]
+webgpu = ["onnx", "oxionnx/gpu"]
+directml = ["onnx", "oxionnx/directml"]
 
 [dependencies]
 oximedia-core = { workspace = true }

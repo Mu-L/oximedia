@@ -18,7 +18,7 @@ use super::{BitWrite, BitsWritten, ByteWrite, Counter, Endianness, Overflowed, P
 /// # Example
 /// ```
 /// use std::io::Read;
-/// use bitstream_io::{BigEndian, BitWrite, BitWriter, ToBitStream};
+/// use oximedia_bitstream::{BigEndian, BitWrite, BitWriter, ToBitStream};
 ///
 /// #[derive(Debug, PartialEq, Eq)]
 /// struct BlockHeader {

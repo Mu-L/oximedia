@@ -4,11 +4,25 @@
 //! White point adaptation uses the Bradford chromatic adaptation transform (CAT).
 
 use crate::{HdrError, Result};
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+// ── Process-wide matrix cache ─────────────────────────────────────────────────
+
+/// Type alias for the inner map stored in the process-wide gamut cache.
+type GamutCacheMap = HashMap<(ColorGamut, ColorGamut), [[f32; 3]; 3]>;
+
+/// Process-wide cache for gamut conversion matrices.
+///
+/// Keyed by `(src, dst)` pair; stores the computed `[[f32; 3]; 3]` matrix.
+/// Two-phase locking: read-locked fast path, write-locked slow path.
+static MATRIX_CACHE: OnceLock<RwLock<GamutCacheMap>> = OnceLock::new();
 
 // ── Gamut enum ────────────────────────────────────────────────────────────────
 
 /// Well-known RGB colour gamuts.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColorGamut {
     /// BT.709 / sRGB (HD broadcast).
     Rec709,
@@ -217,6 +231,46 @@ fn bradford_cat(src_white: Xy, dst_white: Xy) -> Mat3 {
     mat3_mul(BRADFORD_INV, mat3_mul(scale, BRADFORD))
 }
 
+// ── Matrix computation ────────────────────────────────────────────────────────
+
+/// Compute the raw `[[f32; 3]; 3]` conversion matrix for the given gamut pair.
+///
+/// This is the inner computation extracted from `GamutConversionMatrix::new` so
+/// it can be called from the cache miss path without holding any lock.
+fn compute_matrix(src: ColorGamut, dst: ColorGamut) -> Result<[[f32; 3]; 3]> {
+    let src_data = src.data();
+    let dst_data = dst.data();
+
+    let src_to_xyz = rgb_to_xyz_matrix(&src_data);
+    let dst_to_xyz = rgb_to_xyz_matrix(&dst_data);
+    let xyz_to_dst = mat3_inverse(dst_to_xyz);
+
+    // Apply Bradford CAT only if white points differ.
+    let cat = if src_data.w.x != dst_data.w.x || src_data.w.y != dst_data.w.y {
+        Some(bradford_cat(src_data.w, dst_data.w))
+    } else {
+        None
+    };
+
+    let xyz_adapted = if let Some(cat_mat) = cat {
+        mat3_mul(cat_mat, src_to_xyz)
+    } else {
+        src_to_xyz
+    };
+
+    let m64 = mat3_mul(xyz_to_dst, xyz_adapted);
+
+    // Downcast to f32.
+    let mut matrix = [[0.0f32; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            matrix[i][j] = m64[i][j] as f32;
+        }
+    }
+
+    Ok(matrix)
+}
+
 // ── GamutConversionMatrix ─────────────────────────────────────────────────────
 
 /// A 3×3 RGB-to-RGB colour matrix with source and destination gamut metadata.
@@ -237,36 +291,20 @@ impl GamutConversionMatrix {
     /// Returns `HdrError::GamutConversionError` if a primary matrix is singular (degenerate
     /// gamut definition).
     pub fn new(src: ColorGamut, dst: ColorGamut) -> Result<Self> {
-        let src_data = src.data();
-        let dst_data = dst.data();
+        let key = (src, dst);
+        let cache = MATRIX_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
 
-        let src_to_xyz = rgb_to_xyz_matrix(&src_data);
-        let dst_to_xyz = rgb_to_xyz_matrix(&dst_data);
-        let xyz_to_dst = mat3_inverse(dst_to_xyz);
-
-        // Apply Bradford CAT only if white points differ
-        let cat = if src_data.w.x != dst_data.w.x || src_data.w.y != dst_data.w.y {
-            Some(bradford_cat(src_data.w, dst_data.w))
-        } else {
-            None
-        };
-
-        let xyz_adapted = if let Some(cat_mat) = cat {
-            mat3_mul(cat_mat, src_to_xyz)
-        } else {
-            src_to_xyz
-        };
-
-        let m64 = mat3_mul(xyz_to_dst, xyz_adapted);
-
-        // Downcast to f32
-        let mut matrix = [[0.0f32; 3]; 3];
-        for i in 0..3 {
-            for j in 0..3 {
-                matrix[i][j] = m64[i][j] as f32;
+        // Fast path: read-locked lookup.
+        {
+            let guard = cache.read();
+            if let Some(&matrix) = guard.get(&key) {
+                return Ok(Self { src, dst, matrix });
             }
         }
 
+        // Slow path: compute and insert under write lock.
+        let matrix = compute_matrix(src, dst)?;
+        cache.write().insert(key, matrix);
         Ok(Self { src, dst, matrix })
     }
 
@@ -524,6 +562,13 @@ fn soft_knee_compress(x: f32, softness: f32) -> f32 {
     };
 
     knee + headroom * tanh_val
+}
+
+// ── Test-only cache introspection ─────────────────────────────────────────────
+
+#[cfg(test)]
+pub(crate) fn cache_len() -> usize {
+    MATRIX_CACHE.get().map_or(0, |c| c.read().len())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -925,6 +970,67 @@ mod tests {
         assert!(
             chroma_out <= chroma_in + 1e-5,
             "highlight desaturation should reduce chroma: in={chroma_in}, out={chroma_out}"
+        );
+    }
+
+    // ── Cache tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_gamut_cache_deduplicates() {
+        // Populate the cache with a known pair.
+        let _ = GamutConversionMatrix::new(ColorGamut::Rec709, ColorGamut::Rec2020)
+            .expect("first construction");
+        let before = super::cache_len();
+
+        // A second construction of the same pair must not grow the cache.
+        let _ = GamutConversionMatrix::new(ColorGamut::Rec709, ColorGamut::Rec2020)
+            .expect("second construction");
+        let after = super::cache_len();
+
+        assert_eq!(
+            before, after,
+            "second call should hit cache, not grow it (before={before}, after={after})"
+        );
+    }
+
+    #[test]
+    fn test_gamut_cache_thread_hammer() {
+        use std::thread;
+
+        let pairs = [
+            (ColorGamut::Rec709, ColorGamut::Rec2020),
+            (ColorGamut::Rec2020, ColorGamut::Rec709),
+            (ColorGamut::P3D65, ColorGamut::Rec2020),
+            (ColorGamut::Rec2020, ColorGamut::P3D65),
+            (ColorGamut::P3Dci, ColorGamut::Rec709),
+            (ColorGamut::Rec709, ColorGamut::P3Dci),
+            (ColorGamut::Aces, ColorGamut::Rec2020),
+            (ColorGamut::Rec2020, ColorGamut::Aces),
+            (ColorGamut::Rec709, ColorGamut::Rec709),
+            (ColorGamut::Aces, ColorGamut::P3D65),
+        ];
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                thread::spawn(move || {
+                    for &(src, dst) in &pairs {
+                        GamutConversionMatrix::new(src, dst).unwrap_or_else(|e| {
+                            panic!("construction failed ({src:?}→{dst:?}): {e}")
+                        });
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        // All 10 distinct pairs should be cached (upper bound — may be more if
+        // other tests already populated the cache, but must be at least 10).
+        assert!(
+            super::cache_len() >= 10,
+            "expected >=10 cache entries after thread hammer"
         );
     }
 }

@@ -450,12 +450,51 @@ impl<'a> Parser<'a> {
     }
 
     /// Collect everything up to the next chain-level separator.
+    ///
+    /// Respects:
+    /// - Single-quoted strings `'...'` — commas, semicolons, and brackets inside
+    ///   are taken literally until the closing `'`.
+    /// - Double-quoted strings `"..."` — same semantics as single-quote.
+    /// - Backslash escapes `\,`, `\;`, `\[`, `\]`, `\\` — the escaped character is
+    ///   included literally in the output (escape byte is consumed).
+    /// - Nested `(...)` / `{...}` depth — brackets at depth > 0 do not terminate.
     fn collect_option_string(&mut self) -> String {
         let mut s = String::new();
-        let mut depth = 0i32; // track nested parens/brackets
+        let mut depth = 0i32;
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut escape_next = false;
 
         while let Some(c) = self.peek() {
+            if escape_next {
+                // Previous character was `\`; take current character literally.
+                s.push(c);
+                self.advance();
+                escape_next = false;
+                continue;
+            }
+
             match c {
+                '\\' => {
+                    // Consume the backslash; next character will be taken literally.
+                    self.advance();
+                    escape_next = true;
+                }
+                '\'' if !in_double_quote => {
+                    in_single_quote = !in_single_quote;
+                    s.push(c);
+                    self.advance();
+                }
+                '"' if !in_single_quote => {
+                    in_double_quote = !in_double_quote;
+                    s.push(c);
+                    self.advance();
+                }
+                // Inside any quote mode, everything is literal.
+                _ if in_single_quote || in_double_quote => {
+                    s.push(c);
+                    self.advance();
+                }
                 '(' | '{' => {
                     depth += 1;
                     s.push(c);
@@ -680,5 +719,50 @@ mod tests {
         // Re-parse the output to verify it's still valid.
         let g2 = FilterGraph::parse(&s).expect("re-parse");
         assert_eq!(g.chains.len(), g2.chains.len());
+    }
+
+    #[test]
+    fn test_single_quoted_option_value() {
+        // A subtitle file path with commas must be accepted inside single quotes.
+        let g = FilterGraph::parse("subtitles='file,name.srt'").expect("parse");
+        let filter = &g.chains[0].filters[0];
+        assert_eq!(filter.name, "subtitles");
+        // The option value should include the quotes; the key is positional.
+        assert!(!filter.options.is_empty());
+    }
+
+    #[test]
+    fn test_double_quoted_option_value() {
+        // A drawtext filter value with a comma inside double quotes.
+        let g = FilterGraph::parse("drawtext=text=\"Hello, World\"").expect("parse");
+        let filter = &g.chains[0].filters[0];
+        assert_eq!(filter.name, "drawtext");
+        let text_opt = filter
+            .options
+            .iter()
+            .find(|o| o.key.as_deref() == Some("text"));
+        assert!(text_opt.is_some(), "text option missing");
+    }
+
+    #[test]
+    fn test_backslash_escape_in_option() {
+        // A backslash-escaped comma should not split the option string.
+        let g = FilterGraph::parse(r"drawtext=text=Hello\,World").expect("parse");
+        let filter = &g.chains[0].filters[0];
+        assert_eq!(filter.name, "drawtext");
+        // Only one filter in this chain (comma was escaped, not a separator).
+        assert_eq!(g.chains[0].filters.len(), 1);
+    }
+
+    #[test]
+    fn test_nested_bracket_depth_in_option() {
+        // A filter option that uses parentheses internally (e.g. color= with rgb()).
+        let g = FilterGraph::parse("color=c=rgb(0,255,0)").expect("parse");
+        let filter = &g.chains[0].filters[0];
+        assert_eq!(filter.name, "color");
+        // The rgb(...) expression should be collected as part of the option value,
+        // not treated as a chain separator at the commas inside parens.
+        assert_eq!(g.chains.len(), 1);
+        assert_eq!(g.chains[0].filters.len(), 1);
     }
 }

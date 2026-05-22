@@ -2,9 +2,15 @@
 // Licensed under the Apache License, Version 2.0
 
 //! Thumbnail generation from video files.
+//!
+//! `ThumbnailGenerator` generates image thumbnails at fractional or absolute
+//! positions within a video. Full integration requires the codec decode and
+//! image resize paths; until those are wired through the `generate_*` methods
+//! return [`ConversionError::UnsupportedFormat`]. The builder API, position
+//! math, and output-path naming logic are fully implemented.
 
-use crate::Result;
-use std::path::Path;
+use crate::{ConversionError, Result};
+use std::path::{Path, PathBuf};
 
 /// Generator for video thumbnails.
 #[derive(Debug, Clone)]
@@ -13,10 +19,12 @@ pub struct ThumbnailGenerator {
     height: u32,
     time_position: ThumbnailPosition,
     format: super::super::frame::extract::ImageFormat,
+    /// Output file pattern; `%02d` is replaced by the thumbnail index.
+    output_pattern: String,
 }
 
 impl ThumbnailGenerator {
-    /// Create a new thumbnail generator.
+    /// Create a new thumbnail generator (default: 320×180, middle of video, JPEG).
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -24,6 +32,7 @@ impl ThumbnailGenerator {
             height: 180,
             time_position: ThumbnailPosition::Middle,
             format: super::super::frame::extract::ImageFormat::Jpeg,
+            output_pattern: "thumb_%02d".to_string(),
         }
     }
 
@@ -41,7 +50,7 @@ impl ThumbnailGenerator {
         self
     }
 
-    /// Set the thumbnail size.
+    /// Set the thumbnail dimensions.
     #[must_use]
     pub fn with_size(mut self, width: u32, height: u32) -> Self {
         self.width = width;
@@ -63,68 +72,191 @@ impl ThumbnailGenerator {
         self
     }
 
-    /// Generate a thumbnail from a video.
+    /// Set the output filename pattern (`%02d` → zero-padded index).
+    #[must_use]
+    pub fn with_output_pattern<S: Into<String>>(mut self, pattern: S) -> Self {
+        self.output_pattern = pattern.into();
+        self
+    }
+
+    // ── Duration validation helpers ─────────────────────────────────────────
+
+    fn validate_size(&self) -> Result<()> {
+        if self.width == 0 || self.height == 0 {
+            return Err(ConversionError::InvalidInput(
+                "Thumbnail width and height must be greater than zero".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    // ── Output path generation ──────────────────────────────────────────────
+
+    /// Generate the output path for thumbnail index `idx` in `output_dir`.
+    #[must_use]
+    pub fn output_path_for(&self, output_dir: &Path, idx: usize) -> PathBuf {
+        let name = self.output_pattern.replace("%02d", &format!("{idx:02}"));
+        output_dir.join(format!("{name}.{}", self.format.extension()))
+    }
+
+    /// Generate a thumbnail from a video at the configured position.
+    ///
+    /// Returns [`ConversionError::UnsupportedFormat`] until the codec decode
+    /// path is integrated.
     pub async fn generate<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         input: P,
         output: Q,
     ) -> Result<()> {
-        let _input = input.as_ref();
-        let _output = output.as_ref();
+        let input = input.as_ref();
+        let output = output.as_ref();
 
-        // Placeholder for actual generation
-        Ok(())
+        self.validate_size()?;
+
+        if !input.exists() {
+            return Err(ConversionError::InvalidInput(format!(
+                "Input file not found: {}",
+                input.display()
+            )));
+        }
+
+        let _ = output;
+
+        Err(ConversionError::UnsupportedFormat(
+            "Thumbnail generation requires the codec decode pipeline (demux → decode → resize → \
+             image encode), which is not yet integrated."
+                .to_string(),
+        ))
     }
 
-    /// Generate multiple thumbnails at different positions.
+    /// Generate multiple thumbnails at evenly-spaced positions.
     pub async fn generate_multiple<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         input: P,
         output_dir: Q,
         count: usize,
-    ) -> Result<Vec<std::path::PathBuf>> {
-        let _input = input.as_ref();
-        let _output_dir = output_dir.as_ref();
-        let _count = count;
+    ) -> Result<Vec<PathBuf>> {
+        let input = input.as_ref();
+        let output_dir = output_dir.as_ref();
 
-        // Placeholder
-        Ok(Vec::new())
+        self.validate_size()?;
+
+        if !input.exists() {
+            return Err(ConversionError::InvalidInput(format!(
+                "Input file not found: {}",
+                input.display()
+            )));
+        }
+
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let _ = output_dir;
+
+        Err(ConversionError::UnsupportedFormat(
+            "Thumbnail generation requires the codec decode pipeline, which is not yet integrated."
+                .to_string(),
+        ))
     }
 
-    /// Generate thumbnail at a specific time.
+    /// Generate a thumbnail at a specific time (in seconds from start).
     pub async fn generate_at<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         input: P,
         output: Q,
         time_seconds: f64,
     ) -> Result<()> {
-        let _input = input.as_ref();
-        let _output = output.as_ref();
-        let _time = time_seconds;
+        let input = input.as_ref();
+        let output = output.as_ref();
 
-        // Placeholder
-        Ok(())
+        self.validate_size()?;
+
+        if !input.exists() {
+            return Err(ConversionError::InvalidInput(format!(
+                "Input file not found: {}",
+                input.display()
+            )));
+        }
+
+        if time_seconds < 0.0 {
+            return Err(ConversionError::InvalidTimestamp);
+        }
+
+        let _ = output;
+
+        Err(ConversionError::UnsupportedFormat(
+            "Thumbnail generation requires the codec decode pipeline, which is not yet integrated."
+                .to_string(),
+        ))
     }
 
-    /// Create a 16:9 thumbnail.
+    /// Generate thumbnails at fractional or absolute positions (0.0–1.0 or
+    /// seconds).
+    ///
+    /// Each element of `positions` is interpreted as:
+    /// - A value in 0.0–1.0: fractional position in the video.
+    /// - A value > 1.0: absolute position in seconds.
+    ///
+    /// `total_duration_secs` is used only for fractional positions.
+    pub async fn generate_at_positions<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        input: P,
+        output_dir: Q,
+        positions: &[f64],
+        _total_duration_secs: f64,
+    ) -> Result<Vec<PathBuf>> {
+        let input = input.as_ref();
+        let output_dir = output_dir.as_ref();
+
+        self.validate_size()?;
+
+        if !input.exists() {
+            return Err(ConversionError::InvalidInput(format!(
+                "Input file not found: {}",
+                input.display()
+            )));
+        }
+
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        for &p in positions {
+            if p < 0.0 {
+                return Err(ConversionError::InvalidTimestamp);
+            }
+        }
+
+        let _ = output_dir;
+
+        Err(ConversionError::UnsupportedFormat(
+            "Thumbnail generation requires the codec decode pipeline, which is not yet integrated."
+                .to_string(),
+        ))
+    }
+
+    // ── Preset constructors ─────────────────────────────────────────────────
+
+    /// Create a 16:9 thumbnail (640×360).
     #[must_use]
     pub fn widescreen() -> Self {
         Self::new().with_size(640, 360)
     }
 
-    /// Create a 4:3 thumbnail.
+    /// Create a 4:3 thumbnail (640×480).
     #[must_use]
     pub fn standard() -> Self {
         Self::new().with_size(640, 480)
     }
 
-    /// Create a small thumbnail.
+    /// Create a small thumbnail (160×90).
     #[must_use]
     pub fn small() -> Self {
         Self::new().with_size(160, 90)
     }
 
-    /// Create a large thumbnail.
+    /// Create a large thumbnail (1280×720).
     #[must_use]
     pub fn large() -> Self {
         Self::new().with_size(1280, 720)
@@ -140,20 +272,20 @@ impl Default for ThumbnailGenerator {
 /// Position in the video for thumbnail extraction.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ThumbnailPosition {
-    /// Start of the video
+    /// Start of the video (t = 0).
     Start,
-    /// Middle of the video
+    /// Middle of the video.
     Middle,
-    /// End of the video
+    /// Near the end of the video (last second).
     End,
-    /// Specific time in seconds
+    /// Specific absolute time in seconds.
     Time(f64),
-    /// Percentage through the video (0.0 to 1.0)
+    /// Fractional position through the video (0.0 to 1.0).
     Percent(f64),
 }
 
 impl ThumbnailPosition {
-    /// Calculate the actual time based on video duration.
+    /// Calculate the actual time in seconds based on total video duration.
     #[must_use]
     pub fn calculate_time(&self, duration_seconds: f64) -> f64 {
         match self {
@@ -164,11 +296,18 @@ impl ThumbnailPosition {
             Self::Percent(p) => duration_seconds * p.clamp(0.0, 1.0),
         }
     }
+
+    /// Return `true` if this position requires knowing the total duration.
+    #[must_use]
+    pub fn requires_duration(&self) -> bool {
+        matches!(self, Self::Middle | Self::End | Self::Percent(_))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::extract::ImageFormat;
 
     #[test]
     fn test_generator_creation() {
@@ -207,5 +346,149 @@ mod tests {
             ThumbnailPosition::Percent(0.75).calculate_time(duration),
             75.0
         );
+    }
+
+    #[test]
+    fn test_position_percent_clamp() {
+        // Clamps at 1.0
+        assert_eq!(ThumbnailPosition::Percent(1.5).calculate_time(100.0), 100.0);
+        // Clamps at 0.0
+        assert_eq!(ThumbnailPosition::Percent(-0.5).calculate_time(100.0), 0.0);
+    }
+
+    #[test]
+    fn test_position_requires_duration() {
+        assert!(ThumbnailPosition::Middle.requires_duration());
+        assert!(ThumbnailPosition::End.requires_duration());
+        assert!(ThumbnailPosition::Percent(0.5).requires_duration());
+        assert!(!ThumbnailPosition::Start.requires_duration());
+        assert!(!ThumbnailPosition::Time(5.0).requires_duration());
+    }
+
+    #[test]
+    fn test_output_path_for() {
+        let gen = ThumbnailGenerator::new().with_output_pattern("frame_%02d");
+        let dir = std::env::temp_dir();
+        assert_eq!(gen.output_path_for(&dir, 0), dir.join("frame_00.jpg"));
+        assert_eq!(gen.output_path_for(&dir, 5), dir.join("frame_05.jpg"));
+    }
+
+    #[test]
+    fn test_output_path_png() {
+        let gen = ThumbnailGenerator::new()
+            .with_format(ImageFormat::Png)
+            .with_output_pattern("thumb_%02d");
+        let dir = PathBuf::from("/out");
+        assert_eq!(
+            gen.output_path_for(&dir, 1),
+            PathBuf::from("/out/thumb_01.png")
+        );
+    }
+
+    #[test]
+    fn test_validate_size_zero_width_errors() {
+        let gen = ThumbnailGenerator::new().with_size(0, 180);
+        assert!(
+            matches!(gen.validate_size(), Err(ConversionError::InvalidInput(_))),
+            "expected InvalidInput for zero width"
+        );
+    }
+
+    #[test]
+    fn test_validate_size_zero_height_errors() {
+        let gen = ThumbnailGenerator::new().with_size(320, 0);
+        assert!(
+            matches!(gen.validate_size(), Err(ConversionError::InvalidInput(_))),
+            "expected InvalidInput for zero height"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_missing_file_errors() {
+        let gen = ThumbnailGenerator::new();
+        let input = std::env::temp_dir().join("__oximedia_nonexistent_thumb__.mkv");
+        let output = std::env::temp_dir().join("__oximedia_nonexistent_thumb_out__.jpg");
+        let result = gen.generate(&input, &output).await;
+        assert!(
+            matches!(result, Err(ConversionError::InvalidInput(_))),
+            "expected InvalidInput, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_at_negative_time_errors() {
+        let tmp = std::env::temp_dir().join("oximedia_convert_thumb_neg_time.mkv");
+        std::fs::write(&tmp, b"dummy").expect("write dummy");
+        let gen = ThumbnailGenerator::new();
+        let result = gen
+            .generate_at(
+                &tmp,
+                std::env::temp_dir().join("oximedia_convert_thumb_neg_time_out.jpg"),
+                -1.0,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(ConversionError::InvalidTimestamp)),
+            "expected InvalidTimestamp, got {result:?}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_generate_multiple_zero_count_returns_empty() {
+        let tmp = std::env::temp_dir().join("oximedia_convert_thumb_zero_count.mkv");
+        std::fs::write(&tmp, b"dummy").expect("write dummy");
+        let gen = ThumbnailGenerator::new();
+        let result = gen.generate_multiple(&tmp, std::env::temp_dir(), 0).await;
+        assert!(
+            matches!(result, Ok(ref v) if v.is_empty()),
+            "expected empty vec, got {result:?}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_generate_at_positions_empty_returns_empty() {
+        let tmp = std::env::temp_dir().join("oximedia_convert_thumb_empty_pos.mkv");
+        std::fs::write(&tmp, b"dummy").expect("write dummy");
+        let gen = ThumbnailGenerator::new();
+        let result = gen
+            .generate_at_positions(&tmp, std::env::temp_dir(), &[], 60.0)
+            .await;
+        assert!(
+            matches!(result, Ok(ref v) if v.is_empty()),
+            "expected empty vec"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_generate_at_positions_negative_errors() {
+        let tmp = std::env::temp_dir().join("oximedia_convert_thumb_neg_pos.mkv");
+        std::fs::write(&tmp, b"dummy").expect("write dummy");
+        let gen = ThumbnailGenerator::new();
+        let result = gen
+            .generate_at_positions(&tmp, std::env::temp_dir(), &[-1.0, 0.5], 60.0)
+            .await;
+        assert!(
+            matches!(result, Err(ConversionError::InvalidTimestamp)),
+            "expected InvalidTimestamp, got {result:?}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[tokio::test]
+    async fn test_generate_zero_size_errors() {
+        let tmp = std::env::temp_dir().join("oximedia_convert_thumb_zero_size.mkv");
+        std::fs::write(&tmp, b"dummy").expect("write dummy");
+        let gen = ThumbnailGenerator::new().with_size(0, 0);
+        let result = gen
+            .generate(&tmp, std::env::temp_dir().join("out.jpg"))
+            .await;
+        assert!(
+            matches!(result, Err(ConversionError::InvalidInput(_))),
+            "expected InvalidInput for zero size, got {result:?}"
+        );
+        let _ = std::fs::remove_file(&tmp);
     }
 }

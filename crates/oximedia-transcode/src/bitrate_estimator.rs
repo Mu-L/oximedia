@@ -1,4 +1,11 @@
 //! Bitrate estimation from QP/CRF, resolution, and frame-rate parameters.
+//!
+//! This module also integrates [`RunningStats`](crate::running_stats::RunningStats)
+//! and [`BitrateRunningAnalyzer`]
+//! so that callers can accumulate per-frame bitrate statistics incrementally
+//! (Welford online algorithm) without storing all past values.
+
+use crate::running_stats::BitrateRunningAnalyzer;
 
 /// Estimates output bitrate (bits per second) from encode parameters.
 ///
@@ -7,21 +14,33 @@
 ///
 /// where `quality_factor` decreases as QP/CRF increases.
 ///
+/// An embedded [`BitrateRunningAnalyzer`] accumulates per-frame bitrate
+/// statistics incrementally via Welford's online algorithm so that callers
+/// can query running mean/variance without storing historical data.
+///
 /// # Example
 ///
 /// ```
 /// use oximedia_transcode::bitrate_estimator::BitrateEstimator;
 ///
-/// let est = BitrateEstimator::new();
+/// let mut est = BitrateEstimator::new();
 /// let bps = est.estimate_from_crf(23, 1920, 1080, 30.0);
 /// assert!(bps > 0);
+///
+/// // Feed observed per-frame bit counts into the running analyzer
+/// est.record_frame_bits(50_000);
+/// est.record_frame_bits(45_000);
+/// let summary = est.running_summary();
+/// assert!(summary.mean_bps > 0.0);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct BitrateEstimator {
     /// Base bits-per-pixel at CRF/QP = 0.
     base_bpp: f64,
     /// Exponential decay coefficient for quality degradation with QP.
     decay: f64,
+    /// Online running statistics for per-frame bitrate (Welford algorithm).
+    analyzer: BitrateRunningAnalyzer,
 }
 
 impl Default for BitrateEstimator {
@@ -32,11 +51,16 @@ impl Default for BitrateEstimator {
 
 impl BitrateEstimator {
     /// Creates a `BitrateEstimator` with default empirical parameters.
+    ///
+    /// The embedded running analyzer is initialised for 30 fps with a 60-frame
+    /// rolling window; call [`with_params_and_fps`](Self::with_params_and_fps)
+    /// to customise these.
     #[must_use]
     pub fn new() -> Self {
         Self {
             base_bpp: 0.10, // 0.10 bits per pixel at lossless
             decay: 0.065,   // tuned to match real-world H.264/VP9 behaviour
+            analyzer: BitrateRunningAnalyzer::new(30.0, 60),
         }
     }
 
@@ -46,7 +70,45 @@ impl BitrateEstimator {
     /// * `decay` – exponential decay constant; higher = steeper quality/bitrate curve.
     #[must_use]
     pub fn with_params(base_bpp: f64, decay: f64) -> Self {
-        Self { base_bpp, decay }
+        Self {
+            base_bpp,
+            decay,
+            analyzer: BitrateRunningAnalyzer::new(30.0, 60),
+        }
+    }
+
+    /// Creates a `BitrateEstimator` with custom model parameters and analyzer config.
+    ///
+    /// * `fps`           – Frame rate for the running analyzer (bits/frame → bits/s).
+    /// * `window_frames` – Rolling-window size for recent-peak detection.
+    #[must_use]
+    pub fn with_params_and_fps(base_bpp: f64, decay: f64, fps: f64, window_frames: usize) -> Self {
+        Self {
+            base_bpp,
+            decay,
+            analyzer: BitrateRunningAnalyzer::new(fps, window_frames),
+        }
+    }
+
+    /// Records the observed bit count for one encoded frame into the running analyzer.
+    ///
+    /// Use this to track actual per-frame bitrate statistics incrementally
+    /// (Welford algorithm) without buffering all historical frame data.
+    pub fn record_frame_bits(&mut self, bits_per_frame: u64) {
+        self.analyzer.push_frame(bits_per_frame);
+    }
+
+    /// Returns a snapshot of current running bitrate statistics.
+    ///
+    /// The summary reflects all frames recorded via [`record_frame_bits`](Self::record_frame_bits).
+    #[must_use]
+    pub fn running_summary(&self) -> crate::running_stats::BitrateSummary {
+        self.analyzer.summary()
+    }
+
+    /// Resets the running bitrate statistics to their initial state.
+    pub fn reset_running_stats(&mut self) {
+        self.analyzer.reset();
     }
 
     /// Estimates output bitrate in bits/s from a CRF value (0–51 for H.264/H.265).
@@ -259,5 +321,105 @@ mod tests {
         let est = BitrateEstimator::with_params(0.2, 0.05);
         let bps = est.estimate_from_crf(20, 1280, 720, 25.0);
         assert!(bps > 0);
+    }
+
+    // ── Running-statistics integration tests (T1) ─────────────────────────────
+
+    /// Verify that `RunningStats` (Welford) produces the same mean and sample
+    /// variance as a classic two-pass batch computation over the same data.
+    #[test]
+    fn test_running_stats_matches_batch_computation() {
+        use crate::running_stats::RunningStats;
+
+        // Representative per-frame bit counts (arbitrary realistic values)
+        let samples = [
+            10_000.0_f64,
+            12_500.0,
+            8_700.0,
+            15_000.0,
+            9_800.0,
+            11_300.0,
+            13_600.0,
+            7_900.0,
+            14_200.0,
+            10_500.0,
+        ];
+
+        // Online (Welford) accumulator
+        let mut stats = RunningStats::new();
+        for &s in &samples {
+            stats.push(s);
+        }
+
+        // Batch computation (two-pass)
+        let n = samples.len() as f64;
+        let batch_mean = samples.iter().sum::<f64>() / n;
+        let batch_var = samples
+            .iter()
+            .map(|&x| (x - batch_mean).powi(2))
+            .sum::<f64>()
+            / (n - 1.0); // sample variance (n-1)
+
+        let tol = 1e-6;
+        assert!(
+            (stats.mean() - batch_mean).abs() < tol,
+            "mean mismatch: welford={}, batch={}",
+            stats.mean(),
+            batch_mean
+        );
+        assert!(
+            (stats.variance() - batch_var).abs() < tol,
+            "variance mismatch: welford={}, batch={}",
+            stats.variance(),
+            batch_var
+        );
+    }
+
+    /// Verify that incremental updates to `RunningStats` give the same final
+    /// state as pushing all samples in one go.
+    #[test]
+    fn test_running_stats_incremental_update() {
+        use crate::running_stats::RunningStats;
+
+        let all_samples = [1.0_f64, 4.0, 9.0, 16.0, 25.0, 36.0];
+
+        // Single-batch accumulator
+        let mut batch = RunningStats::new();
+        for &s in &all_samples {
+            batch.push(s);
+        }
+
+        // Incremental: push half, check intermediate state, then push the rest
+        let mut incremental = RunningStats::new();
+        let (first_half, second_half) = all_samples.split_at(3);
+        for &s in first_half {
+            incremental.push(s);
+        }
+        // Intermediate mean should match the first three samples
+        let expected_mid_mean = first_half.iter().sum::<f64>() / first_half.len() as f64;
+        assert!(
+            (incremental.mean() - expected_mid_mean).abs() < 1e-10,
+            "mid-point mean mismatch: got {}, expected {}",
+            incremental.mean(),
+            expected_mid_mean
+        );
+
+        for &s in second_half {
+            incremental.push(s);
+        }
+
+        // Final state must match the single-pass accumulator
+        let tol = 1e-10;
+        assert_eq!(incremental.count(), batch.count());
+        assert!(
+            (incremental.mean() - batch.mean()).abs() < tol,
+            "final mean mismatch"
+        );
+        assert!(
+            (incremental.variance() - batch.variance()).abs() < tol,
+            "final variance mismatch"
+        );
+        assert_eq!(incremental.min(), batch.min());
+        assert_eq!(incremental.max(), batch.max());
     }
 }

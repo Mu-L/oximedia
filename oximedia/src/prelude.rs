@@ -20,6 +20,14 @@ pub use crate::{
 
 pub use oximedia_io::MediaSource;
 
+// ── Computer vision (always available) ───────────────────────────────────────
+
+/// Computer vision module alias — always available, no feature flag required.
+///
+/// This re-exports the `cv` module shorthand so `use oximedia::prelude::*` gives
+/// access to `cv::*` without a separate `use oximedia::cv;` statement.
+pub use crate::cv;
+
 // ── Audio ────────────────────────────────────────────────────────────────────
 
 #[cfg(feature = "audio")]
@@ -719,3 +727,18 @@ pub use oximedia_codec::{MjpegConfig, MjpegDecoder, MjpegEncoder, MjpegError};
 
 #[cfg(feature = "apv")]
 pub use oximedia_codec::{ApvConfig, ApvDecoder, ApvEncoder, ApvError};
+
+// ── Pipeline ─────────────────────────────────────────────────────────────────
+
+/// Declarative media processing pipeline DSL.
+///
+/// Provides the primary entry points for building typed filter graphs:
+/// [`PipelineBuilder`] for the fluent API, [`PipelineGraph`] for direct
+/// node manipulation, and the shared error surface.
+///
+/// [`PipelineGraph`]: oximedia_pipeline::graph::PipelineGraph
+#[cfg(feature = "pipeline")]
+pub use oximedia_pipeline::{
+    builder::{NodeChain, PipelineBuilder},
+    PipelineError,
+};

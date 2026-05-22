@@ -147,9 +147,7 @@ impl RecurringSchedule {
                 Some(after + Duration::seconds(secs))
             }
             Self::DailyAt { hour, minute } => {
-                let candidate = after
-                    .date_naive()
-                    .and_hms_opt(*hour, *minute, 0)?;
+                let candidate = after.date_naive().and_hms_opt(*hour, *minute, 0)?;
                 let candidate = DateTime::from_naive_utc_and_offset(candidate, Utc);
                 if candidate > after {
                     Some(candidate)
@@ -176,18 +174,14 @@ impl RecurringSchedule {
                         }
                     }
                     let next = check.date_naive().succ_opt()?;
-                    check = DateTime::from_naive_utc_and_offset(
-                        next.and_hms_opt(0, 0, 0)?,
-                        Utc,
-                    );
+                    check = DateTime::from_naive_utc_and_offset(next.and_hms_opt(0, 0, 0)?, Utc);
                 }
                 None
             }
             Self::MonthlyAt { day, hour, minute } => {
                 let year = after.year();
                 let month = after.month();
-                let candidate_date =
-                    chrono::NaiveDate::from_ymd_opt(year, month, *day)?;
+                let candidate_date = chrono::NaiveDate::from_ymd_opt(year, month, *day)?;
                 let candidate = candidate_date.and_hms_opt(*hour, *minute, 0)?;
                 let candidate = DateTime::from_naive_utc_and_offset(candidate, Utc);
                 if candidate > after {
@@ -209,9 +203,7 @@ impl RecurringSchedule {
                 let next_mins = ((elapsed_mins / n) + 1) * n;
                 let extra_hours = next_mins / 60;
                 let minute = (next_mins % 60) as u32;
-                let base = after
-                    .date_naive()
-                    .and_hms_opt(after.hour(), 0, 0)?;
+                let base = after.date_naive().and_hms_opt(after.hour(), 0, 0)?;
                 let base = DateTime::from_naive_utc_and_offset(base, Utc);
                 Some(base + Duration::hours(extra_hours) + Duration::minutes(minute as i64))
             }
@@ -379,9 +371,7 @@ impl RecurringJob {
     /// respecting the `MissedRunPolicy`.
     fn compute_due_runs(&self, last_run: DateTime<Utc>, now: DateTime<Utc>) -> Vec<DateTime<Utc>> {
         match self.missed_run_policy {
-            MissedRunPolicy::CatchUpAll => {
-                self.schedule.triggers_between(last_run, now, 1000)
-            }
+            MissedRunPolicy::CatchUpAll => self.schedule.triggers_between(last_run, now, 1000),
             MissedRunPolicy::CatchUpOne => {
                 // Only the most-recent missed run
                 let triggers = self.schedule.triggers_between(last_run, now, 1000);
@@ -650,7 +640,10 @@ mod tests {
 
     #[test]
     fn test_daily_at_next_after_same_day() {
-        let schedule = RecurringSchedule::DailyAt { hour: 23, minute: 0 };
+        let schedule = RecurringSchedule::DailyAt {
+            hour: 23,
+            minute: 0,
+        };
         let base = chrono::DateTime::parse_from_rfc3339("2025-06-01T10:00:00Z")
             .expect("parse")
             .with_timezone(&Utc);
@@ -735,7 +728,11 @@ mod tests {
         let now = rj.next_run_at.expect("must have next_run") + Duration::minutes(10);
         let jobs = rj.tick(now);
         // Should only catch up once, not 10 times
-        assert_eq!(jobs.len(), 1, "CatchUpOne should produce exactly 1 catch-up job");
+        assert_eq!(
+            jobs.len(),
+            1,
+            "CatchUpOne should produce exactly 1 catch-up job"
+        );
     }
 
     #[test]

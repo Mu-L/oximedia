@@ -122,7 +122,11 @@ pub fn convert_batch(frame: &[u8]) -> Vec<YcbcrPixel> {
         let base = chunk_idx * BATCH_SIZE;
 
         // Unrolled fixed-size array so LLVM can see the trip-count.
-        let mut chunk_out = [YcbcrPixel { y: 0, cb: 128, cr: 128 }; BATCH_SIZE];
+        let mut chunk_out = [YcbcrPixel {
+            y: 0,
+            cb: 128,
+            cr: 128,
+        }; BATCH_SIZE];
         for lane in 0..BATCH_SIZE {
             let off = (base + lane) * 3;
             let r = frame[off];
@@ -136,7 +140,11 @@ pub fn convert_batch(frame: &[u8]) -> Vec<YcbcrPixel> {
     // Handle the remaining pixels (< BATCH_SIZE).
     for px in remainder_start..pixel_count {
         let off = px * 3;
-        output.push(rgb_to_ycbcr_pixel(frame[off], frame[off + 1], frame[off + 2]));
+        output.push(rgb_to_ycbcr_pixel(
+            frame[off],
+            frame[off + 1],
+            frame[off + 2],
+        ));
     }
 
     output
@@ -258,7 +266,11 @@ pub fn convert_batch_bt2020(frame: &[u8]) -> Vec<YcbcrPixel> {
 
     for chunk_idx in 0..chunk_pixels {
         let base = chunk_idx * BATCH_SIZE;
-        let mut chunk_out = [YcbcrPixel { y: 0, cb: 128, cr: 128 }; BATCH_SIZE];
+        let mut chunk_out = [YcbcrPixel {
+            y: 0,
+            cb: 128,
+            cr: 128,
+        }; BATCH_SIZE];
         for lane in 0..BATCH_SIZE {
             let off = (base + lane) * 3;
             chunk_out[lane] = rgb_to_ycbcr_bt2020(frame[off], frame[off + 1], frame[off + 2]);
@@ -268,7 +280,194 @@ pub fn convert_batch_bt2020(frame: &[u8]) -> Vec<YcbcrPixel> {
 
     for px in remainder_start..pixel_count {
         let off = px * 3;
-        output.push(rgb_to_ycbcr_bt2020(frame[off], frame[off + 1], frame[off + 2]));
+        output.push(rgb_to_ycbcr_bt2020(
+            frame[off],
+            frame[off + 1],
+            frame[off + 2],
+        ));
+    }
+
+    output
+}
+
+// ── BT.601 SIMD-dispatched RGB-to-YCbCr ────────────────────────────────────
+
+/// BT.601 fixed-point coefficients scaled by 2^15.
+///
+/// BT.601 is used in standard-definition broadcast and is the traditional
+/// coefficients for waveform/vectorscope analysis:
+/// ```text
+/// Y  =  0.299  R + 0.587  G + 0.114  B
+/// Cb = -0.16874 R - 0.33126 G + 0.5    B  (+128 bias)
+/// Cr =  0.5    R - 0.41869 G - 0.08131 B  (+128 bias)
+/// ```
+mod coeff601 {
+    /// Y from R: round(0.299 * 32768)
+    pub const KR: i32 = 9798;
+    /// Y from G: round(0.587 * 32768)
+    pub const KG: i32 = 19235;
+    /// Y from B: round(0.114 * 32768)
+    pub const KB: i32 = 3736;
+
+    /// Cb from R: round(-0.16874 * 32768)
+    pub const CB_R: i32 = -5529;
+    /// Cb from G: round(-0.33126 * 32768)
+    pub const CB_G: i32 = -10855;
+    /// Cb from B: round(0.5 * 32768)
+    pub const CB_B: i32 = 16384;
+
+    /// Cr from R: round(0.5 * 32768)
+    pub const CR_R: i32 = 16384;
+    /// Cr from G: round(-0.41869 * 32768)
+    pub const CR_G: i32 = -13717;
+    /// Cr from B: round(-0.08131 * 32768)
+    pub const CR_B: i32 = -2664;
+}
+
+/// Convert a single RGB triplet to BT.601 YCbCr (scalar path).
+///
+/// Returns packed `[Y, Cb, Cr]` as `[u8; 3]`.
+/// Neutral grey maps to `Cb = 128, Cr = 128`.
+#[must_use]
+pub fn rgb_to_ycbcr_bt601_pixel(r: u8, g: u8, b: u8) -> [u8; 3] {
+    let ri = i32::from(r);
+    let gi = i32::from(g);
+    let bi = i32::from(b);
+
+    let y = (coeff601::KR * ri + coeff601::KG * gi + coeff601::KB * bi + (1 << 14)) >> 15;
+    let cb = (coeff601::CB_R * ri + coeff601::CB_G * gi + coeff601::CB_B * bi + (1 << 14)) >> 15;
+    let cr = (coeff601::CR_R * ri + coeff601::CR_G * gi + coeff601::CR_B * bi + (1 << 14)) >> 15;
+
+    [
+        y.clamp(0, 255) as u8,
+        (cb + 128).clamp(0, 255) as u8,
+        (cr + 128).clamp(0, 255) as u8,
+    ]
+}
+
+/// Scalar BT.601 batch conversion — processes `pixels` slice without any
+/// architecture-specific intrinsics.  Used in tests as the reference path.
+#[must_use]
+#[cfg(test)]
+fn rgb_to_ycbcr_scalar_bt601(pixels: &[[u8; 3]]) -> Vec<[u8; 3]> {
+    pixels
+        .iter()
+        .map(|&[r, g, b]| rgb_to_ycbcr_bt601_pixel(r, g, b))
+        .collect()
+}
+
+/// Number of pixels per SIMD batch for auto-vectorized BT.601 conversion.
+/// A width-8 window matches AVX2's 8×i32 lane count; LLVM will widen
+/// scalar fixed-point code to 256-bit vectors on x86-64 and 128-bit on AArch64.
+const BT601_BATCH: usize = 8;
+
+/// Process exactly `BT601_BATCH` pixels of BT.601 conversion in a single
+/// tight, fixed-trip-count inner loop that LLVM can auto-vectorize.
+///
+/// The function is `#[inline(always)]` so the caller's loop is the outer
+/// iterator; LLVM sees a perfectly nested loop with a constant inner bound
+/// and emits SIMD instructions automatically.
+#[inline(always)]
+fn convert_bt601_batch(chunk: &[[u8; 3]; BT601_BATCH]) -> [[u8; 3]; BT601_BATCH] {
+    let mut out = [[0u8; 3]; BT601_BATCH];
+    for lane in 0..BT601_BATCH {
+        out[lane] = rgb_to_ycbcr_bt601_pixel(chunk[lane][0], chunk[lane][1], chunk[lane][2]);
+    }
+    out
+}
+
+/// BT.601 SIMD-optimized RGB-to-YCbCr conversion.
+///
+/// Returns packed `[Y, Cb, Cr]` for each input pixel, using BT.601 primaries
+/// (traditional broadcast SD coefficients, also used for waveform/vectorscope
+/// displays in many broadcast monitors).
+///
+/// The implementation uses an 8-pixel fixed-width inner loop that the Rust
+/// compiler (LLVM) auto-vectorizes to AVX2 (x86-64) or NEON (AArch64)
+/// without requiring `unsafe` code.  The trailing scalar path handles
+/// any residual pixels when the total count is not a multiple of 8.
+///
+/// # Examples
+///
+/// ```
+/// use oximedia_scopes::simd_convert::rgb_to_ycbcr_simd;
+/// let pixels: Vec<[u8; 3]> = vec![[255, 255, 255], [0, 0, 0]];
+/// let out = rgb_to_ycbcr_simd(&pixels);
+/// assert_eq!(out.len(), 2);
+/// // White maps to Y ≈ 255, neutral Cb/Cr.
+/// assert_eq!(out[0][0], 255);
+/// assert!((out[0][1] as i32 - 128).abs() <= 1);
+/// ```
+#[must_use]
+pub fn rgb_to_ycbcr_simd(pixels: &[[u8; 3]]) -> Vec<[u8; 3]> {
+    let n = pixels.len();
+    let mut output = Vec::with_capacity(n);
+
+    let full_chunks = n / BT601_BATCH;
+    for c in 0..full_chunks {
+        let base = c * BT601_BATCH;
+        // Build a fixed-size array so LLVM can determine the inner trip-count
+        // at compile time and emit vectorized code.
+        let mut chunk = [[0u8; 3]; BT601_BATCH];
+        for lane in 0..BT601_BATCH {
+            chunk[lane] = pixels[base + lane];
+        }
+        let converted = convert_bt601_batch(&chunk);
+        output.extend_from_slice(&converted);
+    }
+
+    // Scalar tail for any remaining pixels.
+    for px in (full_chunks * BT601_BATCH)..n {
+        output.push(rgb_to_ycbcr_bt601_pixel(
+            pixels[px][0],
+            pixels[px][1],
+            pixels[px][2],
+        ));
+    }
+
+    output
+}
+
+/// Convert a flat RGB-interleaved frame buffer to BT.601 YCbCr.
+///
+/// Returns packed `[Y, Cb, Cr]` triplets, one per source pixel.
+/// The implementation uses the same 8-pixel auto-vectorizable inner loop as
+/// [`rgb_to_ycbcr_simd`] but reads directly from the flat `&[u8]` slice,
+/// avoiding an intermediate allocation.
+///
+/// # Examples
+///
+/// ```
+/// use oximedia_scopes::simd_convert::convert_batch_bt601_simd;
+/// let rgb = vec![255u8, 0, 0,  0, 255, 0,  0, 0, 255];
+/// let out = convert_batch_bt601_simd(&rgb);
+/// assert_eq!(out.len(), 3);
+/// ```
+#[must_use]
+pub fn convert_batch_bt601_simd(frame: &[u8]) -> Vec<[u8; 3]> {
+    let pixel_count = frame.len() / 3;
+    let mut output = Vec::with_capacity(pixel_count);
+
+    let full_chunks = pixel_count / BT601_BATCH;
+    for c in 0..full_chunks {
+        let base = c * BT601_BATCH * 3;
+        let mut chunk = [[0u8; 3]; BT601_BATCH];
+        for lane in 0..BT601_BATCH {
+            let off = base + lane * 3;
+            chunk[lane] = [frame[off], frame[off + 1], frame[off + 2]];
+        }
+        let converted = convert_bt601_batch(&chunk);
+        output.extend_from_slice(&converted);
+    }
+
+    // Scalar tail.
+    for px in (full_chunks * BT601_BATCH)..pixel_count {
+        let off = px * 3;
+        output.push(rgb_to_ycbcr_bt601_pixel(
+            frame[off],
+            frame[off + 1],
+            frame[off + 2],
+        ));
     }
 
     output
@@ -335,7 +534,12 @@ mod tests {
         // Y ≈ 54 (0.2126 * 255)
         assert!((p.y as i32 - 54).abs() <= 1, "y={}", p.y);
         // Cr should be the highest chroma component for red.
-        assert!(p.cr > p.cb, "expected Cr > Cb for red, got cr={} cb={}", p.cr, p.cb);
+        assert!(
+            p.cr > p.cb,
+            "expected Cr > Cb for red, got cr={} cb={}",
+            p.cr,
+            p.cb
+        );
     }
 
     /// Pure-blue in BT.709 has significant positive Cb.
@@ -343,7 +547,12 @@ mod tests {
     fn test_blue_pixel_chroma() {
         let p = rgb_to_ycbcr_pixel(0, 0, 255);
         // Cb should be the highest chroma component for blue.
-        assert!(p.cb > p.cr, "expected Cb > Cr for blue, got cb={} cr={}", p.cb, p.cr);
+        assert!(
+            p.cb > p.cr,
+            "expected Cb > Cr for blue, got cb={} cr={}",
+            p.cb,
+            p.cr
+        );
     }
 
     /// `convert_batch` on an empty frame returns an empty vec.
@@ -423,5 +632,80 @@ mod tests {
         let rgb: Vec<u8> = (0..27).collect(); // 9 pixels
         let out = convert_batch_bt2020(&rgb);
         assert_eq!(out.len(), 9);
+    }
+
+    // ── Item 1 tests (BT.601 SIMD dispatch) ──────────────────────────────────
+
+    /// SIMD dispatch result must match the scalar reference for every pixel
+    /// across a comprehensive ramp (all grey levels × representative colors).
+    #[test]
+    fn test_rgb_to_ycbcr_simd_matches_scalar() {
+        // Grey ramp
+        let mut pixels: Vec<[u8; 3]> = (0u8..=255).map(|v| [v, v, v]).collect();
+        // Add primaries and complementaries
+        pixels.extend_from_slice(&[
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+            [255, 255, 0],
+            [0, 255, 255],
+            [255, 0, 255],
+            [128, 64, 32],
+        ]);
+
+        let simd_out = rgb_to_ycbcr_simd(&pixels);
+        let scalar_out = rgb_to_ycbcr_scalar_bt601(&pixels);
+
+        assert_eq!(simd_out.len(), scalar_out.len());
+        for (i, (s, r)) in simd_out.iter().zip(scalar_out.iter()).enumerate() {
+            assert_eq!(s, r, "pixel {i}: SIMD {:?} != scalar {:?}", s, r);
+        }
+    }
+
+    /// White pixel with BT.601 must produce Y=255, Cb≈128, Cr≈128.
+    #[test]
+    fn test_rgb_to_ycbcr_white_pixel() {
+        let pixels = vec![[255u8, 255, 255]];
+        let out = rgb_to_ycbcr_simd(&pixels);
+        assert_eq!(out.len(), 1);
+        let [y, cb, cr] = out[0];
+        assert_eq!(y, 255, "white Y should be 255");
+        assert!(
+            (cb as i32 - 128).abs() <= 1,
+            "white Cb should be ~128, got {cb}"
+        );
+        assert!(
+            (cr as i32 - 128).abs() <= 1,
+            "white Cr should be ~128, got {cr}"
+        );
+    }
+
+    /// Black pixel with BT.601 must produce Y=0, Cb=128, Cr=128.
+    #[test]
+    fn test_rgb_to_ycbcr_black_pixel_bt601() {
+        let pixels = vec![[0u8, 0, 0]];
+        let out = rgb_to_ycbcr_simd(&pixels);
+        let [y, cb, cr] = out[0];
+        assert_eq!(y, 0, "black Y should be 0");
+        assert_eq!(cb, 128, "black Cb should be 128");
+        assert_eq!(cr, 128, "black Cr should be 128");
+    }
+
+    /// `convert_batch_bt601_simd` flat-frame wrapper must agree with per-pixel scalar.
+    #[test]
+    fn test_convert_batch_bt601_simd_wrapper() {
+        let frame: Vec<u8> = (0..30).collect(); // 10 pixels
+        let batch = convert_batch_bt601_simd(&frame);
+        let scalar: Vec<[u8; 3]> = (0..10)
+            .map(|i| rgb_to_ycbcr_bt601_pixel(frame[i * 3], frame[i * 3 + 1], frame[i * 3 + 2]))
+            .collect();
+        assert_eq!(batch, scalar);
+    }
+
+    /// SIMD path on an empty slice returns an empty vec without panicking.
+    #[test]
+    fn test_rgb_to_ycbcr_simd_empty() {
+        let out = rgb_to_ycbcr_simd(&[]);
+        assert!(out.is_empty());
     }
 }

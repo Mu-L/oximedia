@@ -7,6 +7,16 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::time::{Duration, Instant};
 
+/// Output format for progress reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum ProgressFormat {
+    /// Human-readable progress bar (default).
+    #[default]
+    Plain,
+    /// NDJSON records emitted to stderr (one per tick).
+    Json,
+}
+
 /// Progress tracker for transcoding operations.
 ///
 /// Displays a progress bar with:
@@ -23,6 +33,8 @@ pub struct TranscodeProgress {
     bytes_written: u64,
     last_update: Instant,
     update_interval: Duration,
+    /// Output format for progress ticks.
+    pub format: ProgressFormat,
 }
 
 impl TranscodeProgress {
@@ -49,6 +61,7 @@ impl TranscodeProgress {
             bytes_written: 0,
             last_update: Instant::now(),
             update_interval: Duration::from_millis(100),
+            format: ProgressFormat::Plain,
         }
     }
 
@@ -72,6 +85,28 @@ impl TranscodeProgress {
             bytes_written: 0,
             last_update: Instant::now(),
             update_interval: Duration::from_millis(100),
+            format: ProgressFormat::Plain,
+        }
+    }
+
+    /// Create a new transcode progress tracker with an explicit output format.
+    ///
+    /// When `format` is [`ProgressFormat::Json`], the indicatif bar is hidden
+    /// so that NDJSON records written to stderr are not interleaved with bar
+    /// control codes.
+    pub fn new_with_format(total_frames: u64, fmt: ProgressFormat) -> Self {
+        let mut this = Self::new(total_frames);
+        this.set_format(fmt);
+        this
+    }
+
+    /// Set the progress output format.
+    pub fn set_format(&mut self, fmt: ProgressFormat) {
+        self.format = fmt;
+        if fmt == ProgressFormat::Json {
+            // Hide the indicatif bar when using JSON output.
+            self.bar
+                .set_draw_target(indicatif::ProgressDrawTarget::hidden());
         }
     }
 
@@ -90,21 +125,36 @@ impl TranscodeProgress {
         }
         self.last_update = now;
 
-        self.bar.set_position(frames);
-
-        // Calculate and display stats
         let fps = self.fps();
         let eta = self.eta();
         let bitrate = self.bitrate();
 
-        let msg = format!(
-            "{:.1} fps | {} | {}",
-            fps,
-            format_eta(eta),
-            format_bitrate(bitrate)
-        );
-
-        self.bar.set_message(msg);
+        match self.format {
+            ProgressFormat::Plain => {
+                self.bar.set_position(frames);
+                let msg = format!(
+                    "{:.1} fps | {} | {}",
+                    fps,
+                    format_eta(eta),
+                    format_bitrate(bitrate)
+                );
+                self.bar.set_message(msg);
+            }
+            ProgressFormat::Json => {
+                let elapsed = self.start_time.elapsed().as_secs_f64();
+                let eta_secs = eta.as_secs_f64();
+                let record = serde_json::json!({
+                    "kind": "progress",
+                    "frames_done": frames,
+                    "frames_total": self.frames_total,
+                    "fps": fps,
+                    "bitrate_bps": bitrate,
+                    "eta_seconds": eta_secs,
+                    "elapsed_seconds": elapsed
+                });
+                eprintln!("{record}");
+            }
+        }
     }
 
     /// Update the number of bytes written to the output file.
@@ -135,14 +185,28 @@ impl TranscodeProgress {
             0.0
         };
 
-        let final_msg = format!(
-            "{} | Avg {:.1} fps | {}",
-            "Complete".green().bold(),
-            avg_fps,
-            format_size(self.bytes_written)
-        );
-
-        self.bar.finish_with_message(final_msg);
+        match self.format {
+            ProgressFormat::Plain => {
+                let final_msg = format!(
+                    "{} | Avg {:.1} fps | {}",
+                    "Complete".green().bold(),
+                    avg_fps,
+                    format_size(self.bytes_written)
+                );
+                self.bar.finish_with_message(final_msg);
+            }
+            ProgressFormat::Json => {
+                let record = serde_json::json!({
+                    "kind": "done",
+                    "frames_done": self.frames_done,
+                    "frames_total": self.frames_total,
+                    "avg_fps": avg_fps,
+                    "bytes_written": self.bytes_written,
+                    "elapsed_seconds": elapsed.as_secs_f64()
+                });
+                eprintln!("{record}");
+            }
+        }
     }
 
     /// Mark the progress as failed with an error message.
@@ -221,6 +285,8 @@ pub struct BatchProgress {
     total_files: usize,
     completed: usize,
     failed: usize,
+    /// Output format for progress events.
+    pub format: ProgressFormat,
 }
 
 impl BatchProgress {
@@ -245,6 +311,16 @@ impl BatchProgress {
             total_files,
             completed: 0,
             failed: 0,
+            format: ProgressFormat::Plain,
+        }
+    }
+
+    /// Set the progress output format.
+    pub fn set_format(&mut self, fmt: ProgressFormat) {
+        self.format = fmt;
+        if fmt == ProgressFormat::Json {
+            self.bar
+                .set_draw_target(indicatif::ProgressDrawTarget::hidden());
         }
     }
 
@@ -252,43 +328,70 @@ impl BatchProgress {
     pub fn inc_success(&mut self) {
         self.completed += 1;
         self.bar.inc(1);
-        self.update_message();
+        self.emit_tick();
     }
 
     /// Mark a file as failed.
     pub fn inc_failed(&mut self) {
         self.failed += 1;
         self.bar.inc(1);
-        self.update_message();
+        self.emit_tick();
     }
 
-    /// Update the status message.
-    fn update_message(&self) {
-        let msg = if self.failed > 0 {
-            format!(
-                "{} succeeded, {} failed",
-                self.completed.to_string().green(),
-                self.failed.to_string().red()
-            )
-        } else {
-            format!("{} succeeded", self.completed.to_string().green())
-        };
-
-        self.bar.set_message(msg);
+    /// Emit a progress tick (plain bar or JSON).
+    fn emit_tick(&self) {
+        match self.format {
+            ProgressFormat::Plain => {
+                let msg = if self.failed > 0 {
+                    format!(
+                        "{} succeeded, {} failed",
+                        self.completed.to_string().green(),
+                        self.failed.to_string().red()
+                    )
+                } else {
+                    format!("{} succeeded", self.completed.to_string().green())
+                };
+                self.bar.set_message(msg);
+            }
+            ProgressFormat::Json => {
+                let elapsed = self.start_time.elapsed().as_secs_f64();
+                let record = serde_json::json!({
+                    "kind": "batch_progress",
+                    "completed": self.completed,
+                    "failed": self.failed,
+                    "total": self.total_files,
+                    "elapsed_seconds": elapsed
+                });
+                eprintln!("{record}");
+            }
+        }
     }
 
     /// Finish the progress display.
     pub fn finish(&self) {
         let elapsed = self.start_time.elapsed();
-        let msg = format!(
-            "{} | {} succeeded, {} failed | Took {}",
-            "Complete".green().bold(),
-            self.completed,
-            self.failed,
-            format_duration(elapsed)
-        );
-
-        self.bar.finish_with_message(msg);
+        match self.format {
+            ProgressFormat::Plain => {
+                let msg = format!(
+                    "{} | {} succeeded, {} failed | Took {}",
+                    "Complete".green().bold(),
+                    self.completed,
+                    self.failed,
+                    format_duration(elapsed)
+                );
+                self.bar.finish_with_message(msg);
+            }
+            ProgressFormat::Json => {
+                let record = serde_json::json!({
+                    "kind": "batch_done",
+                    "completed": self.completed,
+                    "failed": self.failed,
+                    "total": self.total_files,
+                    "elapsed_seconds": elapsed.as_secs_f64()
+                });
+                eprintln!("{record}");
+            }
+        }
     }
 }
 
@@ -393,5 +496,31 @@ mod tests {
 
         let eta = progress.eta();
         let _ = eta.as_secs(); // ETA is a Duration (always non-negative)
+    }
+
+    #[test]
+    fn test_set_format_json_does_not_panic() {
+        let mut progress = TranscodeProgress::new(100);
+        progress.set_format(ProgressFormat::Json);
+        assert_eq!(progress.format, ProgressFormat::Json);
+        // JSON update should write to stderr, not panic
+        progress.update(5);
+    }
+
+    #[test]
+    fn test_set_format_plain_roundtrip() {
+        let mut progress = TranscodeProgress::new_spinner();
+        progress.set_format(ProgressFormat::Plain);
+        assert_eq!(progress.format, ProgressFormat::Plain);
+    }
+
+    #[test]
+    fn test_batch_progress_json_emit() {
+        let mut bp = BatchProgress::new(3);
+        bp.set_format(ProgressFormat::Json);
+        bp.inc_success();
+        bp.inc_failed();
+        // finish should emit JSON to stderr without panicking
+        bp.finish();
     }
 }

@@ -2,16 +2,19 @@
 //!
 //! Renders the timeline to a stream of video and audio frames.
 
-use oximedia_audio::{AudioFrame, ChannelLayout};
+use bytes::Bytes;
+use oximedia_audio::{AudioBuffer, AudioFrame, ChannelLayout};
 use oximedia_codec::VideoFrame;
 use oximedia_core::{PixelFormat, Rational, SampleFormat, Timestamp};
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::mpsc;
 
 use crate::clip::Clip;
 use crate::error::EditResult;
+use crate::render_source::RenderSource;
 use crate::timeline::{Timeline, TimelineConfig};
 use crate::transition::Transition;
 
@@ -23,6 +26,11 @@ pub struct TimelineRenderer {
     config: RenderConfig,
     /// Frame cache.
     cache: FrameCache,
+    /// Raw byte-buffer cache for source frames, keyed by `(clip_id, source_pts)`.
+    raw_frame_cache: RawFrameCache,
+    /// Per-path decoded source cache.  Shared via `Arc` so clips pointing at the
+    /// same file decode it only once.
+    source_cache: HashMap<PathBuf, Arc<RenderSource>>,
 }
 
 impl TimelineRenderer {
@@ -34,6 +42,8 @@ impl TimelineRenderer {
             timeline,
             config,
             cache: FrameCache::new(cache_size),
+            raw_frame_cache: RawFrameCache::new(RAW_FRAME_CACHE_CAPACITY),
+            source_cache: HashMap::new(),
         }
     }
 
@@ -44,19 +54,26 @@ impl TimelineRenderer {
             return Ok(frame);
         }
 
-        // Find all active clips at this position
-        let clips_at_pos = self.timeline.get_clips_at(position);
+        // Collect active clips — clone so we don't hold a borrow on `self.timeline`
+        // across the mutable render calls below.
+        let clips_at_pos: Vec<(usize, Clip)> = self
+            .timeline
+            .get_clips_at(position)
+            .into_iter()
+            .map(|(ti, c)| (ti, c.clone()))
+            .collect();
+        let clips_refs: Vec<(usize, &Clip)> = clips_at_pos.iter().map(|(ti, c)| (*ti, c)).collect();
 
         // Render video layers
         let video_frame = if self.config.render_video {
-            self.render_video_at(position, &clips_at_pos).await?
+            self.render_video_at(position, &clips_refs).await?
         } else {
             None
         };
 
         // Render audio
         let audio_frame = if self.config.render_audio {
-            self.render_audio_at(position, &clips_at_pos).await?
+            self.render_audio_at(position, &clips_refs).await?
         } else {
             None
         };
@@ -76,114 +93,278 @@ impl TimelineRenderer {
 
     /// Render video frame at position.
     async fn render_video_at(
-        &self,
+        &mut self,
         position: i64,
         clips: &[(usize, &Clip)],
     ) -> EditResult<Option<VideoFrame>> {
-        let video_clips: Vec<&Clip> = clips
+        let video_clips: Vec<(usize, Clip)> = clips
             .iter()
             .filter(|(_, clip)| clip.is_video())
-            .map(|(_, clip)| *clip)
+            .map(|(ti, c)| (*ti, (*c).clone()))
             .collect();
 
         if video_clips.is_empty() {
             return Ok(None);
         }
 
-        // Create output frame
-        let mut output = VideoFrame::new(
-            self.config.pixel_format,
-            self.config.width,
-            self.config.height,
-        );
-        output.allocate();
-        output.timestamp = Timestamp::new(position, self.timeline.timebase);
+        let w = self.config.width;
+        let h = self.config.height;
 
-        // Composite video layers (top to bottom)
-        for clip in video_clips.iter().rev() {
+        // Collect active transitions for this position (clone so we don't hold
+        // a borrow on `self.timeline` while calling `&mut self` methods later).
+        let active_transitions: Vec<(usize, Transition)> = video_clips
+            .iter()
+            .flat_map(|(track_idx, _)| {
+                self.timeline
+                    .transitions
+                    .get_active_at(*track_idx, position)
+                    .into_iter()
+                    .map(|t| (*track_idx, t.clone()))
+            })
+            .collect();
+
+        // Build the set of clip IDs involved in active transitions so we can
+        // replace them with a single blended layer.
+        // map: clip_a_id → (frame_a, frame_b, transition, progress)
+        let mut in_transition_pair: HashMap<u64, (VideoFrame, VideoFrame, Transition, f64)> =
+            HashMap::new();
+        let mut transitioned_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+        for (_, transition) in &active_transitions {
+            let clip_a_id = transition.clip_a;
+            let clip_b_id = transition.clip_b;
+
+            let clip_a = video_clips
+                .iter()
+                .find(|(_, c)| c.id == clip_a_id)
+                .map(|(_, c)| c.clone());
+            let clip_b = video_clips
+                .iter()
+                .find(|(_, c)| c.id == clip_b_id)
+                .map(|(_, c)| c.clone());
+
+            if let (Some(ca), Some(cb)) = (clip_a, clip_b) {
+                let pos_a = ca.timeline_to_source(position);
+                let pos_b = cb.timeline_to_source(position);
+                let frame_a = self.get_source_frame(&ca, pos_a)?;
+                let frame_b = self.get_source_frame(&cb, pos_b)?;
+                let progress = transition.progress_at(position);
+                transitioned_ids.insert(clip_a_id);
+                transitioned_ids.insert(clip_b_id);
+                // Only store once per transition (first time we see clip_a).
+                in_transition_pair.entry(clip_a_id).or_insert((
+                    frame_a,
+                    frame_b,
+                    transition.clone(),
+                    progress,
+                ));
+            }
+        }
+
+        // Compositor: bottom-to-top (rev() order mirrors layer stack).
+        use oximedia_graphics::hdr_composite::HdrCompositor;
+
+        let mut compositor = HdrCompositor::new(w, h, 1000.0);
+
+        // Iterate bottom-to-top.
+        for (_, clip) in video_clips.iter().rev() {
             if clip.muted {
                 continue;
             }
 
-            // Get source frame for this clip at this position
             let source_pos = clip.timeline_to_source(position);
-            let _source_frame = self.get_source_frame(clip, source_pos)?;
 
-            // Apply effects
-            // Apply transitions
-            // Composite onto output
+            if transitioned_ids.contains(&clip.id) {
+                // This clip is part of a transition pair.
+                if let Some((fa, fb, trans, progress)) = in_transition_pair.remove(&clip.id) {
+                    let blended = TransitionRenderer::blend_video(&fa, &fb, &trans, progress);
+                    let layer = video_frame_to_hdr_layer(&blended, clip.opacity);
+                    compositor.add_layer(layer);
+                }
+                // Clip B's entry was already consumed with clip A; skip.
+                continue;
+            }
 
-            // This is a placeholder - actual implementation would:
-            // 1. Load source frame from clip.source
-            // 2. Apply clip.effects
-            // 3. Apply clip.opacity
-            // 4. Composite onto output frame
+            let source_frame = self.get_source_frame(clip, source_pos)?;
+            let layer = video_frame_to_hdr_layer(&source_frame, clip.opacity);
+            compositor.add_layer(layer);
         }
+
+        // Flatten compositor to RGBA f32 → pack into output VideoFrame.
+        let rgba_f32 = compositor.composite();
+        let mut output = VideoFrame::new(self.config.pixel_format, w, h);
+        output.allocate();
+        output.timestamp = Timestamp::new(position, self.timeline.timebase);
+
+        // Write RGBA f32 → luma plane (BT.709 coefficients).
+        fill_output_frame_from_rgba_f32(&mut output, &rgba_f32, w, h);
 
         Ok(Some(output))
     }
 
     /// Render audio frame at position.
     async fn render_audio_at(
-        &self,
+        &mut self,
         position: i64,
         clips: &[(usize, &Clip)],
     ) -> EditResult<Option<AudioFrame>> {
-        let audio_clips: Vec<&Clip> = clips
+        let audio_clips: Vec<(usize, Clip)> = clips
             .iter()
             .filter(|(_, clip)| clip.is_audio())
-            .map(|(_, clip)| *clip)
+            .map(|(ti, c)| (*ti, (*c).clone()))
             .collect();
 
         if audio_clips.is_empty() {
             return Ok(None);
         }
 
-        // Create output frame
-        let mut output = AudioFrame::new(
-            self.config.sample_format,
-            self.config.sample_rate,
-            self.config.channels.clone(),
-        );
-        output.timestamp = Timestamp::new(position, self.timeline.timebase);
+        let ch_count = self.config.channels.count();
+        // Produce 1024 samples per render call (approx. 21 ms at 48 kHz).
+        let num_samples: usize = 1024;
+        let mut mix_buf = vec![0.0_f32; num_samples * ch_count];
 
-        // Mix audio tracks
-        for clip in &audio_clips {
-            if clip.muted {
+        // Collect active CrossFade transitions (clone so we don't hold a borrow
+        // on `self.timeline` while calling `&mut self` decode methods).
+        use crate::transition::TransitionType;
+
+        let crossfade_transitions: Vec<(usize, Transition)> = audio_clips
+            .iter()
+            .flat_map(|(track_idx, _)| {
+                self.timeline
+                    .transitions
+                    .get_active_at(*track_idx, position)
+                    .into_iter()
+                    .filter(|t| matches!(t.transition_type, TransitionType::CrossFade))
+                    .map(|t| (*track_idx, t.clone()))
+            })
+            .collect();
+
+        // Identify audio clips involved in CrossFade transitions.
+        let mut crossfade_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut crossfade_pairs: Vec<(AudioFrame, AudioFrame, Transition, f64)> = Vec::new();
+
+        for (_, transition) in &crossfade_transitions {
+            let ca_id = transition.clip_a;
+            let cb_id = transition.clip_b;
+
+            let ca = audio_clips
+                .iter()
+                .find(|(_, c)| c.id == ca_id)
+                .map(|(_, c)| (*c).clone());
+            let cb = audio_clips
+                .iter()
+                .find(|(_, c)| c.id == cb_id)
+                .map(|(_, c)| (*c).clone());
+            if let (Some(ca), Some(cb)) = (ca, cb) {
+                let fa = self.get_source_audio_frame(&ca, ca.timeline_to_source(position))?;
+                let fb = self.get_source_audio_frame(&cb, cb.timeline_to_source(position))?;
+                let progress = transition.progress_at(position);
+                crossfade_ids.insert(ca_id);
+                crossfade_ids.insert(cb_id);
+                crossfade_pairs.push((fa, fb, transition.clone(), progress));
+            }
+        }
+
+        // Mix crossfade pairs.
+        for (fa, fb, trans, progress) in &crossfade_pairs {
+            let blended = TransitionRenderer::mix_audio(fa, fb, trans, *progress);
+            accumulate_audio_frame_into(&mut mix_buf, &blended, 1.0, ch_count, num_samples);
+        }
+
+        // Mix non-transitioned clips.
+        for (_, clip) in audio_clips.iter() {
+            if clip.muted || crossfade_ids.contains(&clip.id) {
                 continue;
             }
-
             let source_pos = clip.timeline_to_source(position);
-            let _source_frame = self.get_source_audio_frame(clip, source_pos)?;
-
-            // This is a placeholder - actual implementation would:
-            // 1. Load source audio from clip.source
-            // 2. Apply clip.effects
-            // 3. Apply clip.opacity (volume)
-            // 4. Mix into output frame
+            let src_frame = self.get_source_audio_frame(clip, source_pos)?;
+            let gain = clip.opacity; // opacity == volume for audio clips
+            accumulate_audio_frame_into(&mut mix_buf, &src_frame, gain, ch_count, num_samples);
         }
+
+        // Clamp mix to [-1, 1].
+        for s in &mut mix_buf {
+            *s = s.clamp(-1.0, 1.0);
+        }
+
+        // Pack into output AudioFrame.
+        let bytes: Vec<u8> = mix_buf.iter().flat_map(|s| s.to_ne_bytes()).collect();
+
+        let mut output = AudioFrame {
+            format: self.config.sample_format,
+            sample_rate: self.config.sample_rate,
+            channels: self.config.channels.clone(),
+            samples: oximedia_audio::AudioBuffer::Interleaved(Bytes::from(bytes)),
+            timestamp: Timestamp::new(position, self.timeline.timebase),
+        };
+        output.timestamp = Timestamp::new(position, self.timeline.timebase);
 
         Ok(Some(output))
     }
 
-    /// Get source frame from clip.
-    fn get_source_frame(&self, _clip: &Clip, _position: i64) -> EditResult<VideoFrame> {
-        // Placeholder - would load from clip.source file
-        Ok(VideoFrame::new(
-            self.config.pixel_format,
-            self.config.width,
-            self.config.height,
-        ))
+    /// Resolve the `RenderSource` for a clip, using the source cache.
+    fn resolve_source(&mut self, clip: &Clip) -> Arc<RenderSource> {
+        match &clip.source {
+            None => Arc::new(RenderSource::TestPattern),
+            Some(path) => {
+                if let Some(cached) = self.source_cache.get(path) {
+                    return cached.clone();
+                }
+                let resolved = RenderSource::from_path(path)
+                    .unwrap_or_else(|_| Arc::new(RenderSource::TestPattern));
+                self.source_cache.insert(path.clone(), resolved.clone());
+                resolved
+            }
+        }
     }
 
-    /// Get source audio frame from clip.
-    fn get_source_audio_frame(&self, _clip: &Clip, _position: i64) -> EditResult<AudioFrame> {
-        // Placeholder - would load from clip.source file
-        Ok(AudioFrame::new(
-            self.config.sample_format,
-            self.config.sample_rate,
-            self.config.channels.clone(),
-        ))
+    /// Get a decoded video frame for `clip` at `source_pts`, using the raw
+    /// frame byte cache to avoid redundant decoding.
+    fn get_source_frame(&mut self, clip: &Clip, source_pts: i64) -> EditResult<VideoFrame> {
+        let w = self.config.width;
+        let h = self.config.height;
+
+        // Compound cache key: high 32 bits = clip id (truncated), low 32 bits = pts hash.
+        // Using wrapping arithmetic to avoid overflow; collisions are acceptable for a
+        // preview cache (a cache miss just re-decodes).
+        let key = (clip.id.wrapping_mul(0x9e3779b9)).wrapping_add(source_pts.unsigned_abs())
+            ^ (source_pts.signum() as u64);
+
+        let source = self.resolve_source(clip);
+
+        // Borrow-checker dance: we need to call get_or_render, which needs
+        // `source` to be captured in the closure but also needs `&mut self.raw_frame_cache`.
+        // We clone the Arc so the closure doesn't borrow `self`.
+        let source_clone = source.clone();
+        let rgba8 = self
+            .raw_frame_cache
+            .get_or_render(key, || source_clone.sample_video(source_pts, w, h))
+            .to_vec();
+
+        let mut frame = VideoFrame::new(self.config.pixel_format, w, h);
+        frame.allocate();
+        fill_output_frame_from_rgba8(&mut frame, &rgba8, w, h);
+        Ok(frame)
+    }
+
+    /// Get decoded audio samples for `clip` at `source_pts`.
+    fn get_source_audio_frame(&mut self, clip: &Clip, source_pts: i64) -> EditResult<AudioFrame> {
+        let ch_count = self.config.channels.count() as u16;
+        let sample_rate = self.config.sample_rate;
+        let num_samples: usize = 1024;
+
+        let source = self.resolve_source(clip);
+        let samples = source.sample_audio(source_pts, num_samples, ch_count, sample_rate);
+
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_ne_bytes()).collect();
+
+        Ok(AudioFrame {
+            format: self.config.sample_format,
+            sample_rate,
+            channels: self.config.channels.clone(),
+            samples: oximedia_audio::AudioBuffer::Interleaved(Bytes::from(bytes)),
+            timestamp: Timestamp::new(source_pts, self.timeline.timebase),
+        })
     }
 
     /// Start background rendering.
@@ -195,6 +376,139 @@ impl TimelineRenderer {
     pub fn clear_cache(&mut self) {
         self.cache.clear();
     }
+}
+
+// ─── Render pipeline helper functions ─────────────────────────────────────────
+
+/// Convert a decoded `VideoFrame` (any format, already allocated) into an
+/// [`HdrLayer`] for the HDR compositor.
+///
+/// The frame data is interpreted as RGBA8 when all planes are concatenated.
+/// For planar YUV formats the luma plane is broadcast to R, G, B channels.
+fn video_frame_to_hdr_layer(
+    frame: &VideoFrame,
+    opacity: f32,
+) -> oximedia_graphics::hdr_composite::HdrLayer {
+    use oximedia_graphics::hdr_composite::HdrLayer;
+
+    let w = frame.width;
+    let h = frame.height;
+    let pixel_count = (w as usize) * (h as usize);
+    let mut layer = HdrLayer::new(w, h);
+    layer.opacity = opacity.clamp(0.0, 1.0);
+
+    // Best-effort pixel extraction: use the luma plane (plane 0) for all
+    // colour channels when no better interleaved data is available.
+    if let Some(plane) = frame.planes.first() {
+        for i in 0..pixel_count {
+            let idx = i * 4;
+            let luma = if i < plane.data.len() {
+                plane.data[i] as f32 / 255.0
+            } else {
+                0.0_f32
+            };
+            layer.pixels[idx] = luma;
+            layer.pixels[idx + 1] = luma;
+            layer.pixels[idx + 2] = luma;
+            layer.pixels[idx + 3] = 1.0;
+        }
+    }
+
+    layer
+}
+
+/// Write RGBA f32 linear-light compositor output into the first plane of a
+/// `VideoFrame`.  Values are tone-mapped to `[0, 255]` (divide by peak_nits,
+/// clamp, scale).
+fn fill_output_frame_from_rgba_f32(frame: &mut VideoFrame, rgba: &[f32], w: u32, h: u32) {
+    let pixel_count = (w as usize) * (h as usize);
+    if let Some(plane) = frame.planes.first_mut() {
+        let out_len = plane.data.len().min(pixel_count);
+        for i in 0..out_len {
+            let base = i * 4;
+            if base + 2 < rgba.len() {
+                // Luma: 0.2126*R + 0.7152*G + 0.0722*B  (BT.709)
+                let luma =
+                    (0.2126 * rgba[base] + 0.7152 * rgba[base + 1] + 0.0722 * rgba[base + 2])
+                        .clamp(0.0, 1.0);
+                #[allow(clippy::cast_possible_truncation)]
+                #[allow(clippy::cast_sign_loss)]
+                let y = (luma * 255.0).round() as u8;
+                plane.data[i] = y;
+            }
+        }
+    }
+}
+
+/// Write RGBA8 pixel bytes into the first plane of a `VideoFrame` as luma.
+fn fill_output_frame_from_rgba8(frame: &mut VideoFrame, rgba8: &[u8], w: u32, h: u32) {
+    let pixel_count = (w as usize) * (h as usize);
+    if let Some(plane) = frame.planes.first_mut() {
+        let out_len = plane.data.len().min(pixel_count);
+        for i in 0..out_len {
+            let base = i * 4;
+            if base + 2 < rgba8.len() {
+                // Luma (integer approximation of BT.601).
+                let r = rgba8[base] as u32;
+                let g = rgba8[base + 1] as u32;
+                let b = rgba8[base + 2] as u32;
+                let y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+                plane.data[i] = y.min(255) as u8;
+            }
+        }
+    }
+}
+
+/// Accumulate samples from an `AudioFrame` (F32 interleaved) into `mix_buf`
+/// with the given `gain`.
+fn accumulate_audio_frame_into(
+    mix_buf: &mut [f32],
+    frame: &AudioFrame,
+    gain: f32,
+    ch_count: usize,
+    num_samples: usize,
+) {
+    use oximedia_mixer::simd_audio::mix_and_gain_simd;
+
+    let expected = num_samples * ch_count;
+    let src_samples: Vec<f32> = match &frame.samples {
+        oximedia_audio::AudioBuffer::Interleaved(bytes) => bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .take(expected)
+            .collect(),
+        oximedia_audio::AudioBuffer::Planar(planes) => {
+            // Interleave planes.
+            let frames_per_plane = if planes.is_empty() {
+                0
+            } else {
+                (planes[0].len() / 4).min(num_samples)
+            };
+            let mut interleaved = vec![0.0_f32; frames_per_plane * ch_count];
+            for (c, plane) in planes.iter().enumerate().take(ch_count) {
+                for f in 0..frames_per_plane {
+                    let base = f * 4;
+                    if base + 3 < plane.len() {
+                        interleaved[f * ch_count + c] = f32::from_ne_bytes([
+                            plane[base],
+                            plane[base + 1],
+                            plane[base + 2],
+                            plane[base + 3],
+                        ]);
+                    }
+                }
+            }
+            interleaved
+        }
+    };
+
+    if src_samples.is_empty() {
+        return;
+    }
+
+    let dst_len = mix_buf.len().min(expected);
+    let src_len = src_samples.len().min(dst_len);
+    mix_and_gain_simd(&mut mix_buf[..dst_len], &src_samples[..src_len], gain);
 }
 
 /// Rendered frame containing video and audio.
@@ -633,6 +947,8 @@ impl TimelineRenderer {
             timeline: self.timeline.clone(),
             config: self.config.clone(),
             cache: FrameCache::new(self.config.cache_size),
+            raw_frame_cache: RawFrameCache::new(RAW_FRAME_CACHE_CAPACITY),
+            source_cache: HashMap::new(),
         }
     }
 }
@@ -918,45 +1234,495 @@ pub struct TransitionRenderer;
 
 impl TransitionRenderer {
     /// Blend two video frames based on transition progress.
+    ///
+    /// `progress` ranges from `0.0` (fully `frame_a`) to `1.0` (fully `frame_b`).
+    /// When the two frames have different dimensions the larger frame is returned
+    /// unchanged.  When formats differ `frame_a` is returned unchanged.
     #[must_use]
     pub fn blend_video(
         frame_a: &VideoFrame,
-        _frame_b: &VideoFrame,
+        frame_b: &VideoFrame,
         transition: &Transition,
         progress: f64,
     ) -> VideoFrame {
-        let output = frame_a.clone();
+        use crate::transition::TransitionType;
 
-        // Apply transition based on type
-        if transition.transition_type == crate::transition::TransitionType::Dissolve {
-            // Simple alpha blend
-            // This is a placeholder - actual implementation would blend pixel data
-            #[allow(clippy::cast_possible_truncation)]
-            #[allow(clippy::cast_sign_loss)]
-            let _ = (progress * 255.0) as u8;
-        } else {
-            // Other transitions would be implemented here
+        // Dimension / format mismatch — return the larger (or frame_a) unblended.
+        if frame_a.format != frame_b.format {
+            return frame_a.clone();
+        }
+        let a_pixels = frame_a.width as u64 * frame_a.height as u64;
+        let b_pixels = frame_b.width as u64 * frame_b.height as u64;
+        if a_pixels != b_pixels {
+            return if b_pixels > a_pixels {
+                frame_b.clone()
+            } else {
+                frame_a.clone()
+            };
+        }
+
+        let progress_f32 = progress as f32;
+
+        match &transition.transition_type {
+            TransitionType::Dissolve => Self::dissolve_video(frame_a, frame_b, progress_f32),
+            TransitionType::WipeLeft => {
+                Self::wipe_video(frame_a, frame_b, progress_f32, WipeDirection::Left)
+            }
+            TransitionType::WipeRight => {
+                Self::wipe_video(frame_a, frame_b, progress_f32, WipeDirection::Right)
+            }
+            TransitionType::WipeDown => {
+                Self::wipe_video(frame_a, frame_b, progress_f32, WipeDirection::Down)
+            }
+            TransitionType::WipeUp => {
+                Self::wipe_video(frame_a, frame_b, progress_f32, WipeDirection::Up)
+            }
+            // CrossFade is audio-only; all remaining video variants and Cut-like
+            // behaviour: switch at mid-point.
+            _ => {
+                if progress_f32 >= 0.5 {
+                    frame_b.clone()
+                } else {
+                    frame_a.clone()
+                }
+            }
+        }
+    }
+
+    /// Mix two audio frames based on transition progress (cross-fade).
+    ///
+    /// `progress` ranges from `0.0` (fully `frame_a`) to `1.0` (fully `frame_b`).
+    /// `F32` interleaved and `F32p` planar audio are blended; all other formats
+    /// fall back to returning `frame_a` unchanged.  When sample formats differ,
+    /// `frame_a` is returned unchanged.
+    #[must_use]
+    pub fn mix_audio(
+        frame_a: &AudioFrame,
+        frame_b: &AudioFrame,
+        _transition: &Transition,
+        progress: f64,
+    ) -> AudioFrame {
+        // Format mismatch — return frame_a unblended.
+        if frame_a.format != frame_b.format {
+            return frame_a.clone();
+        }
+
+        let alpha = progress as f32;
+        let inv_alpha = 1.0_f32 - alpha;
+
+        match (&frame_a.samples, &frame_b.samples) {
+            (AudioBuffer::Interleaved(a_bytes), AudioBuffer::Interleaved(b_bytes))
+                if frame_a.format == SampleFormat::F32 =>
+            {
+                let len_samples = (a_bytes.len() / 4).min(b_bytes.len() / 4);
+                let mut out_bytes = Vec::with_capacity(len_samples * 4);
+
+                for i in 0..len_samples {
+                    let base = i * 4;
+                    let a_val = f32::from_ne_bytes([
+                        a_bytes[base],
+                        a_bytes[base + 1],
+                        a_bytes[base + 2],
+                        a_bytes[base + 3],
+                    ]);
+                    let b_val = f32::from_ne_bytes([
+                        b_bytes[base],
+                        b_bytes[base + 1],
+                        b_bytes[base + 2],
+                        b_bytes[base + 3],
+                    ]);
+                    let blended = (a_val * inv_alpha + b_val * alpha).clamp(-1.0, 1.0);
+                    out_bytes.extend_from_slice(&blended.to_ne_bytes());
+                }
+
+                AudioFrame {
+                    format: frame_a.format,
+                    sample_rate: frame_a.sample_rate,
+                    channels: frame_a.channels.clone(),
+                    samples: AudioBuffer::Interleaved(Bytes::from(out_bytes)),
+                    timestamp: frame_a.timestamp,
+                }
+            }
+            (AudioBuffer::Planar(a_planes), AudioBuffer::Planar(b_planes))
+                if frame_a.format == SampleFormat::F32p =>
+            {
+                let plane_count = a_planes.len().min(b_planes.len());
+                let mut out_planes = Vec::with_capacity(plane_count);
+
+                for p in 0..plane_count {
+                    let a_plane = &a_planes[p];
+                    let b_plane = &b_planes[p];
+                    let len_samples = (a_plane.len() / 4).min(b_plane.len() / 4);
+                    let mut plane_bytes = Vec::with_capacity(len_samples * 4);
+
+                    for i in 0..len_samples {
+                        let base = i * 4;
+                        let a_val = f32::from_ne_bytes([
+                            a_plane[base],
+                            a_plane[base + 1],
+                            a_plane[base + 2],
+                            a_plane[base + 3],
+                        ]);
+                        let b_val = f32::from_ne_bytes([
+                            b_plane[base],
+                            b_plane[base + 1],
+                            b_plane[base + 2],
+                            b_plane[base + 3],
+                        ]);
+                        let blended = (a_val * inv_alpha + b_val * alpha).clamp(-1.0, 1.0);
+                        plane_bytes.extend_from_slice(&blended.to_ne_bytes());
+                    }
+
+                    out_planes.push(Bytes::from(plane_bytes));
+                }
+
+                AudioFrame {
+                    format: frame_a.format,
+                    sample_rate: frame_a.sample_rate,
+                    channels: frame_a.channels.clone(),
+                    samples: AudioBuffer::Planar(out_planes),
+                    timestamp: frame_a.timestamp,
+                }
+            }
+            // Unsupported format combination — return frame_a unchanged.
+            _ => frame_a.clone(),
+        }
+    }
+
+    // ── Private helpers ──────────────────────────────────────────────────────
+
+    /// Linear dissolve blend over all planes.
+    fn dissolve_video(frame_a: &VideoFrame, frame_b: &VideoFrame, progress: f32) -> VideoFrame {
+        use oximedia_codec::frame::Plane;
+
+        let inv = 1.0_f32 - progress;
+        let mut output = frame_a.clone();
+
+        for (out_plane, b_plane) in output.planes.iter_mut().zip(frame_b.planes.iter()) {
+            let len = out_plane.data.len().min(b_plane.data.len());
+            let blended: Vec<u8> = (0..len)
+                .map(|i| {
+                    #[allow(clippy::cast_possible_truncation)]
+                    #[allow(clippy::cast_sign_loss)]
+                    let v = (out_plane.data[i] as f32 * inv + b_plane.data[i] as f32 * progress)
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                    v
+                })
+                .collect();
+
+            // Rebuild the plane so that stride/width/height are preserved and
+            // only the pixel data is replaced.
+            let new_plane = Plane::with_dimensions(
+                blended,
+                out_plane.stride,
+                out_plane.width,
+                out_plane.height,
+            );
+            *out_plane = new_plane;
         }
 
         output
     }
 
-    /// Mix two audio frames based on transition progress.
-    #[must_use]
-    pub fn mix_audio(
-        frame_a: &AudioFrame,
-        _frame_b: &AudioFrame,
-        _transition: &Transition,
-        progress: f64,
-    ) -> AudioFrame {
-        let output = frame_a.clone();
+    /// Wipe transition — one side uses `frame_b`, the other `frame_a`.
+    fn wipe_video(
+        frame_a: &VideoFrame,
+        frame_b: &VideoFrame,
+        progress: f32,
+        direction: WipeDirection,
+    ) -> VideoFrame {
+        use oximedia_codec::frame::Plane;
 
-        // Cross-fade audio
-        #[allow(clippy::cast_possible_truncation)]
-        let _ = progress as f32; // Alpha value calculated above
+        let mut output = frame_a.clone();
 
-        // This is a placeholder - actual implementation would mix sample data
+        // Process plane by plane so that chroma subsampling is handled correctly.
+        for (out_plane, b_plane) in output.planes.iter_mut().zip(frame_b.planes.iter()) {
+            let pw = out_plane.width as usize;
+            let ph = out_plane.height as usize;
+            // Chroma planes have reduced spatial size; compute the wipe boundary
+            // in plane-local coordinates by using the plane's own dimensions.
+
+            let mut new_data = out_plane.data.clone();
+
+            match direction {
+                WipeDirection::Left | WipeDirection::Right => {
+                    // Number of columns (in this plane) that show frame_b.
+                    #[allow(clippy::cast_possible_truncation)]
+                    #[allow(clippy::cast_sign_loss)]
+                    let boundary = (progress * pw as f32).round() as usize;
+                    for y in 0..ph {
+                        for x in 0..pw {
+                            let use_b = match direction {
+                                WipeDirection::Left => x < boundary,
+                                WipeDirection::Right => x >= pw.saturating_sub(boundary),
+                                _ => false,
+                            };
+                            if use_b {
+                                let src_idx = y * b_plane.stride + x;
+                                let dst_idx = y * out_plane.stride + x;
+                                if src_idx < b_plane.data.len() && dst_idx < new_data.len() {
+                                    new_data[dst_idx] = b_plane.data[src_idx];
+                                }
+                            }
+                        }
+                    }
+                }
+                WipeDirection::Down | WipeDirection::Up => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    #[allow(clippy::cast_sign_loss)]
+                    let boundary = (progress * ph as f32).round() as usize;
+                    for y in 0..ph {
+                        let use_b = match direction {
+                            WipeDirection::Down => y < boundary,
+                            WipeDirection::Up => y >= ph.saturating_sub(boundary),
+                            _ => false,
+                        };
+                        if use_b {
+                            for x in 0..pw {
+                                let src_idx = y * b_plane.stride + x;
+                                let dst_idx = y * out_plane.stride + x;
+                                if src_idx < b_plane.data.len() && dst_idx < new_data.len() {
+                                    new_data[dst_idx] = b_plane.data[src_idx];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let new_plane = Plane::with_dimensions(
+                new_data,
+                out_plane.stride,
+                out_plane.width,
+                out_plane.height,
+            );
+            *out_plane = new_plane;
+        }
 
         output
+    }
+}
+
+/// Direction for wipe transitions.
+#[derive(Clone, Copy)]
+enum WipeDirection {
+    Left,
+    Right,
+    Down,
+    Up,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests for TransitionRenderer
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod transition_renderer_tests {
+    use super::*;
+    use crate::transition::{Transition, TransitionType};
+    use bytes::Bytes;
+    use oximedia_audio::{AudioBuffer, AudioFrame, ChannelLayout};
+    use oximedia_codec::VideoFrame;
+    use oximedia_core::{PixelFormat, SampleFormat};
+
+    /// Build a solid-colour YUV420p video frame (all planes set to `value`).
+    fn make_video_frame(width: u32, height: u32, value: u8) -> VideoFrame {
+        let mut frame = VideoFrame::new(PixelFormat::Yuv420p, width, height);
+        frame.allocate();
+        for plane in &mut frame.planes {
+            for b in &mut plane.data {
+                *b = value;
+            }
+        }
+        frame
+    }
+
+    /// Build an F32 interleaved audio frame with all samples set to `value`.
+    fn make_audio_frame(num_samples: usize, value: f32) -> AudioFrame {
+        let bytes: Vec<u8> = (0..num_samples).flat_map(|_| value.to_ne_bytes()).collect();
+        AudioFrame {
+            format: SampleFormat::F32,
+            sample_rate: 48_000,
+            channels: ChannelLayout::Stereo,
+            samples: AudioBuffer::Interleaved(Bytes::from(bytes)),
+            timestamp: oximedia_core::Timestamp::new(0, oximedia_core::Rational::new(1, 48_000)),
+        }
+    }
+
+    /// Make a minimal `Transition` with the given type (no real clips needed).
+    fn make_transition(tt: TransitionType) -> Transition {
+        Transition::new(0, tt, 0, 0, 1000, 0, 1)
+    }
+
+    // ── blend_video tests ────────────────────────────────────────────────────
+
+    /// Dissolve at progress=0.5 should produce pixels near (100+200)/2 = 150.
+    #[test]
+    fn test_blend_video_dissolve_mid() {
+        let frame_a = make_video_frame(8, 4, 100);
+        let frame_b = make_video_frame(8, 4, 200);
+        let t = make_transition(TransitionType::Dissolve);
+
+        let out = TransitionRenderer::blend_video(&frame_a, &frame_b, &t, 0.5);
+
+        for plane in &out.planes {
+            for &b in &plane.data {
+                assert!((i32::from(b) - 150).abs() <= 1, "expected ~150, got {b}");
+            }
+        }
+    }
+
+    /// Dissolve at progress=0.0 should reproduce frame_a exactly.
+    #[test]
+    fn test_blend_video_dissolve_zero() {
+        let frame_a = make_video_frame(8, 4, 80);
+        let frame_b = make_video_frame(8, 4, 200);
+        let t = make_transition(TransitionType::Dissolve);
+
+        let out = TransitionRenderer::blend_video(&frame_a, &frame_b, &t, 0.0);
+
+        for plane in &out.planes {
+            for &b in &plane.data {
+                assert_eq!(b, 80);
+            }
+        }
+    }
+
+    /// Dissolve at progress=1.0 should reproduce frame_b exactly.
+    #[test]
+    fn test_blend_video_dissolve_one() {
+        let frame_a = make_video_frame(8, 4, 80);
+        let frame_b = make_video_frame(8, 4, 200);
+        let t = make_transition(TransitionType::Dissolve);
+
+        let out = TransitionRenderer::blend_video(&frame_a, &frame_b, &t, 1.0);
+
+        for plane in &out.planes {
+            for &b in &plane.data {
+                assert_eq!(b, 200);
+            }
+        }
+    }
+
+    /// Dimension mismatch must not panic and must return the larger frame.
+    #[test]
+    fn test_blend_video_dimension_mismatch_no_panic() {
+        let frame_a = make_video_frame(8, 4, 100);
+        let frame_b = make_video_frame(16, 8, 200);
+        let t = make_transition(TransitionType::Dissolve);
+
+        // Must not panic.
+        let out = TransitionRenderer::blend_video(&frame_a, &frame_b, &t, 0.5);
+        // The larger frame (frame_b, 16×8) is returned.
+        assert_eq!(out.width, 16);
+        assert_eq!(out.height, 8);
+    }
+
+    /// Dimension mismatch: same format but frame_a is larger.
+    #[test]
+    fn test_blend_video_dimension_mismatch_a_larger() {
+        let frame_a = make_video_frame(16, 8, 100);
+        let frame_b = make_video_frame(8, 4, 200);
+        let t = make_transition(TransitionType::Dissolve);
+
+        let out = TransitionRenderer::blend_video(&frame_a, &frame_b, &t, 0.5);
+        assert_eq!(out.width, 16);
+        assert_eq!(out.height, 8);
+    }
+
+    /// WipeLeft at 0.5 — left half of output should equal frame_b pixels.
+    #[test]
+    fn test_blend_video_wipe_left() {
+        let frame_a = make_video_frame(8, 4, 10);
+        let frame_b = make_video_frame(8, 4, 250);
+        let t = make_transition(TransitionType::WipeLeft);
+
+        let out = TransitionRenderer::blend_video(&frame_a, &frame_b, &t, 0.5);
+
+        // Y-plane: columns 0-3 should be frame_b (250), columns 4-7 should be frame_a (10).
+        let y_plane = &out.planes[0];
+        for y in 0..4usize {
+            for x in 0..4usize {
+                assert_eq!(y_plane.data[y * y_plane.stride + x], 250, "x={x},y={y}");
+            }
+            for x in 4..8usize {
+                assert_eq!(y_plane.data[y * y_plane.stride + x], 10, "x={x},y={y}");
+            }
+        }
+    }
+
+    // ── mix_audio tests ──────────────────────────────────────────────────────
+
+    /// Cross-fade at 0.5: 0.5*a + 0.5*b; with a=0.5 and b=-0.5 → 0.0.
+    #[test]
+    fn test_mix_audio_f32_mid() {
+        let frame_a = make_audio_frame(64, 0.5_f32);
+        let frame_b = make_audio_frame(64, -0.5_f32);
+        let t = make_transition(TransitionType::CrossFade);
+
+        let out = TransitionRenderer::mix_audio(&frame_a, &frame_b, &t, 0.5);
+
+        if let AudioBuffer::Interleaved(bytes) = &out.samples {
+            for chunk in bytes.chunks_exact(4) {
+                let v = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                assert!(v.abs() < 1e-5, "expected ~0.0, got {v}");
+            }
+        } else {
+            panic!("expected interleaved buffer");
+        }
+    }
+
+    /// Cross-fade at 0.0 should preserve frame_a samples.
+    #[test]
+    fn test_mix_audio_f32_zero() {
+        let frame_a = make_audio_frame(32, 0.8_f32);
+        let frame_b = make_audio_frame(32, -0.8_f32);
+        let t = make_transition(TransitionType::CrossFade);
+
+        let out = TransitionRenderer::mix_audio(&frame_a, &frame_b, &t, 0.0);
+
+        if let AudioBuffer::Interleaved(bytes) = &out.samples {
+            for chunk in bytes.chunks_exact(4) {
+                let v = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                assert!((v - 0.8).abs() < 1e-5, "expected 0.8, got {v}");
+            }
+        } else {
+            panic!("expected interleaved buffer");
+        }
+    }
+
+    /// Cross-fade at 1.0 should reproduce frame_b samples.
+    #[test]
+    fn test_mix_audio_f32_one() {
+        let frame_a = make_audio_frame(32, 0.3_f32);
+        let frame_b = make_audio_frame(32, 0.9_f32);
+        let t = make_transition(TransitionType::CrossFade);
+
+        let out = TransitionRenderer::mix_audio(&frame_a, &frame_b, &t, 1.0);
+
+        if let AudioBuffer::Interleaved(bytes) = &out.samples {
+            for chunk in bytes.chunks_exact(4) {
+                let v = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                assert!((v - 0.9).abs() < 1e-5, "expected 0.9, got {v}");
+            }
+        } else {
+            panic!("expected interleaved buffer");
+        }
+    }
+
+    /// Format mismatch on audio returns frame_a unchanged.
+    #[test]
+    fn test_mix_audio_format_mismatch() {
+        let frame_a = make_audio_frame(16, 0.5_f32);
+        let mut frame_b = make_audio_frame(16, -0.5_f32);
+        frame_b.format = SampleFormat::S16; // intentional mismatch
+
+        let t = make_transition(TransitionType::CrossFade);
+        let out = TransitionRenderer::mix_audio(&frame_a, &frame_b, &t, 0.5);
+
+        // Should return frame_a unchanged.
+        assert_eq!(out.format, SampleFormat::F32);
+        assert_eq!(out.samples.size(), frame_a.samples.size());
     }
 }

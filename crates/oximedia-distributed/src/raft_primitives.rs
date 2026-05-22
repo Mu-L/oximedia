@@ -3,8 +3,43 @@
 //! Provides building-block types for implementing a Raft consensus
 //! protocol in the distributed encoding cluster. These primitives
 //! focus on state management and log structures.
+//!
+//! # Raft Consensus Protocol Usage
+//!
+//! The Raft algorithm guarantees consensus in a distributed cluster by electing
+//! a single *leader* that coordinates all writes. The key phases are:
+//!
+//! ## Leader Election
+//!
+//! - All nodes start as **Followers** with term 0.
+//! - If a Follower does not receive a heartbeat within the **election timeout**
+//!   (typically 150–300 ms), it increments its term, transitions to **Candidate**,
+//!   and broadcasts `RequestVote` RPCs.
+//! - A node grants a vote if it has not voted in the current term and the
+//!   candidate's log is at least as up-to-date as its own.
+//! - A Candidate wins if it receives a majority (⌊N/2⌋ + 1) of votes and
+//!   transitions to **Leader**.
+//!
+//! ## Log Replication
+//!
+//! - The Leader appends each client command to its local [`RaftLog`], then
+//!   broadcasts `AppendEntries` RPCs (replicated to followers in parallel).
+//! - Once a majority of nodes have acknowledged the entry, the Leader marks
+//!   it as *committed* (updates `commit_index`).
+//! - Followers apply committed entries to their state machines in order.
+//!
+//! ## Heartbeat and Timeout Values
+//!
+//! | Constant            | Typical Value | Notes                                      |
+//! |---------------------|---------------|--------------------------------------------|
+//! | Heartbeat interval  | 50 ms         | Leader sends empty `AppendEntries` per hop |
+//! | Election timeout    | 150–300 ms    | Randomised to avoid split votes            |
+//! | RPC timeout         | 30 ms         | After which the RPC is retried             |
 
 #![allow(dead_code)]
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 /// A single entry in the Raft replicated log.
 #[derive(Debug, Clone)]
@@ -214,6 +249,181 @@ impl RaftLog {
     }
 }
 
+/// Latency metrics for a Raft node.
+///
+/// All values are stored as microseconds in [`AtomicU64`] counters so they can
+/// be read from any thread without acquiring a lock.
+///
+/// Use [`RaftMetrics::record_propose_commit`] after a proposal is committed
+/// and [`RaftMetrics::record_heartbeat_rtt`] after each heartbeat round-trip.
+/// Then call [`RaftMetrics::report`] to obtain a snapshot.
+#[derive(Debug, Default)]
+pub struct RaftMetrics {
+    /// Total number of commit latency samples recorded.
+    propose_commit_samples: AtomicU64,
+    /// Sum of propose-to-commit latencies in microseconds.
+    propose_commit_sum_us: AtomicU64,
+    /// Maximum propose-to-commit latency seen (microseconds).
+    propose_commit_max_us: AtomicU64,
+    /// Total number of heartbeat RTT samples recorded.
+    heartbeat_samples: AtomicU64,
+    /// Sum of heartbeat RTTs in microseconds.
+    heartbeat_sum_us: AtomicU64,
+    /// Maximum heartbeat RTT seen (microseconds).
+    heartbeat_max_us: AtomicU64,
+}
+
+/// A point-in-time snapshot of [`RaftMetrics`].
+#[derive(Debug, Clone)]
+pub struct RaftMetricsSnapshot {
+    /// Number of propose-to-commit latency samples.
+    pub propose_commit_samples: u64,
+    /// Average propose-to-commit latency in milliseconds.
+    pub propose_commit_avg_ms: f64,
+    /// Maximum propose-to-commit latency in milliseconds.
+    pub propose_commit_max_ms: f64,
+    /// Number of heartbeat RTT samples.
+    pub heartbeat_samples: u64,
+    /// Average heartbeat RTT in milliseconds.
+    pub heartbeat_rtt_avg_ms: f64,
+    /// Maximum heartbeat RTT in milliseconds.
+    pub heartbeat_rtt_max_ms: f64,
+}
+
+impl RaftMetrics {
+    /// Create a new, zeroed metrics instance.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record the elapsed time from a proposal being submitted to being
+    /// committed.  Pass the `Instant` captured when the proposal was first
+    /// submitted; this method captures the current time to compute the
+    /// elapsed duration.
+    pub fn record_propose_commit(&self, propose_start: Instant) {
+        let elapsed_us = propose_start.elapsed().as_micros() as u64;
+        self.propose_commit_samples.fetch_add(1, Ordering::Relaxed);
+        self.propose_commit_sum_us
+            .fetch_add(elapsed_us, Ordering::Relaxed);
+        // Update max (relaxed compare-and-swap loop)
+        let mut current = self.propose_commit_max_us.load(Ordering::Relaxed);
+        while elapsed_us > current {
+            match self.propose_commit_max_us.compare_exchange_weak(
+                current,
+                elapsed_us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(c) => current = c,
+            }
+        }
+    }
+
+    /// Record the round-trip time for a single heartbeat.  Pass the `Instant`
+    /// when the heartbeat was sent; this method captures the current time.
+    pub fn record_heartbeat_rtt(&self, send_start: Instant) {
+        let elapsed_us = send_start.elapsed().as_micros() as u64;
+        self.heartbeat_samples.fetch_add(1, Ordering::Relaxed);
+        self.heartbeat_sum_us
+            .fetch_add(elapsed_us, Ordering::Relaxed);
+        let mut current = self.heartbeat_max_us.load(Ordering::Relaxed);
+        while elapsed_us > current {
+            match self.heartbeat_max_us.compare_exchange_weak(
+                current,
+                elapsed_us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(c) => current = c,
+            }
+        }
+    }
+
+    /// Record a raw propose-to-commit latency value in microseconds (for
+    /// testing / synthetic benchmarks where you control the exact value).
+    pub fn record_propose_commit_us(&self, latency_us: u64) {
+        self.propose_commit_samples.fetch_add(1, Ordering::Relaxed);
+        self.propose_commit_sum_us
+            .fetch_add(latency_us, Ordering::Relaxed);
+        let mut current = self.propose_commit_max_us.load(Ordering::Relaxed);
+        while latency_us > current {
+            match self.propose_commit_max_us.compare_exchange_weak(
+                current,
+                latency_us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(c) => current = c,
+            }
+        }
+    }
+
+    /// Record a raw heartbeat RTT value in microseconds.
+    pub fn record_heartbeat_rtt_us(&self, rtt_us: u64) {
+        self.heartbeat_samples.fetch_add(1, Ordering::Relaxed);
+        self.heartbeat_sum_us.fetch_add(rtt_us, Ordering::Relaxed);
+        let mut current = self.heartbeat_max_us.load(Ordering::Relaxed);
+        while rtt_us > current {
+            match self.heartbeat_max_us.compare_exchange_weak(
+                current,
+                rtt_us,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(c) => current = c,
+            }
+        }
+    }
+
+    /// Return a snapshot of the current metrics.
+    #[must_use]
+    pub fn report(&self) -> RaftMetricsSnapshot {
+        let pc_samples = self.propose_commit_samples.load(Ordering::Relaxed);
+        let pc_sum = self.propose_commit_sum_us.load(Ordering::Relaxed);
+        let pc_max = self.propose_commit_max_us.load(Ordering::Relaxed);
+
+        let hb_samples = self.heartbeat_samples.load(Ordering::Relaxed);
+        let hb_sum = self.heartbeat_sum_us.load(Ordering::Relaxed);
+        let hb_max = self.heartbeat_max_us.load(Ordering::Relaxed);
+
+        let pc_avg_ms = if pc_samples > 0 {
+            pc_sum as f64 / pc_samples as f64 / 1000.0
+        } else {
+            0.0
+        };
+
+        let hb_avg_ms = if hb_samples > 0 {
+            hb_sum as f64 / hb_samples as f64 / 1000.0
+        } else {
+            0.0
+        };
+
+        RaftMetricsSnapshot {
+            propose_commit_samples: pc_samples,
+            propose_commit_avg_ms: pc_avg_ms,
+            propose_commit_max_ms: pc_max as f64 / 1000.0,
+            heartbeat_samples: hb_samples,
+            heartbeat_rtt_avg_ms: hb_avg_ms,
+            heartbeat_rtt_max_ms: hb_max as f64 / 1000.0,
+        }
+    }
+
+    /// Reset all counters to zero.
+    pub fn reset(&self) {
+        self.propose_commit_samples.store(0, Ordering::Relaxed);
+        self.propose_commit_sum_us.store(0, Ordering::Relaxed);
+        self.propose_commit_max_us.store(0, Ordering::Relaxed);
+        self.heartbeat_samples.store(0, Ordering::Relaxed);
+        self.heartbeat_sum_us.store(0, Ordering::Relaxed);
+        self.heartbeat_max_us.store(0, Ordering::Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,5 +578,80 @@ mod tests {
         log.truncate_after(2);
         assert_eq!(log.last_index(), 2);
         assert!(log.get(3).is_none());
+    }
+
+    // ---- RaftMetrics tests ----
+
+    #[test]
+    fn test_raft_metrics_captures_latency() {
+        let metrics = RaftMetrics::new();
+
+        // Record 3 synthetic propose-to-commit samples
+        metrics.record_propose_commit_us(2_000); // 2 ms
+        metrics.record_propose_commit_us(4_000); // 4 ms
+        metrics.record_propose_commit_us(6_000); // 6 ms
+
+        // Record 2 heartbeat RTT samples
+        metrics.record_heartbeat_rtt_us(500); // 0.5 ms
+        metrics.record_heartbeat_rtt_us(1_500); // 1.5 ms
+
+        let snap = metrics.report();
+
+        assert_eq!(snap.propose_commit_samples, 3);
+        // avg = (2+4+6)/3 = 4 ms
+        assert!((snap.propose_commit_avg_ms - 4.0).abs() < 0.01);
+        // max = 6 ms
+        assert!((snap.propose_commit_max_ms - 6.0).abs() < 0.01);
+
+        assert_eq!(snap.heartbeat_samples, 2);
+        // avg = (0.5+1.5)/2 = 1.0 ms
+        assert!((snap.heartbeat_rtt_avg_ms - 1.0).abs() < 0.01);
+        // max = 1.5 ms
+        assert!((snap.heartbeat_rtt_max_ms - 1.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_raft_metrics_empty_report() {
+        let metrics = RaftMetrics::new();
+        let snap = metrics.report();
+        assert_eq!(snap.propose_commit_samples, 0);
+        assert_eq!(snap.heartbeat_samples, 0);
+        assert_eq!(snap.propose_commit_avg_ms, 0.0);
+        assert_eq!(snap.heartbeat_rtt_avg_ms, 0.0);
+    }
+
+    #[test]
+    fn test_raft_metrics_reset() {
+        let metrics = RaftMetrics::new();
+        metrics.record_propose_commit_us(1_000);
+        metrics.record_heartbeat_rtt_us(500);
+        metrics.reset();
+
+        let snap = metrics.report();
+        assert_eq!(snap.propose_commit_samples, 0);
+        assert_eq!(snap.heartbeat_samples, 0);
+    }
+
+    #[test]
+    fn test_raft_metrics_instant_recording() {
+        let metrics = RaftMetrics::new();
+        let t = Instant::now();
+        // Tiny sleep to ensure elapsed > 0
+        std::thread::sleep(std::time::Duration::from_micros(100));
+        metrics.record_propose_commit(t);
+        let snap = metrics.report();
+        assert_eq!(snap.propose_commit_samples, 1);
+        assert!(snap.propose_commit_max_ms >= 0.0);
+    }
+
+    #[test]
+    fn test_raft_metrics_max_tracks_correctly() {
+        let metrics = RaftMetrics::new();
+        metrics.record_propose_commit_us(100);
+        metrics.record_propose_commit_us(9_000); // 9 ms
+        metrics.record_propose_commit_us(500);
+
+        let snap = metrics.report();
+        assert!((snap.propose_commit_max_ms - 9.0).abs() < 0.01);
     }
 }

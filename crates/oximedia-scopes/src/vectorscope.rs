@@ -12,6 +12,7 @@
 //! The vectorscope uses Cb (U) and Cr (V) components as X and Y axes.
 
 use crate::render::{rgb_to_ycbcr, Canvas};
+use crate::simd_convert::convert_batch_bt601_simd;
 use crate::{GamutColorspace, ScopeConfig, ScopeData, ScopeType, VectorscopeMode};
 use oximedia_core::OxiResult;
 use std::f32::consts::PI;
@@ -65,15 +66,15 @@ pub fn generate_vectorscope(
     // Apply gain (zoom)
     let gain = config.vectorscope_gain;
 
-    // Process all pixels
-    for y in 0..height {
-        for x in 0..width {
-            let pixel_idx = ((y * width + x) * 3) as usize;
-            let r = frame[pixel_idx];
-            let g = frame[pixel_idx + 1];
-            let b = frame[pixel_idx + 2];
+    // Pre-convert entire frame using BT.601 SIMD dispatch.
+    let ycbcr_frame = convert_batch_bt601_simd(&frame[..(width * height * 3) as usize]);
 
-            let (_luma, cb, cr) = rgb_to_ycbcr(r, g, b);
+    // Process pre-converted pixels
+    let mut px_idx = 0usize;
+    for _y in 0..height {
+        for _x in 0..width {
+            let [_luma, cb, cr] = ycbcr_frame[px_idx];
+            px_idx += 1;
 
             // Cb and Cr are in range 0-255, with 128 = neutral
             // Map to -128 to +127 range

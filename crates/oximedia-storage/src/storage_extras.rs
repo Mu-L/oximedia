@@ -8,7 +8,7 @@
 //! - `StorageNamespace` — prefix-scoped in-memory object store
 //! - `VersionedObject` / `SimpleVersionStore` — key-versioned blobs
 //! - `SimpleRetentionManager` — age-based expiry purge
-//! - `CompressedStore` — identity-stub compress/decompress wrapper
+//! - `CompressedStore` — LZ4 compress/decompress wrapper via `oxiarc_lz4`
 //! - `IntegrityChecker` — SHA-256 batch verify with `IntegrityViolation`
 
 #![allow(dead_code)]
@@ -539,14 +539,15 @@ impl SimpleRetentionManager {
 }
 
 // ---------------------------------------------------------------------------
-// CompressedStore — identity-stub compress/decompress
+// CompressedStore — LZ4 compress/decompress via OxiARC
 // ---------------------------------------------------------------------------
 
-/// A simple content store with stub compression.
+/// A simple content store with transparent LZ4 compression.
 ///
-/// Per the COOLJAPAN Pure Rust policy, actual compression must use OxiARC
-/// (`oxiarc-*`).  This stub stores data unmodified while presenting the same
-/// compressed/decompressed interface.
+/// All objects are compressed with `oxiarc_lz4` (COOLJAPAN Pure Rust policy)
+/// before being stored, and decompressed on retrieval.  The
+/// `compress_lz4`/`decompress_lz4` helpers are also available as standalone
+/// functions for callers that want to manage compression themselves.
 #[derive(Debug, Default)]
 pub struct CompressedStore {
     /// Internally stored (would-be-compressed) data.
@@ -560,34 +561,48 @@ impl CompressedStore {
         Self::default()
     }
 
-    /// Stub LZ4-style compress: returns data unchanged.
+    /// Compress `data` with LZ4 via OxiARC.
     ///
-    /// Replace with `oxiarc_lz4::compress(data)` when the OxiARC LZ4
-    /// feature is available.
-    #[must_use]
-    pub fn compress_lz4_stub(data: &[u8]) -> Vec<u8> {
-        data.to_vec()
+    /// Returns a `StorageError::ProviderError` if compression fails.
+    pub fn compress_lz4(data: &[u8]) -> crate::Result<Vec<u8>> {
+        oxiarc_lz4::compress(data)
+            .map_err(|e| crate::StorageError::ProviderError(format!("LZ4 compression failed: {e}")))
     }
 
-    /// Stub LZ4-style decompress: returns data unchanged.
+    /// Decompress LZ4-compressed `data` via OxiARC.
     ///
-    /// Replace with `oxiarc_lz4::decompress(data)` when the OxiARC LZ4
-    /// feature is available.
-    #[must_use]
-    pub fn decompress_lz4_stub(data: &[u8]) -> Vec<u8> {
-        data.to_vec()
+    /// Uses a progressive buffer-doubling strategy so that the caller does not
+    /// need to supply the original uncompressed size.
+    pub fn decompress_lz4(data: &[u8]) -> crate::Result<Vec<u8>> {
+        let mut max_output = data.len().saturating_mul(16).max(65_536);
+        loop {
+            match oxiarc_lz4::decompress(data, max_output) {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("exceeds maximum size") && max_output < 256 * 1024 * 1024 {
+                        max_output = max_output.saturating_mul(4);
+                    } else {
+                        return Err(crate::StorageError::ProviderError(format!(
+                            "LZ4 decompression failed: {e}"
+                        )));
+                    }
+                }
+            }
+        }
     }
 
-    /// Stores `data` at `key`, applying the stub compressor.
+    /// Stores `data` at `key`, applying LZ4 compression.
+    ///
+    /// Falls back to storing the raw bytes if compression fails.
     pub fn put(&mut self, key: impl Into<String>, data: Vec<u8>) {
-        let compressed = Self::compress_lz4_stub(&data);
+        let compressed = Self::compress_lz4(&data).unwrap_or(data);
         self.inner.insert(key.into(), compressed);
     }
 
     /// Retrieves and decompresses data at `key`.
-    #[must_use]
-    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        self.inner.get(key).map(|d| Self::decompress_lz4_stub(d))
+    pub fn get(&self, key: &str) -> Option<crate::Result<Vec<u8>>> {
+        self.inner.get(key).map(|d| Self::decompress_lz4(d))
     }
 
     /// Number of objects stored.
@@ -945,7 +960,10 @@ mod tests {
     fn test_compressed_store_put_get_roundtrip() {
         let mut store = CompressedStore::new();
         store.put("key", b"hello world".to_vec());
-        let got = store.get("key").expect("should retrieve");
+        let got = store
+            .get("key")
+            .expect("should retrieve")
+            .expect("decompress should succeed");
         assert_eq!(got, b"hello world");
     }
 
@@ -958,11 +976,12 @@ mod tests {
     }
 
     #[test]
-    fn test_compress_decompress_stub_identity() {
+    fn test_lz4_round_trip() {
         let data = b"some binary data \x00\xFF\xAB";
-        let compressed = CompressedStore::compress_lz4_stub(data);
-        let decompressed = CompressedStore::decompress_lz4_stub(&compressed);
-        assert_eq!(decompressed, data);
+        let compressed = CompressedStore::compress_lz4(data).expect("compress should succeed");
+        let decompressed =
+            CompressedStore::decompress_lz4(&compressed).expect("decompress should succeed");
+        assert_eq!(decompressed.as_slice(), data.as_ref());
     }
 
     // --- IntegrityChecker ---

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "oximedia"
-version = "0.1.6"
+version = "0.1.7"
 description = "Python bindings for OxiMedia - Royalty-free multimedia processing library"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -25,4 +25,11 @@ classifiers = [
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-module-name = "oximedia"
+module-name = "oximedia.oximedia"
+python-source = "python"
+include = [
+    "python/oximedia/*.pyi",
+    "python/oximedia/py.typed",
+    "python/oximedia/__init__.py",
+    "python/oximedia/__main__.py",
+]

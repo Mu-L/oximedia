@@ -12,6 +12,11 @@ homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
 
+[features]
+# OCI Object Storage backend (reqwest, rsa, base64 are unconditional deps;
+# this feature flag exists for conditional compilation guards and future dep-gating)
+oci = []
+
 [lints]
 workspace = true
 
@@ -27,23 +32,23 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 
 # AWS SDK (ring-based TLS to avoid aws-lc-sys C dependency)
-aws-config = { version = "1.8", default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }
-aws-sdk-s3 = { version = "1.131", default-features = false, features = ["rustls", "rt-tokio"] }
-aws-sdk-mediaconvert = { version = "1.126", default-features = false, features = ["rustls", "rt-tokio"] }
-aws-sdk-medialive = { version = "1.134", default-features = false, features = ["rustls", "rt-tokio"] }
-aws-sdk-mediapackage = { version = "1.98", default-features = false, features = ["rustls", "rt-tokio"] }
-aws-sdk-cloudwatch = { version = "1.110", default-features = false, features = ["rustls", "rt-tokio"] }
-aws-sdk-sts = { version = "1.103", default-features = false, features = ["rustls", "rt-tokio"] }
-aws-sdk-kms = { version = "1.105", default-features = false, features = ["rustls", "rt-tokio"] }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+aws-sdk-mediaconvert = { workspace = true }
+aws-sdk-medialive = { workspace = true }
+aws-sdk-mediapackage = { workspace = true }
+aws-sdk-cloudwatch = { workspace = true }
+aws-sdk-sts = { workspace = true }
+aws-sdk-kms = { workspace = true }
 aws-smithy-types = "1.4"
 aws-smithy-runtime = { version = "1", features = ["tls-rustls", "client"] }
-aws-smithy-runtime-api = "1.11"
+aws-smithy-runtime-api = { workspace = true }
 
 # Azure SDK
-azure_core = "0.34"
-azure_storage = "0.21"
-azure_storage_blobs = "0.21"
-azure_identity = "0.34"
+azure_core = { workspace = true }
+azure_storage = { workspace = true }
+azure_storage_blobs = { workspace = true }
+azure_identity = "1.0"
 
 # GCP (using reqwest for REST API)
 reqwest = { workspace = true, features = ["stream"] }
@@ -51,6 +56,7 @@ base64 = { workspace = true }
 url = "2.5"
 sha2 = { workspace = true }
 hmac = { workspace = true }
+rsa = { workspace = true }
 md-5 = "0.11"
 hex = "0.4"
 

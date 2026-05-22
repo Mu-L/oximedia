@@ -248,12 +248,18 @@ mod tests {
     use std::env::temp_dir;
 
     fn tmp_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
         let d = temp_dir().join(format!(
-            "oximedia_lock_test_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos()
+            "oximedia_lock_test_{}_{}_{}",
+            std::process::id(),
+            nanos,
+            seq,
         ));
         fs::create_dir_all(&d).expect("temp dir creation");
         d
@@ -302,7 +308,8 @@ mod tests {
         };
         fs::write(&lock_path, data.encode()).expect("write stale lock");
 
-        let mut lock = DistributedLock::new(&dir, "stale", "owner-1").with_ttl(Duration::from_secs(30));
+        let mut lock =
+            DistributedLock::new(&dir, "stale", "owner-1").with_ttl(Duration::from_secs(30));
         assert!(lock.try_acquire().is_ok(), "should break stale lock");
         let _ = lock.release();
         let _ = fs::remove_dir_all(&dir);

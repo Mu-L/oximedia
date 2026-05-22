@@ -293,10 +293,7 @@ impl JobArchiver {
     ///
     /// Returns [`ArchiveError::NotFound`] if the ID is not in the archive.
     pub fn restore(&mut self, id: Uuid) -> Result<Job, ArchiveError> {
-        let archived = self
-            .store
-            .remove(&id)
-            .ok_or(ArchiveError::NotFound(id))?;
+        let archived = self.store.remove(&id).ok_or(ArchiveError::NotFound(id))?;
         self.insertion_order.retain(|&x| x != id);
         self.stats.total = self.stats.total.saturating_sub(1);
 
@@ -318,10 +315,7 @@ impl JobArchiver {
     ///
     /// Returns [`ArchiveError::NotFound`] if the ID does not exist.
     pub fn delete(&mut self, id: Uuid) -> Result<ArchivedJob, ArchiveError> {
-        let archived = self
-            .store
-            .remove(&id)
-            .ok_or(ArchiveError::NotFound(id))?;
+        let archived = self.store.remove(&id).ok_or(ArchiveError::NotFound(id))?;
         self.insertion_order.retain(|&x| x != id);
         self.stats.total = self.stats.total.saturating_sub(1);
         Ok(archived)
@@ -350,7 +344,11 @@ impl JobArchiver {
 
         // Per-status count pruning: keep the newest `max_count` per status.
         if let Some(max_count) = pruning.max_count_per_status {
-            for target_status in [JobStatus::Completed, JobStatus::Failed, JobStatus::Cancelled] {
+            for target_status in [
+                JobStatus::Completed,
+                JobStatus::Failed,
+                JobStatus::Cancelled,
+            ] {
                 let mut by_status: Vec<(Uuid, DateTime<Utc>)> = self
                     .store
                     .iter()
@@ -477,7 +475,9 @@ mod tests {
     fn test_archive_failed_job() {
         let mut archiver = JobArchiver::new(ArchivePolicy::default(), 100);
         let job = make_transcode_job("encode-fail", JobStatus::Failed);
-        archiver.archive(job, Some("max retries exceeded".into())).expect("should archive");
+        archiver
+            .archive(job, Some("max retries exceeded".into()))
+            .expect("should archive");
         assert_eq!(archiver.stats().failed_count, 1);
     }
 

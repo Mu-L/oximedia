@@ -212,6 +212,7 @@ async fn generate_single(options: &ThumbnailOptions, timestamp: f64) -> Result<V
 
     let (rgb, width, height) =
         crate::frame_extract::extract_video_frame_rgb(&options.input, frame_num)
+            .await
             .context("Frame extraction failed")?;
 
     let rgb = maybe_scale(rgb, width, height, options.width, options.height);
@@ -257,6 +258,7 @@ async fn generate_multiple(options: &ThumbnailOptions, count: usize) -> Result<V
     debug!("Extracting frame indices: {:?}", indices);
 
     let frames = crate::frame_extract::extract_video_frames_rgb(&options.input, &indices)
+        .await
         .context("Multi-frame extraction failed")?;
 
     let mut output_files = Vec::with_capacity(frames.len());
@@ -328,6 +330,7 @@ async fn generate_grid(
         .collect();
 
     let frames = crate::frame_extract::extract_video_frames_rgb(&options.input, &indices)
+        .await
         .context("Grid frame extraction failed")?;
 
     // Composite into a single canvas: rows × cols cells.
@@ -400,6 +403,7 @@ async fn generate_auto(options: &ThumbnailOptions) -> Result<Vec<PathBuf>> {
         .collect();
 
     let frames = crate::frame_extract::extract_video_frames_rgb(&options.input, &indices)
+        .await
         .context("Auto frame extraction failed")?;
 
     // Pick the frame with the highest mean luma.

@@ -13,24 +13,24 @@
 - Dependencies: oximedia-core, oximedia-timecode, bytes, bitflags, chrono, crc, tokio, memmap2, libc (non-wasm)
 
 ## Enhancements
-- [ ] Add PTP Announce message timeout handling in `ptp::bmca` for detecting master clock loss and triggering re-election
-- [ ] Extend `ntp::client` to support NTS (Network Time Security, RFC 8915) for authenticated time synchronization
-- [ ] Improve `clock::drift::DriftEstimator` with Allan variance computation for oscillator characterization
-- [ ] Add `clock_ensemble` support for weighted averaging of multiple clock sources using Bayesian estimation
-- [ ] Extend `aes67` module with PTP profile compliance checking per AES67-2013 specification
-- [ ] Improve `jitter_buffer` with adaptive depth adjustment based on measured network jitter statistics
-- [ ] Add `sync_audit` persistent logging to file with rotation for post-production timing analysis
-- [ ] Extend `gptp` (gPTP/802.1AS) with neighbor rate ratio measurement for improved accuracy
+- [x] Add PTP Announce message timeout handling in `ptp::bmca` for detecting master clock loss and triggering re-election (verified 2026-05-16; src/ptp/bmca.rs:280 AnnounceTimeoutTracker)
+- [x] Extend `ntp::client` to support NTS (Network Time Security, RFC 8915) for authenticated time synchronization (verified 2026-05-16; src/ntp/nts.rs:1 NTS RFC 8915, NtsCookie:81, NtsKeyMaterial:115)
+- [ ] Improve `clock::drift::DriftEstimator` with Allan variance computation for oscillator characterization (verified-open 2026-05-16: no allan_variance in clock_discipline.rs)
+- [x] Add `clock_ensemble` support for weighted averaging of multiple clock sources using Bayesian estimation (verified 2026-05-16; src/clock_ensemble.rs:596 BayesianEnsemble Gaussian conjugate updates)
+- [ ] Extend `aes67` module with PTP profile compliance checking per AES67-2013 specification (verified-open 2026-05-16: no profile compliance checker in aes67.rs)
+- [x] Improve `jitter_buffer` with adaptive depth adjustment based on measured network jitter statistics (verified 2026-05-16; src/jitter_buffer.rs:123 adaptive_depth field, JitterStats:118)
+- [ ] Add `sync_audit` persistent logging to file with rotation for post-production timing analysis (verified-open 2026-05-16: SyncAuditLog in-memory only, no file I/O in sync_audit.rs)
+- [x] Extend `gptp` (gPTP/802.1AS) with neighbor rate ratio measurement for improved accuracy (verified 2026-05-16; src/gptp.rs:184 neighbor_rate_ratio field)
 
 ## New Features
-- [x] Implement `white_rabbit` module for White Rabbit sub-nanosecond PTP extension (used in broadcast facilities)
-- [ ] Add `smpte_2059` module for SMPTE ST 2059 PTP profile for professional media (media-specific PTP profile)
-- [x] Implement `clock_graph` module for visualizing clock hierarchy and sync relationships in multi-device setups
-- [ ] Add `ravenna` module for RAVENNA AoIP clock synchronization profile support
-- [ ] Implement `sync_test` module with synthetic clock drift/offset injection for testing sync algorithms
-- [ ] Add `gps_reference` module for GPS-disciplined clock input as ultimate reference source
-- [ ] Implement `ptp_management` module for PTP management messages (GET/SET/COMMAND) per IEEE 1588
-- [x] Add `clock_quality_monitor` that tracks and reports MTIE (Maximum Time Interval Error) and TDEV
+- [x] Implement `white_rabbit` module for White Rabbit sub-nanosecond PTP extension (used in broadcast facilities) (verified 2026-05-16; src/white_rabbit.rs:39 WrLinkDelayCoefficients, DdmtdSample:96, 503 lines)
+- [x] Add `smpte_2059` module for SMPTE ST 2059 PTP profile for professional media (media-specific PTP profile) (verified 2026-05-16; src/smpte_2059.rs:18 Rational, frame_duration_ns:50, 502 lines)
+- [x] Implement `clock_graph` module for visualizing clock hierarchy and sync relationships in multi-device setups (verified 2026-05-16; src/clock_graph.rs:168 ClockGraph, 547 lines)
+- [x] Add `ravenna` module for RAVENNA AoIP clock synchronization profile support (verified 2026-05-16; src/ravenna.rs:77 RavennaStreamConfig, RavennaClockDomain:221, 427 lines)
+- [x] Implement `sync_test` module with synthetic clock drift/offset injection for testing sync algorithms (verified 2026-05-16; src/sync_test.rs:199 SyntheticClock, SyncTestHarness:292, 547 lines)
+- [x] Add `gps_reference` module for GPS-disciplined clock input as ultimate reference source (verified 2026-05-16; src/gps_reference.rs:307 GpsDisciplinedClock, GpsPpsSource:224, 561 lines)
+- [x] Implement `ptp_management` module for PTP management messages (GET/SET/COMMAND) per IEEE 1588 (verified 2026-05-16; src/ptp_management.rs:257 ManagementMessage, SimpleManagementResponder:444, 768 lines)
+- [x] Add `clock_quality_monitor` that tracks and reports MTIE (Maximum Time Interval Error) and TDEV (verified 2026-05-16; src/clock_quality_monitor.rs:101 ClockQualityMonitor, 418 lines)
 
 ## Performance
 - [ ] Use lock-free shared memory updates in `ipc::shmem` for microsecond-level timestamp distribution

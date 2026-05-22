@@ -334,6 +334,7 @@ impl PyStabilizer {
     ///     Motion data estimated between this frame and the previous one.
     fn analyze_frame(
         &mut self,
+        py: Python<'_>,
         frame_data: Vec<u8>,
         width: u32,
         height: u32,
@@ -351,12 +352,16 @@ impl PyStabilizer {
                 confidence: 1.0,
             }
         } else {
-            // Estimate motion from previous frame using simple block matching
+            // Block-matching motion estimation is the heavy work — clone the
+            // last frame so the closure owns its inputs and the GIL can be
+            // released for the duration of the search.
             let prev = self
                 .frames_buffer
                 .last()
-                .ok_or_else(|| PyRuntimeError::new_err("No previous frame available"))?;
-            estimate_simple_motion(prev, &frame)
+                .ok_or_else(|| PyRuntimeError::new_err("No previous frame available"))?
+                .clone();
+            let curr_for_estimate = frame.clone();
+            py.detach(move || estimate_simple_motion(&prev, &curr_for_estimate))
         };
 
         self.motion_data.push(motion.clone());
@@ -376,19 +381,30 @@ impl PyStabilizer {
     ///
     /// Returns:
     ///     Stabilized frame as RGB bytes.
-    fn process_frame(&mut self, frame_data: Vec<u8>, width: u32, height: u32) -> PyResult<Vec<u8>> {
+    fn process_frame(
+        &mut self,
+        py: Python<'_>,
+        frame_data: Vec<u8>,
+        width: u32,
+        height: u32,
+    ) -> PyResult<Vec<u8>> {
         let timestamp = self.frames_buffer.len() as f64 / 30.0;
         let frame = rgb_bytes_to_frame(&frame_data, width, height, timestamp)?;
 
         // For single-frame processing, accumulate and then stabilize the batch
         self.frames_buffer.push(frame);
 
-        let mut stabilizer = Stabilizer::new(self.config.clone())
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to create stabilizer: {e}")))?;
-
-        let stabilized = stabilizer
-            .stabilize(&self.frames_buffer)
-            .map_err(|e| PyRuntimeError::new_err(format!("Stabilization failed: {e}")))?;
+        let config = self.config.clone();
+        let frames = &self.frames_buffer;
+        let stabilized = py
+            .detach(move || {
+                let mut stabilizer = Stabilizer::new(config)
+                    .map_err(|e| format!("Failed to create stabilizer: {e}"))?;
+                stabilizer
+                    .stabilize(frames)
+                    .map_err(|e| format!("Stabilization failed: {e}"))
+            })
+            .map_err(PyRuntimeError::new_err)?;
 
         let last = stabilized
             .last()
@@ -548,6 +564,7 @@ fn estimate_simple_motion(prev: &Frame, curr: &Frame) -> PyMotionData {
 #[pyfunction]
 #[pyo3(signature = (frames, width, height, mode=None, strength=None))]
 pub fn stabilize_video_frames(
+    py: Python<'_>,
     frames: Vec<Vec<u8>>,
     width: u32,
     height: u32,
@@ -578,14 +595,19 @@ pub fn stabilize_video_frames(
         .map(|(i, f)| rgb_bytes_to_frame(f, width, height, i as f64 / 30.0))
         .collect::<PyResult<Vec<_>>>()?;
 
-    let mut stabilizer = Stabilizer::new(config)
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create stabilizer: {e}")))?;
+    // Run the heavy block-matching + smoothing off-GIL.
+    let result: Result<Vec<Vec<u8>>, String> = py.detach(move || {
+        let mut stabilizer =
+            Stabilizer::new(config).map_err(|e| format!("Failed to create stabilizer: {e}"))?;
 
-    let stabilized = stabilizer
-        .stabilize(&internal_frames)
-        .map_err(|e| PyRuntimeError::new_err(format!("Stabilization failed: {e}")))?;
+        let stabilized = stabilizer
+            .stabilize(&internal_frames)
+            .map_err(|e| format!("Stabilization failed: {e}"))?;
 
-    Ok(stabilized.iter().map(frame_to_rgb_bytes).collect())
+        Ok(stabilized.iter().map(frame_to_rgb_bytes).collect())
+    });
+
+    result.map_err(PyRuntimeError::new_err)
 }
 
 /// Estimate motion between two consecutive frames.
@@ -600,6 +622,7 @@ pub fn stabilize_video_frames(
 ///     Motion data between the two frames.
 #[pyfunction]
 pub fn estimate_motion(
+    py: Python<'_>,
     frame1: Vec<u8>,
     frame2: Vec<u8>,
     width: u32,
@@ -607,7 +630,8 @@ pub fn estimate_motion(
 ) -> PyResult<PyMotionData> {
     let f1 = rgb_bytes_to_frame(&frame1, width, height, 0.0)?;
     let f2 = rgb_bytes_to_frame(&frame2, width, height, 1.0 / 30.0)?;
-    Ok(estimate_simple_motion(&f1, &f2))
+    // Block matching is the hot loop here; release the GIL for it.
+    Ok(py.detach(move || estimate_simple_motion(&f1, &f2)))
 }
 
 /// List available stabilization modes.
@@ -699,12 +723,15 @@ mod tests {
 
     #[test]
     fn test_estimate_motion_identical_frames() {
-        let data = make_test_rgb(32, 32, 100);
-        let result = estimate_motion(data.clone(), data, 32, 32);
-        assert!(result.is_ok());
-        let m = result.expect("motion should succeed");
-        assert!(m.dx.abs() < 1.0);
-        assert!(m.dy.abs() < 1.0);
+        Python::initialize();
+        Python::attach(|py| {
+            let data = make_test_rgb(32, 32, 100);
+            let result = estimate_motion(py, data.clone(), data, 32, 32);
+            assert!(result.is_ok());
+            let m = result.expect("motion should succeed");
+            assert!(m.dx.abs() < 1.0);
+            assert!(m.dy.abs() < 1.0);
+        });
     }
 
     #[test]

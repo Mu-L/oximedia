@@ -9,25 +9,25 @@
 ## Enhancements
 - [x] Add BagIt v1.0 spec compliance verification in `package/bagit` (fetch.txt, tag manifests)
 - [x] Implement OAIS DIP generation from AIP in `package/oais` (dissemination information package)
-- [ ] Add incremental BagIt update in `package/bagit` (add/remove files without full re-manifest)
+- [x] Add incremental BagIt update in `package/bagit` (add/remove files without full re-manifest) (verified 2026-05-16; src/package/bagit.rs:884 test_incremental_add_file, test_incremental_remove_file:919, add_file:685)
 - [x] Implement Merkle tree verification in `checksum/tree` for efficient partial verification
 - [x] Add PREMIS rights metadata support in `metadata/premis` (access restrictions, license info)
-- [ ] Implement METS structural map generation in `metadata/mets` for complex multi-file objects
-- [ ] Add `format_validator` support for TIFF, DPX, and OpenEXR validation rules
+- [x] Implement METS structural map generation in `metadata/mets` for complex multi-file objects (verified 2026-05-16; src/metadata/mets.rs:421 build_auto_structural_map, MetsDiv, test_mets_structural_map_generation:528)
+- [ ] Add `format_validator` support for TIFF, DPX, and OpenEXR validation rules (partial 2026-05-16: format_validator.rs:52 FormatFamily::Tiff with magic bytes; DPX and OpenEXR variants missing)
 - [x] Implement `cold_storage` tier management with automated warm-up and cool-down transitions
 - [x] Add `disaster_recovery` plan validation: verify backup completeness and recoverability
 - [x] Implement `provenance_chain` cryptographic signing for tamper-evident audit trails
 
 ## New Features
 - [x] Add Dublin Core metadata support in `metadata` alongside PREMIS/METS
-- [ ] Implement IIIF (International Image Interoperability Framework) manifest generation
-- [ ] Add DataCite DOI metadata generation for archived research media
-- [ ] Implement automated format migration triggers based on `risk/monitor` alerts
-- [ ] Add geographic replication support with consistency verification in `replication_verify`
-- [ ] Implement `deaccession` workflow with approval chain and audit logging
-- [ ] Add preservation cost estimation in `archive_stats` (storage growth, migration cost projections)
-- [ ] Implement LOCKSS/CLOCKSS-compatible package generation for distributed preservation
-- [ ] Add `metadata_crosswalk` support for PBCore (public broadcasting metadata standard)
+- [x] Implement IIIF (International Image Interoperability Framework) manifest generation (verified 2026-05-16; src/iiif_manifest.rs:121 IiifManifest, IiifManifestBuilder:190, Presentation API 3.0:3, 512 lines)
+- [ ] Add DataCite DOI metadata generation for archived research media (verified-open 2026-05-16: no DataCite/datacite module in archive-pro sources; dublin_core.rs mentions doi as identifier field only)
+- [ ] Implement automated format migration triggers based on `risk/monitor` alerts (verified-open 2026-05-16: risk/monitor.rs has RiskMonitor/MonitoringReport but no auto_trigger/MigrationTrigger wired to format_migration)
+- [x] Add geographic replication support with consistency verification in `replication_verify` (verified 2026-05-16; src/replication_verify.rs:12 ReplicaLocation, FileReplicaInfo.evaluate:98, ReplicationVerifier:182, consistency_percent:172, 451 lines)
+- [x] Implement `deaccession` workflow with approval chain and audit logging (verified 2026-05-16; src/deaccession.rs:106 DeaccessionRequest, DeaccessionStatus Approved/UnderReview/Executing:60, approve/reject:187, 488 lines)
+- [x] Add preservation cost estimation in `archive_stats` (storage growth, migration cost projections) (verified 2026-05-16; src/cost_estimator.rs:322 PreservationCostEstimator, CostEstimatorConfig:287, default_25_year:516, 609 lines)
+- [x] Implement LOCKSS/CLOCKSS-compatible package generation for distributed preservation (verified 2026-05-16; src/lockss_package.rs:1 LockssPackage, LockssNetwork::Lockss/Clockss:22-25, ArchivalUnit:39, 514 lines)
+- [ ] Add `metadata_crosswalk` support for PBCore (public broadcasting metadata standard) (verified-open 2026-05-16: metadata_crosswalk.rs has MetadataCrosswalk/crosswalk rules framework but no PBCore-specific schema or mappings)
 
 ## Performance
 - [x] Parallelize BagIt manifest generation with rayon in `package/bagit` for large bags

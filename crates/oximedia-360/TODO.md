@@ -28,20 +28,20 @@
 - [x] Implement FOV-dependent quality allocation (`FovQualityAllocator` with Linear/Cosine/Gaussian fall-off in `tile_selector.rs`)
 
 ## Performance
-- [ ] Add SIMD-accelerated bilinear sampling using packed f32 operations
+- [x] Add SIMD-accelerated bilinear sampling using packed f32 operations (impl 2026-05-16: `sample_bilinear_batch` in `src/sampling.rs` — runtime dispatch AVX2+FMA / SSE4.1 / scalar; 4× and 2× unrolled paths)
 - [x] Implement tiled cubemap conversion for better cache locality (`tiled.rs`: `equirect_to_cube_tiled`)
 - [x] Add parallel scanline processing with rayon (`tiled.rs`: `equirect_to_cube_parallel`, `resample_equirect_parallel`)
 - [x] Pre-compute lookup tables for fisheye-to-equirect mapping (`fisheye_lut.rs`)
-- [ ] Use `f32` fast-math approximations for `sin`/`cos`/`atan2` in hot projection loops
+- [x] Use `f32` fast-math approximations for `sin`/`cos`/`atan2` in hot projection loops (impl 2026-05-16: `fast_sin`, `fast_cos`, `fast_atan2` in `src/sampling.rs`; used in `projection.rs` via `fast_math` Cargo feature)
 
 ## Testing
 - [x] Add round-trip tests: equirect -> cubemap -> equirect with PSNR threshold (`projection.rs`: `equirect_cube_equirect_psnr_above_threshold`)
 - [x] Add property-based tests for `sphere_to_equirect` / `equirect_to_sphere` inverse relationship (`sphere_equirect_roundtrip_error_near_zero`)
-- [ ] Test `DualFisheyeStitcher` with synthetic checkerboard fisheye images
+- [x] Test `DualFisheyeStitcher` with synthetic checkerboard fisheye images (impl 2026-05-16: `checkerboard_fisheye_stitch_smoke` + `checkerboard_fisheye_equirect_roundtrip` in `src/fisheye.rs`)
 - [x] Add edge-case tests for polar singularities in equirectangular projection (`north_pole_elevation_clamped_at_half_pi`, `south_pole_elevation_clamped_at_neg_half_pi`, `pole_roundtrip_does_not_panic`, `antimeridian_roundtrip_stable`)
-- [ ] Benchmark cubemap face extraction at 4K and 8K resolutions
+- [ ] Benchmark cubemap face extraction at 4K and 8K resolutions (verified-open 2026-05-16: no criterion or bench tests for 4K/8K cubemap found in src/)
 
 ## Documentation
-- [ ] Add visual diagrams showing coordinate system conventions (theta/phi orientation)
-- [ ] Document supported stereo layouts (SBS, TB, frame-sequential) with pixel layout examples
-- [ ] Add end-to-end example: load equirectangular image, extract cubemap faces, write output
+- [ ] Add visual diagrams showing coordinate system conventions (theta/phi orientation) (verified-open 2026-05-16: no diagrams found in src/)
+- [ ] Document supported stereo layouts (SBS, TB, frame-sequential) with pixel layout examples (verified-open 2026-05-16: stereo layouts not documented beyond code comments in src/stereo.rs)
+- [ ] Add end-to-end example: load equirectangular image, extract cubemap faces, write output (verified-open 2026-05-16: no end-to-end example found in src/)

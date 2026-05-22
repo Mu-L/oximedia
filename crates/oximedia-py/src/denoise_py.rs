@@ -202,6 +202,7 @@ impl PyDenoiser {
     /// Returns the denoised pixel data with the same dimensions and layout.
     fn process_frame(
         &mut self,
+        py: Python<'_>,
         frame_data: Vec<u8>,
         width: u32,
         height: u32,
@@ -226,56 +227,62 @@ impl PyDenoiser {
             )));
         }
 
-        // Create an internal VideoFrame in YUV420P (Denoiser operates on YUV)
-        let mut video_frame = VideoFrame::new(PixelFormat::Yuv420p, width, height);
-        video_frame.allocate();
+        // Run the conversion + denoise pipeline off-GIL: it's a CPU-bound
+        // heavy loop (RGB↔YUV plus the actual denoiser pass).
+        let inner = &mut self.inner;
+        let result: Result<Vec<u8>, String> = py.detach(move || {
+            // Create an internal VideoFrame in YUV420P (Denoiser operates on YUV)
+            let mut video_frame = VideoFrame::new(PixelFormat::Yuv420p, width, height);
+            video_frame.allocate();
 
-        // Convert RGB24 to YUV420P for processing
-        if pixel_format == PixelFormat::Rgb24 {
-            rgb24_to_yuv420p_frame(&frame_data, width, height, &mut video_frame);
-        } else {
-            // Grayscale: fill Y plane, set chroma to neutral
-            let y_size = (width * height) as usize;
-            if video_frame.planes.len() > 2 {
-                let chroma_w = ((width + 1) / 2) as usize;
-                let chroma_h = ((height + 1) / 2) as usize;
-                video_frame.planes[0] = Plane::with_dimensions(
-                    frame_data[..y_size].to_vec(),
-                    width as usize,
-                    width,
-                    height,
-                );
-                video_frame.planes[1] = Plane::with_dimensions(
-                    vec![128u8; chroma_w * chroma_h],
-                    chroma_w,
-                    chroma_w as u32,
-                    chroma_h as u32,
-                );
-                video_frame.planes[2] = Plane::with_dimensions(
-                    vec![128u8; chroma_w * chroma_h],
-                    chroma_w,
-                    chroma_w as u32,
-                    chroma_h as u32,
-                );
+            // Convert RGB24 to YUV420P for processing
+            if pixel_format == PixelFormat::Rgb24 {
+                rgb24_to_yuv420p_frame(&frame_data, width, height, &mut video_frame);
+            } else {
+                // Grayscale: fill Y plane, set chroma to neutral
+                let y_size = (width * height) as usize;
+                if video_frame.planes.len() > 2 {
+                    let chroma_w = ((width + 1) / 2) as usize;
+                    let chroma_h = ((height + 1) / 2) as usize;
+                    video_frame.planes[0] = Plane::with_dimensions(
+                        frame_data[..y_size].to_vec(),
+                        width as usize,
+                        width,
+                        height,
+                    );
+                    video_frame.planes[1] = Plane::with_dimensions(
+                        vec![128u8; chroma_w * chroma_h],
+                        chroma_w,
+                        chroma_w as u32,
+                        chroma_h as u32,
+                    );
+                    video_frame.planes[2] = Plane::with_dimensions(
+                        vec![128u8; chroma_w * chroma_h],
+                        chroma_w,
+                        chroma_w as u32,
+                        chroma_h as u32,
+                    );
+                }
             }
-        }
 
-        // Process
-        let denoised = self
-            .inner
-            .process(&video_frame)
-            .map_err(|e| PyRuntimeError::new_err(format!("Denoise failed: {e}")))?;
+            // Process
+            let denoised = inner
+                .process(&video_frame)
+                .map_err(|e| format!("Denoise failed: {e}"))?;
 
-        // Convert back to output format
-        if pixel_format == PixelFormat::Rgb24 {
-            Ok(yuv420p_frame_to_rgb24(&denoised, width, height))
-        } else {
-            // Return Y plane
-            if denoised.planes.is_empty() {
-                return Err(PyRuntimeError::new_err("Denoised frame has no plane data"));
+            // Convert back to output format
+            if pixel_format == PixelFormat::Rgb24 {
+                Ok(yuv420p_frame_to_rgb24(&denoised, width, height))
+            } else {
+                // Return Y plane
+                if denoised.planes.is_empty() {
+                    return Err("Denoised frame has no plane data".to_string());
+                }
+                Ok(denoised.planes[0].data.clone())
             }
-            Ok(denoised.planes[0].data.clone())
-        }
+        });
+
+        result.map_err(PyRuntimeError::new_err)
     }
 
     /// Get the estimated noise level (if available after processing at least one frame).
@@ -312,6 +319,7 @@ impl PyDenoiser {
 #[pyfunction]
 #[pyo3(signature = (data, width, height, channels, mode=None, strength=None))]
 pub fn denoise_image(
+    py: Python<'_>,
     data: Vec<u8>,
     width: u32,
     height: u32,
@@ -343,7 +351,7 @@ pub fn denoise_image(
     };
 
     let mut denoiser = PyDenoiser::new(&py_config)?;
-    denoiser.process_frame(data, width, height, channels)
+    denoiser.process_frame(py, data, width, height, channels)
 }
 
 /// Denoise audio samples using spectral subtraction and noise gating.
@@ -353,6 +361,7 @@ pub fn denoise_image(
 #[pyfunction]
 #[pyo3(signature = (samples, sample_rate, strength=None))]
 pub fn denoise_audio_samples(
+    py: Python<'_>,
     samples: Vec<f32>,
     sample_rate: u32,
     strength: Option<f64>,
@@ -370,18 +379,21 @@ pub fn denoise_audio_samples(
     // Hold time: ~50ms worth of samples
     let hold_samples = (f64::from(sample_rate) * 0.05) as usize;
 
-    let mut filter = AudioDenoiseFilter::new(gate_threshold, hold_samples);
+    // Filter passes are CPU-bound; release the GIL.
+    Ok(py.detach(move || {
+        let mut filter = AudioDenoiseFilter::new(gate_threshold, hold_samples);
 
-    // Process in blocks (e.g., 1024 samples at a time)
-    let block_size = 1024;
-    let mut output = Vec::with_capacity(samples.len());
+        // Process in blocks (e.g., 1024 samples at a time)
+        let block_size = 1024;
+        let mut output = Vec::with_capacity(samples.len());
 
-    for chunk in samples.chunks(block_size) {
-        let denoised_block = filter.process(chunk);
-        output.extend_from_slice(&denoised_block);
-    }
+        for chunk in samples.chunks(block_size) {
+            let denoised_block = filter.process(chunk);
+            output.extend_from_slice(&denoised_block);
+        }
 
-    Ok(output)
+        output
+    }))
 }
 
 /// Estimate the noise level in an image frame.
@@ -389,38 +401,44 @@ pub fn denoise_audio_samples(
 /// `data` is raw pixel data (grayscale or RGB24, will use luma if RGB).
 /// Returns estimated noise standard deviation (0-255 scale).
 #[pyfunction]
-pub fn estimate_noise(data: Vec<u8>, width: u32, height: u32) -> PyResult<f64> {
+pub fn estimate_noise(py: Python<'_>, data: Vec<u8>, width: u32, height: u32) -> PyResult<f64> {
     use oximedia_denoise::noise_estimate::{NoiseEstimateMethod, NoiseEstimator};
 
     let expected_rgb = (width * height * 3) as usize;
     let expected_gray = (width * height) as usize;
 
-    let luma_data = if data.len() >= expected_rgb {
-        // RGB data: extract luma
-        let mut luma = Vec::with_capacity(expected_gray);
-        for i in 0..expected_gray {
-            let idx = i * 3;
-            let r = f64::from(data[idx]);
-            let g = f64::from(data[idx + 1]);
-            let b = f64::from(data[idx + 2]);
-            let y = (0.2126 * r + 0.7152 * g + 0.0722 * b).clamp(0.0, 255.0);
-            luma.push(y as u8);
-        }
-        luma
-    } else if data.len() >= expected_gray {
-        // Grayscale
-        data[..expected_gray].to_vec()
-    } else {
+    if data.len() < expected_gray {
         return Err(PyValueError::new_err(format!(
             "Data too small: need at least {expected_gray} bytes for {width}x{height}, got {}",
             data.len()
         )));
-    };
+    }
 
-    let mut estimator = NoiseEstimator::new(NoiseEstimateMethod::LocalVariance);
-    let estimate = estimator.estimate_from_frame(&luma_data, width as usize, height as usize);
+    // The luma extraction + local-variance noise estimate are pure number
+    // crunching — release the GIL.
+    Ok(py.detach(move || {
+        let luma_data = if data.len() >= expected_rgb {
+            // RGB data: extract luma
+            let mut luma = Vec::with_capacity(expected_gray);
+            for i in 0..expected_gray {
+                let idx = i * 3;
+                let r = f64::from(data[idx]);
+                let g = f64::from(data[idx + 1]);
+                let b = f64::from(data[idx + 2]);
+                let y = (0.2126 * r + 0.7152 * g + 0.0722 * b).clamp(0.0, 255.0);
+                luma.push(y as u8);
+            }
+            luma
+        } else {
+            // Grayscale (we already validated len >= expected_gray above)
+            data[..expected_gray].to_vec()
+        };
 
-    Ok(f64::from(estimate.sigma))
+        let mut estimator = NoiseEstimator::new(NoiseEstimateMethod::LocalVariance);
+        let estimate = estimator.estimate_from_frame(&luma_data, width as usize, height as usize);
+
+        f64::from(estimate.sigma)
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -635,41 +653,56 @@ mod tests {
 
     #[test]
     fn test_estimate_noise_gray() {
-        let data = gray_frame(64, 64, 128);
-        let result = estimate_noise(data, 64, 64);
-        assert!(result.is_ok());
-        let sigma = result.expect("should succeed");
-        // Flat frame should have low noise
-        assert!(sigma < 5.0);
+        Python::initialize();
+        Python::attach(|py| {
+            let data = gray_frame(64, 64, 128);
+            let result = estimate_noise(py, data, 64, 64);
+            assert!(result.is_ok());
+            let sigma = result.expect("should succeed");
+            // Flat frame should have low noise
+            assert!(sigma < 5.0);
+        });
     }
 
     #[test]
     fn test_estimate_noise_rgb() {
-        let data = rgb_frame(64, 64);
-        let result = estimate_noise(data, 64, 64);
-        assert!(result.is_ok());
+        Python::initialize();
+        Python::attach(|py| {
+            let data = rgb_frame(64, 64);
+            let result = estimate_noise(py, data, 64, 64);
+            assert!(result.is_ok());
+        });
     }
 
     #[test]
     fn test_estimate_noise_bad_size() {
-        let result = estimate_noise(vec![0u8; 10], 100, 100);
-        assert!(result.is_err());
+        Python::initialize();
+        Python::attach(|py| {
+            let result = estimate_noise(py, vec![0u8; 10], 100, 100);
+            assert!(result.is_err());
+        });
     }
 
     #[test]
     fn test_denoise_audio_empty() {
-        let result = denoise_audio_samples(vec![], 44100, None);
-        assert!(result.is_ok());
-        assert!(result.expect("should succeed").is_empty());
+        Python::initialize();
+        Python::attach(|py| {
+            let result = denoise_audio_samples(py, vec![], 44100, None);
+            assert!(result.is_ok());
+            assert!(result.expect("should succeed").is_empty());
+        });
     }
 
     #[test]
     fn test_denoise_audio_basic() {
-        let samples: Vec<f32> = (0..4096).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
-        let result = denoise_audio_samples(samples.clone(), 44100, Some(0.3));
-        assert!(result.is_ok());
-        let output = result.expect("should succeed");
-        assert_eq!(output.len(), samples.len());
+        Python::initialize();
+        Python::attach(|py| {
+            let samples: Vec<f32> = (0..4096).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+            let result = denoise_audio_samples(py, samples.clone(), 44100, Some(0.3));
+            assert!(result.is_ok());
+            let output = result.expect("should succeed");
+            assert_eq!(output.len(), samples.len());
+        });
     }
 
     #[test]

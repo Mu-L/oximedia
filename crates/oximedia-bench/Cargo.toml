@@ -31,7 +31,8 @@ csv = "1"
 statistical = "1.0"
 rayon.workspace = true
 bytes.workspace = true
-sysinfo = "0.38"
+sysinfo = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

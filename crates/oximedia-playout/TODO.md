@@ -12,24 +12,24 @@
 - [x] Extend `failover` with cascading failover chains (primary -> secondary -> tertiary -> slate)
 - [x] Add audio level monitoring with EBU R128 loudness gates in `monitoring`
 - [x] Implement hot-swap of `PlayoutConfig` without stopping the server (runtime reconfiguration)
-- [ ] Extend `graphics` engine with template-based lower-third generation (name/title fields)
-- [ ] Add frame-accurate cue point triggering in `secondary_events` via timecode matching
-- [ ] Implement `clip_store` integrity verification (checksum validation on ingest)
+- [x] Extend `graphics` engine with template-based lower-third generation (name/title fields) (verified 2026-05-16; src/graphics.rs:52 LowerThird variant, template rendering:278)
+- [x] Add frame-accurate cue point triggering in `secondary_events` via timecode matching (verified 2026-05-16; src/secondary_events.rs:238 frame-accurate CuePoint, timecode match:342)
+- [x] Implement `clip_store` integrity verification (checksum validation on ingest) (verified 2026-05-16; src/clip_store.rs:4 checksum-based integrity, sha256:20)
 
 ## New Features
-- [ ] Add PTP (Precision Time Protocol) clock source support alongside internal/SDI
-- [ ] Implement timecode burn-in overlay rendering in the `timecode_overlay` module stub
-- [ ] Add IP multicast output support in `output` module (SMPTE ST 2110)
-- [ ] Implement automated compliance recording in `compliance_ingest` with retention policies
-- [ ] Add `catchup` module integration with VOD platform export (HLS manifest generation)
-- [ ] Implement automated highlight clip extraction in `highlight_automation` using scene analysis
-- [ ] Add BXF (Broadcast Exchange Format) import/export in `bxf` for schedule interchange
-- [ ] Implement multi-format simulcast (HD + UHD output from single playout chain)
+- [x] Add PTP (Precision Time Protocol) clock source support alongside internal/SDI (verified 2026-05-16; src/ptp_clock.rs:1 IEEE 1588-2019/SMPTE ST 2059-2 model, PTP OC:34)
+- [ ] Implement timecode burn-in overlay rendering in the `timecode_overlay` module stub (verified-open 2026-05-16: module stub but full rendering not complete)
+- [x] Add IP multicast output support in `output` module (SMPTE ST 2110) (verified 2026-05-16; src/output.rs:26 ST2110 variant, ST2110Settings:246)
+- [x] Implement automated compliance recording in `compliance_ingest` with retention policies (verified 2026-05-16; src/compliance_recorder.rs:759 lines)
+- [x] Add `catchup` module integration with VOD platform export (HLS manifest generation) (verified 2026-05-16; src/catchup.rs:425 lines)
+- [ ] Implement automated highlight clip extraction in `highlight_automation` using scene analysis (verified-open 2026-05-16: highlight_automation.rs exists but scene analysis integration not complete)
+- [x] Add BXF (Broadcast Exchange Format) import/export in `bxf` for schedule interchange (verified 2026-05-16; src/bxf.rs:1 SMPTE BXF, BxfConfig:16)
+- [x] Implement multi-format simulcast (HD + UHD output from single playout chain) (verified 2026-05-16; src/simulcast.rs:345 lines)
 
 ## Performance
-- [ ] Use lock-free ring buffer in `frame_buffer` for zero-contention frame passing
-- [ ] Implement GPU-accelerated graphics compositing in `graphics` engine
-- [ ] Pre-decode upcoming playlist items in background threads for gapless transitions
+- [ ] Use lock-free ring buffer in `frame_buffer` for zero-contention frame passing (verified-open 2026-05-16: no lock-free/SPSC in frame_buffer.rs)
+- [ ] Implement GPU-accelerated graphics compositing in `graphics` engine (verified-open 2026-05-16: no wgpu/GPU in graphics.rs)
+- [x] Pre-decode upcoming playlist items in background threads for gapless transitions (verified 2026-05-16; src/predecode.rs:124 PreDecodeDescriptor, background decode workers:146)
 - [ ] Profile and optimize `signal_chain` processing to stay within frame budget at 60fps
 
 ## Testing

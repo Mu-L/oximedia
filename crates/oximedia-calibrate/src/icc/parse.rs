@@ -13,6 +13,60 @@ pub enum IccProfileVersion {
     V2,
     /// ICC v4.
     V4,
+    /// ICC v5 / iccMAX.
+    V5IccMax,
+}
+
+// ── iccMAX tag type codes ──────────────────────────────────────────────────────
+
+/// iccMAX `sfloat32Array` type signature.
+const SIG_SF32: u32 = 0x7366_3332; // 'sf32'
+/// iccMAX `spectralDataType` type signature.
+const SIG_SPEC: u32 = 0x7370_6563; // 'spec'
+/// iccMAX `multiProcessElements` type signature.
+const SIG_MPE: u32 = 0x6D706566; // 'mpef'
+
+/// iccMAX spectral tag signatures recognised by this parser.
+const TAG_BRDF_SPECTRAL: u32 = 0x6272_6466; // 'brdf'
+
+/// iccMAX float tag for custom float data.
+const TAG_FLOAT_LUT: u32 = 0x666C_7574; // 'flut'
+
+/// An iccMAX (ICC v5) tag payload.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum IccMaxTag {
+    /// Spectral data from an `spec`-type tag.
+    SpectralData(SpectralData),
+    /// Float LUT sampled from an `sf32`-type tag.
+    FloatLut(Vec<f32>),
+    /// Multi-process elements placeholder (stores raw byte count only).
+    MultiProcessElements(usize),
+}
+
+/// Spectral data extracted from an iccMAX spectral tag.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SpectralData {
+    /// Starting wavelength in nanometres.
+    pub start_nm: f32,
+    /// Ending wavelength in nanometres.
+    pub end_nm: f32,
+    /// Number of spectral samples.
+    pub sample_count: u16,
+    /// Spectral values (one per sample, linear scale).
+    pub values: Vec<f32>,
+}
+
+/// An ICC v5 / iccMAX profile (superset of `IccProfile`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IccMaxProfile {
+    /// The underlying ICC v4-compatible fields (header + tag table).
+    pub base: IccProfile,
+    /// Spectral PCS data, if a `spec`-type tag was found.
+    pub spectral_pcs: Option<SpectralData>,
+    /// Float LUT values from an `sf32`-type tag, if found.
+    pub float_lut: Option<Vec<f32>>,
+    /// All recognised iccMAX tags.
+    pub tags: Vec<IccMaxTag>,
 }
 
 /// ICC color profile.
@@ -52,6 +106,7 @@ const SIG_BXYZ: u32 = 0x6258_595A; // 'bXYZ'
 
 const VERSION_V2: u32 = 0x0210_0000;
 const VERSION_V4: u32 = 0x0400_0000;
+const VERSION_V5: u32 = 0x0500_0000;
 
 /// D50 PCS illuminant XYZ values written in ICC headers (fixed canonical values).
 const D50_PCS_X: f64 = 0.964_2;
@@ -466,6 +521,7 @@ impl IccProfile {
         let version = match ver_raw >> 24 {
             2 => IccProfileVersion::V2,
             4 => IccProfileVersion::V4,
+            5 => IccProfileVersion::V5IccMax,
             _ => {
                 // Accept any version but default to V4.
                 IccProfileVersion::V4
@@ -614,6 +670,7 @@ impl IccProfile {
         let ver_u32 = match self.version {
             IccProfileVersion::V2 => VERSION_V2,
             IccProfileVersion::V4 => VERSION_V4,
+            IccProfileVersion::V5IccMax => VERSION_V5,
         };
         push_u32_be(&mut buf, ver_u32);
         // 12-15: device class 'mntr'
@@ -780,6 +837,155 @@ impl IccProfile {
 
         Ok(())
     }
+}
+
+// ── iccMAX float32 read helpers ───────────────────────────────────────────────
+
+fn read_f32_be(data: &[u8], offset: usize) -> CalibrationResult<f32> {
+    if offset + 4 > data.len() {
+        return Err(CalibrationError::IccParseError(format!(
+            "read_f32_be: offset {offset} out of bounds (len={})",
+            data.len()
+        )));
+    }
+    Ok(f32::from_be_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ]))
+}
+
+// ── iccMAX tag parsers ─────────────────────────────────────────────────────────
+
+/// Parse an `sf32` (sfloat32Array) iccMAX tag blob.
+///
+/// Layout: 4B type-sig `sf32` + 4B reserved + N×4B IEEE 754 single floats.
+fn parse_sf32_tag(data: &[u8], tag_offset: usize, tag_size: usize) -> CalibrationResult<Vec<f32>> {
+    if tag_size < 8 {
+        return Ok(Vec::new());
+    }
+    let sig = read_u32_be(data, tag_offset)?;
+    if sig != SIG_SF32 {
+        return Err(CalibrationError::IccParseError(format!(
+            "sf32 tag: unexpected signature {sig:#010x}"
+        )));
+    }
+    let value_count = (tag_size - 8) / 4;
+    let mut values = Vec::with_capacity(value_count);
+    for i in 0..value_count {
+        values.push(read_f32_be(data, tag_offset + 8 + i * 4)?);
+    }
+    Ok(values)
+}
+
+/// Parse a `spec` (spectralDataType) iccMAX tag blob.
+///
+/// Simplified layout:
+///   4B type-sig `spec` + 4B reserved + 4B start_nm (f32) + 4B end_nm (f32)
+///   + 2B sample_count + 2B reserved + sample_count×4B IEEE 754 floats.
+fn parse_spectral_tag(
+    data: &[u8],
+    tag_offset: usize,
+    tag_size: usize,
+) -> CalibrationResult<SpectralData> {
+    if tag_size < 18 {
+        return Err(CalibrationError::IccParseError(
+            "spectral tag: too small".to_string(),
+        ));
+    }
+    let sig = read_u32_be(data, tag_offset)?;
+    if sig != SIG_SPEC {
+        return Err(CalibrationError::IccParseError(format!(
+            "spectral tag: unexpected signature {sig:#010x}"
+        )));
+    }
+    let start_nm = read_f32_be(data, tag_offset + 8)?;
+    let end_nm = read_f32_be(data, tag_offset + 12)?;
+    let sample_count = read_u16_be(data, tag_offset + 16)?;
+    let data_start = tag_offset + 20;
+    let mut values = Vec::with_capacity(sample_count as usize);
+    for i in 0..sample_count as usize {
+        values.push(read_f32_be(data, data_start + i * 4)?);
+    }
+    Ok(SpectralData {
+        start_nm,
+        end_nm,
+        sample_count,
+        values,
+    })
+}
+
+/// Parse an ICC v5 / iccMAX profile from raw bytes.
+///
+/// This function reads the v5 header and dispatches known iccMAX tags
+/// (`sf32`, `spec`, `mpef`) in addition to the standard v2/v4 tags.
+///
+/// # Errors
+///
+/// Returns an error if the bytes do not form a valid ICC profile or if
+/// the version is not 5.
+pub fn parse_iccmax(data: &[u8]) -> CalibrationResult<IccMaxProfile> {
+    // First, run the standard v2/v4 parser to get the base fields.
+    let base = IccProfile::from_bytes(data)?;
+
+    if base.version != IccProfileVersion::V5IccMax {
+        return Err(CalibrationError::IccParseError(format!(
+            "expected iccMAX v5 profile, got {:?}",
+            base.version
+        )));
+    }
+
+    // Walk the tag table again and collect iccMAX-specific tags.
+    let tag_count = read_u32_be(data, HEADER_SIZE)? as usize;
+    let table_start = HEADER_SIZE + 4;
+
+    let mut spectral_pcs: Option<SpectralData> = None;
+    let mut float_lut: Option<Vec<f32>> = None;
+    let mut tags: Vec<IccMaxTag> = Vec::new();
+
+    for i in 0..tag_count {
+        let entry_offset = table_start + i * TAG_ENTRY_SIZE;
+        if entry_offset + TAG_ENTRY_SIZE > data.len() {
+            break;
+        }
+        let _sig = read_u32_be(data, entry_offset)?;
+        let tag_off = read_u32_be(data, entry_offset + 4)? as usize;
+        let tag_size = read_u32_be(data, entry_offset + 8)? as usize;
+
+        // Read the type signature from the tag blob itself.
+        if tag_off + 4 > data.len() {
+            continue;
+        }
+        let type_sig = read_u32_be(data, tag_off)?;
+
+        match type_sig {
+            SIG_SF32 => {
+                if let Ok(values) = parse_sf32_tag(data, tag_off, tag_size) {
+                    float_lut.get_or_insert_with(Vec::new).extend(&values);
+                    tags.push(IccMaxTag::FloatLut(values));
+                }
+            }
+            SIG_SPEC => {
+                if let Ok(spec) = parse_spectral_tag(data, tag_off, tag_size) {
+                    let spec_clone = spec.clone();
+                    spectral_pcs.get_or_insert(spec);
+                    tags.push(IccMaxTag::SpectralData(spec_clone));
+                }
+            }
+            SIG_MPE => {
+                tags.push(IccMaxTag::MultiProcessElements(tag_size));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(IccMaxProfile {
+        base,
+        spectral_pcs,
+        float_lut,
+        tags,
+    })
 }
 
 #[cfg(test)]
@@ -1000,6 +1206,86 @@ mod tests {
                 (v - decoded).abs() < 1.6e-5,
                 "s15Fixed16 round-trip failed for {v}: got {decoded}"
             );
+        }
+    }
+
+    // ── iccMAX v5 tests ────────────────────────────────────────────────────────
+
+    /// Build a minimal v5 ICC binary and verify `IccProfile::from_bytes` parses
+    /// the version as `V5IccMax`.
+    #[test]
+    fn test_iccmax_version_parsed() {
+        let to_xyz: Matrix3x3 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let mut profile = IccProfile {
+            description: "iccMAX Test".to_string(),
+            version: IccProfileVersion::V5IccMax,
+            to_xyz_matrix: to_xyz,
+            from_xyz_matrix: IccProfile::compute_inverse_matrix(&to_xyz),
+            white_point: Illuminant::D50,
+            creation_date: 0,
+        };
+        // Serialize — to_bytes now writes VERSION_V5 at offset 8.
+        let bytes = profile.to_bytes().expect("to_bytes succeeded for V5");
+        // Verify the raw version bytes at offset 8.
+        let ver_raw = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+        assert_eq!(ver_raw, VERSION_V5, "version bytes should be V5");
+
+        // Parse back and check version field.
+        let parsed = IccProfile::from_bytes(&bytes).expect("from_bytes succeeded");
+        assert_eq!(
+            parsed.version,
+            IccProfileVersion::V5IccMax,
+            "parsed version must be V5IccMax"
+        );
+
+        // parse_iccmax must also succeed and return the base profile correctly.
+        profile.version = IccProfileVersion::V5IccMax;
+        let iccmax = parse_iccmax(&bytes).expect("parse_iccmax succeeded");
+        assert_eq!(iccmax.base.version, IccProfileVersion::V5IccMax);
+        assert_eq!(iccmax.base.description, "iccMAX Test");
+    }
+
+    /// Test that a hand-crafted `sf32` tag blob is correctly parsed and stored
+    /// inside an `IccMaxProfile`.
+    #[test]
+    fn test_iccmax_float_tag_roundtrip() {
+        // Build a v5 profile manually by serializing a base profile and then
+        // appending a fake `sf32` tag (type=SIG_SF32) to the tag table.
+        //
+        // Strategy: we cannot easily modify an already-serialized profile's tag
+        // table because offsets are embedded, so we instead call parse_sf32_tag
+        // directly with a hand-crafted buffer.
+
+        // ── hand-craft an sf32 tag blob ──
+        let values_in: Vec<f32> = vec![0.25_f32, 0.50_f32, 0.75_f32, 1.0_f32];
+        let mut blob: Vec<u8> = Vec::new();
+        // 4B type signature 'sf32'
+        blob.extend_from_slice(&SIG_SF32.to_be_bytes());
+        // 4B reserved
+        blob.extend_from_slice(&0u32.to_be_bytes());
+        // 4 × 4B IEEE 754 f32 BE
+        for &v in &values_in {
+            blob.extend_from_slice(&v.to_be_bytes());
+        }
+        let tag_size = blob.len();
+
+        let parsed_values =
+            parse_sf32_tag(&blob, 0, tag_size).expect("parse_sf32_tag must succeed");
+        assert_eq!(parsed_values.len(), values_in.len(), "value count matches");
+        for (a, b) in parsed_values.iter().zip(values_in.iter()) {
+            assert!(
+                (a - b).abs() < f32::EPSILON,
+                "float value mismatch: {a} vs {b}"
+            );
+        }
+
+        // Also verify that wrapping in IccMaxTag works.
+        let tag = IccMaxTag::FloatLut(parsed_values.clone());
+        if let IccMaxTag::FloatLut(ref v) = tag {
+            assert_eq!(v.len(), 4, "FloatLut should hold 4 values");
+            assert!((v[1] - 0.5_f32).abs() < f32::EPSILON);
+        } else {
+            panic!("expected IccMaxTag::FloatLut");
         }
     }
 }

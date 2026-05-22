@@ -7,25 +7,25 @@
 - Dependencies: oximedia-core, oximedia-audio, oxifft, thiserror
 
 ## Enhancements
-- [ ] Add per-step bypass toggle to `RestoreChain` so individual steps can be disabled without removing them
-- [ ] Implement `RestoreChain::process_multichannel` for surround sound (5.1/7.1) with channel-aware processing
-- [ ] Add step reordering validation in `RestoreChain` (e.g., DC removal should precede click detection)
-- [ ] Extend `noise::SpectralSubtraction` with adaptive noise floor estimation from initial silence detection
-- [ ] Add real-time preview mode to `RestoreChain` processing fixed-size blocks with overlap-add
-- [ ] Improve `wow::WowFlutterCorrector` with pilot-tone detection for precise speed reference
-- [ ] Add severity/confidence output to `click::ClickDetector` for each detected event
-- [ ] Extend `hum::HumRemover` with automatic fundamental frequency detection (50Hz vs 60Hz)
+- [x] Add per-step bypass toggle to `RestoreChain` so individual steps can be disabled without removing them (verified 2026-05-16; src/lib.rs:234 WrappedStep with enabled:bool, bypass toggle, disabled:256)
+- [x] Implement `RestoreChain::process_multichannel` for surround sound (5.1/7.1) with channel-aware processing (verified 2026-05-16; src/lib.rs:268 SurroundChannel, MultichannelLayout:292, process_surround:651)
+- [x] Add step reordering validation in `RestoreChain` (e.g., DC removal should precede click detection) (verified 2026-05-16; src/lib.rs:352 OrderingViolation, validate_order:452, step ordering constants:126)
+- [x] Extend `noise::SpectralSubtraction` with adaptive noise floor estimation from initial silence detection (verified 2026-05-16; src/noise/subtract.rs:248 adaptive noise profile update; src/noise/profile.rs:216 silence_threshold detection)
+- [x] Add real-time preview mode to `RestoreChain` processing fixed-size blocks with overlap-add (verified 2026-05-16; src/overlap_add.rs:105 OverlapAddProcessor, OverlapAdd:246, real-time block processing:1)
+- [ ] Improve `wow::WowFlutterCorrector` with pilot-tone detection for precise speed reference (verified-open 2026-05-16: flutter_repair.rs:127 SpeedVariationEstimator uses reference_freq but no pilot-tone detection; wow/ lacks pilot-tone)
+- [x] Add severity/confidence output to `click::ClickDetector` for each detected event (verified 2026-05-16; src/click/detector.rs:68 Click.severity, .confidence:73, compute_severity_confidence:136)
+- [x] Extend `hum::HumRemover` with automatic fundamental frequency detection (50Hz vs 60Hz) (verified 2026-05-16; src/hum/remover.rs:154 auto-detect 50/60 Hz hum, fallback to 50 Hz:158, FFT-based detection)
 
 ## New Features
-- [ ] Add a `breath_removal` module for podcast/voiceover restoration (detect and attenuate breaths)
-- [ ] Implement `reverb_reduction` module using spectral dereverberation techniques
+- [x] Add a `breath_removal` module for podcast/voiceover restoration (detect and attenuate breaths) (verified 2026-05-16; src/breath_removal.rs 527 lines)
+- [x] Implement `reverb_reduction` module using spectral dereverberation techniques (verified 2026-05-16; src/reverb_reduction.rs 315 lines)
 - [x] Add `dynamic_eq` module for frequency-dependent compression/expansion
-- [ ] Implement `loudness_normalization` step (EBU R128 / ITU-R BS.1770) as a RestoreChain step
+- [x] Implement `loudness_normalization` step (EBU R128 / ITU-R BS.1770) as a RestoreChain step (verified 2026-05-16; src/loudness_normalization.rs 511 lines)
 - [x] Add `vinyl_surface_noise` module with adaptive surface noise profiling distinct from click/crackle
 - [x] Implement `tape_dropout_repair` module for detecting and interpolating tape dropouts
-- [ ] Add `harmonic_reconstruct` module to rebuild missing harmonics in bandwidth-limited recordings
-- [ ] Implement `stereo_width` restoration step for collapsed or narrow stereo fields
-- [ ] Add `restore_undo` with per-step rollback capability using stored intermediate buffers
+- [x] Add `harmonic_reconstruct` module to rebuild missing harmonics in bandwidth-limited recordings (verified 2026-05-16; src/harmonic_reconstruct.rs 675 lines)
+- [x] Implement `stereo_width` restoration step for collapsed or narrow stereo fields (verified 2026-05-16; src/stereo_width.rs 678 lines)
+- [x] Add `restore_undo` with per-step rollback capability using stored intermediate buffers (verified 2026-05-16; src/restore_undo.rs 538 lines)
 
 ## Performance
 - [ ] Add SIMD-optimized paths in `noise::WienerFilter` for batch FFT processing

@@ -2,17 +2,37 @@
 //!
 //! This module provides deep scanning capabilities to detect
 //! corruption at the packet and frame level.
+//!
+//! The [`deep_scan_mmap`] function uses `memmap2` which requires an
+//! `unsafe` block to call `Mmap::map`. The safety invariant is:
+//! the file is opened read-only, no mutable aliases exist, and the
+//! mapping is dropped at the end of the function.
+#![allow(unsafe_code)]
 
 use crate::{Issue, IssueType, Result, Severity};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+/// Minimum file size (bytes) to use memory-mapped I/O in `deep_scan`.
+const MMAP_THRESHOLD: u64 = 4 * 1024 * 1024; // 4 MiB
+
 /// Perform a deep scan of a media file.
 ///
-/// This function performs an intensive scan of the entire file,
-/// checking packet integrity, frame validity, and data consistency.
+/// Automatically selects between streaming I/O (for files smaller than
+/// `MMAP_THRESHOLD`) and memory-mapped I/O (for larger files) to balance
+/// memory usage and scan throughput.
 pub fn deep_scan(path: &Path) -> Result<Vec<Issue>> {
+    let file_size = std::fs::metadata(path)?.len();
+    if file_size >= MMAP_THRESHOLD {
+        deep_scan_mmap(path)
+    } else {
+        deep_scan_streaming(path)
+    }
+}
+
+/// Perform a deep scan using streaming I/O (for smaller files).
+pub fn deep_scan_streaming(path: &Path) -> Result<Vec<Issue>> {
     let mut issues = Vec::new();
     let mut file = File::open(path)?;
     let file_size = file.metadata()?.len();
@@ -46,6 +66,68 @@ pub fn deep_scan(path: &Path) -> Result<Vec<Issue>> {
     // Check for truncation at end
     if let Some(issue) = check_truncation(&mut file)? {
         issues.push(issue);
+    }
+
+    Ok(issues)
+}
+
+/// Perform a deep scan using memory-mapped I/O (for large files ≥ `MMAP_THRESHOLD`).
+///
+/// The mmap approach avoids the system-call overhead of repeated `read()`
+/// calls, letting the OS page-in only the portions that are actually touched.
+///
+/// # Safety
+///
+/// The file is mapped read-only.  The mapping is valid for the duration of
+/// this function.  If another process truncates the file while we're reading
+/// it the kernel will deliver `SIGBUS` on platforms that surface it — this is
+/// the inherent risk of mmap and is acceptable for repair tooling that
+/// operates on pre-staged, stable input files.
+pub fn deep_scan_mmap(path: &Path) -> Result<Vec<Issue>> {
+    let file = File::open(path)?;
+    let metadata = file.metadata()?;
+    let file_size = metadata.len();
+
+    // Fall back to streaming for small files
+    if file_size < MMAP_THRESHOLD {
+        return deep_scan_streaming(path);
+    }
+
+    // SAFETY: we open the file read-only and hold the File for the lifetime of
+    // the mmap. No other code in this function mutates the underlying data.
+    let mmap = unsafe { memmap2::Mmap::map(&file)? };
+
+    let mut issues = Vec::new();
+    const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB chunks
+
+    let data: &[u8] = &mmap;
+    let mut offset = 0usize;
+
+    while offset < data.len() {
+        let end = (offset + CHUNK_SIZE).min(data.len());
+        let chunk = &data[offset..end];
+
+        issues.extend(scan_chunk(chunk, offset as u64)?);
+        issues.extend(detect_sync_loss(chunk, offset as u64)?);
+        issues.extend(detect_packet_corruption(chunk, offset as u64)?);
+
+        offset = end;
+    }
+
+    // Check for truncation at end
+    {
+        let tail_start = data.len().saturating_sub(16);
+        let tail = &data[tail_start..];
+        if !tail.is_empty() && tail.iter().all(|&b| b == 0) {
+            issues.push(Issue {
+                issue_type: IssueType::Truncated,
+                severity: Severity::High,
+                description: "File ends with zeros, likely truncated".to_string(),
+                location: Some(tail_start as u64),
+                fixable: true,
+                confidence: 0.8,
+            });
+        }
     }
 
     Ok(issues)

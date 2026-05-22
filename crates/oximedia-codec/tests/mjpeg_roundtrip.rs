@@ -1,3 +1,4 @@
+#![cfg(feature = "mjpeg")]
 //! MJPEG encode–decode round-trip integration tests.
 //!
 //! All frames are synthesized in-test; no binary fixtures are used.

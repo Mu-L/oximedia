@@ -1,3 +1,4 @@
+#![cfg(feature = "apv")]
 //! APV encode–decode round-trip integration tests.
 //!
 //! All frames are synthesized in-test; no binary fixtures are used.

@@ -8,21 +8,21 @@
 ## Enhancements
 - [x] Add adaptive threshold tuning in `detect::CutDetector` based on content complexity (e.g., action vs. dialogue scenes)
 - [x] Extend `classify::ShotTypeClassifier` to support insert shots and cutaway classification
-- [ ] Add confidence calibration to `classify::AngleClassifier` using histogram-based features
+- [x] Add confidence calibration to `classify::AngleClassifier` using histogram-based features (verified 2026-05-16; src/confidence_calibration.rs:359 ConfidenceCalibrator with histogram similarity)
 - [x] Improve `composition::CompositionAnalyzer` with golden ratio and phi grid analysis in addition to rule of thirds
-- [ ] Add multi-threaded frame processing in `ShotDetector::detect_shots` using rayon parallel iterators
-- [ ] Extend `export::shotlist` to support XML-based shot list formats (FCP XML, Resolve markers)
-- [ ] Add configurable wipe direction patterns in `detect::WipeDetector` (radial, iris, clock)
-- [ ] Improve `continuity::ContinuityChecker` to detect 180-degree rule violations using optical flow direction
+- [x] Add multi-threaded frame processing in `ShotDetector::detect_shots` using rayon parallel iterators (verified 2026-05-16; src/lib.rs:226 rayon par_iter boundary detection, src/detector.rs:46)
+- [x] Extend `export::shotlist` to support XML-based shot list formats (FCP XML, Resolve markers) (verified 2026-05-16; src/export/shotlist.rs:137 FCP XML, :213 DaVinci Resolve markers XML)
+- [ ] Add configurable wipe direction patterns in `detect::WipeDetector` (radial, iris, clock) (verified-open 2026-05-16: WipeDirection enum has Left/Right but no Radial/Iris/Clock variants)
+- [x] Improve `continuity::ContinuityChecker` to detect 180-degree rule violations using optical flow direction (verified 2026-05-16; src/continuity/continuity_errors.rs:168 AxisViolation struct, 180-degree rule check:166)
 
 ## New Features
-- [ ] Add ML-based shot boundary detection module using lightweight convolutional features (no external ML runtime)
-- [ ] Implement `shot_similarity` module for finding visually similar shots across a project using perceptual hashing
-- [ ] Add `color_continuity` module to detect color temperature/grading inconsistencies between consecutive shots
-- [ ] Implement `depth_of_field` estimation module to classify shallow vs. deep focus shots
-- [ ] Add `audio_scene_boundary` integration with audio energy envelope for scene boundary refinement
-- [ ] Implement real-time shot detection mode in `ShotDetector` with streaming frame input
-- [ ] Add `shot_annotation` module for attaching free-form metadata and tags to detected shots
+- [x] Add ML-based shot boundary detection module using lightweight convolutional features (no external ML runtime) (verified 2026-05-16; src/ml_boundary.rs:1 MlBoundaryDetector using hand-crafted conv features)
+- [x] Implement `shot_similarity` module for finding visually similar shots across a project using perceptual hashing (verified 2026-05-16; src/shot_similarity.rs:91 ShotSimilarity, 849 lines)
+- [x] Add `color_continuity` module to detect color temperature/grading inconsistencies between consecutive shots (verified 2026-05-16; src/color_continuity.rs:747 lines)
+- [x] Implement `depth_of_field` estimation module to classify shallow vs. deep focus shots (verified 2026-05-16; src/depth_of_field.rs:57 DofEstimate, DofEstimator:113, 691 lines)
+- [x] Add `audio_scene_boundary` integration with audio energy envelope for scene boundary refinement (verified 2026-05-16; src/audio_scene_boundary.rs:493 lines)
+- [ ] Implement real-time shot detection mode in `ShotDetector` with streaming frame input (verified-open 2026-05-16: no streaming/real-time mode in ShotDetector)
+- [x] Add `shot_annotation` module for attaching free-form metadata and tags to detected shots (verified 2026-05-16; src/shot_annotation.rs:922 lines)
 
 ## Performance
 - [ ] Cache histogram computations in `detect::CutDetector` to avoid recomputing for overlapping frame pairs

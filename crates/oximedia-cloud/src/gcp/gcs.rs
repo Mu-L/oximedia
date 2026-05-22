@@ -4,6 +4,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use reqwest::{Client, StatusCode};
+use rsa::pkcs1::DecodeRsaPrivateKey;
+use rsa::pkcs8::DecodePrivateKey;
+use rsa::sha2::{Digest, Sha256};
+use rsa::signature::SignatureEncoding;
+use rsa::RsaPrivateKey;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -19,6 +24,10 @@ pub struct GcsStorage {
     bucket: String,
     project_id: String,
     access_token: String,
+    /// Service account email, required for V4 signed URLs.
+    service_account_email: Option<String>,
+    /// PEM-encoded RSA private key for the service account, required for V4 signed URLs.
+    private_key_pem: Option<String>,
 }
 
 impl GcsStorage {
@@ -40,6 +49,8 @@ impl GcsStorage {
             bucket,
             project_id,
             access_token,
+            service_account_email: None,
+            private_key_pem: None,
         })
     }
 
@@ -51,6 +62,27 @@ impl GcsStorage {
             bucket,
             project_id,
             access_token,
+            service_account_email: None,
+            private_key_pem: None,
+        }
+    }
+
+    /// Create from service account credentials (enables V4 signed URL generation).
+    #[must_use]
+    pub fn from_service_account(
+        bucket: String,
+        project_id: String,
+        access_token: String,
+        service_account_email: String,
+        private_key_pem: String,
+    ) -> Self {
+        Self {
+            client: Client::new(),
+            bucket,
+            project_id,
+            access_token,
+            service_account_email: Some(service_account_email),
+            private_key_pem: Some(private_key_pem),
         }
     }
 
@@ -147,27 +179,88 @@ impl GcsStorage {
         Ok(())
     }
 
-    /// Generate signed URL for download
+    /// Generate a V4 signed URL for object download (GOOG4-RSA-SHA256).
+    ///
+    /// Requires the storage backend to have been created via
+    /// [`GcsStorage::from_service_account`].  If service account credentials are
+    /// absent, returns `CloudError::Authentication`.
     ///
     /// # Errors
     ///
-    /// Returns an error if URL generation fails
+    /// Returns an error if credentials are missing or if RSA signing fails.
     #[allow(clippy::unused_async)]
     pub async fn generate_signed_url_download(
         &self,
         object_name: &str,
         expires_in_secs: u64,
     ) -> Result<String> {
-        // In production, would use proper signing with service account key
-        // This is a simplified placeholder
-        let url = format!(
-            "https://storage.googleapis.com/{}/{}",
-            self.bucket, object_name
+        let email = self.service_account_email.as_deref().ok_or_else(|| {
+            CloudError::Authentication(
+                "GCS V4 signed URLs require service account credentials (call from_service_account)"
+                    .to_string(),
+            )
+        })?;
+        let pem = self.private_key_pem.as_deref().ok_or_else(|| {
+            CloudError::Authentication("GCS V4 signed URL: private_key_pem is not set".to_string())
+        })?;
+
+        let now = Utc::now();
+        let date_str = now.format("%Y%m%d").to_string();
+        let datetime_str = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+        // Credential scope
+        let credential_scope = format!("{date_str}/auto/storage/goog4_request");
+        let credential = format!("{email}/{credential_scope}");
+        let credential_encoded = urlencoding::encode(&credential).to_string();
+
+        // Sorted query parameters (without X-Goog-Signature)
+        let signed_headers = "host";
+        let query_params = format!(
+            "X-Goog-Algorithm=GOOG4-RSA-SHA256\
+             &X-Goog-Credential={credential_encoded}\
+             &X-Goog-Date={datetime_str}\
+             &X-Goog-Expires={expires_in_secs}\
+             &X-Goog-SignedHeaders={signed_headers}"
         );
 
-        Ok(format!(
-            "{url}?X-Goog-Expires={expires_in_secs}&X-Goog-Algorithm=GOOG4-RSA-SHA256"
-        ))
+        // Canonical request
+        let canonical_request = format!(
+            "GET\n/{bucket}/{object}\n{query_params}\nhost:storage.googleapis.com\n\n{signed_headers}\nUNSIGNED-PAYLOAD",
+            bucket = self.bucket,
+            object = urlencoding::encode(object_name),
+        );
+
+        // String to sign
+        let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
+        let string_to_sign =
+            format!("GOOG4-RSA-SHA256\n{datetime_str}\n{credential_scope}\n{canonical_hash}");
+
+        // RSA-SHA256 sign using PKCS#1 v1.5 — deterministic, no RNG needed
+        let private_key = Self::load_rsa_private_key(pem)?;
+        let signing_key = rsa::pkcs1v15::SigningKey::<Sha256>::new(private_key);
+        // Use sign() (deterministic) instead of try_sign_with_rng to avoid rand version conflict
+        use rsa::signature::Signer;
+        let signature = signing_key.sign(string_to_sign.as_bytes());
+        let sig_hex = hex::encode(signature.to_bytes());
+
+        let url = format!(
+            "https://storage.googleapis.com/{}/{object}?{query_params}&X-Goog-Signature={sig_hex}",
+            self.bucket,
+            object = urlencoding::encode(object_name),
+        );
+
+        Ok(url)
+    }
+
+    /// Load an RSA private key from PEM (PKCS#8 or PKCS#1).
+    fn load_rsa_private_key(pem: &str) -> Result<RsaPrivateKey> {
+        // Try PKCS#8 first, then fall back to PKCS#1
+        if let Ok(key) = RsaPrivateKey::from_pkcs8_pem(pem) {
+            return Ok(key);
+        }
+        RsaPrivateKey::from_pkcs1_pem(pem).map_err(|e| {
+            CloudError::Authentication(format!("Failed to parse RSA private key: {e}"))
+        })
     }
 
     /// Generate resumable upload URL

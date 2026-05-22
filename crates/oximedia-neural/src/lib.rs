@@ -33,6 +33,53 @@
 //! let output = layer.forward(&input).unwrap();
 //! assert_eq!(output.shape(), &[2]);
 //! ```
+//!
+//! ## Architecture
+//!
+//! ### Supported Layer Types
+//!
+//! | Layer | Input shape | Output shape | Notes |
+//! |-------|-------------|--------------|-------|
+//! | [`LinearLayer`] | `[in_features]` | `[out_features]` | Fully-connected; y = Wx + b |
+//! | [`Conv2dLayer`] | `[C_in, H, W]` | `[C_out, H', W']` | NCHW-style 2-D convolution |
+//! | [`DepthwiseConv2d`] | `[C, H, W]` | `[C, H', W']` | Per-channel depthwise convolution |
+//! | [`ConvTranspose2d`] | `[C_in, H, W]` | `[C_out, H', W']` | Transposed / fractionally-strided conv |
+//! | [`BatchNorm1d`] | `[C]` or `[N, C]` | same shape | Normalise feature vectors |
+//! | [`BatchNorm2d`] | `[C, H, W]` | same shape | Spatial batch normalisation |
+//! | [`MaxPool2d`] | `[C, H, W]` | `[C, H', W']` | Max pooling over kernel window |
+//! | [`AvgPool2d`] | `[C, H, W]` | `[C, H', W']` | Average pooling over kernel window |
+//! | [`GlobalAvgPool`] | `[C, H, W]` | `[C]` | Channel-wise spatial average |
+//! | ReLU / Sigmoid / GELU / Swish | any | same shape | Applied via [`apply_activation`] |
+//! | Softmax | `[N]` | `[N]` | Normalised probabilities; see [`softmax`] |
+//! | [`MultiHeadAttention`] | `[seq, d_model]` | `[seq, d_model]` | Self- or cross-attention |
+//! | GRU / LSTM | `[seq, input_size]` | `[seq, hidden_size]` | Temporal recurrent layers; see [`recurrent`] |
+//!
+//! ### Media Models
+//!
+//! Pre-built pipelines in the [`media_models`] module accept raw feature vectors and
+//! return structured results with no additional setup:
+//!
+//! | Model | Input shape | Value range | Output | Use case |
+//! |-------|-------------|-------------|--------|----------|
+//! | [`SceneClassifier`] | `[128]` f32 feature vector | `[0, 1]` | `(class_index: usize, confidence: f32)` | Shot-type classification (interior / exterior / sky …) |
+//! | [`ThumbnailRanker`] | `[64]` f32 feature vector | `[0, 1]` | `f32` score in `[0, 1]` | Select the best-quality thumbnail frame |
+//! | [`SrUpscaler`] | `[C, H, W]` pixel values | `[0, 1]` | `[C, 2H, 2W]` tensor | 2× super-resolution via PixelShuffle |
+//! | [`FeatureExtractor`] | `[C, H, W]` pixel values | `[0, 1]` | `[128]` embedding | Compact visual embedding for retrieval / dedup |
+//!
+//! ### Performance
+//!
+//! Rough single-core throughput estimates on a modern x86-64 laptop (operations
+//! per second, approximate order of magnitude):
+//!
+//! | Operation | Approx. latency | Notes |
+//! |-----------|-----------------|-------|
+//! | `relu_inplace` on `[3, 224, 224]` | < 1 ms | SIMD-accelerated in-place path |
+//! | `SceneClassifier::classify` | < 1 ms | Two-layer MLP; SIMD matmul |
+//! | `Conv2dLayer` 3×3 on `[3, 224, 224]` | 50–200 ms | im2col + SIMD matmul |
+//! | SIMD matmul 512×512 | 10–50 ms | AVX2 path via [`matmul_simd`] |
+//!
+//! Enable the `onnx` Cargo feature to load arbitrary `.onnx` models through
+//! the `onnx_backend` module (gated behind `#[cfg(feature = "onnx")]`).
 
 pub mod accuracy_tests;
 pub mod activations;
@@ -55,6 +102,8 @@ pub mod metrics;
 pub mod model_zoo;
 pub mod object_detector;
 pub mod onnx;
+#[cfg(feature = "onnx")]
+pub mod onnx_backend;
 pub mod onnx_runtime;
 pub mod optical_flow;
 pub mod optimizer;
@@ -95,6 +144,8 @@ pub use media_models::{
 };
 pub use model_zoo::{LayerConfig, MediaModelZoo, ModelInfo};
 pub use onnx::{inspect_onnx, OnnxModelInfo};
+#[cfg(feature = "onnx")]
+pub use onnx_backend::OnnxBackend;
 pub use onnx_runtime::{
     AddExecutor, ExecutionGraph, ExecutionNode, FallbackExecutor, GemmExecutor, MatMulExecutor,
     NodeExecutor, OnnxRuntime, ReluExecutor, ReshapeExecutor, SigmoidExecutor, TransposeExecutor,

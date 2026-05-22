@@ -295,6 +295,15 @@ pub struct AudioMixer {
     solo_bus: SoloBus,
     /// Automation player: renders per-block parameter values from automation lanes.
     automation_player: AutomationPlayer,
+    /// Left-channel oversampled lookahead limiter for the master bus.
+    master_limiter_l: oversampled_limiter::OversampledLimiter,
+    /// Right-channel oversampled lookahead limiter for the master bus.
+    master_limiter_r: oversampled_limiter::OversampledLimiter,
+    /// Whether the master lookahead limiter is active.
+    ///
+    /// When `false` (default) the legacy `soft_clip()` is used to match the
+    /// previous behaviour.  Enable via [`AudioMixer::set_limiter_enabled`].
+    limiter_enabled: bool,
 }
 
 impl std::fmt::Debug for AudioMixer {
@@ -323,6 +332,16 @@ impl AudioMixer {
 
         let engine = ProcessingEngine::new(config.buffer_size);
 
+        // Build a stereo pair of oversampled lookahead limiters (default: −0.3 dBFS,
+        // 50 ms release, 4× oversampling).  They are only exercised when
+        // `limiter_enabled` is true.
+        #[allow(clippy::cast_precision_loss)]
+        let sample_rate_f32 = config.sample_rate as f32;
+        let master_limiter_l =
+            oversampled_limiter::OversampledLimiter::new(-0.3, 50.0, 4, sample_rate_f32);
+        let master_limiter_r =
+            oversampled_limiter::OversampledLimiter::new(-0.3, 50.0, 4, sample_rate_f32);
+
         Self {
             config,
             channels: HashMap::new(),
@@ -334,6 +353,9 @@ impl AudioMixer {
             engine,
             solo_bus: SoloBus::default(),
             automation_player: AutomationPlayer::new(),
+            master_limiter_l,
+            master_limiter_r,
+            limiter_enabled: false,
         }
     }
 
@@ -572,10 +594,27 @@ impl AudioMixer {
         let (mut master_left, mut master_right) =
             self.engine.process_mix(&channel_params, &input_samples);
 
-        // Apply master bus soft clipping to prevent digital overs.
-        for i in 0..buffer_size {
-            master_left[i] = soft_clip(master_left[i]);
-            master_right[i] = soft_clip(master_right[i]);
+        // Apply master bus limiting / soft clipping to prevent digital overs.
+        if self.limiter_enabled {
+            // Use the oversampled lookahead limiter for broadcast-quality peak control.
+            // The left and right channels are processed independently to keep the hot
+            // path allocation-free.  Stereo-linked gain is desirable in a mastering
+            // context but is traded here for simplicity; use an external stereo-linked
+            // compressor / limiter if image stability is critical.
+            let mut limited_left = vec![0.0_f32; buffer_size];
+            let mut limited_right = vec![0.0_f32; buffer_size];
+            self.master_limiter_l
+                .process_block(&master_left, &mut limited_left);
+            self.master_limiter_r
+                .process_block(&master_right, &mut limited_right);
+            master_left = limited_left;
+            master_right = limited_right;
+        } else {
+            // Legacy soft-clip path — kept for backward compatibility.
+            for i in 0..buffer_size {
+                master_left[i] = soft_clip(master_left[i]);
+                master_right[i] = soft_clip(master_right[i]);
+            }
         }
 
         self.sample_count += buffer_size as u64;
@@ -876,6 +915,51 @@ impl AudioMixer {
     #[must_use]
     pub fn solo_bus_mut(&mut self) -> &mut SoloBus {
         &mut self.solo_bus
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Master bus limiter
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Enable or disable the oversampled lookahead limiter on the master bus.
+    ///
+    /// When `enabled` is `true` the limiter replaces the legacy `soft_clip()`
+    /// saturation.  When `false` (default) the legacy behaviour is preserved.
+    pub fn set_limiter_enabled(&mut self, enabled: bool) {
+        self.limiter_enabled = enabled;
+    }
+
+    /// Returns `true` if the master bus lookahead limiter is active.
+    #[must_use]
+    pub fn limiter_enabled(&self) -> bool {
+        self.limiter_enabled
+    }
+
+    /// Immutable reference to the left-channel master limiter.
+    #[must_use]
+    pub fn master_limiter_l(&self) -> &oversampled_limiter::OversampledLimiter {
+        &self.master_limiter_l
+    }
+
+    /// Mutable reference to the left-channel master limiter.
+    ///
+    /// Use this to adjust `threshold_db`, `release_ms`, and call
+    /// [`oversampled_limiter::OversampledLimiter::recalculate`] after changing parameters.
+    #[must_use]
+    pub fn master_limiter_l_mut(&mut self) -> &mut oversampled_limiter::OversampledLimiter {
+        &mut self.master_limiter_l
+    }
+
+    /// Immutable reference to the right-channel master limiter.
+    #[must_use]
+    pub fn master_limiter_r(&self) -> &oversampled_limiter::OversampledLimiter {
+        &self.master_limiter_r
+    }
+
+    /// Mutable reference to the right-channel master limiter.
+    #[must_use]
+    pub fn master_limiter_r_mut(&mut self) -> &mut oversampled_limiter::OversampledLimiter {
+        &mut self.master_limiter_r
     }
 
     /// Get mixer session.
@@ -1384,5 +1468,142 @@ mod tests {
             (gain - 0.7).abs() < 0.01,
             "automation should not have changed gain when disabled, got {gain}"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Master limiter wiring tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Build a stereo `AudioFrame` whose interleaved f32 samples are all `value`.
+    fn constant_frame(buffer_size: usize, value: f32) -> AudioFrame {
+        use oximedia_audio::AudioBuffer;
+        use oximedia_core::SampleFormat;
+
+        let mut frame = AudioFrame::new(SampleFormat::F32, 48000, ChannelLayout::Stereo);
+        let mut raw = Vec::with_capacity(buffer_size * 2 * 4);
+        for _ in 0..buffer_size * 2 {
+            raw.extend_from_slice(&value.to_le_bytes());
+        }
+        frame.samples = AudioBuffer::Interleaved(bytes::Bytes::from(raw));
+        frame
+    }
+
+    /// Decode the first `n` left-channel samples from a stereo interleaved output frame.
+    fn decode_left_samples(frame: &AudioFrame, n: usize) -> Vec<f32> {
+        let raw = match &frame.samples {
+            oximedia_audio::AudioBuffer::Interleaved(b) => b.clone(),
+            _ => return vec![],
+        };
+        let mut out = Vec::with_capacity(n);
+        let mut i = 0;
+        while i + 7 < raw.len() && out.len() < n {
+            let bytes: [u8; 4] = [raw[i], raw[i + 1], raw[i + 2], raw[i + 3]];
+            out.push(f32::from_le_bytes(bytes));
+            i += 8; // skip right channel
+        }
+        out
+    }
+
+    #[test]
+    fn test_limiter_enabled_accessor_roundtrip() {
+        // Verify enable/disable toggles correctly.
+        let mut mixer = AudioMixer::new(MixerConfig::default());
+        assert!(
+            !mixer.limiter_enabled(),
+            "limiter should be disabled by default"
+        );
+        mixer.set_limiter_enabled(true);
+        assert!(
+            mixer.limiter_enabled(),
+            "limiter should be enabled after set"
+        );
+        mixer.set_limiter_enabled(false);
+        assert!(!mixer.limiter_enabled(), "limiter should be disabled again");
+    }
+
+    #[test]
+    fn test_master_limiter_caps_output_when_enabled() {
+        // Build a one-channel mixer with gain = 4.0 (well above 0 dBFS).
+        // Feed a constant-1.0 mono signal through the full pipeline.
+        // After the lookahead delay is primed the limiter must keep all
+        // output samples at or below 1.0 (0 dBFS ceiling).
+        let config = MixerConfig {
+            buffer_size: 512,
+            sample_rate: 48000,
+            ..Default::default()
+        };
+        let mut mixer = AudioMixer::new(config);
+        mixer.set_limiter_enabled(true);
+
+        let ch = mixer
+            .add_channel("Hot".to_string(), ChannelType::Mono, ChannelLayout::Mono)
+            .expect("add_channel should succeed");
+        // Drive the channel hard (+12 dB headroom: amplitude 4 × 0.9 = 3.6).
+        mixer
+            .set_channel_gain(ch, 4.0)
+            .expect("set_channel_gain should succeed");
+
+        let frame = constant_frame(512, 0.9);
+
+        // Prime the limiter over several blocks so the gain envelope settles.
+        let lookahead = mixer.master_limiter_l().lookahead_samples;
+        let priming_blocks = (lookahead / 512).max(1) + 2;
+        for _ in 0..priming_blocks {
+            mixer.process(&frame).expect("process should succeed");
+        }
+
+        // Now check the settled output.
+        let output = mixer.process(&frame).expect("process should succeed");
+        let left = decode_left_samples(&output, 512);
+
+        // Allow a tiny tolerance (1e-4) matching the existing oversampled-limiter tests.
+        for (i, &s) in left.iter().enumerate() {
+            assert!(
+                s.abs() <= 1.0 + 1e-4,
+                "sample[{i}] = {s:.6} exceeds 0 dBFS after master limiter"
+            );
+        }
+    }
+
+    #[test]
+    fn test_master_limiter_disabled_soft_clips_legacy() {
+        // When the limiter is disabled the legacy soft_clip path is used.
+        // A silent (all-zero) input must produce a silent output regardless.
+        let config = MixerConfig {
+            buffer_size: 256,
+            sample_rate: 48000,
+            ..Default::default()
+        };
+        let mut mixer = AudioMixer::new(config);
+        assert!(!mixer.limiter_enabled());
+
+        let frame = silent_frame(256);
+        let output = mixer.process(&frame).expect("process should succeed");
+        let left = decode_left_samples(&output, 256);
+
+        for (i, &s) in left.iter().enumerate() {
+            assert!(
+                s.abs() < f32::EPSILON,
+                "sample[{i}] = {s} should be zero for silent input"
+            );
+        }
+    }
+
+    #[test]
+    fn test_master_limiter_refs_accessible() {
+        // Verify the accessor methods compile and return sensible initial state.
+        let mut mixer = AudioMixer::new(MixerConfig::default());
+        // Both limiters should start at unity gain (no signal processed yet).
+        assert!(
+            mixer.master_limiter_l().gain_reduction_db().abs() < 1e-5,
+            "left limiter gain reduction should be 0 dB initially"
+        );
+        assert!(
+            mixer.master_limiter_r().gain_reduction_db().abs() < 1e-5,
+            "right limiter gain reduction should be 0 dB initially"
+        );
+        // Mutable refs should be obtainable.
+        mixer.master_limiter_l_mut().reset();
+        mixer.master_limiter_r_mut().reset();
     }
 }

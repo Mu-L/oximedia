@@ -2,10 +2,12 @@
 
 pub mod file_ops;
 pub mod media_ops;
+pub mod mmap_reader;
 pub mod pipeline;
 
 pub use file_ops::FileOperation;
 pub use media_ops::{AnalysisType, MediaOperation};
+pub use mmap_reader::{open_smart, MmapReader, MMAP_THRESHOLD};
 pub use pipeline::PipelineExecutor;
 
 use crate::error::Result;

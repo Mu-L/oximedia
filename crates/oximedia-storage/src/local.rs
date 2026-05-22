@@ -14,6 +14,7 @@ use futures::stream;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::fs;
 
@@ -203,6 +204,8 @@ impl StorageMetadata {
 pub struct LocalStorage {
     /// Root directory for all stored objects
     root: PathBuf,
+    /// In-memory tag store: key → tag map
+    tags: Arc<Mutex<HashMap<String, HashMap<String, String>>>>,
 }
 
 impl LocalStorage {
@@ -216,7 +219,10 @@ impl LocalStorage {
     pub async fn new(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         fs::create_dir_all(&root).await?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            tags: Arc::new(Mutex::new(HashMap::new())),
+        })
     }
 
     /// Resolve a key to a full filesystem path, ensuring it is inside root
@@ -480,6 +486,12 @@ impl CloudStorage for LocalStorage {
     ) -> Result<String> {
         let path = self.resolve(key)?;
         Ok(format!("file://{}", path.display()))
+    }
+
+    async fn update_metadata(&self, key: &str, new_tags: HashMap<String, String>) -> Result<()> {
+        let mut guard = self.tags.lock().unwrap_or_else(|p| p.into_inner());
+        guard.insert(key.to_string(), new_tags);
+        Ok(())
     }
 }
 
@@ -809,6 +821,20 @@ mod tests {
             .await
             .expect("list objects should succeed");
         assert_eq!(result.objects.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_local_storage_update_metadata() {
+        let (store, _dir) = make_store().await;
+        // update_metadata must succeed even if key doesn't exist on disk
+        // (the tags are held in memory only)
+        let mut tags = HashMap::new();
+        tags.insert("format".to_string(), "h264".to_string());
+        tags.insert("fps".to_string(), "30".to_string());
+        store
+            .update_metadata("video/clip.mp4", tags)
+            .await
+            .expect("update_metadata should succeed");
     }
 
     #[tokio::test]

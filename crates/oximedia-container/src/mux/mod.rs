@@ -51,6 +51,7 @@
 pub mod avi;
 pub mod cmaf;
 pub mod flac;
+pub mod flv;
 pub mod interleave;
 pub mod matroska;
 pub mod mp4;
@@ -63,6 +64,7 @@ pub mod y4m;
 pub use avi::{AviError, AviMjpegWriter};
 pub use cmaf::{CmafBrand, CmafConfig, CmafMuxer, CmafSample, CmafSegment, CmafTrack, TrackType};
 pub use flac::FlacMuxer;
+pub use flv::FlvMuxer;
 pub use matroska::MatroskaMuxer;
 pub use mp4::{
     AudioCodecInfo, BasicMp4Error, BasicMp4Muxer, FourCC, Mp4Config, Mp4FragmentMode, Mp4Mode,

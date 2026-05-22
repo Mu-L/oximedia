@@ -85,7 +85,7 @@ define_counter!(u128);
 ///
 /// # Example
 /// ```
-/// use bitstream_io::{BigEndian, BitWrite, BitsWritten};
+/// use oximedia_bitstream::{BigEndian, BitWrite, BitsWritten};
 /// let mut writer: BitsWritten<u32> = BitsWritten::new();
 /// writer.write_var(1, 0b1u8).unwrap();
 /// writer.write_var(2, 0b01u8).unwrap();
@@ -337,7 +337,7 @@ impl<N: Counter> BitWrite for BitsWritten<N> {
 ///
 /// # Example
 /// ```
-/// use bitstream_io::{BigEndian, BitWrite, BitCounter};
+/// use oximedia_bitstream::{BigEndian, BitWrite, BitCounter};
 /// let mut writer: BitCounter<u32, BigEndian> = BitCounter::new();
 /// writer.write_var(1, 0b1u8).unwrap();
 /// writer.write_var(2, 0b01u8).unwrap();

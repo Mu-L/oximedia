@@ -13,19 +13,19 @@
 - [x] Implement HRTF interpolation in `binaural` using spherical harmonics for smoother head rotation transitions
 - [x] Add frequency-dependent wall absorption coefficients to `room_simulation` (currently likely uses single absorption value)
 - [x] Extend `vbap` to support irregular speaker layouts with automatic triangulation (Delaunay-based)
-- [ ] Add IMU sensor fusion (accelerometer + gyroscope + magnetometer) to `head_tracking` complementary filter
-- [ ] Implement distance attenuation models (inverse square, logarithmic, custom curve) in `object_audio`
-- [ ] Add Doppler effect simulation for moving sound sources
+- [x] Add IMU sensor fusion (accelerometer + gyroscope + magnetometer) to `head_tracking` complementary filter (verified 2026-05-16; src/imu_fusion.rs:15 Mahony filter, gyroscope/accelerometer/magnetometer fusion:50)
+- [x] Implement distance attenuation models (inverse square, logarithmic, custom curve) in `object_audio` (verified 2026-05-16; src/distance_attenuation.rs:522 lines)
+- [x] Add Doppler effect simulation for moving sound sources (verified 2026-05-16; src/doppler.rs:425 lines)
 
 ## New Features
-- [ ] Implement `dbap` (Distance-Based Amplitude Panning) module as alternative to VBAP for non-regular layouts
-- [ ] Add `reverb` module with algorithmic late reverberation (Schroeder/Moorer style) separate from room simulation
-- [ ] Implement `hoa_decoder` module with AllRAD (All-Round Ambisonic Decoding) for arbitrary speaker arrays
-- [ ] Add `spatial_audio_format` module for ADM BWF (Broadcast Wave Format) and MPEG-H 3D Audio metadata I/O
-- [ ] Implement `acoustic_raytracer` module for geometric acoustics beyond image-source method
-- [ ] Add `binauralizer` module that converts any multi-channel format to binaural using virtual speakers
-- [ ] Implement `spatial_capture` module for A-format to B-format microphone array conversion (Soundfield, Eigenmike)
-- [ ] Add `zone_control` module for multi-zone spatial audio rendering in installations
+- [x] Implement `dbap` (Distance-Based Amplitude Panning) module as alternative to VBAP for non-regular layouts (verified 2026-05-16; src/dbap.rs:326 lines)
+- [x] Add `reverb` module with algorithmic late reverberation (Schroeder/Moorer style) separate from room simulation (verified 2026-05-16; src/reverb.rs:808 lines, Schroeder 1962 + Moorer 1979)
+- [x] Implement `hoa_decoder` module with AllRAD (All-Round Ambisonic Decoding) for arbitrary speaker arrays (verified 2026-05-16; src/hoa_decoder.rs:516 lines)
+- [x] Add `spatial_audio_format` module for ADM BWF (Broadcast Wave Format) and MPEG-H 3D Audio metadata I/O (verified 2026-05-16; src/adm_bwf.rs:653 lines)
+- [x] Implement `acoustic_raytracer` module for geometric acoustics beyond image-source method (verified 2026-05-16; src/acoustic_raytracer.rs:543 lines)
+- [x] Add `binauralizer` module that converts any multi-channel format to binaural using virtual speakers (verified 2026-05-16; src/binauralizer.rs:576 lines)
+- [x] Implement `spatial_capture` module for A-format to B-format microphone array conversion (Soundfield, Eigenmike) (verified 2026-05-16; src/spatial_capture.rs:372 lines)
+- [x] Add `zone_control` module for multi-zone spatial audio rendering in installations (verified 2026-05-16; src/zone_control.rs:573 lines)
 
 ## Performance
 - [ ] Use SIMD-accelerated spherical harmonic coefficient computation in `ambisonics` encoding

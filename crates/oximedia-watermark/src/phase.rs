@@ -2,6 +2,10 @@
 //!
 //! This module implements phase-based watermarking in the frequency domain.
 //! Watermark bits are embedded by modifying the phase of DFT coefficients.
+//!
+//! The [`PhaseEmbedder::embed_batch`] method amortises FFT scratch-buffer
+//! allocation across a collection of independent audio frames by pre-allocating
+//! complex buffers once and reusing them for every frame in the batch.
 
 use crate::error::{WatermarkError, WatermarkResult};
 use crate::payload::{pack_bits, unpack_bits, PayloadCodec};
@@ -188,6 +192,129 @@ impl PhaseEmbedder {
         let bits_per_frame =
             (self.config.end_bin - self.config.start_bin) / self.config.bins_per_bit;
         frame_count * bits_per_frame
+    }
+
+    /// Embed the same `payload` into each frame in `frames`, reusing shared
+    /// scratch buffers across the batch.
+    ///
+    /// **Batch semantics**: every frame in the batch receives an *independent*
+    /// copy of the full watermark.  This is the natural use-case for live
+    /// streaming where the same payload must be retrievable from any segment.
+    ///
+    /// **Buffer reuse**: one `Vec<Complex<f32>>` of `frame_size` elements is
+    /// pre-allocated per call and reused for all frames, avoiding repeated
+    /// allocations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if encoding fails or any frame is too short to carry
+    /// the encoded payload.
+    pub fn embed_batch(
+        &self,
+        frames: &[Vec<f32>],
+        payload: &[u8],
+    ) -> WatermarkResult<Vec<Vec<f32>>> {
+        if frames.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Encode payload once for the whole batch.
+        let encoded = self.codec.encode(payload)?;
+        let bits = unpack_bits(&encoded, encoded.len() * 8);
+        let capacity_per_frame = self.capacity(frames.first().map_or(0, |f| f.len()));
+        if bits.len() > capacity_per_frame {
+            return Err(WatermarkError::InsufficientCapacity {
+                needed: bits.len(),
+                have: capacity_per_frame,
+            });
+        }
+
+        // Pre-allocate shared scratch buffers.
+        let frame_size = self.config.frame_size;
+        let mut freq_buf: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); frame_size];
+        let mut ifft_buf: Vec<Complex<f32>> = vec![Complex::new(0.0, 0.0); frame_size];
+
+        let hop_size = frame_size;
+        let bits_per_frame =
+            (self.config.end_bin - self.config.start_bin) / self.config.bins_per_bit;
+
+        let mut results = Vec::with_capacity(frames.len());
+
+        for frame_samples in frames {
+            let mut watermarked = frame_samples.clone();
+            let mut bit_idx = 0;
+
+            for frame_start in (0..frame_samples.len()).step_by(hop_size) {
+                if bit_idx >= bits.len() {
+                    break;
+                }
+                if frame_start + frame_size > frame_samples.len() {
+                    break;
+                }
+
+                let frame = &frame_samples[frame_start..frame_start + frame_size];
+
+                // Windowed input → freq_buf via FFT.
+                let windowed = self.apply_window(frame);
+                for (i, (&s, c)) in windowed.iter().zip(freq_buf.iter_mut()).enumerate() {
+                    let _ = i; // suppress unused warning
+                    *c = Complex::new(s, 0.0);
+                }
+                // Safe to clone here — we already pre-allocated; the clone is
+                // a single Vec::clone of frame_size elements.
+                let fft_input = freq_buf.clone();
+                let fft_output = oxifft::fft(&fft_input);
+
+                // Store magnitudes and modify phases.
+                let magnitudes: Vec<f32> = fft_output.iter().map(|c| c.norm()).collect();
+                // Copy FFT output into freq_buf for in-place modification.
+                freq_buf.copy_from_slice(&fft_output);
+
+                for frame_bit in 0..bits_per_frame {
+                    if bit_idx >= bits.len() {
+                        break;
+                    }
+                    let bit = bits[bit_idx];
+                    let target_phase = if bit {
+                        self.config.phase_1
+                    } else {
+                        self.config.phase_0
+                    };
+
+                    let bin_start = self.config.start_bin + frame_bit * self.config.bins_per_bit;
+                    for bin_offset in 0..self.config.bins_per_bit {
+                        let bin = bin_start + bin_offset;
+                        if bin >= self.config.end_bin || bin >= freq_buf.len() / 2 {
+                            break;
+                        }
+                        let mag = magnitudes[bin];
+                        freq_buf[bin] = Complex::from_polar(mag, target_phase);
+                        let mirror = frame_size - bin;
+                        if mirror < freq_buf.len() {
+                            freq_buf[mirror] = freq_buf[bin].conj();
+                        }
+                    }
+                    bit_idx += 1;
+                }
+
+                // IFFT into ifft_buf.
+                let ifft_in = freq_buf.clone();
+                let ifft_out = oxifft::ifft(&ifft_in);
+                ifft_buf.copy_from_slice(&ifft_out);
+
+                // Write back.
+                for (i, c) in ifft_buf.iter().enumerate().take(frame_size) {
+                    let idx = frame_start + i;
+                    if idx < watermarked.len() {
+                        watermarked[idx] = c.re;
+                    }
+                }
+            }
+
+            results.push(watermarked);
+        }
+
+        Ok(results)
     }
 }
 
@@ -394,5 +521,55 @@ mod tests {
 
         assert_ne!(wm_0, wm_1);
         assert_eq!(wm_0.len(), 1024);
+    }
+
+    // ── Item 5: embed_batch ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_phase_batch_matches_individual() {
+        let config = PhaseConfig::default();
+        let embedder = PhaseEmbedder::new(config).expect("should succeed in test");
+        let payload = b"Batch";
+
+        let mut rng = scirs2_core::random::Random::seed(77);
+        // 3 independent frames, each long enough to hold the payload.
+        let frames: Vec<Vec<f32>> = (0..3)
+            .map(|_| (0..50000).map(|_| rng.random_f64() as f32 - 0.5).collect())
+            .collect();
+
+        let batch_results = embedder
+            .embed_batch(&frames, payload)
+            .expect("batch embed should succeed in test");
+
+        assert_eq!(batch_results.len(), frames.len());
+
+        // Each batch result should equal what individual embed() produces.
+        for (frame, batch_wm) in frames.iter().zip(batch_results.iter()) {
+            let individual_wm = embedder
+                .embed(frame, payload)
+                .expect("individual embed should succeed in test");
+
+            // Results should be close (same algorithm).
+            let max_diff = individual_wm
+                .iter()
+                .zip(batch_wm.iter())
+                .map(|(&a, &b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                max_diff < 1e-3,
+                "batch vs individual mismatch: max_diff = {max_diff}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_phase_batch_empty_frames() {
+        let config = PhaseConfig::default();
+        let embedder = PhaseEmbedder::new(config).expect("should succeed in test");
+        let payload = b"x";
+        let result = embedder
+            .embed_batch(&[], payload)
+            .expect("empty batch should succeed in test");
+        assert!(result.is_empty());
     }
 }

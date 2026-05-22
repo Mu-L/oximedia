@@ -316,6 +316,32 @@ impl TimelineProject {
         self.tracks.iter().map(|t| t.clips.len()).sum()
     }
 
+    /// Add a clip to a track by index.  Returns the assigned clip id.
+    /// Defaults: `in_point = 0.0`, `out_point = duration`, `speed = 1.0`.
+    #[allow(dead_code)]
+    fn add_clip(
+        &mut self,
+        track_index: u32,
+        source_path: &str,
+        start_time: f64,
+        duration: f64,
+    ) -> u64 {
+        let id = self.next_clip_id;
+        self.next_clip_id += 1;
+        if let Some(track) = self.tracks.iter_mut().find(|t| t.index == track_index) {
+            track.clips.push(ClipData {
+                id,
+                source_path: source_path.to_string(),
+                start_time,
+                duration,
+                in_point: 0.0,
+                out_point: duration,
+                speed: 1.0,
+            });
+        }
+        id
+    }
+
     fn load(path: &PathBuf) -> Result<Self> {
         let content =
             std::fs::read_to_string(path).context("Failed to read timeline project file")?;
@@ -760,7 +786,7 @@ async fn handle_export(
     let export_content = match format {
         "edl" => generate_edl(&project),
         "xml" | "fcpxml" => generate_fcpxml(&project),
-        _ => generate_otio_placeholder(&project),
+        _ => generate_otio_json(&project),
     };
 
     std::fs::write(output, &export_content).context("Failed to write export file")?;
@@ -963,32 +989,138 @@ fn generate_fcpxml(project: &TimelineProject) -> String {
     xml
 }
 
-fn generate_otio_placeholder(project: &TimelineProject) -> String {
+/// Build a `RationalTime.1` JSON node from seconds and a frame rate.
+fn otio_rational_time(seconds: f64, fps: f64) -> serde_json::Value {
     serde_json::json!({
+        "OTIO_SCHEMA": "RationalTime.1",
+        "value": (seconds * fps).round(),
+        "rate": fps,
+    })
+}
+
+/// Build a `TimeRange.1` JSON node.
+fn otio_time_range(start_secs: f64, duration_secs: f64, fps: f64) -> serde_json::Value {
+    serde_json::json!({
+        "OTIO_SCHEMA": "TimeRange.1",
+        "start_time": otio_rational_time(start_secs, fps),
+        "duration": otio_rational_time(duration_secs, fps),
+    })
+}
+
+/// Build an `ExternalReference.1` for a clip's source path.
+fn otio_external_reference(source_path: &str, duration_secs: f64, fps: f64) -> serde_json::Value {
+    serde_json::json!({
+        "OTIO_SCHEMA": "ExternalReference.1",
+        "target_url": source_path,
+        "available_range": otio_time_range(0.0, duration_secs, fps),
+        "available_image_bounds": serde_json::Value::Null,
+        "metadata": {},
+    })
+}
+
+/// Derive a human-readable clip name from a source path stem.
+fn otio_clip_name(source_path: &str) -> &str {
+    let path = std::path::Path::new(source_path);
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(source_path)
+}
+
+/// Build a `Clip.1` JSON node.
+fn otio_clip(clip: &ClipData, fps: f64) -> serde_json::Value {
+    serde_json::json!({
+        "OTIO_SCHEMA": "Clip.1",
+        "name": otio_clip_name(&clip.source_path),
+        "source_range": otio_time_range(clip.in_point, clip.duration, fps),
+        "media_reference": otio_external_reference(&clip.source_path, clip.duration, fps),
+        "effects": [],
+        "markers": [],
+        "metadata": {},
+        "enabled": true,
+    })
+}
+
+/// Build a `Gap.1` JSON node for empty space with the given duration.
+fn otio_gap(duration_secs: f64, fps: f64) -> serde_json::Value {
+    serde_json::json!({
+        "OTIO_SCHEMA": "Gap.1",
+        "source_range": otio_time_range(0.0, duration_secs, fps),
+        "effects": [],
+        "markers": [],
+        "metadata": {},
+        "enabled": true,
+    })
+}
+
+/// Serialize a `TimelineProject` to an OTIO 0.17-compatible JSON string.
+fn generate_otio_json(project: &TimelineProject) -> String {
+    let fps = project.fps;
+
+    let track_kind = |track_type: &str| -> &str {
+        match track_type {
+            "audio" => "Audio",
+            _ => "Video",
+        }
+    };
+
+    let tracks: Vec<serde_json::Value> = project
+        .tracks
+        .iter()
+        .map(|t| {
+            // Sort clips by timeline start_time for correct gap detection.
+            let mut sorted_clips = t.clips.clone();
+            sorted_clips.sort_by(|a, b| {
+                a.start_time
+                    .partial_cmp(&b.start_time)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let mut children: Vec<serde_json::Value> = Vec::new();
+            let mut cursor = 0.0_f64;
+
+            for clip in &sorted_clips {
+                let gap_secs = clip.start_time - cursor;
+                if gap_secs > 1e-9 {
+                    children.push(otio_gap(gap_secs, fps));
+                }
+                children.push(otio_clip(clip, fps));
+                cursor = clip.start_time + clip.duration;
+            }
+
+            serde_json::json!({
+                "OTIO_SCHEMA": "Track.1",
+                "name": t.name,
+                "kind": track_kind(&t.track_type),
+                "children": children,
+                "effects": [],
+                "markers": [],
+                "metadata": {},
+                "enabled": true,
+                "source_range": serde_json::Value::Null,
+            })
+        })
+        .collect();
+
+    let stack = serde_json::json!({
+        "OTIO_SCHEMA": "Stack.1",
+        "name": "tracks",
+        "children": tracks,
+        "effects": [],
+        "markers": [],
+        "metadata": {},
+        "enabled": true,
+        "source_range": serde_json::Value::Null,
+    });
+
+    let timeline = serde_json::json!({
         "OTIO_SCHEMA": "Timeline.1",
         "name": project.name,
-        "tracks": {
-            "OTIO_SCHEMA": "Stack.1",
-            "children": project.tracks.iter().map(|t| {
-                serde_json::json!({
-                    "OTIO_SCHEMA": "Track.1",
-                    "name": t.name,
-                    "kind": t.track_type,
-                    "children": t.clips.iter().map(|c| {
-                        serde_json::json!({
-                            "OTIO_SCHEMA": "Clip.1",
-                            "name": c.source_path,
-                            "source_range": {
-                                "start_time": c.in_point,
-                                "duration": c.duration,
-                            }
-                        })
-                    }).collect::<Vec<_>>(),
-                })
-            }).collect::<Vec<_>>(),
-        }
-    })
-    .to_string()
+        "global_start_time": otio_rational_time(0.0, fps),
+        "tracks": stack,
+        "metadata": {},
+    });
+
+    serde_json::to_string_pretty(&timeline).unwrap_or_else(|_| timeline.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1162,5 +1294,56 @@ mod tests {
         let edl = generate_edl(&project);
         assert!(edl.contains("TITLE: EDL Test"));
         assert!(edl.contains("SCENE01"));
+    }
+
+    #[test]
+    fn test_otio_json_schema() {
+        let mut project = TimelineProject::new("Test", 24.0, 1920, 1080);
+        let vi = project.add_track("video");
+        let ai = project.add_track("audio");
+        project.add_clip(vi, "source.mp4", 0.0, 2.0);
+        project.add_clip(vi, "b_roll.mp4", 3.0, 1.5); // gap at 2.0-3.0
+        project.add_clip(ai, "dialogue.wav", 0.0, 3.5);
+
+        let json = generate_otio_json(&project);
+        let val: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+
+        assert_eq!(val["OTIO_SCHEMA"], "Timeline.1");
+        assert_eq!(val["name"], "Test");
+        assert_eq!(val["tracks"]["OTIO_SCHEMA"], "Stack.1");
+
+        let children = &val["tracks"]["children"];
+        assert_eq!(children[0]["OTIO_SCHEMA"], "Track.1");
+        assert_eq!(children[0]["kind"], "Video");
+
+        // Check RationalTime.1 on first clip's source_range
+        let first_clip_start = &children[0]["children"][0]["source_range"]["start_time"];
+        assert_eq!(first_clip_start["OTIO_SCHEMA"], "RationalTime.1");
+        let rate = first_clip_start["rate"].as_f64().unwrap();
+        assert!(
+            (rate - 24.0).abs() < f64::EPSILON,
+            "rate should be project fps"
+        );
+
+        // Check gap was inserted between clips
+        let track_children = &children[0]["children"];
+        let has_gap = track_children
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["OTIO_SCHEMA"] == "Gap.1");
+        assert!(has_gap, "gap should be inserted between clips");
+    }
+
+    #[test]
+    fn test_otio_json_audio_track_kind() {
+        let mut project = TimelineProject::new("Audio", 48000.0, 0, 0);
+        let ai = project.add_track("audio");
+        project.add_clip(ai, "mono.wav", 0.0, 1.0);
+
+        let json = generate_otio_json(&project);
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(val["tracks"]["children"][0]["kind"], "Audio");
     }
 }

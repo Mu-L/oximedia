@@ -134,7 +134,7 @@ impl<const MAX: u32, U: UnsignedInteger> CheckedUnsigned<MAX, U> {
     /// # Example
     ///
     /// ```
-    /// use bitstream_io::{BitCount, CheckedUnsigned, CheckedError};
+    /// use oximedia_bitstream::{BitCount, CheckedUnsigned, CheckedError};
     ///
     /// // a value of 7 fits into a 3 bit count
     /// assert!(CheckedUnsigned::<8, u8>::new(3, 0b111).is_ok());
@@ -177,7 +177,7 @@ impl<const MAX: u32, U: UnsignedInteger> CheckedUnsigned<MAX, U> {
     /// # Examples
     ///
     /// ```
-    /// use bitstream_io::{CheckedUnsigned, CheckedError};
+    /// use oximedia_bitstream::{CheckedUnsigned, CheckedError};
     ///
     /// // a value of 7 fits into a 3 bit count
     /// assert!(CheckedUnsigned::<8, u8>::new_fixed::<3>(0b111).is_ok());
@@ -190,7 +190,7 @@ impl<const MAX: u32, U: UnsignedInteger> CheckedUnsigned<MAX, U> {
     /// ```
     ///
     /// ```compile_fail
-    /// use bitstream_io::{BitCount, CheckedUnsigned};
+    /// use oximedia_bitstream::{BitCount, CheckedUnsigned};
     ///
     /// // a bit count of 9 is too large for u8
     ///
@@ -228,7 +228,7 @@ impl<const MAX: u32, U: UnsignedInteger> CheckedUnsigned<MAX, U> {
 /// # Example
 ///
 /// ```
-/// use bitstream_io::{
+/// use oximedia_bitstream::{
 ///     BigEndian, BitRead, BitReader, BitWrite, BitWriter, CheckedUnsignedFixed, FixedBitCount,
 /// };
 ///
@@ -286,7 +286,7 @@ impl<const BITS: u32, U: UnsignedInteger> CheckedUnsignedFixed<BITS, U> {
     /// # Examples
     ///
     /// ```
-    /// use bitstream_io::{CheckedUnsignedFixed, CheckedError};
+    /// use oximedia_bitstream::{CheckedUnsignedFixed, CheckedError};
     ///
     /// // a value of 7 fits into a maximum of 3 bits
     /// assert!(CheckedUnsignedFixed::<3, u8>::new_fixed(0b111).is_ok());
@@ -299,7 +299,7 @@ impl<const BITS: u32, U: UnsignedInteger> CheckedUnsignedFixed<BITS, U> {
     /// ```
     ///
     /// ```compile_fail
-    /// use bitstream_io::CheckedUnsignedFixed;
+    /// use oximedia_bitstream::CheckedUnsignedFixed;
     ///
     /// // a bit count of 9 is too large for u8
     ///
@@ -424,7 +424,7 @@ impl<const MAX: u32, S: SignedInteger> CheckedSigned<MAX, S> {
     /// # Example
     ///
     /// ```
-    /// use bitstream_io::{SignedBitCount, CheckedSigned, CheckedError};
+    /// use oximedia_bitstream::{SignedBitCount, CheckedSigned, CheckedError};
     ///
     /// // a value of 3 fits into a 3 bit count
     /// assert!(CheckedSigned::<8, _>::new(3, 3i8).is_ok());
@@ -469,7 +469,7 @@ impl<const MAX: u32, S: SignedInteger> CheckedSigned<MAX, S> {
     /// # Examples
     ///
     /// ```
-    /// use bitstream_io::{CheckedSigned, CheckedError};
+    /// use oximedia_bitstream::{CheckedSigned, CheckedError};
     ///
     /// // a value of 3 fits into a 3 bit count
     /// assert!(CheckedSigned::<8, i8>::new_fixed::<3>(3).is_ok());
@@ -482,7 +482,7 @@ impl<const MAX: u32, S: SignedInteger> CheckedSigned<MAX, S> {
     /// ```
     ///
     /// ```compile_fail
-    /// use bitstream_io::{BitCount, CheckedSigned};
+    /// use oximedia_bitstream::{BitCount, CheckedSigned};
     ///
     /// // a bit count of 9 is too large for i8
     ///
@@ -516,7 +516,7 @@ impl<const MAX: u32, S: SignedInteger> CheckedSigned<MAX, S> {
 /// # Example
 ///
 /// ```
-/// use bitstream_io::{
+/// use oximedia_bitstream::{
 ///     BigEndian, BitRead, BitReader, BitWrite, BitWriter,
 ///     CheckedSignedFixed, FixedSignedBitCount,
 /// };
@@ -577,7 +577,7 @@ impl<const BITS: u32, S: SignedInteger> CheckedSignedFixed<BITS, S> {
     /// # Examples
     ///
     /// ```
-    /// use bitstream_io::{SignedBitCount, CheckedSignedFixed, CheckedError};
+    /// use oximedia_bitstream::{SignedBitCount, CheckedSignedFixed, CheckedError};
     ///
     /// // a value of 3 fits into a 3 bit count
     /// assert!(CheckedSignedFixed::<3, _>::new_fixed(3i8).is_ok());
@@ -590,7 +590,7 @@ impl<const BITS: u32, S: SignedInteger> CheckedSignedFixed<BITS, S> {
     /// ```
     ///
     /// ```compile_fail
-    /// use bitstream_io::CheckedSignedFixed;
+    /// use oximedia_bitstream::CheckedSignedFixed;
     ///
     /// // a bit count of 9 is too large for i8
     ///
@@ -675,7 +675,7 @@ impl<const BITS: u32, S: SignedInteger> CheckablePrimitive for CheckedSignedFixe
 /// # Example 1
 ///
 /// ```
-/// use bitstream_io::{BitWrite, BitWriter, BigEndian};
+/// use oximedia_bitstream::{BitWrite, BitWriter, BigEndian};
 ///
 /// let mut w = BitWriter::endian(vec![], BigEndian);
 ///
@@ -690,7 +690,7 @@ impl<const BITS: u32, S: SignedInteger> CheckablePrimitive for CheckedSignedFixe
 /// # Example 2
 ///
 /// ```
-/// use bitstream_io::{BitWrite, BitWriter, BigEndian, CheckedUnsigned};
+/// use oximedia_bitstream::{BitWrite, BitWriter, BigEndian, CheckedUnsigned};
 ///
 /// let mut w = BitWriter::endian(vec![], BigEndian);
 ///

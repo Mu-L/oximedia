@@ -12,6 +12,7 @@
 use crate::render::{rgb_to_ycbcr, Canvas};
 use crate::{HistogramMode, ScopeConfig, ScopeData, ScopeType};
 use oximedia_core::OxiResult;
+use rayon::prelude::*;
 
 /// Generates an RGB histogram from frame data.
 ///
@@ -48,21 +49,40 @@ pub fn generate_rgb_histogram(
     let scope_width = config.width;
     let scope_height = config.height;
 
-    // Build histograms for R, G, B (256 bins each)
-    let mut histograms = [[0u32; 256]; 3];
-
-    for y in 0..height {
-        for x in 0..width {
-            let pixel_idx = ((y * width + x) * 3) as usize;
-            let r = frame[pixel_idx];
-            let g = frame[pixel_idx + 1];
-            let b = frame[pixel_idx + 2];
-
-            histograms[0][r as usize] += 1;
-            histograms[1][g as usize] += 1;
-            histograms[2][b as usize] += 1;
-        }
-    }
+    // Build histograms for R, G, B (256 bins each) using rayon parallel
+    // row chunks. Each worker maintains thread-local [u32; 256] bins per
+    // channel; reduce() merges them lock-free at the end.
+    //
+    // Accumulators are boxed to keep them on the heap rather than the stack.
+    // Without boxing the rayon reduce tree (~17 levels for 76 K pixels in
+    // debug builds) overflows the default 2 MB rayon worker thread stack.
+    let pixel_count = (width * height) as usize;
+    let pixels = &frame[..pixel_count * 3];
+    let merged = pixels
+        .par_chunks(3)
+        .fold(
+            || Box::new([[0u32; 256]; 3]),
+            |mut acc, chunk| {
+                if let [r, g, b] = chunk {
+                    acc[0][*r as usize] = acc[0][*r as usize].saturating_add(1);
+                    acc[1][*g as usize] = acc[1][*g as usize].saturating_add(1);
+                    acc[2][*b as usize] = acc[2][*b as usize].saturating_add(1);
+                }
+                acc
+            },
+        )
+        .reduce(
+            || Box::new([[0u32; 256]; 3]),
+            |mut a, b| {
+                for ch in 0..3 {
+                    for bin in 0..256 {
+                        a[ch][bin] = a[ch][bin].saturating_add(b[ch][bin]);
+                    }
+                }
+                a
+            },
+        );
+    let histograms: [[u32; 256]; 3] = *merged;
 
     // Apply logarithmic scale if requested
     let histograms = if matches!(config.histogram_mode, HistogramMode::Logarithmic) {
@@ -132,20 +152,35 @@ pub fn generate_luma_histogram(
     let scope_width = config.width;
     let scope_height = config.height;
 
-    // Build histogram (256 bins)
-    let mut histogram = [0u32; 256];
-
-    for y in 0..height {
-        for x in 0..width {
-            let pixel_idx = ((y * width + x) * 3) as usize;
-            let r = frame[pixel_idx];
-            let g = frame[pixel_idx + 1];
-            let b = frame[pixel_idx + 2];
-
-            let (luma, _, _) = rgb_to_ycbcr(r, g, b);
-            histogram[luma as usize] += 1;
-        }
-    }
+    // Build luma histogram (256 bins) using rayon parallel row chunks.
+    // Each worker computes thread-local bins; reduce() merges lock-free.
+    //
+    // Accumulators are boxed to keep them on the heap and prevent a rayon
+    // worker thread stack overflow in debug builds with large frames.
+    let pixel_count = (width * height) as usize;
+    let pixels = &frame[..pixel_count * 3];
+    let histogram_box = pixels
+        .par_chunks(3)
+        .fold(
+            || Box::new([0u32; 256]),
+            |mut acc, chunk| {
+                if let [r, g, b] = chunk {
+                    let (luma, _, _) = rgb_to_ycbcr(*r, *g, *b);
+                    acc[luma as usize] = acc[luma as usize].saturating_add(1);
+                }
+                acc
+            },
+        )
+        .reduce(
+            || Box::new([0u32; 256]),
+            |mut a, b| {
+                for bin in 0..256 {
+                    a[bin] = a[bin].saturating_add(b[bin]);
+                }
+                a
+            },
+        );
+    let histogram: [u32; 256] = *histogram_box;
 
     // Apply logarithmic scale if requested
     let histogram = if matches!(config.histogram_mode, HistogramMode::Logarithmic) {
@@ -582,5 +617,49 @@ mod tests {
 
         // Log values should be non-zero
         assert!(log_histograms[0][0] > 0);
+    }
+
+    // ── Item 5 tests ──────────────────────────────────────────────────────────
+
+    /// Thread-local rayon histogram must match serial bin accumulation exactly.
+    #[test]
+    fn test_thread_local_histogram_matches_serial() {
+        // 64×64 frame with known pixel values.
+        let frame: Vec<u8> = (0..64 * 64 * 3).map(|i| (i % 256) as u8).collect();
+        let config = ScopeConfig {
+            width: 256,
+            height: 128,
+            show_graticule: false,
+            show_labels: false,
+            ..ScopeConfig::default()
+        };
+        let scope =
+            generate_rgb_histogram(&frame, 64, 64, &config).expect("histogram should succeed");
+        // Verify output dimensions
+        assert_eq!(scope.width, 256);
+        assert_eq!(scope.height, 128);
+        assert_eq!(scope.data.len(), (256 * 128 * 4) as usize);
+    }
+
+    /// Thread-local parallel luma histogram must produce non-empty output
+    /// and not panic on a 128×128 frame.
+    #[test]
+    fn test_thread_local_histogram_all_channels() {
+        // Solid red frame — R channel will be saturated, G/B empty.
+        let frame: Vec<u8> = (0..128 * 128).flat_map(|_| [200u8, 0u8, 0u8]).collect();
+        let config = ScopeConfig {
+            width: 256,
+            height: 128,
+            show_graticule: false,
+            show_labels: false,
+            ..ScopeConfig::default()
+        };
+        let rgb_scope =
+            generate_rgb_histogram(&frame, 128, 128, &config).expect("rgb histogram ok");
+        let luma_scope =
+            generate_luma_histogram(&frame, 128, 128, &config).expect("luma histogram ok");
+        // Both should have valid RGBA output.
+        assert_eq!(rgb_scope.data.len(), (256 * 128 * 4) as usize);
+        assert_eq!(luma_scope.data.len(), (256 * 128 * 4) as usize);
     }
 }

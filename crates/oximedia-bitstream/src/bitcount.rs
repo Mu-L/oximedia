@@ -26,7 +26,7 @@ use crate::{Checked, CheckedUnsigned, Numeric, SignedInteger, UnsignedInteger};
 /// type being read or written on every call.
 ///
 /// ```
-/// use bitstream_io::{BitRead, BitReader, BigEndian};
+/// use oximedia_bitstream::{BitRead, BitReader, BigEndian};
 ///
 /// let data: &[u8] = &[0b100_0001_1, 0b111_0110_0];
 /// let mut r = BitReader::endian(data, BigEndian);
@@ -51,7 +51,7 @@ use crate::{Checked, CheckedUnsigned, Numeric, SignedInteger, UnsignedInteger};
 /// But we can convert our example to use the `BitCount` type:
 ///
 /// ```
-/// use bitstream_io::{BitRead, BitReader, BigEndian, BitCount};
+/// use oximedia_bitstream::{BitRead, BitReader, BigEndian, BitCount};
 ///
 /// let data: &[u8] = &[0b100_0001_1, 0b111_0110_0];
 /// let mut r = BitReader::endian(data, BigEndian);
@@ -94,7 +94,7 @@ impl<const MAX: u32> BitCount<MAX> {
     /// # Examples
     ///
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian, BitCount};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian, BitCount};
     /// let data: &[u8] = &[0b111_00000];
     /// let mut r = BitReader::endian(data, BigEndian);
     /// // reading 3 bits from a stream out of a maximum of 8
@@ -105,7 +105,7 @@ impl<const MAX: u32> BitCount<MAX> {
     /// ```
     ///
     /// ```rust,compile_fail
-    /// use bitstream_io::BitCount;
+    /// use oximedia_bitstream::BitCount;
     /// // trying to build a count of 10 with a maximum of 8
     /// // fails to compile at all
     /// let count = BitCount::<8>::new::<10>();
@@ -126,7 +126,7 @@ impl<const MAX: u32> BitCount<MAX> {
     /// # Examples
     ///
     /// ```
-    /// use bitstream_io::BitCount;
+    /// use oximedia_bitstream::BitCount;
     ///
     /// let count = BitCount::<2>::new::<1>();
     /// // adding 2 to 1 and increasing the max to 3 yields a new count of 3
@@ -150,7 +150,7 @@ impl<const MAX: u32> BitCount<MAX> {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::BitCount;
+    /// use oximedia_bitstream::BitCount;
     /// let count = BitCount::<5>::new::<5>();
     /// // subtracting 1 from 5 yields a new count of 4
     /// assert_eq!(count.checked_sub::<5>(1), Some(BitCount::<5>::new::<4>()));
@@ -177,7 +177,7 @@ impl<const MAX: u32> BitCount<MAX> {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::BitCount;
+    /// use oximedia_bitstream::BitCount;
     ///
     /// let count = BitCount::<5>::new::<5>();
     /// // muliplying 5 bits by 2 with a new max of 10 is ok
@@ -203,7 +203,7 @@ impl<const MAX: u32> BitCount<MAX> {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::BitCount;
+    /// use oximedia_bitstream::BitCount;
     ///
     /// let count = BitCount::<10>::new::<5>();
     /// assert_eq!(count.max(), 10);
@@ -218,7 +218,7 @@ impl<const MAX: u32> BitCount<MAX> {
     /// # Example
     ///
     /// ```
-    /// use bitstream_io::{BitCount, SignedBitCount};
+    /// use oximedia_bitstream::{BitCount, SignedBitCount};
     ///
     /// let count = BitCount::<10>::new::<5>();
     /// assert_eq!(count.signed_count(), Some(SignedBitCount::<10>::new::<5>()));
@@ -248,7 +248,7 @@ impl<const MAX: u32> BitCount<MAX> {
     /// # Examples
     ///
     /// ```
-    /// use bitstream_io::BitCount;
+    /// use oximedia_bitstream::BitCount;
     ///
     /// // create a bit count of 3
     /// let count = BitCount::<8>::new::<3>();
@@ -270,7 +270,7 @@ impl<const MAX: u32> BitCount<MAX> {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::BitCount;
+    /// use oximedia_bitstream::BitCount;
     ///
     /// // a mask with a bit count of 0 puts everything in msb
     /// let mask = BitCount::<8>::new::<0>().mask_lsb::<u8>();
@@ -317,7 +317,7 @@ impl<const MAX: u32> BitCount<MAX> {
     /// # Example
     ///
     /// ```
-    /// use bitstream_io::BitCount;
+    /// use oximedia_bitstream::BitCount;
     ///
     /// assert_eq!(BitCount::<9>::new::<0>().range::<u8>(), 0..=0);
     /// assert_eq!(BitCount::<9>::new::<1>().range::<u8>(), 0..=0b1);
@@ -345,7 +345,7 @@ impl<const MAX: u32> BitCount<MAX> {
     /// # Example
     ///
     /// ```
-    /// use bitstream_io::BitCount;
+    /// use oximedia_bitstream::BitCount;
     ///
     /// let count = BitCount::<8>::new::<7>();
     /// assert_eq!(count.min(6), BitCount::new::<6>());
@@ -365,7 +365,7 @@ impl<const MAX: u32> BitCount<MAX> {
     /// # Example
     ///
     /// ```
-    /// use bitstream_io::BitCount;
+    /// use oximedia_bitstream::BitCount;
     ///
     /// assert_eq!(BitCount::<8>::new::<0>().none::<u8>().into_value(), 0b0);
     /// assert_eq!(BitCount::<8>::new::<1>().none::<u8>().into_value(), 0b0);
@@ -390,7 +390,7 @@ impl<const MAX: u32> BitCount<MAX> {
     /// # Example
     ///
     /// ```
-    /// use bitstream_io::BitCount;
+    /// use oximedia_bitstream::BitCount;
     ///
     /// assert_eq!(BitCount::<8>::new::<0>().all::<u8>().into_value(), 0b0);
     /// assert_eq!(BitCount::<8>::new::<1>().all::<u8>().into_value(), 0b1);
@@ -424,7 +424,7 @@ impl<const MAX: u32> core::convert::TryFrom<u32> for BitCount<MAX> {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::BitCount;
+    /// use oximedia_bitstream::BitCount;
     /// use std::convert::TryInto;
     ///
     /// assert_eq!(8u32.try_into(), Ok(BitCount::<8>::new::<8>()));
@@ -446,7 +446,7 @@ impl BitCount<{ u32::MAX }> {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::BitCount;
+    /// use oximedia_bitstream::BitCount;
     /// assert_eq!(BitCount::unknown(5), BitCount::<{ u32::MAX }>::new::<5>());
     /// ```
     pub const fn unknown(bits: u32) -> Self {
@@ -476,7 +476,7 @@ impl<const MAX: u32> From<BitCount<MAX>> for u32 {
 /// Let's start with a basic example:
 ///
 /// ```
-/// use bitstream_io::{BitRead, BitReader, BigEndian};
+/// use oximedia_bitstream::{BitRead, BitReader, BigEndian};
 ///
 /// let data: &[u8] = &[0b100_0001_1, 0b111_0110_0];
 /// let mut r = BitReader::endian(data, BigEndian);
@@ -501,7 +501,7 @@ impl<const MAX: u32> From<BitCount<MAX>> for u32 {
 ///
 /// But we can convert our example to use the `SignedBitCount` type:
 /// ```
-/// use bitstream_io::{BitRead, BitReader, BigEndian, SignedBitCount};
+/// use oximedia_bitstream::{BitRead, BitReader, BigEndian, SignedBitCount};
 ///
 /// let data: &[u8] = &[0b100_0001_1, 0b111_0110_0];
 /// let mut r = BitReader::endian(data, BigEndian);
@@ -549,7 +549,7 @@ impl<const MAX: u32> SignedBitCount<MAX> {
     /// # Examples
     ///
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian, SignedBitCount};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian, SignedBitCount};
     /// let data: &[u8] = &[0b111_00000];
     /// let mut r = BitReader::endian(data, BigEndian);
     /// // reading 3 bits from a stream out of a maximum of 8
@@ -560,14 +560,14 @@ impl<const MAX: u32> SignedBitCount<MAX> {
     /// ```
     ///
     /// ```rust,compile_fail
-    /// use bitstream_io::SignedBitCount;
+    /// use oximedia_bitstream::SignedBitCount;
     /// // trying to build a count of 10 with a maximum of 8
     /// // fails to compile at all
     /// let count = SignedBitCount::<8>::new::<10>();
     /// ```
     ///
     /// ```rust,compile_fail
-    /// use bitstream_io::SignedBitCount;
+    /// use oximedia_bitstream::SignedBitCount;
     /// // trying to build a count of 0 also fails to compile
     /// let count = SignedBitCount::<8>::new::<0>();
     /// ```
@@ -590,7 +590,7 @@ impl<const MAX: u32> SignedBitCount<MAX> {
     /// # Examples
     ///
     /// ```
-    /// use bitstream_io::SignedBitCount;
+    /// use oximedia_bitstream::SignedBitCount;
     ///
     /// let count = SignedBitCount::<2>::new::<1>();
     /// // adding 2 to 1 and increasing the max to 3 yields a new count of 3
@@ -623,7 +623,7 @@ impl<const MAX: u32> SignedBitCount<MAX> {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::SignedBitCount;
+    /// use oximedia_bitstream::SignedBitCount;
     /// let count = SignedBitCount::<5>::new::<5>();
     /// // subtracting 1 from 5 yields a new count of 4
     /// assert_eq!(count.checked_sub::<5>(1), Some(SignedBitCount::<5>::new::<4>()));
@@ -663,7 +663,7 @@ impl<const MAX: u32> SignedBitCount<MAX> {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::SignedBitCount;
+    /// use oximedia_bitstream::SignedBitCount;
     ///
     /// let count = SignedBitCount::<5>::new::<5>();
     /// // muliplying 5 bits by 2 with a new max of 10 is ok
@@ -691,7 +691,7 @@ impl<const MAX: u32> SignedBitCount<MAX> {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::SignedBitCount;
+    /// use oximedia_bitstream::SignedBitCount;
     ///
     /// let count = SignedBitCount::<10>::new::<5>();
     /// assert_eq!(count.max(), 10);
@@ -706,7 +706,7 @@ impl<const MAX: u32> SignedBitCount<MAX> {
     /// # Example
     ///
     /// ```
-    /// use bitstream_io::{BitCount, SignedBitCount};
+    /// use oximedia_bitstream::{BitCount, SignedBitCount};
     ///
     /// let signed_count = SignedBitCount::<10>::new::<5>();
     /// assert_eq!(signed_count.count(), BitCount::<10>::new::<5>());
@@ -721,7 +721,7 @@ impl<const MAX: u32> SignedBitCount<MAX> {
     /// # Example
     ///
     /// ```
-    /// use bitstream_io::SignedBitCount;
+    /// use oximedia_bitstream::SignedBitCount;
     ///
     /// assert_eq!(SignedBitCount::<9>::new::<1>().range::<i8>(), -1..=0);
     /// assert_eq!(SignedBitCount::<9>::new::<2>().range::<i8>(), -2..=1);

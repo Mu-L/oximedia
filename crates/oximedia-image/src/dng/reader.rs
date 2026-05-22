@@ -3,6 +3,8 @@
 use crate::error::{ImageError, ImageResult};
 
 use super::constants::*;
+use super::jpeg_baseline::decode_baseline_jpeg;
+use super::jpeg_lossless::{decode_lossless_jpeg, deinterleave_cfa};
 use super::parser::{tiff_type_size, TiffIfd, TiffParser};
 use super::types::{CfaPattern, DngCompression, DngImage, DngMetadata};
 
@@ -299,6 +301,33 @@ impl DngReader {
             ));
         }
 
+        // JPEG-based compressions decode directly to 16-bit samples; the bit
+        // unpacker is bypassed entirely. Each strip is an independent JPEG
+        // datastream covering a horizontal band of `rows_per_strip` rows.
+        match compression {
+            DngCompression::LosslessJpeg => {
+                return Self::decode_lossless_jpeg_strips(
+                    parser,
+                    ifd,
+                    data,
+                    width,
+                    height,
+                    &strip_offsets,
+                    &strip_byte_counts,
+                );
+            }
+            DngCompression::LossyDng => {
+                return Self::decode_lossy_dng_strips(
+                    data,
+                    width,
+                    height,
+                    &strip_offsets,
+                    &strip_byte_counts,
+                );
+            }
+            DngCompression::Uncompressed | DngCompression::Deflate => {}
+        }
+
         // Read all strips into a contiguous buffer
         let mut raw_bytes = Vec::new();
         for (offset, count) in strip_offsets.iter().zip(&strip_byte_counts) {
@@ -317,17 +346,127 @@ impl DngReader {
                     let decompressed = decompress_deflate_dng(strip_data)?;
                     raw_bytes.extend_from_slice(&decompressed);
                 }
-                DngCompression::LosslessJpeg | DngCompression::LossyDng => {
-                    return Err(ImageError::unsupported(format!(
-                        "DNG compression {:?} not yet implemented",
-                        compression
-                    )));
-                }
+                DngCompression::LosslessJpeg | DngCompression::LossyDng => unreachable!(
+                    "JPEG-based compressions are handled before the byte-concatenation path"
+                ),
             }
         }
 
         // Unpack bits to u16
         Self::unpack_bits(&raw_bytes, bps, pixel_count)
+    }
+
+    /// Decode lossless-JPEG (TIFF compression 7) strips into a CFA raster.
+    ///
+    /// Each strip is a complete lossless-JPEG datastream (ITU-T T.81 Annex H,
+    /// process 14). Adobe's DNG converter packs the Bayer mosaic into a
+    /// 2-component-per-pixel image whose width is `cfa_width / components`;
+    /// [`deinterleave_cfa`] reverses that packing. The decoded `u16` samples
+    /// are placed row-by-row into the full-image raster.
+    fn decode_lossless_jpeg_strips(
+        parser: &TiffParser,
+        ifd: &TiffIfd,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        strip_offsets: &[u32],
+        strip_byte_counts: &[u32],
+    ) -> ImageResult<Vec<u16>> {
+        let width_usize = width as usize;
+        let height_usize = height as usize;
+        let mut raster = vec![0u16; width_usize * height_usize];
+
+        // RowsPerStrip determines where each strip's band begins. When the tag
+        // is absent the whole image is a single strip.
+        let rows_per_strip = parser
+            .get_tag_value_u32(ifd, TAG_ROWS_PER_STRIP, data)
+            .filter(|&r| r > 0)
+            .unwrap_or(height) as usize;
+
+        for (strip_index, (offset, count)) in strip_offsets
+            .iter()
+            .zip(strip_byte_counts.iter())
+            .enumerate()
+        {
+            let off = *offset as usize;
+            let cnt = *count as usize;
+            if off + cnt > data.len() {
+                return Err(ImageError::invalid_format(
+                    "Lossless JPEG strip extends beyond file",
+                ));
+            }
+            let strip_bytes = &data[off..off + cnt];
+            let image = decode_lossless_jpeg(strip_bytes)?;
+
+            let row_start = strip_index * rows_per_strip;
+            if row_start >= height_usize {
+                break;
+            }
+            let band_rows = rows_per_strip.min(height_usize - row_start);
+            // De-interleave the strip's component packing into CFA columns.
+            let cfa = deinterleave_cfa(&image, width, band_rows as u32)?;
+            let band_start = row_start * width_usize;
+            let band_len = band_rows * width_usize;
+            raster[band_start..band_start + band_len].copy_from_slice(&cfa[..band_len]);
+        }
+
+        Ok(raster)
+    }
+
+    /// Decode lossy-DNG (TIFF compression 34892) strips into a sample raster.
+    ///
+    /// DNG 1.4 lossy stores gamma-encoded raw data as a baseline 8-bit DCT
+    /// JPEG. The decoded 8-bit luma samples are widened to `u16`; the inverse
+    /// gamma is applied later by the opcode/scale pipeline. Single-component
+    /// JPEGs map directly to the CFA mosaic; multi-component JPEGs contribute
+    /// their first plane (DNG lossy tiles are single-component mosaics).
+    fn decode_lossy_dng_strips(
+        data: &[u8],
+        width: u32,
+        height: u32,
+        strip_offsets: &[u32],
+        strip_byte_counts: &[u32],
+    ) -> ImageResult<Vec<u16>> {
+        let width_usize = width as usize;
+        let height_usize = height as usize;
+        let mut raster = vec![0u16; width_usize * height_usize];
+        let mut row_cursor = 0usize;
+
+        for (offset, count) in strip_offsets.iter().zip(strip_byte_counts.iter()) {
+            let off = *offset as usize;
+            let cnt = *count as usize;
+            if off + cnt > data.len() {
+                return Err(ImageError::invalid_format(
+                    "Lossy DNG strip extends beyond file",
+                ));
+            }
+            let strip_bytes = &data[off..off + cnt];
+            let image = decode_baseline_jpeg(strip_bytes)?;
+            let plane = image.planes.first().ok_or_else(|| {
+                ImageError::compression("Lossy DNG: baseline JPEG produced no planes")
+            })?;
+
+            let plane_w = plane.width as usize;
+            let plane_h = plane.height as usize;
+            let copy_w = plane_w.min(width_usize);
+            for y in 0..plane_h {
+                let dst_row = row_cursor + y;
+                if dst_row >= height_usize {
+                    break;
+                }
+                let src = y * plane_w;
+                let dst = dst_row * width_usize;
+                for x in 0..copy_w {
+                    raster[dst + x] = u16::from(plane.samples[src + x]);
+                }
+            }
+            row_cursor += plane_h;
+            if row_cursor >= height_usize {
+                break;
+            }
+        }
+
+        Ok(raster)
     }
 
     /// Unpack packed bit data into u16 values.

@@ -460,6 +460,73 @@ fn xml_escape(s: &str) -> String {
     out
 }
 
+// ─── Async writers (feature = "async") ───────────────────────────────────────
+
+#[cfg(feature = "async")]
+mod async_io {
+    use super::{
+        build_dash_mpd, build_master_playlist, build_media_playlist, DashMpd, HlsManifest,
+        StreamVariant,
+    };
+    use crate::StreamError;
+    use tokio::io::{AsyncWrite, AsyncWriteExt};
+
+    /// Async wrapper around [`build_master_playlist`] that streams the rendered
+    /// playlist to an [`AsyncWrite`] sink.
+    ///
+    /// Equivalent to writing the result of [`build_master_playlist`] verbatim;
+    /// useful when the segment pipeline drives a non-blocking I/O target.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::IoError`] if the underlying writer fails.
+    pub async fn write_master_playlist_async<W: AsyncWrite + Unpin>(
+        variants: &[StreamVariant],
+        w: &mut W,
+    ) -> Result<(), StreamError> {
+        let s = build_master_playlist(variants);
+        w.write_all(s.as_bytes())
+            .await
+            .map_err(|e| StreamError::IoError(format!("master playlist write: {e}")))?;
+        Ok(())
+    }
+
+    /// Async wrapper around [`build_media_playlist`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::IoError`] if the underlying writer fails.
+    pub async fn write_media_playlist_async<W: AsyncWrite + Unpin>(
+        manifest: &HlsManifest,
+        w: &mut W,
+    ) -> Result<(), StreamError> {
+        let s = build_media_playlist(manifest);
+        w.write_all(s.as_bytes())
+            .await
+            .map_err(|e| StreamError::IoError(format!("media playlist write: {e}")))?;
+        Ok(())
+    }
+
+    /// Async wrapper around [`build_dash_mpd`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::IoError`] if the underlying writer fails.
+    pub async fn write_dash_mpd_async<W: AsyncWrite + Unpin>(
+        mpd: &DashMpd,
+        w: &mut W,
+    ) -> Result<(), StreamError> {
+        let s = build_dash_mpd(mpd);
+        w.write_all(s.as_bytes())
+            .await
+            .map_err(|e| StreamError::IoError(format!("dash mpd write: {e}")))?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "async")]
+pub use async_io::{write_dash_mpd_async, write_master_playlist_async, write_media_playlist_async};
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

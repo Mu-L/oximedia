@@ -784,3 +784,182 @@ mod tests {
         assert_eq!(TaskType::ConvertFormat.as_str(), "Convert Format");
     }
 }
+
+// ── AudiopostPipeline ─────────────────────────────────────────────────────────
+
+/// Configuration for each DSP stage in `AudiopostPipeline`.
+#[derive(Debug, Clone)]
+pub struct PipelineStageConfig {
+    /// Enable the declick stage.
+    pub declick: bool,
+    /// Enable the spectral-subtraction denoise stage.
+    pub denoise: bool,
+    /// Enable the sound-design chain (reverb → chorus → distortion) stage.
+    pub sound_design: bool,
+    /// Enable the loudness normalisation stage.
+    pub normalize_loudness: bool,
+    /// Target integrated loudness in LUFS (used when `normalize_loudness` is true).
+    pub target_lufs: f32,
+    /// Maximum true-peak in dBTP (used when `normalize_loudness` is true).
+    pub max_true_peak_dbtp: f32,
+}
+
+impl Default for PipelineStageConfig {
+    fn default() -> Self {
+        Self {
+            declick: true,
+            denoise: true,
+            sound_design: false,
+            normalize_loudness: true,
+            target_lufs: -23.0,
+            max_true_peak_dbtp: -1.0,
+        }
+    }
+}
+
+/// Summary output produced by `AudiopostPipeline::process`.
+#[derive(Debug, Clone)]
+pub struct PipelineOutput {
+    /// Processed audio samples.
+    pub samples: Vec<f32>,
+    /// Integrated loudness measured on the output (LUFS).
+    pub integrated_lufs: f64,
+    /// True-peak measured on the output (dBTP).
+    pub true_peak_dbtp: f64,
+    /// Number of clicks detected and repaired (0 if declick stage was bypassed).
+    pub clicks_repaired: usize,
+}
+
+/// Sequential DSP pipeline: declick → denoise → sound_design → loudness normalisation → metering tap.
+///
+/// Each stage is individually bypassable via [`PipelineStageConfig`].
+///
+/// Note: `process` takes `&mut self` because the optional
+/// [`crate::sound_design::SoundDesignChain`] holds mutable internal state
+/// (delay-line buffers for chorus and reverb).
+///
+/// ```
+/// # use oximedia_audiopost::workflow::{AudiopostPipeline, PipelineStageConfig};
+/// let mut pipeline = AudiopostPipeline::new(48000, PipelineStageConfig::default())
+///     .expect("valid sample rate");
+/// ```
+pub struct AudiopostPipeline {
+    sample_rate: u32,
+    config: PipelineStageConfig,
+    /// Optional sound-design chain; present when `config.sound_design` is true.
+    sound_chain: Option<crate::sound_design::SoundDesignChain>,
+}
+
+impl AudiopostPipeline {
+    /// Create a new pipeline.
+    ///
+    /// When `config.sound_design` is `true` a default
+    /// [`crate::sound_design::SoundDesignChain`] (all stages bypassed) is
+    /// initialised.  You can add reverb / chorus / distortion afterwards by
+    /// rebuilding the pipeline with a custom chain via
+    /// [`AudiopostPipeline::with_sound_chain`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioPostError::InvalidSampleRate`] for a zero sample rate.
+    pub fn new(sample_rate: u32, config: PipelineStageConfig) -> AudioPostResult<Self> {
+        if sample_rate == 0 {
+            return Err(AudioPostError::InvalidSampleRate(sample_rate));
+        }
+        // Build a pass-through chain only when the stage is enabled.
+        let sound_chain = if config.sound_design {
+            Some(crate::sound_design::SoundDesignChain::new(sample_rate)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            sample_rate,
+            config,
+            sound_chain,
+        })
+    }
+
+    /// Replace (or install) the sound-design chain and enable the stage.
+    ///
+    /// This lets callers configure reverb / chorus / distortion before
+    /// the first `process` call.
+    #[must_use]
+    pub fn with_sound_chain(mut self, chain: crate::sound_design::SoundDesignChain) -> Self {
+        self.sound_chain = Some(chain);
+        self.config.sound_design = true;
+        self
+    }
+
+    /// Process `samples` through the enabled DSP stages.
+    ///
+    /// Returns a [`PipelineOutput`] containing the processed audio and
+    /// metering data measured at the output.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from the individual DSP stages.
+    pub fn process(&mut self, samples: &[f32]) -> AudioPostResult<PipelineOutput> {
+        if samples.is_empty() {
+            return Err(AudioPostError::InvalidBufferSize(0));
+        }
+
+        let mut buf = samples.to_vec();
+        let mut clicks_repaired = 0_usize;
+
+        // Stage 1 – Declick (MAD-based transient detection + cubic Hermite interpolation).
+        if self.config.declick {
+            let click_cfg = crate::restoration::DeclickConfig::default();
+            // Count detected clicks before repairing.
+            let first_diff: Vec<f32> = buf.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+            let mut sorted_diffs = first_diff.clone();
+            sorted_diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let m = sorted_diffs.len();
+            let mad_median = if m == 0 {
+                1e-9_f32
+            } else if m % 2 == 1 {
+                sorted_diffs[m / 2]
+            } else {
+                (sorted_diffs[m / 2 - 1] + sorted_diffs[m / 2]) / 2.0
+            }
+            .max(1e-9);
+            let threshold = click_cfg.mad_threshold * mad_median;
+            clicks_repaired = first_diff.iter().filter(|&&d| d > threshold).count();
+
+            buf = crate::restoration::declick(&buf, &click_cfg)?;
+        }
+
+        // Stage 2 – Spectral subtraction denoise.
+        if self.config.denoise {
+            let ss_cfg = crate::restoration::SpectralSubtractionConfig::default();
+            buf = crate::restoration::spectral_subtract(&buf, &ss_cfg)?;
+        }
+
+        // Stage 3 – Sound-design chain (reverb → chorus → distortion).
+        if self.config.sound_design {
+            if let Some(ref mut chain) = self.sound_chain {
+                buf = chain.process(&buf);
+            }
+        }
+
+        // Stage 4 – Loudness normalisation.
+        if self.config.normalize_loudness {
+            let delivery_cfg = crate::delivery::DeliveryConfig {
+                target_lufs: self.config.target_lufs,
+                max_true_peak_dbtp: self.config.max_true_peak_dbtp,
+                tolerance_lu: 0.5,
+            };
+            buf = crate::delivery::normalize_loudness(&buf, self.sample_rate, &delivery_cfg)?;
+        }
+
+        // Metering tap on the output.
+        let measurement =
+            oximedia_audio::loudness_gating::GatedLoudnessMeter::measure(&buf, self.sample_rate, 1);
+
+        Ok(PipelineOutput {
+            samples: buf,
+            integrated_lufs: measurement.integrated_lufs,
+            true_peak_dbtp: measurement.true_peak_dbtp,
+            clicks_repaired,
+        })
+    }
+}

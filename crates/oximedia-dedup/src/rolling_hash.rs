@@ -14,6 +14,10 @@
 //! - [`ChunkBoundary`] - A detected chunk boundary with offset and hash
 //! - [`ChunkerConfig`] - Configuration for content-defined chunking
 //! - [`ContentChunker`] - Splits a byte stream into content-defined chunks
+//! - [`RollingHashStream`] - Streaming Rabin-fingerprint iterator over `Read` sources
+
+use std::collections::VecDeque;
+use std::io::{self, Read};
 
 /// Configuration for the content-defined chunker.
 #[derive(Debug, Clone)]
@@ -316,6 +320,181 @@ pub fn chunk_bytes(data: &[u8], config: ChunkerConfig) -> Vec<ChunkBoundary> {
     all
 }
 
+// ── Rabin-fingerprint streaming iterator ─────────────────────────────────────
+
+/// Internal read buffer size used by [`RollingHashStream`].
+const CHUNK_SIZE: usize = 65_536;
+
+/// Rabin-fingerprint rolling hash multiplier (odd prime for good diffusion).
+const RABIN_BASE: u64 = 0x08D3_B1B9_ADFA_BC4D;
+
+/// A streaming Rabin-fingerprint rolling hash over an arbitrary [`Read`] source.
+///
+/// Each call to `next()` advances the window by one byte and yields
+/// `(byte_offset, hash)` where `byte_offset` is the 0-based index of the
+/// leading byte of the current window.
+///
+/// The hash is computed as:
+/// ```text
+/// hash = (hash * BASE + byte_in) XOR (BASE^window_size * byte_out)
+/// ```
+/// with `BASE^window_size` pre-computed at construction time.
+pub struct RollingHashStream<R: Read> {
+    /// Wrapped reader.
+    inner: R,
+    /// Sliding window of the last `window_size` bytes.
+    window: VecDeque<u8>,
+    /// Window size in bytes.
+    window_size: usize,
+    /// Current hash value.
+    hash: u64,
+    /// Current byte offset (index of leading byte of window).
+    pos: u64,
+    /// Pre-computed `BASE^window_size` for O(1) removal of oldest byte.
+    pow_table: u64,
+    /// Read buffer (heap-allocated to avoid large stack arrays).
+    buf: Box<[u8]>,
+    /// Valid bytes in `buf`.
+    buf_len: usize,
+    /// Cursor inside `buf`.
+    buf_pos: usize,
+    /// Whether the underlying reader is exhausted.
+    eof: bool,
+    /// Whether the iterator has been fully consumed (including EOF state).
+    done: bool,
+}
+
+impl<R: Read> RollingHashStream<R> {
+    /// Create a new streaming rolling hash with the given window size.
+    ///
+    /// The window is "warmed up" by the first `window_size` bytes fed, after
+    /// which each subsequent byte produces a yielded `(offset, hash)` pair.
+    #[must_use]
+    pub fn new(inner: R, window_size: usize) -> Self {
+        let window_size = window_size.max(1);
+        // Pre-compute BASE^window_size mod 2^64.
+        let pow_table = (0..window_size).fold(1u64, |acc, _| acc.wrapping_mul(RABIN_BASE));
+        Self {
+            inner,
+            window: VecDeque::with_capacity(window_size),
+            window_size,
+            hash: 0,
+            pos: 0,
+            pow_table,
+            buf: vec![0u8; CHUNK_SIZE].into_boxed_slice(),
+            buf_len: 0,
+            buf_pos: 0,
+            eof: false,
+            done: false,
+        }
+    }
+
+    /// Read the next byte from the buffered inner reader.
+    ///
+    /// Returns `Ok(Some(byte))`, `Ok(None)` at EOF, or `Err(io::Error)`.
+    fn read_byte(&mut self) -> io::Result<Option<u8>> {
+        if self.buf_pos >= self.buf_len {
+            if self.eof {
+                return Ok(None);
+            }
+            let n = self.inner.read(&mut self.buf[..])?;
+            if n == 0 {
+                self.eof = true;
+                return Ok(None);
+            }
+            self.buf_len = n;
+            self.buf_pos = 0;
+        }
+        let byte = self.buf[self.buf_pos];
+        self.buf_pos += 1;
+        Ok(Some(byte))
+    }
+}
+
+impl<R: Read> Iterator for RollingHashStream<R> {
+    /// `(byte_offset_of_window_start, rolling_hash)`.
+    type Item = io::Result<(u64, u64)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        // Feed bytes until the window is full and we can yield.
+        loop {
+            let byte = match self.read_byte() {
+                Ok(Some(b)) => b,
+                Ok(None) => {
+                    self.done = true;
+                    return None;
+                }
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
+            };
+
+            // Remove the oldest byte from the window (if full).
+            let byte_out = if self.window.len() == self.window_size {
+                self.window.pop_front()
+            } else {
+                None
+            };
+
+            self.window.push_back(byte);
+
+            // Update Rabin hash:
+            //   hash = hash * BASE + byte_in
+            //   hash ^= pow(BASE, window_size) * byte_out  (if window was full)
+            self.hash = self
+                .hash
+                .wrapping_mul(RABIN_BASE)
+                .wrapping_add(u64::from(byte));
+            if let Some(out) = byte_out {
+                self.hash ^= self.pow_table.wrapping_mul(u64::from(out));
+            }
+
+            self.pos += 1;
+
+            // Only yield once the window is fully filled.
+            if self.window.len() == self.window_size {
+                let window_start = self.pos - self.window_size as u64;
+                return Some(Ok((window_start, self.hash)));
+            }
+        }
+    }
+}
+
+/// Compute rolling hashes over a byte slice using the same Rabin formula as
+/// [`RollingHashStream`], for comparison and testing.
+///
+/// Returns one `(offset, hash)` per position once the window is filled.
+#[must_use]
+pub fn rolling_hash_slice(data: &[u8], window_size: usize) -> Vec<(u64, u64)> {
+    let window_size = window_size.max(1);
+    let pow_table = (0..window_size).fold(1u64, |acc, _| acc.wrapping_mul(RABIN_BASE));
+    let mut window: VecDeque<u8> = VecDeque::with_capacity(window_size);
+    let mut hash: u64 = 0;
+    let mut results = Vec::with_capacity(data.len().saturating_sub(window_size) + 1);
+
+    for (i, &byte) in data.iter().enumerate() {
+        let byte_out = if window.len() == window_size {
+            window.pop_front()
+        } else {
+            None
+        };
+        window.push_back(byte);
+        hash = hash.wrapping_mul(RABIN_BASE).wrapping_add(u64::from(byte));
+        if let Some(out) = byte_out {
+            hash ^= pow_table.wrapping_mul(u64::from(out));
+        }
+        if window.len() == window_size {
+            let offset = (i + 1 - window_size) as u64;
+            results.push((offset, hash));
+        }
+    }
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,5 +651,59 @@ mod tests {
             chunk_len: 50,
         };
         assert_eq!(a, b);
+    }
+
+    // ── RollingHashStream tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_rolling_hash_stream_matches_slice() {
+        // Feed the same data through both APIs and assert identical results.
+        let data: Vec<u8> = (0u8..=255).cycle().take(1024).collect();
+        let window_size = 32;
+
+        // Slice-based reference.
+        let expected = rolling_hash_slice(&data, window_size);
+
+        // Stream-based.
+        let cursor = std::io::Cursor::new(&data);
+        let stream = RollingHashStream::new(cursor, window_size);
+        let actual: Vec<(u64, u64)> = stream
+            .map(|r| r.expect("stream should not error"))
+            .collect();
+
+        assert_eq!(
+            expected.len(),
+            actual.len(),
+            "number of hash pairs must match"
+        );
+        for (i, (exp, got)) in expected.iter().zip(actual.iter()).enumerate() {
+            assert_eq!(
+                exp, got,
+                "hash mismatch at position {i}: expected {exp:?}, got {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rolling_hash_stream_large_data() {
+        // Stream 4 MB of synthetic data and verify no panic and reasonable count.
+        const MB4: usize = 4 * 1024 * 1024;
+        let data: Vec<u8> = (0u8..=255).cycle().take(MB4).collect();
+        let window_size = 64;
+
+        let cursor = std::io::Cursor::new(&data);
+        let stream = RollingHashStream::new(cursor, window_size);
+        let mut count = 0usize;
+        for item in stream {
+            let _ = item.expect("stream should not error");
+            count += 1;
+        }
+
+        // Expect exactly MB4 - window_size + 1 hash pairs.
+        let expected_count = MB4 - window_size + 1;
+        assert_eq!(
+            count, expected_count,
+            "expected {expected_count} hash pairs, got {count}"
+        );
     }
 }

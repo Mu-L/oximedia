@@ -22,7 +22,7 @@ thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true }
 rayon = { workspace = true }
-quick-xml = "0.39"
+quick-xml = { workspace = true }
 oxiarc-archive = { workspace = true }
 sha2 = { workspace = true }
 md-5 = "0.11"

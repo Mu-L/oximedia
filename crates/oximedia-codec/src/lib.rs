@@ -11,6 +11,7 @@
 //! - **MJPEG** — Motion JPEG, one JPEG baseline frame per video frame (feature `mjpeg`)
 //! - **APV** — Advanced Professional Video, ISO/IEC 23009-13 (feature `apv`)
 //! - **FFV1** — Lossless video codec, RFC 9043 (feature `ffv1`)
+//! - **ProRes 422** — Apple ProRes post-production intermediate (feature `prores`)
 //!
 //! ## Audio Codecs
 //!
@@ -41,6 +42,7 @@
 //! | APV | ✓ | ✓ | 8, 10, 12 | 4:2:0, 4:2:2, 4:4:4 |
 //! | FFV1 | ✓ | ✓ | 8 | 4:2:0, 4:2:2, 4:4:4 |
 //! | H.263 | ✓ | ✓ | 8 | 4:2:0 |
+//! | ProRes 422 | — | ✓ | 10 | 4:2:2 |
 //! | JPEG-XL | ✓ | ✓ | 8, 10, 12 | 4:2:0, 4:2:2, 4:4:4 |
 //! | AVIF/AV1 | ✓ | ✓ | 8, 10, 12 | 4:2:0, 4:4:4 |
 //! | APNG/PNG | ✓ | ✓ | 8, 16 | RGBA, Grayscale |
@@ -55,7 +57,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! oximedia-codec = { version = "0.1.6", features = ["av1", "vp9", "opus", "jpegxl"] }
+//! oximedia-codec = { version = "0.1.7", features = ["av1", "vp9", "opus", "jpegxl"] }
 //! ```
 //!
 //! Available features: `av1` (default), `vp9`, `vp8`, `theora`, `h263`, `opus`,
@@ -371,6 +373,28 @@ pub mod mjpeg;
 #[cfg(feature = "apv")]
 pub mod apv;
 
+#[cfg(feature = "prores")]
+pub mod prores;
+
+#[cfg(feature = "dnxhd")]
+pub mod dnxhd;
+
+#[cfg(feature = "jpeg2000")]
+pub mod jpeg2000;
+
+#[cfg(feature = "jpegxs")]
+pub mod jpegxs;
+
+#[cfg(feature = "jpegls")]
+pub mod jpegls;
+
+#[cfg(feature = "mpeg2")]
+pub mod mpeg2;
+
+// ALAC (Apple Lossless) audio codec (encoder + decoder)
+#[cfg(feature = "alac")]
+pub mod alac;
+
 // Re-exports
 pub use audio::{AudioFrame, ChannelLayout, SampleFormat};
 pub use error::{CodecError, CodecResult};
@@ -443,6 +467,21 @@ pub use mjpeg::{MjpegConfig, MjpegDecoder, MjpegEncoder, MjpegError};
 
 #[cfg(feature = "apv")]
 pub use apv::{ApvConfig, ApvDecoder, ApvEncoder, ApvError};
+
+#[cfg(feature = "prores")]
+pub use prores::{
+    decode_slice_to_yuv422, encode_block, encode_signed_codeword, encode_slice,
+    encode_unsigned_codeword, fdct_8x8, quantize_block, split_slice_planes, write_frame, BitReader,
+    BitWriter, ChromaFormat, DecodeError, FrameContainer, FrameError, FrameHeader, InterlaceMode,
+    PictureHeader, ProResDecoder, ProResDecoderConfig, ProResEncoder, ProResEncoderConfig,
+    ProResFrame, ProResProfile, SliceData, SliceHeader,
+};
+
+#[cfg(feature = "mpeg2")]
+pub use mpeg2::{Mpeg2Decoder, Mpeg2Error, Mpeg2Frame};
+
+#[cfg(feature = "alac")]
+pub use alac::{AlacDecoder, AlacEncoder, AlacEncoderConfig, AlacError, AlacSpecificConfig};
 
 #[cfg(feature = "image-io")]
 pub use image::{

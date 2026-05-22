@@ -98,11 +98,11 @@ The workspace member declares 11 Criterion harnesses. All of them set
 
 ## Enhancements
 
-- [ ] Reconcile legacy files: either register `codec_benchmark.rs` and
-  `filter_benchmark.rs` as `[[bench]]` entries (e.g.
-  `codec_encode_bench`, `filter_bench`) or fold their useful cases into the
-  existing `codec_bench.rs` / `graph_bench.rs` and delete the originals so
-  contributors cannot accidentally edit dead code.
+- [x] Reconcile legacy files: registered `codec_benchmark.rs` and
+  `filter_benchmark.rs` as `[[bench]]` entries (`codec_encode_bench` and
+  `filter_bench`) with `harness = false` in benches/Cargo.toml; fixed
+  compile errors in filter_benchmark.rs (deref &usize, checked_div, dropped
+  stray enumerate()); cargo check --benches passes cleanly (implemented/verified 2026-05-15).
 - [ ] Update `run_benchmarks.sh` so its full-suite loop runs all 11
   registered benches (today it only invokes four). Add a plain `cargo bench
   --manifest-path benches/Cargo.toml` fallback that exercises every target.

@@ -44,6 +44,7 @@ prometheus = { workspace = true }
 oxiarc-deflate = { workspace = true }
 oxiarc-archive = { workspace = true }
 walkdir = "2.5"
+memmap2 = { workspace = true }
 sha2 = { workspace = true }
 hex = "0.4"
 num_cpus = "1.17"
@@ -56,10 +57,10 @@ rusqlite = { workspace = true, optional = true }
 r2d2 = { workspace = true, optional = true }
 r2d2_sqlite = { workspace = true, optional = true }
 notify = "8.2"
-mlua = { version = "0.11", features = ["lua54", "vendored", "async", "serialize"], optional = true }
-axum = "0.8"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+mlua = { workspace = true, optional = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
 hyper = { workspace = true }
 reqwest = { workspace = true }
 

@@ -11,24 +11,24 @@
 - Dependencies: oximedia-core, oximedia-audio, serde
 
 ## Enhancements
-- [ ] Implement `std::ops::Add` and `std::ops::Sub` for `Timecode` to enable `tc1 + tc2` arithmetic directly
-- [ ] Add `Timecode::from_string` parser that accepts "HH:MM:SS:FF" and "HH:MM:SS;FF" (drop frame semicolon)
-- [ ] Extend `FrameRate` to support 47.952 fps (used in some cinema workflows) and 120 fps
-- [ ] Add `Timecode::to_seconds_f64` convenience method for quick floating-point time conversion
-- [ ] Implement `Ord` and `PartialOrd` for `Timecode` based on total frame count
-- [ ] Extend `tc_validator` to detect and report non-monotonic timecode sequences in streams
-- [ ] Add SMPTE 309M support in `vitc` encoder for HD VITC (ATC/LTC embedded in HD-SDI ancillary data)
-- [ ] Improve `drop_frame` module with exact frame-accurate drop frame calculation (current from_frames uses approximation)
+- [x] Implement `std::ops::Add` and `std::ops::Sub` for `Timecode` to enable `tc1 + tc2` arithmetic directly (verified 2026-05-16; src/lib.rs:569 impl std::ops::Add for Timecode, :591 impl std::ops::Sub)
+- [x] Add `Timecode::from_string` parser that accepts "HH:MM:SS:FF" and "HH:MM:SS;FF" (drop frame semicolon) (verified 2026-05-16; src/lib.rs:351 fn from_string)
+- [ ] Extend `FrameRate` to support 47.952 fps (used in some cinema workflows) and 120 fps (verified-open 2026-05-16: no 47.952 or 120fps variants in frame_rate.rs)
+- [x] Add `Timecode::to_seconds_f64` convenience method for quick floating-point time conversion (verified 2026-05-16; src/lib.rs:423 fn to_seconds_f64)
+- [x] Implement `Ord` and `PartialOrd` for `Timecode` based on total frame count (verified 2026-05-16; src/lib.rs:252 impl PartialOrd, :258 impl Ord)
+- [ ] Extend `tc_validator` to detect and report non-monotonic timecode sequences in streams (verified-open 2026-05-16: no non_monotonic detection in tc_validator.rs)
+- [ ] Add SMPTE 309M support in `vitc` encoder for HD VITC (ATC/LTC embedded in HD-SDI ancillary data) (verified-open 2026-05-16: no SMPTE 309M/ATC in vitc/encoder.rs)
+- [ ] Improve `drop_frame` module with exact frame-accurate drop frame calculation (current from_frames uses approximation) (verified-open 2026-05-16: no exact/precise from_frames variant in drop_frame.rs)
 
 ## New Features
-- [ ] Implement `timecode_generator` module for free-running timecode generation with configurable start time and frame rate
-- [ ] Add `timecode_overlay` module for rendering timecode as text overlay on video frames (integration with burn_in)
-- [ ] Implement `jam_sync` module for syncing local timecode generator to external timecode reference with holdover
-- [ ] Add `timecode_event` module for event-triggered timecode capture (mark in/out points, cue triggers)
-- [ ] Implement `ndf_to_df` and `df_to_ndf` conversion utilities in `tc_convert` for workflow interop
-- [x] Add `embedded_tc` module for reading/writing ATC (Ancillary Timecode) in SDI ancillary data packets
-- [x] Implement `timecode_log` module for recording timecode-stamped production notes and metadata events
-- [x] Add `timecode_display` module for formatting timecode in different regional conventions (SMPTE vs EBU)
+- [x] Implement `timecode_generator` module for free-running timecode generation with configurable start time and frame rate (verified 2026-05-16; src/timecode_generator.rs:19 TimecodeGenerator, 262 lines)
+- [x] Add `timecode_overlay` module for rendering timecode as text overlay on video frames (integration with burn_in) (verified 2026-05-16; src/timecode_overlay.rs:630 lines)
+- [x] Implement `jam_sync` module for syncing local timecode generator to external timecode reference with holdover (verified 2026-05-16; src/jam_sync.rs:80 JamSyncController, 448 lines)
+- [x] Add `timecode_event` module for event-triggered timecode capture (mark in/out points, cue triggers) (verified 2026-05-16; src/timecode_event.rs:60 TimecodeEvent, 378 lines)
+- [x] Implement `ndf_to_df` and `df_to_ndf` conversion utilities in `tc_convert` for workflow interop (verified 2026-05-16; src/tc_convert.rs:237 fn ndf_to_df, :267 fn df_to_ndf)
+- [x] Add `embedded_tc` module for reading/writing ATC (Ancillary Timecode) in SDI ancillary data packets (verified 2026-05-16; src/embedded_tc.rs:443 lines)
+- [x] Implement `timecode_log` module for recording timecode-stamped production notes and metadata events (verified 2026-05-16; src/timecode_log.rs:490 lines)
+- [x] Add `timecode_display` module for formatting timecode in different regional conventions (SMPTE vs EBU) (verified 2026-05-16; src/timecode_display.rs:360 lines)
 
 ## Performance
 - [ ] Cache frame count in `Timecode` struct to avoid recomputing `to_frames()` on repeated access

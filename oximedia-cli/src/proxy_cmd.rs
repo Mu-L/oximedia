@@ -193,6 +193,11 @@ fn compute_checksum(path: &std::path::Path) -> Result<String> {
     Ok(format!("{:016x}", hasher_state))
 }
 
+/// Convert a resolution name to a linear scale factor.
+///
+/// Used by tests and the display layer to describe what fraction of the
+/// original resolution a proxy occupies.
+#[cfg_attr(not(test), allow(dead_code))]
 fn resolution_scale(res: &str) -> f64 {
     match res {
         "quarter" => 0.25,
@@ -202,33 +207,110 @@ fn resolution_scale(res: &str) -> f64 {
     }
 }
 
-/// Generate a proxy file from `input_path` by running a stream-copy remux
-/// into `proxy_path` (a .webm / Matroska container).
+/// Map CLI resolution/codec strings to a `ProxyPreset`, falling back to
+/// `ProxyGenerationSettings` for combinations that don't have a named preset.
+fn resolve_proxy_settings(
+    resolution: &str,
+    codec: &str,
+    quality: &str,
+) -> oximedia_proxy::ProxyGenerationSettings {
+    use oximedia_proxy::{ProxyGenerationSettings, ProxyPreset};
+
+    // Try to match a named preset first.
+    let named: Option<ProxyPreset> = match (resolution, codec) {
+        ("quarter", "h264") => Some(ProxyPreset::QuarterResH264),
+        ("half", "h264") => Some(ProxyPreset::HalfResH264),
+        ("full", "h264") => Some(ProxyPreset::FullResH264),
+        ("quarter", "vp9") => Some(ProxyPreset::QuarterResVP9),
+        ("half", "vp9") => Some(ProxyPreset::HalfResVP9),
+        _ => None,
+    };
+
+    if let Some(preset) = named {
+        return preset.to_settings();
+    }
+
+    // Fallback: build settings from individual strings.
+    let scale_factor = match resolution {
+        "quarter" => 0.25_f32,
+        "half" => 0.50_f32,
+        "full" => 1.00_f32,
+        _ => 0.25_f32,
+    };
+
+    let (audio_codec, container) = match codec {
+        "vp9" | "av1" => ("opus", "webm"),
+        _ => ("aac", "mp4"),
+    };
+
+    let bitrate: u64 = match quality {
+        "low" => 1_500_000,
+        "high" => 8_000_000,
+        _ => 3_000_000, // medium
+    };
+
+    ProxyGenerationSettings {
+        scale_factor,
+        codec: codec.to_string(),
+        bitrate,
+        audio_codec: audio_codec.to_string(),
+        audio_bitrate: 128_000,
+        preserve_frame_rate: true,
+        preserve_timecode: true,
+        preserve_metadata: true,
+        container: container.to_string(),
+        use_hw_accel: true,
+        threads: 0,
+        quality_preset: quality.to_string(),
+    }
+}
+
+/// Generate a proxy file by invoking `oximedia_proxy::ProxyGenerator` with
+/// a preset or settings derived from the CLI arguments.  The generator uses
+/// `oximedia_transcode::TranscodePipeline` internally, so the codec and
+/// bitrate are actually honoured rather than silently ignored.
 ///
-/// Returns the actual byte size of the written proxy file.
-///
-/// Codec re-encoding (VP9, AV1, etc.) requires frame-level decode→encode
-/// which is not yet wired into `TranscodePipeline`. A stream-copy into a
-/// Matroska container is the correct lower-cost proxy workflow.
-async fn generate_proxy_via_pipeline(
+/// Returns the byte size of the written proxy file.
+async fn generate_proxy_via_proxy_crate(
     input_path: &std::path::Path,
     proxy_path: &std::path::Path,
+    resolution: &str,
+    codec: &str,
+    quality: &str,
 ) -> anyhow::Result<u64> {
-    use oximedia_transcode::TranscodePipeline;
+    use oximedia_proxy::ProxyGenerator;
 
-    let mut pipeline = TranscodePipeline::builder()
-        .input(input_path.to_path_buf())
-        .output(proxy_path.to_path_buf())
-        .track_progress(false)
-        .build()
-        .context("Failed to build proxy pipeline")?;
+    let settings = resolve_proxy_settings(resolution, codec, quality);
+    let generator = ProxyGenerator::new();
 
-    let result = pipeline
-        .execute()
+    let result = generator
+        .generate_with_settings(input_path, proxy_path, settings)
         .await
-        .context("Proxy transcode pipeline failed")?;
+        .with_context(|| {
+            format!(
+                "Proxy generation failed for {} (resolution={}, codec={})",
+                input_path.display(),
+                resolution,
+                codec,
+            )
+        })?;
 
-    Ok(result.file_size)
+    // If the transcode pipeline already reported a non-zero size use it;
+    // otherwise stat the output file directly.
+    let size = if result.file_size > 0 {
+        result.file_size
+    } else {
+        std::fs::metadata(proxy_path)
+            .with_context(|| {
+                format!(
+                    "Output file missing after proxy encode: {}",
+                    proxy_path.display()
+                )
+            })?
+            .len()
+    };
+
+    Ok(size)
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +379,6 @@ async fn run_generate(
         std::fs::create_dir_all(output).context("Failed to create output directory")?;
     }
 
-    let scale = resolution_scale(resolution);
     let mut generated = Vec::new();
 
     for input_path in inputs {
@@ -319,38 +400,16 @@ async fn run_generate(
         let proxy_name = format!("{filename}_proxy_{resolution}.webm");
         let proxy_path = output.join(&proxy_name);
 
-        // Generate proxy via stream-copy transcode pipeline.
-        // Note: resolution and codec arguments are recorded in the database but
-        // codec re-encoding requires frame-level decode/encode (not yet wired).
-        // The pipeline performs a container-level stream copy into a .webm
-        // (Matroska) container, which is a valid proxy workflow for offline edit.
-        let proxy_size = match generate_proxy_via_pipeline(input_path, &proxy_path).await {
-            Ok(sz) => sz,
-            Err(e) => {
-                if !json_output {
-                    println!(
-                        "  {} {}: pipeline error — falling back to placeholder ({})",
-                        "Warn:".yellow(),
-                        input_path.display(),
-                        e
-                    );
-                }
-                // Fallback: write a clearly-labelled placeholder so the output
-                // file exists and is non-empty, rather than silently succeeding
-                // with zero bytes or corrupt data.
-                let placeholder = format!(
-                    "PROXY-PLACEHOLDER:original={},resolution={},quality={},codec={},scale={scale}\n\
-                     Pipeline error: {e}",
-                    input_path.display(),
-                    resolution,
-                    quality,
-                    codec
-                );
-                std::fs::write(&proxy_path, placeholder.as_bytes())
-                    .context("Failed to write proxy placeholder")?;
-                std::fs::metadata(&proxy_path).map(|m| m.len()).unwrap_or(0)
-            }
-        };
+        // Generate proxy via oximedia-proxy::ProxyGenerator, which honours
+        // the resolution, codec, and quality arguments rather than silently
+        // performing a stream-copy.  Errors propagate to the caller; no
+        // placeholder fallback is written.
+        let proxy_size =
+            generate_proxy_via_proxy_crate(input_path, &proxy_path, resolution, codec, quality)
+                .await
+                .with_context(|| {
+                    format!("Failed to generate proxy for {}", input_path.display())
+                })?;
 
         let checksum = compute_checksum(input_path)?;
 
@@ -700,10 +759,11 @@ mod tests {
 
     #[test]
     fn test_proxy_record_serialization() {
+        let tmp = std::env::temp_dir();
         let record = ProxyRecord {
             id: "proxy-001".to_string(),
-            original_path: "/tmp/original.mov".to_string(),
-            proxy_path: "/tmp/proxy.webm".to_string(),
+            original_path: tmp.join("original.mov").display().to_string(),
+            proxy_path: tmp.join("proxy.webm").display().to_string(),
             resolution: "quarter".to_string(),
             quality: "medium".to_string(),
             codec: "vp9".to_string(),
@@ -727,12 +787,13 @@ mod tests {
 
     #[test]
     fn test_db_roundtrip() {
+        let tmp = std::env::temp_dir();
         let db = ProxyDb {
             version: 1,
             proxies: vec![ProxyRecord {
                 id: "proxy-001".to_string(),
-                original_path: "/tmp/orig.mov".to_string(),
-                proxy_path: "/tmp/proxy.webm".to_string(),
+                original_path: tmp.join("orig.mov").display().to_string(),
+                proxy_path: tmp.join("proxy.webm").display().to_string(),
                 resolution: "half".to_string(),
                 quality: "high".to_string(),
                 codec: "av1".to_string(),
@@ -746,5 +807,90 @@ mod tests {
         let parsed: ProxyDb = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.proxies.len(), 1);
         assert_eq!(parsed.proxies[0].codec, "av1");
+    }
+
+    // -------------------------------------------------------------------------
+    // Proxy preset mapping tests (added for generate_proxy_via_proxy_crate)
+    // -------------------------------------------------------------------------
+
+    /// ("quarter", "h264") must produce scale_factor=0.25 and codec="h264".
+    #[test]
+    fn test_proxy_preset_mapping_quarter_h264() {
+        use oximedia_proxy::ProxyPreset;
+
+        let settings = resolve_proxy_settings("quarter", "h264", "medium");
+        // Verify via the preset's to_settings() to ensure the mapping is canonical.
+        let expected = ProxyPreset::QuarterResH264.to_settings();
+        assert_eq!(
+            settings.scale_factor, expected.scale_factor,
+            "scale_factor mismatch for quarter/h264"
+        );
+        assert_eq!(
+            settings.codec, expected.codec,
+            "codec mismatch for quarter/h264"
+        );
+    }
+
+    /// An unknown (resolution, codec) pair must not panic and must produce a
+    /// valid, non-zero-bitrate `ProxyGenerationSettings`.
+    #[test]
+    fn test_proxy_preset_mapping_unknown_falls_through() {
+        let settings = resolve_proxy_settings("eighth", "hevc", "medium");
+        // scale_factor falls back to 0.25 for unknown resolution strings.
+        assert!(
+            (settings.scale_factor - 0.25).abs() < f32::EPSILON,
+            "expected fallback scale_factor=0.25, got {}",
+            settings.scale_factor
+        );
+        assert!(settings.bitrate > 0, "bitrate must be > 0");
+        assert!(!settings.codec.is_empty(), "codec must not be empty");
+    }
+
+    /// When proxy generation fails (input file does not exist),
+    /// `generate_proxy_via_proxy_crate` must return `Err` and must NOT write
+    /// any placeholder file to the proxy output path.
+    #[tokio::test]
+    async fn test_proxy_no_placeholder_on_error() {
+        // Use a temp directory so the output dir exists but the input file does not.
+        let tmp = std::env::temp_dir().join("oximedia_proxy_no_placeholder_test");
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+
+        let nonexistent_input = tmp.join("does_not_exist_input.mov");
+        let expected_proxy = tmp.join("does_not_exist_input_proxy_quarter.webm");
+
+        // Preconditions: input must be absent; clean any leftover proxy file.
+        assert!(
+            !nonexistent_input.exists(),
+            "precondition: input must not exist"
+        );
+        let _ = std::fs::remove_file(&expected_proxy);
+
+        // Actually invoke the async helper with a nonexistent input path.
+        // It must return an error (FileNotFound propagated from ProxyEncoder).
+        let result = generate_proxy_via_proxy_crate(
+            &nonexistent_input,
+            &expected_proxy,
+            "quarter",
+            "vp9",
+            "low",
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "expected Err for nonexistent input, got Ok({:?})",
+            result.ok()
+        );
+
+        // The proxy file must NOT have been created — no placeholder.
+        assert!(
+            !expected_proxy.exists(),
+            "no placeholder file must be written when encoding fails; \
+             found unexpected file at {}",
+            expected_proxy.display()
+        );
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

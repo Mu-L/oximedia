@@ -559,6 +559,7 @@ impl PyTranscoder {
 #[pyfunction]
 #[pyo3(signature = (input, output, preset = None, crf = None))]
 pub fn transcode_simple(
+    py: Python<'_>,
     input: &str,
     output: &str,
     preset: Option<&str>,
@@ -568,31 +569,41 @@ pub fn transcode_simple(
         return Err(val_err("Input and output paths must not be empty"));
     }
 
-    let mut tc = Transcoder::new().input(input).output(output);
+    let input_owned = input.to_string();
+    let output_owned = output.to_string();
 
-    // Apply preset defaults if given
-    if let Some(p) = preset {
-        let (vc, ac, container) = preset_defaults(p)?;
-        tc = tc.video_codec(vc).audio_codec(ac);
-        let _ = container; // container inferred from output extension
-    }
+    // Resolve preset defaults while GIL is held (cheap string ops)
+    let preset_codecs: Option<(&'static str, &'static str)> = if let Some(p) = preset {
+        let (vc, ac, _) = preset_defaults(p)?;
+        Some((vc, ac))
+    } else {
+        None
+    };
 
-    if let Some(c) = crf {
-        // Use CRF via quality mode; for now map to quality level
-        if c <= 20 {
-            tc = tc.quality(QualityMode::VeryHigh);
-        } else if c <= 30 {
-            tc = tc.quality(QualityMode::High);
-        } else if c <= 40 {
-            tc = tc.quality(QualityMode::Medium);
-        } else {
-            tc = tc.quality(QualityMode::Low);
+    // Release GIL for the CPU/IO-bound transcode operation
+    py.detach(move || {
+        let mut tc = Transcoder::new().input(&input_owned).output(&output_owned);
+
+        if let Some((vc, ac)) = preset_codecs {
+            tc = tc.video_codec(vc).audio_codec(ac);
         }
-    }
 
-    let rt = tokio::runtime::Runtime::new().map_err(tc_err)?;
-    let output_result = rt.block_on(tc.transcode()).map_err(tc_err)?;
-    Ok(PyTranscodeResult::from(&output_result))
+        if let Some(c) = crf {
+            if c <= 20 {
+                tc = tc.quality(QualityMode::VeryHigh);
+            } else if c <= 30 {
+                tc = tc.quality(QualityMode::High);
+            } else if c <= 40 {
+                tc = tc.quality(QualityMode::Medium);
+            } else {
+                tc = tc.quality(QualityMode::Low);
+            }
+        }
+
+        let rt = tokio::runtime::Runtime::new().map_err(tc_err)?;
+        let output_result = rt.block_on(tc.transcode()).map_err(tc_err)?;
+        Ok(PyTranscodeResult::from(&output_result))
+    })
 }
 
 /// List all available transcoding presets.

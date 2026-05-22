@@ -763,6 +763,568 @@ impl StorageManager {
     }
 }
 
+// ── MamStorage: thin delegation to oximedia-storage ─────────────────────────
+
+/// Error type for `MamStorage` operations.
+#[derive(Debug, thiserror::Error)]
+pub enum MamStorageError {
+    /// The URI could not be parsed.
+    #[error("Invalid URI: {0}")]
+    InvalidUri(String),
+    /// The URI scheme is not supported by any available backend.
+    #[error("Unsupported URI scheme: {0}")]
+    UnsupportedScheme(String),
+    /// The underlying storage backend returned an error.
+    #[error("Backend error: {0}")]
+    Backend(String),
+    /// An I/O error occurred.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+impl From<oximedia_storage::StorageError> for MamStorageError {
+    fn from(e: oximedia_storage::StorageError) -> Self {
+        Self::Backend(e.to_string())
+    }
+}
+
+/// URI scheme understood by `MamStorage::from_uri`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MamStorageScheme {
+    /// Local filesystem (`file://` or a bare relative/absolute path).
+    Local(PathBuf),
+    /// Amazon S3 (`s3://bucket/prefix`).
+    S3 { bucket: String, prefix: String },
+    /// Google Cloud Storage (`gs://bucket/prefix`).
+    Gcs { bucket: String, prefix: String },
+    /// Azure Blob Storage (`https://<account>.blob.core.windows.net/<container>`).
+    Azure {
+        account: String,
+        container: String,
+        prefix: String,
+    },
+}
+
+/// Inner storage implementation.
+///
+/// `Local` always uses `oximedia-storage::local::LocalStorage`.
+///
+/// `Remote` routes I/O through a real cloud backend (`S3Storage`, `GcsStorage`,
+/// or `AzureStorage` from `oximedia-storage`) when the matching `s3`/`gcs`/
+/// `azure` Cargo feature is enabled.  When the feature is **off** the `backend`
+/// field is `None` and every operation falls back to the `local_shadow`
+/// `LocalStorage` rooted in a temp directory — a deliberate, pure-Rust
+/// "local-shadow" degraded mode that keeps the crate dependency-free by
+/// default.
+enum MamStorageInner {
+    Local(oximedia_storage::local::LocalStorage),
+    /// Remote backend — uses `backend` when present, else the local shadow.
+    Remote {
+        /// Real cloud backend; `None` when the matching feature is disabled.
+        backend: Option<Box<dyn oximedia_storage::CloudStorage>>,
+        /// Pure-Rust fallback used when `backend` is `None`.
+        local_shadow: oximedia_storage::local::LocalStorage,
+    },
+}
+
+/// Thin async storage delegation layer for the MAM subsystem.
+///
+/// Create with [`MamStorage::from_uri`] or [`MamStorage::local`].
+pub struct MamStorage {
+    inner: MamStorageInner,
+}
+
+impl MamStorage {
+    /// Create a `MamStorage` backed by a local root directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the root directory cannot be created.
+    pub async fn local(root: impl Into<PathBuf>) -> std::result::Result<Self, MamStorageError> {
+        let ls = oximedia_storage::local::LocalStorage::new(root).await?;
+        Ok(Self {
+            inner: MamStorageInner::Local(ls),
+        })
+    }
+
+    /// Parse a URI and create the appropriate storage backend.
+    ///
+    /// Supported schemes:
+    /// * `file:///path` or bare `/path` or `relative/path` → local filesystem
+    /// * `s3://bucket/prefix` → Amazon S3
+    /// * `gs://bucket/prefix` → Google Cloud Storage
+    /// * `https://<account>.blob.core.windows.net/<container>[/prefix]` → Azure Blob Storage
+    ///
+    /// # Cloud backends and feature flags
+    ///
+    /// The `s3`, `gcs`, and `azure` Cargo features each enable a real network
+    /// backend from `oximedia-storage`.  When the matching feature is **not**
+    /// enabled the URI is still accepted but every operation is routed to a
+    /// pure-Rust "local-shadow" `LocalStorage` rooted in a temp directory; no
+    /// cloud SDK is compiled in.  This keeps the default build dependency-free.
+    ///
+    /// # Credential and configuration sourcing
+    ///
+    /// Cloud credentials are **not** embedded in the path component of the URI.
+    /// They are read from URI query parameters or environment variables:
+    ///
+    /// * **S3** (`s3://bucket/prefix?...`): `access_key`, `secret_key`,
+    ///   `region`, and `endpoint` query parameters; otherwise the standard AWS
+    ///   credential chain (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+    ///   `AWS_REGION`/`AWS_DEFAULT_REGION`) is used.  `region` defaults to
+    ///   `us-east-1` when neither a query parameter nor an env var is present.
+    /// * **GCS** (`gs://bucket/prefix?project=...`): the `gs://` URI grammar
+    ///   has no project field, so the GCS `project_id` is taken from the
+    ///   `project` query parameter or, failing that, the `GOOGLE_CLOUD_PROJECT`
+    ///   environment variable.  It may be empty for object-level operations.
+    ///   Authentication uses Application Default Credentials.
+    /// * **Azure**: the storage account is parsed from the host; the account
+    ///   key is read from the `account_key` query parameter or the
+    ///   `AZURE_STORAGE_KEY` environment variable (required by the backend).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MamStorageError::InvalidUri`] if the URI cannot be parsed,
+    /// [`MamStorageError::UnsupportedScheme`] for unknown schemes, or
+    /// [`MamStorageError::Backend`] if an enabled cloud backend fails to
+    /// initialise.
+    pub async fn from_uri(uri: &str) -> std::result::Result<Self, MamStorageError> {
+        let scheme = Self::parse_scheme(uri)?;
+        match &scheme {
+            MamStorageScheme::Local(path) => {
+                let ls = oximedia_storage::local::LocalStorage::new(path).await?;
+                Ok(Self {
+                    inner: MamStorageInner::Local(ls),
+                })
+            }
+            MamStorageScheme::S3 { bucket, prefix } => {
+                let target = format!("s3://{bucket}/{prefix}");
+                let backend = Self::build_s3_backend(uri, bucket).await?;
+                Self::log_remote_mode("s3", &target, backend.is_some());
+                let shadow_root = std::env::temp_dir().join(format!("mam-s3-{bucket}"));
+                let ls = oximedia_storage::local::LocalStorage::new(&shadow_root).await?;
+                Ok(Self {
+                    inner: MamStorageInner::Remote {
+                        backend,
+                        local_shadow: ls,
+                    },
+                })
+            }
+            MamStorageScheme::Gcs { bucket, prefix } => {
+                let target = format!("gs://{bucket}/{prefix}");
+                let backend = Self::build_gcs_backend(uri, bucket).await?;
+                Self::log_remote_mode("gs", &target, backend.is_some());
+                let shadow_root = std::env::temp_dir().join(format!("mam-gs-{bucket}"));
+                let ls = oximedia_storage::local::LocalStorage::new(&shadow_root).await?;
+                Ok(Self {
+                    inner: MamStorageInner::Remote {
+                        backend,
+                        local_shadow: ls,
+                    },
+                })
+            }
+            MamStorageScheme::Azure {
+                account,
+                container,
+                prefix,
+            } => {
+                let target =
+                    format!("https://{account}.blob.core.windows.net/{container}/{prefix}");
+                let backend = Self::build_azure_backend(uri, account, container).await?;
+                Self::log_remote_mode("azure", &target, backend.is_some());
+                let shadow_root =
+                    std::env::temp_dir().join(format!("mam-az-{account}-{container}"));
+                let ls = oximedia_storage::local::LocalStorage::new(&shadow_root).await?;
+                Ok(Self {
+                    inner: MamStorageInner::Remote {
+                        backend,
+                        local_shadow: ls,
+                    },
+                })
+            }
+        }
+    }
+
+    /// Emit a consistent log line describing the chosen remote mode.
+    fn log_remote_mode(scheme: &str, target: &str, real_backend: bool) {
+        if real_backend {
+            tracing::info!(
+                scheme = %scheme,
+                target = %target,
+                "MamStorage: cloud backend active"
+            );
+        } else {
+            tracing::info!(
+                scheme = %scheme,
+                target = %target,
+                "MamStorage: local-shadow mode (cloud feature disabled)"
+            );
+        }
+    }
+
+    /// Build the S3 backend when the `s3` feature is enabled.
+    ///
+    /// Returns `Ok(None)` when the feature is disabled.
+    async fn build_s3_backend(
+        uri: &str,
+        bucket: &str,
+    ) -> std::result::Result<Option<Box<dyn oximedia_storage::CloudStorage>>, MamStorageError> {
+        #[cfg(feature = "s3")]
+        {
+            let params = parse_query_params(uri);
+            let region = params
+                .get("region")
+                .cloned()
+                .or_else(|| std::env::var("AWS_REGION").ok())
+                .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+                .unwrap_or_else(|| "us-east-1".to_string());
+            let mut config = oximedia_storage::UnifiedConfig::s3(bucket.to_string(), region);
+            let access_key = params
+                .get("access_key")
+                .cloned()
+                .or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok());
+            let secret_key = params
+                .get("secret_key")
+                .cloned()
+                .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok());
+            if let (Some(ak), Some(sk)) = (access_key, secret_key) {
+                config = config.with_credentials(ak, sk);
+            }
+            if let Some(endpoint) = params.get("endpoint") {
+                config = config.with_endpoint(endpoint.clone());
+            }
+            let storage = oximedia_storage::s3::S3Storage::new(config).await?;
+            Ok(Some(Box::new(storage)))
+        }
+        #[cfg(not(feature = "s3"))]
+        {
+            // `s3` feature disabled — fall back to the local shadow.
+            let _ = (uri, bucket);
+            Ok(None)
+        }
+    }
+
+    /// Build the GCS backend when the `gcs` feature is enabled.
+    ///
+    /// The GCS `project_id` is sourced from the `?project=` query parameter or
+    /// the `GOOGLE_CLOUD_PROJECT` environment variable.  Returns `Ok(None)`
+    /// when the feature is disabled.
+    async fn build_gcs_backend(
+        uri: &str,
+        bucket: &str,
+    ) -> std::result::Result<Option<Box<dyn oximedia_storage::CloudStorage>>, MamStorageError> {
+        #[cfg(feature = "gcs")]
+        {
+            let params = parse_query_params(uri);
+            let project_id = params
+                .get("project")
+                .cloned()
+                .or_else(|| std::env::var("GOOGLE_CLOUD_PROJECT").ok())
+                .unwrap_or_default();
+            let config = oximedia_storage::UnifiedConfig::gcs(bucket.to_string(), project_id);
+            let storage = oximedia_storage::gcs::GcsStorage::new(config).await?;
+            Ok(Some(Box::new(storage)))
+        }
+        #[cfg(not(feature = "gcs"))]
+        {
+            // `gcs` feature disabled — fall back to the local shadow.
+            let _ = (uri, bucket);
+            Ok(None)
+        }
+    }
+
+    /// Build the Azure backend when the `azure` feature is enabled.
+    ///
+    /// The account key is sourced from the `?account_key=` query parameter or
+    /// the `AZURE_STORAGE_KEY` environment variable.  Returns `Ok(None)` when
+    /// the feature is disabled.
+    async fn build_azure_backend(
+        uri: &str,
+        account: &str,
+        container: &str,
+    ) -> std::result::Result<Option<Box<dyn oximedia_storage::CloudStorage>>, MamStorageError> {
+        #[cfg(feature = "azure")]
+        {
+            let params = parse_query_params(uri);
+            let account_key = params
+                .get("account_key")
+                .cloned()
+                .or_else(|| std::env::var("AZURE_STORAGE_KEY").ok())
+                .ok_or_else(|| {
+                    MamStorageError::InvalidUri(
+                        "Azure account key required: pass ?account_key=... or set \
+                         AZURE_STORAGE_KEY"
+                            .to_string(),
+                    )
+                })?;
+            let config =
+                oximedia_storage::UnifiedConfig::azure(container.to_string(), account.to_string())
+                    .with_credentials(account.to_string(), account_key);
+            let storage = oximedia_storage::azure::AzureStorage::new(config).await?;
+            Ok(Some(Box::new(storage)))
+        }
+        #[cfg(not(feature = "azure"))]
+        {
+            // `azure` feature disabled — fall back to the local shadow.
+            let _ = (uri, account, container);
+            Ok(None)
+        }
+    }
+
+    /// Parse the URI scheme without creating any I/O resources.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the URI cannot be parsed.
+    pub fn parse_scheme(uri: &str) -> std::result::Result<MamStorageScheme, MamStorageError> {
+        // Bare path (relative or absolute) → Local
+        if !uri.contains("://") {
+            return Ok(MamStorageScheme::Local(PathBuf::from(uri)));
+        }
+
+        let colon_slash = uri
+            .find("://")
+            .ok_or_else(|| MamStorageError::InvalidUri(format!("No scheme separator in: {uri}")))?;
+        let scheme = &uri[..colon_slash];
+        // Strip the query (`?...`) and fragment (`#...`) components: credentials
+        // and the GCS `project` are carried there and must not pollute the
+        // bucket / container / prefix path values.
+        let rest = &uri[colon_slash + 3..];
+        let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+
+        match scheme.to_ascii_lowercase().as_str() {
+            "file" => {
+                // file:///absolute/path or file://relative
+                let path = if rest.starts_with('/') {
+                    rest.to_string()
+                } else {
+                    format!("/{rest}")
+                };
+                Ok(MamStorageScheme::Local(PathBuf::from(path)))
+            }
+            "s3" => {
+                let (bucket, prefix) = Self::split_bucket_prefix(rest);
+                Ok(MamStorageScheme::S3 { bucket, prefix })
+            }
+            "gs" => {
+                let (bucket, prefix) = Self::split_bucket_prefix(rest);
+                Ok(MamStorageScheme::Gcs { bucket, prefix })
+            }
+            "https" => {
+                // Azure: https://<account>.blob.core.windows.net/<container>[/<prefix>]
+                if rest.contains(".blob.core.windows.net") {
+                    let (host, path_part) = rest.split_once('/').ok_or_else(|| {
+                        MamStorageError::InvalidUri(format!("Azure URI missing container: {uri}"))
+                    })?;
+                    let account = host
+                        .split('.')
+                        .next()
+                        .ok_or_else(|| {
+                            MamStorageError::InvalidUri(format!(
+                                "Cannot extract Azure account from: {host}"
+                            ))
+                        })?
+                        .to_string();
+                    let (container, prefix) = path_part
+                        .split_once('/')
+                        .map(|(c, p)| (c.to_string(), p.to_string()))
+                        .unwrap_or_else(|| (path_part.to_string(), String::new()));
+                    Ok(MamStorageScheme::Azure {
+                        account,
+                        container,
+                        prefix,
+                    })
+                } else {
+                    Err(MamStorageError::UnsupportedScheme(format!(
+                        "https:// is only supported for Azure Blob Storage URLs: {uri}"
+                    )))
+                }
+            }
+            other => Err(MamStorageError::UnsupportedScheme(other.to_string())),
+        }
+    }
+
+    fn split_bucket_prefix(rest: &str) -> (String, String) {
+        match rest.split_once('/') {
+            Some((bucket, prefix)) => (bucket.to_string(), prefix.to_string()),
+            None => (rest.to_string(), String::new()),
+        }
+    }
+
+    /// Return the `CloudStorage` implementation that handles I/O for `key`.
+    ///
+    /// This is the real cloud backend when an `s3`/`gcs`/`azure` feature is
+    /// enabled and the URI selected a remote scheme; otherwise it is the local
+    /// filesystem store (a direct `LocalStorage`, or the temp-dir
+    /// "local-shadow" `LocalStorage` of a remote target in degraded mode).
+    fn active_backend(&self) -> &dyn oximedia_storage::CloudStorage {
+        match &self.inner {
+            MamStorageInner::Local(ls) => ls,
+            MamStorageInner::Remote {
+                backend,
+                local_shadow,
+                ..
+            } => match backend {
+                Some(b) => b.as_ref(),
+                None => local_shadow,
+            },
+        }
+    }
+
+    /// Store `data` at `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying storage backend fails.
+    pub async fn put(&self, key: &str, data: &[u8]) -> std::result::Result<(), MamStorageError> {
+        let options = oximedia_storage::UploadOptions::default();
+        // Use upload_stream to avoid a tempfile round-trip
+        let bytes = bytes::Bytes::copy_from_slice(data);
+        let stream: oximedia_storage::ByteStream =
+            Box::pin(futures::stream::once(async move { Ok(bytes) }));
+        self.active_backend()
+            .upload_stream(key, stream, Some(data.len() as u64), options)
+            .await
+            .map_err(MamStorageError::from)?;
+        Ok(())
+    }
+
+    /// Retrieve data stored at `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the key does not exist or the backend fails.
+    pub async fn get(&self, key: &str) -> std::result::Result<Vec<u8>, MamStorageError> {
+        use futures::StreamExt as _;
+        let mut stream = self
+            .active_backend()
+            .download_stream(key, oximedia_storage::DownloadOptions::default())
+            .await
+            .map_err(MamStorageError::from)?;
+        let mut buf = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let b = chunk.map_err(MamStorageError::from)?;
+            buf.extend_from_slice(&b);
+        }
+        Ok(buf)
+    }
+
+    /// List keys under `prefix`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend fails.
+    pub async fn list(&self, prefix: &str) -> std::result::Result<Vec<String>, MamStorageError> {
+        let options = oximedia_storage::ListOptions {
+            prefix: Some(prefix.to_string()),
+            delimiter: None,
+            max_results: Some(10_000),
+            continuation_token: None,
+        };
+        let result = self
+            .active_backend()
+            .list_objects(options)
+            .await
+            .map_err(MamStorageError::from)?;
+        Ok(result.objects.into_iter().map(|m| m.key).collect())
+    }
+
+    /// Delete the object stored at `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend fails.
+    pub async fn delete(&self, key: &str) -> std::result::Result<(), MamStorageError> {
+        self.active_backend()
+            .delete_object(key)
+            .await
+            .map_err(MamStorageError::from)
+    }
+
+    /// Check whether `key` exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backend fails.
+    pub async fn exists(&self, key: &str) -> std::result::Result<bool, MamStorageError> {
+        self.active_backend()
+            .object_exists(key)
+            .await
+            .map_err(MamStorageError::from)
+    }
+
+    /// Returns `true` if this storage routes I/O through a real cloud backend.
+    ///
+    /// Returns `false` for a local-filesystem store and for a remote target
+    /// running in pure-Rust local-shadow degraded mode (cloud feature off).
+    #[must_use]
+    pub fn has_cloud_backend(&self) -> bool {
+        matches!(
+            &self.inner,
+            MamStorageInner::Remote {
+                backend: Some(_),
+                ..
+            }
+        )
+    }
+}
+
+/// Parse `key=value` pairs from the query component of a URI.
+///
+/// Returns an empty map when the URI has no `?` query part.  Values are
+/// percent-decoded for the small set of escapes that occur in credentials and
+/// region identifiers (`%20`, `%2F`, `%3A`, `%2B`, `%3D`).
+///
+/// Only compiled when a cloud feature (or the test harness) needs it.
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure", test))]
+fn parse_query_params(uri: &str) -> HashMap<String, String> {
+    let mut params = HashMap::new();
+    let Some((_, query)) = uri.split_once('?') else {
+        return params;
+    };
+    // A fragment, if present, terminates the query.
+    let query = query.split('#').next().unwrap_or(query);
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = pair.split_once('=') {
+            params.insert(percent_decode(k), percent_decode(v));
+        } else {
+            params.insert(percent_decode(pair), String::new());
+        }
+    }
+    params
+}
+
+/// Minimal percent-decoder for URI query values.
+///
+/// Only compiled when a cloud feature (or the test harness) needs it.
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure", test))]
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        if bytes[i] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,5 +1385,275 @@ mod tests {
         let storage = LocalStorage::new("/var/storage".to_string());
         let resolved = storage.resolve_path("/assets/test.mp4");
         assert_eq!(resolved, PathBuf::from("/var/storage/assets/test.mp4"));
+    }
+
+    // ── MamStorage URI parsing ───────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_scheme_local_bare_path() {
+        let scheme = MamStorage::parse_scheme("/tmp/assets").expect("bare path parses");
+        assert_eq!(
+            scheme,
+            MamStorageScheme::Local(PathBuf::from("/tmp/assets"))
+        );
+    }
+
+    #[test]
+    fn test_parse_scheme_file_uri() {
+        let scheme = MamStorage::parse_scheme("file:///var/data").expect("file uri parses");
+        assert_eq!(scheme, MamStorageScheme::Local(PathBuf::from("/var/data")));
+    }
+
+    #[test]
+    fn test_parse_scheme_s3() {
+        let scheme = MamStorage::parse_scheme("s3://my-bucket/media/clips").expect("s3 parses");
+        assert_eq!(
+            scheme,
+            MamStorageScheme::S3 {
+                bucket: "my-bucket".to_string(),
+                prefix: "media/clips".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_scheme_s3_strips_query() {
+        // Credentials in the query must not leak into the prefix.
+        let scheme = MamStorage::parse_scheme(
+            "s3://my-bucket/media?access_key=AK&secret_key=SK&region=eu-west-1",
+        )
+        .expect("s3 with query parses");
+        assert_eq!(
+            scheme,
+            MamStorageScheme::S3 {
+                bucket: "my-bucket".to_string(),
+                prefix: "media".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_scheme_gcs_strips_project_query() {
+        let scheme = MamStorage::parse_scheme("gs://bucket-x/prefix-y?project=proj-123")
+            .expect("gcs with project query parses");
+        assert_eq!(
+            scheme,
+            MamStorageScheme::Gcs {
+                bucket: "bucket-x".to_string(),
+                prefix: "prefix-y".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_scheme_azure_strips_query() {
+        let scheme = MamStorage::parse_scheme(
+            "https://acct.blob.core.windows.net/container/prefix?account_key=KEY",
+        )
+        .expect("azure with query parses");
+        assert_eq!(
+            scheme,
+            MamStorageScheme::Azure {
+                account: "acct".to_string(),
+                container: "container".to_string(),
+                prefix: "prefix".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_scheme_unsupported() {
+        let err = MamStorage::parse_scheme("ftp://host/path").expect_err("ftp is unsupported");
+        assert!(matches!(err, MamStorageError::UnsupportedScheme(_)));
+    }
+
+    #[test]
+    fn test_parse_query_params_basic() {
+        let params =
+            parse_query_params("s3://bucket/prefix?access_key=AK&secret_key=SK&region=us-east-2");
+        assert_eq!(params.get("access_key").map(String::as_str), Some("AK"));
+        assert_eq!(params.get("secret_key").map(String::as_str), Some("SK"));
+        assert_eq!(params.get("region").map(String::as_str), Some("us-east-2"));
+    }
+
+    #[test]
+    fn test_parse_query_params_none() {
+        let params = parse_query_params("s3://bucket/prefix");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_parse_query_params_percent_decode() {
+        // A secret key containing reserved characters, percent-encoded.
+        let params = parse_query_params("s3://b/p?secret_key=a%2Fb%2Bc%3Dd");
+        assert_eq!(
+            params.get("secret_key").map(String::as_str),
+            Some("a/b+c=d")
+        );
+    }
+
+    #[test]
+    fn test_parse_query_params_plus_is_space() {
+        let params = parse_query_params("s3://b/p?label=hot+tier");
+        assert_eq!(params.get("label").map(String::as_str), Some("hot tier"));
+    }
+
+    #[test]
+    fn test_parse_query_params_flag_without_value() {
+        let params = parse_query_params("s3://b/p?path_style&region=us");
+        assert_eq!(params.get("path_style").map(String::as_str), Some(""));
+        assert_eq!(params.get("region").map(String::as_str), Some("us"));
+    }
+
+    #[test]
+    fn test_percent_decode_passthrough() {
+        assert_eq!(percent_decode("plain-value"), "plain-value");
+        // An invalid escape is left untouched.
+        assert_eq!(percent_decode("a%zz"), "a%zz");
+    }
+
+    // ── MamStorage local-shadow round-trips (offline; default features) ───────
+
+    #[tokio::test]
+    async fn test_mam_storage_local_roundtrip() {
+        let root = std::env::temp_dir().join(format!("mam-s9-local-{}", std::process::id()));
+        let storage = MamStorage::local(&root).await.expect("local storage");
+        assert!(!storage.has_cloud_backend());
+
+        storage
+            .put("clip/a.bin", b"hello-mam")
+            .await
+            .expect("put succeeds");
+        assert!(storage.exists("clip/a.bin").await.expect("exists check"));
+        let data = storage.get("clip/a.bin").await.expect("get succeeds");
+        assert_eq!(data, b"hello-mam");
+
+        let listed = storage.list("clip/").await.expect("list succeeds");
+        assert!(listed.iter().any(|k| k.ends_with("a.bin")));
+
+        storage.delete("clip/a.bin").await.expect("delete succeeds");
+        assert!(!storage
+            .exists("clip/a.bin")
+            .await
+            .expect("exists after delete"));
+
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[tokio::test]
+    async fn test_mam_storage_s3_uri_local_shadow_roundtrip() {
+        // Without the `s3` feature this routes to the temp-dir local shadow;
+        // with the feature enabled the test simply skips (no credentials).
+        let storage = MamStorage::from_uri("s3://oximedia-s9-test/assets")
+            .await
+            .expect("s3 uri yields a storage handle");
+        if storage.has_cloud_backend() {
+            return; // real backend active — skip the offline assertion
+        }
+        storage
+            .put("doc/x.txt", b"shadow-bytes")
+            .await
+            .expect("shadow put");
+        let got = storage.get("doc/x.txt").await.expect("shadow get");
+        assert_eq!(got, b"shadow-bytes");
+        storage.delete("doc/x.txt").await.expect("shadow delete");
+    }
+
+    #[cfg(not(feature = "gcs"))]
+    #[tokio::test]
+    async fn test_mam_storage_gcs_uri_local_shadow() {
+        let storage = MamStorage::from_uri("gs://oximedia-s9-test/media?project=demo")
+            .await
+            .expect("gs uri yields a storage handle");
+        assert!(!storage.has_cloud_backend());
+        storage
+            .put("g/y.txt", b"gcs-shadow")
+            .await
+            .expect("shadow put");
+        let got = storage.get("g/y.txt").await.expect("shadow get");
+        assert_eq!(got, b"gcs-shadow");
+        storage.delete("g/y.txt").await.expect("shadow delete");
+    }
+
+    #[cfg(not(feature = "azure"))]
+    #[tokio::test]
+    async fn test_mam_storage_azure_uri_local_shadow() {
+        // With the `azure` feature off, no account key is needed; the URI is
+        // accepted and routed to the local shadow.
+        let storage = MamStorage::from_uri("https://acct.blob.core.windows.net/container/media")
+            .await
+            .expect("azure uri yields a storage handle");
+        assert!(!storage.has_cloud_backend());
+        storage
+            .put("a/z.txt", b"azure-shadow")
+            .await
+            .expect("shadow put");
+        let got = storage.get("a/z.txt").await.expect("shadow get");
+        assert_eq!(got, b"azure-shadow");
+        storage.delete("a/z.txt").await.expect("shadow delete");
+    }
+
+    // ── Feature-gated real-backend tests (network + credentials; ignored) ────
+
+    #[cfg(feature = "s3")]
+    #[tokio::test]
+    #[ignore = "requires live S3 credentials and network access"]
+    async fn test_mam_storage_s3_real_backend_roundtrip() {
+        // Expects AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION and a
+        // real bucket named via the OXIMEDIA_S3_TEST_BUCKET env var.
+        let bucket = std::env::var("OXIMEDIA_S3_TEST_BUCKET")
+            .expect("set OXIMEDIA_S3_TEST_BUCKET for this ignored test");
+        let uri = format!("s3://{bucket}/oximedia-mam-s9");
+        let storage = MamStorage::from_uri(&uri).await.expect("s3 backend");
+        assert!(storage.has_cloud_backend());
+        storage
+            .put("roundtrip.bin", b"s3-real")
+            .await
+            .expect("real put");
+        let got = storage.get("roundtrip.bin").await.expect("real get");
+        assert_eq!(got, b"s3-real");
+        storage.delete("roundtrip.bin").await.expect("real delete");
+    }
+
+    #[cfg(feature = "gcs")]
+    #[tokio::test]
+    #[ignore = "requires live GCS credentials (ADC) and network access"]
+    async fn test_mam_storage_gcs_real_backend_roundtrip() {
+        // Expects Application Default Credentials, GOOGLE_CLOUD_PROJECT, and a
+        // real bucket named via the OXIMEDIA_GCS_TEST_BUCKET env var.
+        let bucket = std::env::var("OXIMEDIA_GCS_TEST_BUCKET")
+            .expect("set OXIMEDIA_GCS_TEST_BUCKET for this ignored test");
+        let uri = format!("gs://{bucket}/oximedia-mam-s9");
+        let storage = MamStorage::from_uri(&uri).await.expect("gcs backend");
+        assert!(storage.has_cloud_backend());
+        storage
+            .put("roundtrip.bin", b"gcs-real")
+            .await
+            .expect("real put");
+        let got = storage.get("roundtrip.bin").await.expect("real get");
+        assert_eq!(got, b"gcs-real");
+        storage.delete("roundtrip.bin").await.expect("real delete");
+    }
+
+    #[cfg(feature = "azure")]
+    #[tokio::test]
+    #[ignore = "requires live Azure credentials and network access"]
+    async fn test_mam_storage_azure_real_backend_roundtrip() {
+        // Expects AZURE_STORAGE_KEY plus a real account/container named via the
+        // OXIMEDIA_AZURE_TEST_ACCOUNT / OXIMEDIA_AZURE_TEST_CONTAINER env vars.
+        let account = std::env::var("OXIMEDIA_AZURE_TEST_ACCOUNT")
+            .expect("set OXIMEDIA_AZURE_TEST_ACCOUNT for this ignored test");
+        let container = std::env::var("OXIMEDIA_AZURE_TEST_CONTAINER")
+            .expect("set OXIMEDIA_AZURE_TEST_CONTAINER for this ignored test");
+        let uri = format!("https://{account}.blob.core.windows.net/{container}/oximedia-mam-s9");
+        let storage = MamStorage::from_uri(&uri).await.expect("azure backend");
+        assert!(storage.has_cloud_backend());
+        storage
+            .put("roundtrip.bin", b"azure-real")
+            .await
+            .expect("real put");
+        let got = storage.get("roundtrip.bin").await.expect("real get");
+        assert_eq!(got, b"azure-real");
+        storage.delete("roundtrip.bin").await.expect("real delete");
     }
 }

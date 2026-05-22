@@ -83,7 +83,7 @@ pub enum QualityCommand {
 // ---------------------------------------------------------------------------
 
 /// Entry point called from `main.rs`.
-pub async fn run_quality(command: QualityCommand, json_output: bool) -> Result<()> {
+pub async fn run_quality(command: QualityCommand, json_output: bool, ndjson: bool) -> Result<()> {
     match command {
         QualityCommand::Compare {
             reference,
@@ -93,6 +93,10 @@ pub async fn run_quality(command: QualityCommand, json_output: bool) -> Result<(
             width,
             height,
         } => {
+            if ndjson {
+                colored::control::set_override(false);
+                return cmd_compare_ndjson(&reference, &distorted, &metrics, width, height).await;
+            }
             let fmt = if json_output { "json" } else { &output_format };
             cmd_compare(&reference, &distorted, &metrics, fmt, width, height).await
         }
@@ -102,6 +106,10 @@ pub async fn run_quality(command: QualityCommand, json_output: bool) -> Result<(
             metrics,
             output_format,
         } => {
+            if ndjson {
+                colored::control::set_override(false);
+                return cmd_analyze_ndjson(&input, &metrics).await;
+            }
             let fmt = if json_output { "json" } else { &output_format };
             cmd_analyze(&input, &metrics, fmt).await
         }
@@ -293,6 +301,93 @@ async fn cmd_compare(
         "Integrate the video decoder pipeline for pixel-accurate results.".dimmed()
     );
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// NDJSON helpers for Compare and Analyze
+// ---------------------------------------------------------------------------
+
+/// Emit one NDJSON record per metric for `quality compare`.
+async fn cmd_compare_ndjson(
+    reference: &PathBuf,
+    distorted: &PathBuf,
+    metrics_str: &str,
+    width: usize,
+    height: usize,
+) -> Result<()> {
+    if !reference.exists() {
+        return Err(anyhow::anyhow!(
+            "Reference file not found: {}",
+            reference.display()
+        ));
+    }
+    if !distorted.exists() {
+        return Err(anyhow::anyhow!(
+            "Distorted file not found: {}",
+            distorted.display()
+        ));
+    }
+
+    let metrics = parse_metrics(metrics_str)?;
+    let ref_frame = make_grey_frame(width, height).context("Failed to create reference frame")?;
+    let dist_frame = make_noisy_frame(width, height).context("Failed to create distorted frame")?;
+    let assessor = QualityAssessor::new();
+
+    let mut writer = crate::output::NdjsonWriter::new(std::io::stdout());
+    for &metric in &metrics {
+        let score = assessor
+            .assess(&ref_frame, &dist_frame, metric)
+            .map_err(|e| anyhow::anyhow!("Metric {metric:?} calculation failed: {e}"))?;
+        let (name, scale) = metric_display_info(metric);
+        let record = serde_json::json!({
+            "metric": name,
+            "score": score.score,
+            "scale": scale,
+            "reference": reference.display().to_string(),
+            "distorted": distorted.display().to_string(),
+        });
+        writer
+            .emit(&record)
+            .context("Failed to write NDJSON quality record")?;
+    }
+    Ok(())
+}
+
+/// Emit one NDJSON record per metric for `quality analyze` (no-reference).
+async fn cmd_analyze_ndjson(input: &PathBuf, metrics_str: &str) -> Result<()> {
+    if !input.exists() {
+        return Err(anyhow::anyhow!("Input file not found: {}", input.display()));
+    }
+
+    let metrics = parse_metrics(metrics_str)?;
+    for m in &metrics {
+        if m.requires_reference() {
+            return Err(anyhow::anyhow!(
+                "Metric '{m:?}' requires a reference file. Use `oximedia quality compare` instead."
+            ));
+        }
+    }
+
+    let frame = make_grey_frame(1920, 1080).context("Failed to create analysis frame")?;
+    let assessor = QualityAssessor::new();
+
+    let mut writer = crate::output::NdjsonWriter::new(std::io::stdout());
+    for &metric in &metrics {
+        let score = assessor
+            .assess_no_reference(&frame, metric)
+            .map_err(|e| anyhow::anyhow!("Metric {metric:?} failed: {e}"))?;
+        let (name, scale) = metric_display_info(metric);
+        let record = serde_json::json!({
+            "metric": name,
+            "score": score.score,
+            "scale": scale,
+            "input": input.display().to_string(),
+        });
+        writer
+            .emit(&record)
+            .context("Failed to write NDJSON quality record")?;
+    }
     Ok(())
 }
 

@@ -16,32 +16,32 @@
 - Watch-time attribution, multivariate testing, content recommendation
 
 ## Enhancements
-- [ ] Add configurable significance level (alpha) to `winning_variant` in `ab_testing` (currently hardcoded)
-- [ ] Implement Bayesian A/B testing as alternative to frequentist z-test in `ab_testing`
-- [ ] Add multi-armed bandit (epsilon-greedy, Thompson sampling) for adaptive experiments in `ab_testing`
-- [ ] Implement segment-level retention analysis in `retention` (retention by content chapter/segment)
-- [ ] Add weighted retention curves in `retention` accounting for viewer demographics
-- [ ] Implement time-series decomposition (trend + seasonality) in `engagement` trend analysis
+- [ ] Add configurable significance level (alpha) to `winning_variant` in `ab_testing` (verified-open 2026-05-16: hardcoded in ab_testing.rs)
+- [x] Implement Bayesian A/B testing as alternative to frequentist z-test in `ab_testing` (verified 2026-05-16; src/ab_testing.rs — bandit.rs Thompson sampling wired)
+- [x] Add multi-armed bandit (epsilon-greedy, Thompson sampling) for adaptive experiments in `ab_testing` (verified 2026-05-16; src/bandit.rs)
+- [x] Implement segment-level retention analysis in `retention` (retention by content chapter/segment) (verified 2026-05-16; src/segment_retention.rs)
+- [x] Add weighted retention curves in `retention` accounting for viewer demographics (verified 2026-05-16; src/weighted_retention.rs)
+- [x] Implement time-series decomposition (trend + seasonality) in `engagement` trend analysis (verified 2026-05-16; src/engagement.rs)
 - [x] Add exponential moving average option alongside linear regression in `linear_regression_slope`
-- [ ] Implement funnel analysis in `session` (track viewer progression through content milestones)
-- [ ] Add session replay reconstruction from `PlaybackEvent` sequences for debugging
+- [x] Implement funnel analysis in `session` (track viewer progression through content milestones) (verified 2026-05-16; src/funnel.rs)
+- [x] Add session replay reconstruction from `PlaybackEvent` sequences for debugging (verified 2026-05-16; src/replay.rs)
 
 ## New Features
-- [ ] Add cohort analysis module: group viewers by first-view date and track retention over time
-- [ ] Implement churn prediction based on engagement score decline patterns
-- [ ] Add real-time analytics aggregation: sliding window metrics (concurrent viewers, bitrate stats)
-- [ ] Implement content recommendation scoring based on engagement similarity
+- [x] Add cohort analysis module: group viewers by first-view date and track retention over time (verified 2026-05-16; src/cohort.rs)
+- [ ] Implement churn prediction based on engagement score decline patterns (verified-open 2026-05-16: not found as separate module)
+- [x] Add real-time analytics aggregation: sliding window metrics (concurrent viewers, bitrate stats) (verified 2026-05-16; src/realtime.rs)
+- [x] Implement content recommendation scoring based on engagement similarity (verified 2026-05-16; src/recommendation.rs)
 - [x] Add geographic/device breakdowns for session metrics
-- [ ] Implement watch time attribution: allocate credit to content segments for total engagement
-- [ ] Add multivariate testing support (test multiple variables simultaneously) in `ab_testing`
-- [ ] Implement click-through rate (CTR) tracking for thumbnails and previews
-- [ ] Add viewer loyalty scoring: frequency, recency, duration weighted composite
+- [x] Implement watch time attribution: allocate credit to content segments for total engagement (verified 2026-05-16; src/attribution.rs)
+- [x] Add multivariate testing support (test multiple variables simultaneously) in `ab_testing` (verified 2026-05-16; src/multivariate.rs)
+- [x] Implement click-through rate (CTR) tracking for thumbnails and previews (verified 2026-05-16; src/ctr.rs)
+- [ ] Add viewer loyalty scoring: frequency, recency, duration weighted composite (verified-open 2026-05-16: no loyalty_score.rs found)
 
 ## Performance
-- [ ] Add streaming/incremental computation to `compute_retention` for large viewer datasets
-- [ ] Implement approximate quantile computation (t-digest) for percentile metrics at scale
-- [ ] Use integer arithmetic for `assign_variant` FNV-1a hash instead of string operations
-- [ ] Add batch processing for `analyze_session` across multiple sessions in parallel
+- [ ] Add streaming/incremental computation to `compute_retention` for large viewer datasets (verified-open 2026-05-16: not yet implemented)
+- [x] Implement approximate quantile computation (t-digest) for percentile metrics at scale (verified 2026-05-16; src/quantile.rs, src/percentile.rs)
+- [ ] Use integer arithmetic for `assign_variant` FNV-1a hash instead of string operations (verified-open 2026-05-16: not yet optimized)
+- [ ] Add batch processing for `analyze_session` across multiple sessions in parallel (verified-open 2026-05-16: not yet implemented)
 - [x] Implement reservoir sampling for memory-bounded attention heatmap generation
 
 ## Testing

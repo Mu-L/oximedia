@@ -22,8 +22,8 @@
 - [x] Implement manifest_update for live streaming -- incremental playlist update without full regeneration
 - [x] Add keyframe alignment enforcement across all bitrate variants in the ladder
 - [x] Improve encryption_info to support Widevine, FairPlay, and PlayReady DRM system IDs in PSSH boxes
-- [ ] Add content-aware segment boundary selection aligned to scene changes (use codec keyframe positions)
-- [ ] Implement variant_stream (noted in src but may need wiring) for proper multi-variant playlist generation
+- [x] Add content-aware segment boundary selection aligned to scene changes (use codec keyframe positions) (verified 2026-05-16; src/scene_segmenter.rs:201 SceneAlignedSegmenter, 1027 lines)
+- [x] Implement variant_stream (noted in src but may need wiring) for proper multi-variant playlist generation (verified 2026-05-16; src/variant_stream.rs:66 VariantStream, MultiVariantSet:199)
 
 ## New Features
 - [x] Add CMAF byte-range addressing for single-file segment storage (reduces file count on CDN)
@@ -36,16 +36,16 @@
       - InterstitialSchedule for managing multiple interstitials per playlist
       - DateRangeClass enum (AppleInterstitial, Scte35, Custom)
 - [x] Add DASH event stream support for timed metadata (SCTE-35, ID3 equivalent)
-- [ ] Implement automatic bitrate ladder generation from source analysis (per-title encoding)
+- [x] Implement automatic bitrate ladder generation from source analysis (per-title encoding) (verified 2026-05-16; src/ladder.rs:451 SourceAnalysis, BitrateLadderGenerator:550)
 - [x] Add thumbnail/trick-play track generation (I-frame only playlist for HLS, thumbnail adaptation set for DASH)
       - IFramePlaylist: EXT-X-I-FRAMES-ONLY playlists with EXT-X-BYTERANGE addressing
       - IFramePlaylistBuilder: fluent builder for constructing I-frame playlists
       - ThumbnailTrack: DASH thumbnail adaptation set generation with tile sprites
       - ThumbnailTile: tile grid configuration (columns x rows, spatial fragment URIs)
       - EXT-X-I-FRAME-STREAM-INF tag generation for multivariant playlists
-- [ ] Implement pre-roll/bumper injection at packaging time (insert intro segment before content)
-- [ ] Add multi-audio track support with language/accessibility metadata in manifests
-- [ ] Implement SSAI (Server-Side Ad Insertion) markers and manifest manipulation
+- [x] Implement pre-roll/bumper injection at packaging time (insert intro segment before content) (verified 2026-05-16; src/pre_roll.rs:98 PreRollInjector, BumperConfig:59)
+- [x] Add multi-audio track support with language/accessibility metadata in manifests (verified 2026-05-16; src/audio_track.rs:321 MultiAudioSet, AudioTrack:119, 816 lines)
+- [x] Implement SSAI (Server-Side Ad Insertion) markers and manifest manipulation (verified 2026-05-16; src/ssai.rs:40 AdBreakType::PreRoll, 327 lines)
 
 ## Performance
 - [x] Parallelize multi-variant packaging using rayon -- encode each bitrate ladder rung concurrently

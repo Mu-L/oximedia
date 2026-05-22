@@ -6,14 +6,14 @@ Professional color management system for OxiMedia, providing ICC profiles, ACES 
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.6 — 2026-04-26 — 1,026 tests
+Version: 0.1.7 — 2026-05-16 — 1,033 tests
 
 ## Features
 
 - **Standard Color Spaces** — sRGB, Adobe RGB, ProPhoto RGB, Display P3, Rec.709, Rec.2020, DCI-P3
 - **ACES Support** — Full ACES workflow: IDT, RRT, ODT, LMT with AP0 and AP1 primaries
 - **ICC Profile Support** — Parse, validate, and apply ICC v2/v4 profiles (nom-based parsing)
-- **HDR Processing** — PQ and HLG transfer functions, tone mapping operators
+- **HDR Processing** — PQ and HLG transfer functions; `ToneCurve` enum: `ReinhardSimple`, `ReinhardExtended { l_white }`, `FilmicHable` (Hable/Uncharted2 7-param), `AcesFitted` (Narkowicz rational)
 - **Gamut Mapping** — Advanced gamut compression and expansion algorithms
 - **Color Transforms** — Matrix-based, LUT-based, and parametric transforms
 - **Professional Accuracy** — ΔE < 1 for standard conversions, proper linear-light processing
@@ -30,9 +30,9 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-colormgmt = "0.1.6"
+oximedia-colormgmt = "0.1.7"
 # Optional features:
-oximedia-colormgmt = { version = "0.1.6", features = ["lut-integration", "gpu-accel"] }
+oximedia-colormgmt = { version = "0.1.7", features = ["lut-integration", "gpu-accel"] }
 ```
 
 ```rust

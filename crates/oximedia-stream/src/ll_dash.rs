@@ -361,6 +361,30 @@ impl LlDashTimeline {
         out.push_str("</MPD>\n");
         out
     }
+
+    /// Render the current MPD asynchronously into an [`tokio::io::AsyncWrite`] sink.
+    ///
+    /// Calls [`Self::generate_mpd`] internally and streams the result via
+    /// `write_all`. Enabled only when the `async` Cargo feature is on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamError::IoError`] if the underlying writer fails.
+    #[cfg(feature = "async")]
+    pub async fn write_async<W: tokio::io::AsyncWrite + Unpin>(
+        &self,
+        base_url: &str,
+        codec_string: &str,
+        bandwidth_bps: u64,
+        w: &mut W,
+    ) -> Result<(), StreamError> {
+        use tokio::io::AsyncWriteExt;
+        let s = self.generate_mpd(base_url, codec_string, bandwidth_bps);
+        w.write_all(s.as_bytes())
+            .await
+            .map_err(|e| StreamError::IoError(format!("ll-dash write: {e}")))?;
+        Ok(())
+    }
 }
 
 /// Escape the five XML predefined entities.

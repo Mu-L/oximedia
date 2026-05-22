@@ -13,26 +13,26 @@
 - [x] Unify `phase.rs` and `phase_analysis.rs` -- resolved via `pub use phase as phase_analysis` re-export in lib.rs
 - [x] Unify `peak.rs` and `peak_meter.rs` -- resolved via `pub use peak as peak_meter` re-export in lib.rs
 - [x] Unify `dynamics.rs` and `dynamic_range_meter.rs` and `dr_meter.rs` -- resolved via `pub use dynamics as dynamic_range_meter` re-export in lib.rs
-- [ ] Add 8x oversampling option to TruePeakDetector for mastering-grade precision
-- [ ] Implement BS.2051 channel weights for NHK 22.2 immersive audio layout
+- [x] Add 8x oversampling option to TruePeakDetector for mastering-grade precision (verified 2026-05-16; src/truepeak.rs:65 OversampleMode::Mastering8x, new_mastering() fn:115)
+- [x] Implement BS.2051 channel weights for NHK 22.2 immersive audio layout (verified 2026-05-16; src/bs2051_weights.rs:54 struct Bs2051Weights, compute_integrated_loudness_bs2051:147, 380 lines)
 - [x] Add Tidal HiFi and Amazon Music HD loudness targets to the Standard enum
-- [ ] Extend LuminanceMeter to support HLG (Hybrid Log-Gamma) transfer function in addition to PQ/HDR10
-- [ ] Add temporal noise measurement (inter-frame noise) to video_quality module
+- [x] Extend LuminanceMeter to support HLG (Hybrid Log-Gamma) transfer function in addition to PQ/HDR10 (verified 2026-05-16; src/video_luminance.rs:20 Hlg variant, hlg_eotf fn:74)
+- [ ] Add temporal noise measurement (inter-frame noise) to video_quality module (verified-open 2026-05-16: no temporal_noise found in video_quality.rs)
 
 ## New Features
-- [ ] Add VMAF (Video Multi-Method Assessment Fusion) estimator using pure Rust feature extraction
-- [ ] Implement MS-SSIM (Multi-Scale SSIM) in video_quality for better perceptual quality scoring
-- [ ] Add Leq (equivalent continuous sound level) meter for environmental/broadcast compliance
-- [ ] Implement ITU-R BS.2132 loudness measurement for short-form content (<30s)
-- [ ] Add real-time waveform display data generation (oscilloscope-style) to render module
-- [ ] Implement vectorscope data generation for video color analysis in render module
+- [x] Add VMAF (Video Multi-Method Assessment Fusion) estimator using pure Rust feature extraction (verified 2026-05-16; src/vmaf_estimate.rs:483 lines, src/vmaf_features.rs)
+- [x] Implement MS-SSIM (Multi-Scale SSIM) in video_quality for better perceptual quality scoring (verified 2026-05-16; src/ms_ssim.rs:323 lines)
+- [x] Add Leq (equivalent continuous sound level) meter for environmental/broadcast compliance (verified 2026-05-16; src/leq.rs:843 lines)
+- [x] Implement ITU-R BS.2132 loudness measurement for short-form content (<30s) (verified 2026-05-16; src/bs2132.rs:313 lines)
+- [ ] Add real-time waveform display data generation (oscilloscope-style) to render module (verified-open 2026-05-16: no waveform/oscilloscope in render.rs)
+- [ ] Implement vectorscope data generation for video color analysis in render module (verified-open 2026-05-16: no vectorscope in render.rs)
 
 ## Performance
 - [x] Replace rustfft with OxiFFT in spectrum analysis (COOLJAPAN policy) -- Cargo.toml already uses `oxifft.workspace = true`, no rustfft present
 - [x] Remove ndarray dependency -- Cargo.toml has no ndarray; video frames already use flat Vec<f64>
-- [ ] Add SIMD-accelerated K-weighting filter processing using portable_simd (when stable)
-- [ ] Cache FFT plan in SpectrumAnalyzer to avoid repeated allocation per process() call
-- [ ] Use rayon parallel iterators for per-channel true peak detection in multi-channel (>4ch) audio
+- [ ] Add SIMD-accelerated K-weighting filter processing using portable_simd (when stable) (verified-open 2026-05-16: not yet implemented)
+- [ ] Cache FFT plan in SpectrumAnalyzer to avoid repeated allocation per process() call (verified-open 2026-05-16: not yet implemented)
+- [ ] Use rayon parallel iterators for per-channel true peak detection in multi-channel (>4ch) audio (verified-open 2026-05-16: not yet implemented)
 
 ## Testing
 - [x] Add reference signal tests: 997 Hz sine at -23 LUFS should measure exactly -23.0 LUFS (EBU R128 test signal) -- `test_ebu_r128_reference_signal` in lib.rs, ±0.5 LUFS tolerance

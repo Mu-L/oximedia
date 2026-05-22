@@ -1,4 +1,8 @@
-//! Database persistence for batch processing
+//! Database persistence for batch processing.
+//!
+//! [`Database`] wraps an r2d2 connection pool for `SQLite` access.  Use
+//! [`Database::new`] for a single-connection-equivalent default or
+//! [`DatabasePool::new`] to construct a pool with explicit `max_connections`.
 
 pub mod schema;
 
@@ -9,6 +13,143 @@ use chrono::Utc;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::params;
+use std::path::Path;
+
+// ---------------------------------------------------------------------------
+// DatabasePool — configurable connection pool
+// ---------------------------------------------------------------------------
+
+/// A SQLite connection pool with configurable maximum connections.
+///
+/// This is the preferred entry point when you need explicit control over
+/// pool sizing.  For convenience, [`Database`] exposes the same SQL API
+/// but uses the r2d2 default pool size (10).
+///
+/// # Example
+/// ```no_run
+/// use std::path::Path;
+/// use oximedia_batch::database::DatabasePool;
+///
+/// let pool = DatabasePool::new(Path::new("/tmp/batch.db"), 4).unwrap();
+/// let db = pool.into_database();
+/// ```
+pub struct DatabasePool {
+    pool: Pool<SqliteConnectionManager>,
+}
+
+impl DatabasePool {
+    /// Create a new connection pool backed by the `SQLite` file at *db_path*.
+    ///
+    /// # Arguments
+    ///
+    /// * `db_path` - Filesystem path to the `SQLite` database file.
+    /// * `max_connections` - Maximum number of simultaneous connections in the
+    ///   pool.  Must be ≥ 1.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `max_connections` is zero.
+    /// - The r2d2 pool cannot be built (e.g. the path is not writable).
+    /// - Schema initialisation fails.
+    pub fn new(db_path: &Path, max_connections: u32) -> Result<Self> {
+        if max_connections == 0 {
+            return Err(crate::error::BatchError::InvalidJobConfig(
+                "max_connections must be >= 1".to_string(),
+            ));
+        }
+
+        let path_str = db_path
+            .to_str()
+            .ok_or_else(|| {
+                crate::error::BatchError::InvalidJobConfig(
+                    "database path contains non-UTF-8 characters".to_string(),
+                )
+            })?
+            .to_string();
+
+        let manager = SqliteConnectionManager::file(&path_str);
+        let pool = Pool::builder().max_size(max_connections).build(manager)?;
+
+        let dp = Self { pool };
+
+        // Initialise schema using the same DDL as Database.
+        dp.init_schema()?;
+
+        Ok(dp)
+    }
+
+    /// Initialise the jobs / job_logs / job_results schema.
+    fn init_schema(&self) -> Result<()> {
+        let conn = self.pool.get()?;
+        init_schema_on_conn(&conn)
+    }
+
+    /// Convert this pool into a [`Database`] that owns the same underlying
+    /// connection pool.
+    #[must_use]
+    pub fn into_database(self) -> Database {
+        Database { pool: self.pool }
+    }
+
+    /// Return a reference to the inner r2d2 pool.
+    #[must_use]
+    pub fn pool(&self) -> &Pool<SqliteConnectionManager> {
+        &self.pool
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared schema helper
+// ---------------------------------------------------------------------------
+
+fn init_schema_on_conn(conn: &rusqlite::Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            operation TEXT NOT NULL,
+            inputs TEXT,
+            outputs TEXT,
+            priority INTEGER NOT NULL,
+            retry_policy TEXT,
+            dependencies TEXT,
+            schedule TEXT,
+            metadata TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            status TEXT NOT NULL,
+            error TEXT
+        );
+        CREATE TABLE IF NOT EXISTS job_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            level TEXT NOT NULL,
+            message TEXT NOT NULL,
+            FOREIGN KEY(job_id) REFERENCES jobs(id)
+        );
+        CREATE TABLE IF NOT EXISTS job_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT NOT NULL,
+            input_file TEXT NOT NULL,
+            output_files TEXT,
+            success INTEGER NOT NULL,
+            error TEXT,
+            duration REAL,
+            FOREIGN KEY(job_id) REFERENCES jobs(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_job_logs_job_id ON job_logs(job_id);",
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Database — original single-API wrapper (still uses r2d2 under the hood)
+// ---------------------------------------------------------------------------
 
 /// Database for job persistence
 pub struct Database {
@@ -16,7 +157,7 @@ pub struct Database {
 }
 
 impl Database {
-    /// Create a new database connection
+    /// Create a new database backed by the r2d2 default pool size (10).
     ///
     /// # Arguments
     ///
@@ -37,73 +178,10 @@ impl Database {
         Ok(db)
     }
 
-    /// Initialize database schema
+    /// Initialize database schema (delegates to the shared helper).
     fn init_schema(&self) -> Result<()> {
         let conn = self.pool.get()?;
-
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                operation TEXT NOT NULL,
-                inputs TEXT,
-                outputs TEXT,
-                priority INTEGER NOT NULL,
-                retry_policy TEXT,
-                dependencies TEXT,
-                schedule TEXT,
-                metadata TEXT,
-                created_at TEXT NOT NULL,
-                started_at TEXT,
-                completed_at TEXT,
-                status TEXT NOT NULL,
-                error TEXT
-            )",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS job_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                job_id TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                level TEXT NOT NULL,
-                message TEXT NOT NULL,
-                FOREIGN KEY(job_id) REFERENCES jobs(id)
-            )",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS job_results (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                job_id TEXT NOT NULL,
-                input_file TEXT NOT NULL,
-                output_files TEXT,
-                success INTEGER NOT NULL,
-                error TEXT,
-                duration REAL,
-                FOREIGN KEY(job_id) REFERENCES jobs(id)
-            )",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at)",
-            [],
-        )?;
-
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_job_logs_job_id ON job_logs(job_id)",
-            [],
-        )?;
-
-        Ok(())
+        init_schema_on_conn(&conn)
     }
 
     /// Save a job to the database
@@ -665,5 +743,90 @@ mod tests {
 
         let stats = stats.expect("stats should be valid");
         assert_eq!(stats.total, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // DatabasePool tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_database_pool_new() {
+        let temp_file = NamedTempFile::new().expect("temp file");
+        let dp = DatabasePool::new(temp_file.path(), 4);
+        assert!(
+            dp.is_ok(),
+            "DatabasePool::new should succeed: {:?}",
+            dp.err()
+        );
+    }
+
+    #[test]
+    fn test_database_pool_rejects_zero_connections() {
+        let temp_file = NamedTempFile::new().expect("temp file");
+        let dp = DatabasePool::new(temp_file.path(), 0);
+        assert!(dp.is_err(), "zero max_connections should be rejected");
+    }
+
+    #[test]
+    fn test_database_pool_into_database() {
+        let temp_file = NamedTempFile::new().expect("temp file");
+        let dp = DatabasePool::new(temp_file.path(), 2).expect("pool");
+        let db = dp.into_database();
+
+        let stats = db.get_statistics().expect("stats");
+        assert_eq!(stats.total, 0);
+    }
+
+    /// Spawn 4 threads, each inserting 10 jobs, verify total count == 40.
+    #[test]
+    fn test_pool_concurrent_access() {
+        use std::sync::Arc;
+
+        let temp_file = NamedTempFile::new().expect("temp file");
+        // Use a pool with 4 connections to allow genuine concurrency.
+        let dp = DatabasePool::new(temp_file.path(), 4).expect("pool");
+
+        // WAL mode allows concurrent readers; for concurrent writers, SQLite
+        // serialises internally so enabling WAL reduces contention.
+        {
+            let conn = dp.pool().get().expect("conn");
+            conn.execute_batch("PRAGMA journal_mode=WAL;")
+                .expect("WAL mode");
+        }
+
+        let db = Arc::new(dp.into_database());
+
+        const THREADS: usize = 4;
+        const JOBS_PER_THREAD: usize = 10;
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let db_clone = Arc::clone(&db);
+                std::thread::spawn(move || {
+                    for i in 0..JOBS_PER_THREAD {
+                        let job = BatchJob::new(
+                            format!("thread-{t}-job-{i}"),
+                            BatchOperation::FileOp {
+                                operation: FileOperation::Copy { overwrite: false },
+                            },
+                        );
+                        db_clone.save_job(&job).expect("save_job in thread");
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        let stats = db.get_statistics().expect("stats");
+        assert_eq!(
+            stats.total,
+            (THREADS * JOBS_PER_THREAD) as u64,
+            "expected {} total jobs, got {}",
+            THREADS * JOBS_PER_THREAD,
+            stats.total
+        );
     }
 }

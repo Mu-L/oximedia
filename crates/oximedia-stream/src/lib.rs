@@ -1,6 +1,41 @@
 //! `oximedia-stream` — Adaptive streaming pipeline, segment lifecycle management,
 //! and stream health monitoring for the OxiMedia framework.
 //!
+//! # Streaming Pipeline Architecture
+//!
+//! ```text
+//! ┌─────────────┐     ┌──────────────────┐     ┌──────────────────┐
+//! │  srt_ingest │────▶│ stream_packager  │────▶│   cmaf / fmp4   │
+//! └─────────────┘     └──────────────────┘     └────────┬─────────┘
+//!                              ▲                         │
+//!                              │                         ▼
+//! ┌─────────────┐     ┌──────────────────┐     ┌──────────────────┐
+//! │ adaptive_   │────▶│  bola /          │     │ segment_manager  │
+//! │ pipeline    │◀────│  throughput_abr  │     └────────┬─────────┘
+//! └─────────────┘     └──────────────────┘              │
+//!                                                        ▼
+//! ┌─────────────┐     ┌──────────────────┐     ┌──────────────────┐
+//! │  cdn_health │◀────│ stream_analytics │     │ manifest_builder │
+//! │  stream_    │◀────│ stream_health    │     └────────┬─────────┘
+//! │  health     │     └──────────────────┘              │
+//! └─────────────┘                                        ▼
+//!                                               ┌──────────────────┐
+//!                                               │ cdn_upload /     │
+//!                                               │ multi_cdn        │
+//!                                               └──────────────────┘
+//! ```
+//!
+//! **Stage responsibilities:**
+//! - `srt_ingest`: Receive live UDP/SRT streams and produce raw media frames
+//! - `stream_packager`: Segment and mux frames into CMAF/fMP4 or MPEG-TS containers
+//! - `segment_manager`: Track segment lifecycle, prefetch depth, and buffer state
+//! - `bola` / `throughput_abr`: Estimate available bandwidth and compute target quality tier
+//! - `adaptive_pipeline`: Apply cooldowns, hysteresis, and quality-switch decisions
+//! - `manifest_builder`: Emit HLS (v3–v9) and MPEG-DASH MPD manifests
+//! - `stream_analytics` / `stream_health`: Collect QoE metrics and detect playback issues
+//! - `cdn_health`: Aggregate per-CDN health scores for multi-CDN selection
+//! - `cdn_upload` / `multi_cdn`: Push segments and manifests to CDN edge nodes
+//!
 //! # Modules
 //!
 //! | Module | Purpose |
@@ -15,9 +50,11 @@
 //! | [`drm_signaling`] | DRM system signaling (Widevine, FairPlay, PlayReady) |
 //! | [`dvr_recorder`] | DVR sliding-window recorder with VOD playlist generation |
 //! | [`file_recorder`] | Filesystem-backed live stream recorder |
+//! | [`fmp4`] | Fragmented MP4 packaging helpers (re-exports `build_sidx`) |
 //! | [`ll_dash`] | Low-Latency DASH with CMAF chunked transfer encoding |
 //! | [`ll_hls`] | Low-Latency HLS with partial segments (RFC 8216bis) |
 //! | [`manifest_builder`] | HLS master/media playlist and DASH MPD generation |
+//! | [`media_unit_pool`] | Bounded RAII pool for recycling [`MediaUnit`] allocations |
 //! | [`multi_audio`] | Multiple audio track variants and language management |
 //! | [`multi_cdn`] | Multi-CDN failover routing with EWMA latency tracking |
 //! | [`prefetch_scheduler`] | Bandwidth-aware segment prefetch depth scheduler |
@@ -51,9 +88,11 @@ pub mod dash_mpd_updater;
 pub mod drm_signaling;
 pub mod dvr_recorder;
 pub mod file_recorder;
+pub mod fmp4;
 pub mod ll_dash;
 pub mod ll_hls;
 pub mod manifest_builder;
+pub mod media_unit_pool;
 pub mod multi_audio;
 pub mod multi_cdn;
 pub mod prefetch_scheduler;
@@ -70,6 +109,7 @@ pub mod stream_recorder;
 pub mod subtitle_track;
 pub mod throughput_abr;
 pub mod thumbnail_track;
+pub mod validator;
 
 // ─── Crate-level error type ───────────────────────────────────────────────────
 
@@ -188,3 +228,9 @@ pub use prefetch_scheduler::{PrefetchConfig as PrefetchSchedulerConfig, Prefetch
 pub use stream_recorder::{
     DvrWindow, LiveRecorder, RecordingConfig, RecordingStats, StreamRecorder,
 };
+
+// media_unit_pool
+pub use media_unit_pool::{MediaUnitPool, PooledMediaUnit};
+
+// fmp4
+pub use fmp4::build_sidx;

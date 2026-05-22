@@ -152,8 +152,7 @@ impl NoiseProfileLearner {
         let mut profile = NoiseProfile::new(self.fft_size);
         profile.frame_count = self.frame_count;
         for i in 0..bins {
-            profile.mean_power[i] =
-                (self.power_acc[i] / self.frame_count as f64) as f32;
+            profile.mean_power[i] = (self.power_acc[i] / self.frame_count as f64) as f32;
         }
         Ok(profile)
     }
@@ -186,7 +185,7 @@ pub enum GateState {
 
 /// Combined spectral-subtraction + wideband gate processor.
 ///
-/// Processes audio in an internal circular hop buffer; call [`process_block`]
+/// Processes audio in an internal circular hop buffer; call [`Self::process_block`]
 /// with arbitrary-sized buffers and the processor will correctly handle
 /// internal frame boundaries.
 #[derive(Debug)]
@@ -433,7 +432,11 @@ impl NoiseReductionGate {
                 // Scale magnitude preserving phase
                 let input_mag = input_power.sqrt();
                 let new_mag = subtracted_power.sqrt();
-                let scale = if input_mag > 1e-12 { new_mag / input_mag } else { 0.0 };
+                let scale = if input_mag > 1e-12 {
+                    new_mag / input_mag
+                } else {
+                    0.0
+                };
                 spectrum[i] = Complex::new(c.re * scale, c.im * scale);
 
                 // Mirror bin for real-valued IFFT symmetry
@@ -515,9 +518,7 @@ impl NoiseReductionGate {
 
 fn hann_window(size: usize) -> Vec<f32> {
     (0..size)
-        .map(|i| {
-            0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (size - 1) as f32).cos())
-        })
+        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (size - 1) as f32).cos()))
         .collect()
 }
 
@@ -649,7 +650,10 @@ mod tests {
         let mut out_silent = vec![0.0f32; 512];
         gate.process_block(&silent, &mut out_silent).unwrap();
         let e: f32 = out_silent.iter().map(|&x| x * x).sum();
-        assert!(e < 1e-6, "After reset, silence should produce near-silence, e={e}");
+        assert!(
+            e < 1e-6,
+            "After reset, silence should produce near-silence, e={e}"
+        );
     }
 
     #[test]

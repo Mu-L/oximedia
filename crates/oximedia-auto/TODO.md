@@ -9,23 +9,23 @@
 
 ## Enhancements
 - [x] Replace `ndarray` dependency with SciRS2-Core per SCIRS2 policy (confirmed: ndarray was never present in Cargo.toml or source; all array ops use plain Rust)
-- [ ] Improve `highlights::HighlightDetector` with configurable multi-pass analysis (coarse then fine)
-- [ ] Add confidence scores to `cuts::CutPoint` for user review prioritization
-- [ ] Extend `assembly::AssemblyType` with `Recap` variant for episode/series recaps
+- [x] Improve `highlights::HighlightDetector` with configurable multi-pass analysis (coarse then fine) (verified 2026-05-16; src/highlights.rs:253 MultiPassConfig, coarse-to-fine detection:267)
+- [x] Add confidence scores to `cuts::CutPoint` for user review prioritization (verified 2026-05-16; src/cuts.rs:80 CutPoint struct, confidence field:85)
+- [x] Extend `assembly::AssemblyType` with `Recap` variant for episode/series recaps (verified 2026-05-16; src/assembly.rs:39 Recap variant)
 - [x] Add `rules::PacingPreset::Custom` with user-defined shot duration curves (`pacing_curve` module: `PacingCurve`, `CurveShape` 7 variants, `CurveKeyframe`, `CurveAnalyser`; `distribute_clips`/`compute_cut_positions`; 27 tests)
-- [ ] Improve `scoring::SceneScorer` with temporal context (score relative to neighbors)
+- [x] Improve `scoring::SceneScorer` with temporal context (score relative to neighbors) (verified 2026-05-16; src/scoring.rs:509 TemporalContextConfig, neighbor bonus:516)
 - [x] Extend `smart_reframe` with subject tracking across multiple frames for smooth panning (`SubjectTracker` + `SubjectBounds` with EMA; `generate_sequence`/`generate_smooth_sequence`; 10 tests)
 - [x] Add vertical-to-horizontal reframing in `smart_reframe` (`VerticalToHorizontalParams`, `VerticalToHorizontalStrategy` 5 variants, `FrameOrientation`; `primary_placement`/`side_regions`/`saliency_crop_window`; 7 tests)
-- [ ] Improve `music_sync` with downbeat vs upbeat distinction for edit point selection
+- [x] Improve `music_sync` with downbeat vs upbeat distinction for edit point selection (verified 2026-05-16; src/music_sync.rs:12 BeatGrid, downbeats_ms:16)
 
 ## New Features
-- [ ] Add `auto_thumbnail` module for automatic thumbnail selection from best frames
-- [ ] Implement `auto_chaptering` module to generate chapter points from scene analysis
-- [ ] Add `content_warning` module for automatic content classification (violence, language)
-- [ ] Implement `engagement_predictor` module using interest curve analysis for audience retention
-- [ ] Add `a_b_roll` module for automatic B-roll insertion suggestions based on dialogue content
-- [ ] Implement `color_continuity` checker that flags jarring color shifts between assembled clips
-- [ ] Add platform-specific export presets for YouTube Shorts, Instagram Reels, TikTok in `assembly`
+- [x] Add `auto_thumbnail` module for automatic thumbnail selection from best frames (verified 2026-05-16; src/auto_thumbnail.rs:903 lines)
+- [x] Implement `auto_chaptering` module to generate chapter points from scene analysis (verified 2026-05-16; src/auto_chaptering.rs:1099 lines)
+- [x] Add `content_warning` module for automatic content classification (violence, language) (verified 2026-05-16; src/content_warning.rs:1064 lines)
+- [x] Implement `engagement_predictor` module using interest curve analysis for audience retention (verified 2026-05-16; src/engagement_predictor.rs:853 lines)
+- [x] Add `a_b_roll` module for automatic B-roll insertion suggestions based on dialogue content (verified 2026-05-16; src/a_b_roll.rs:1131 lines)
+- [x] Implement `color_continuity` checker that flags jarring color shifts between assembled clips (verified 2026-05-16; src/color_continuity.rs:767 lines)
+- [x] Add platform-specific export presets for YouTube Shorts, Instagram Reels, TikTok in `assembly` (verified 2026-05-16; src/assembly.rs:79 PlatformPreset enum, YouTubeShorts:81, InstagramReels:83, TikTok:85)
 
 ## Performance
 - [ ] Parallelize `highlights::detect_highlights()` across frame batches using rayon

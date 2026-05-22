@@ -12,27 +12,27 @@
 - [x] Improve `psychoacoustic` masking model with Bark scale critical band analysis for more accurate human hearing modeling (`bark_masking.rs`)
 - [x] Add multi-channel watermarking support to `WatermarkEmbedder` (stereo/5.1/7.1 with Independent/Distributed/MidOnly/Complementary/Selective strategies) (`multichannel.rs`)
 - [x] Extend `spread_spectrum` with Gold code sequences for better cross-correlation properties (`gold_code.rs`)
-- [ ] Add configurable Reed-Solomon parameters in `payload_encoder` (currently fixed 16,8 -- allow user-specified redundancy level)
-- [ ] Improve `dct_watermark` with adaptive coefficient selection based on local signal energy
-- [ ] Add watermark strength auto-tuning in `wm_strength` that maximizes robustness while staying below perceptual threshold
+- [x] Add configurable Reed-Solomon parameters in `payload_encoder` (implemented 2026-05-15: `ReedSolomonConfig { n, k }` with `validate()`, `with_rs_config()` builder on `PayloadEncoder`; `RsConfigError` variants for k>=n, n>255, k=0)
+- [x] Improve `dct_watermark` with adaptive coefficient selection based on local signal energy (implemented 2026-05-15: `AdaptiveDctSelector::select_coefficients()` sorts mid-freq zig-zag positions 5-42 by energy; `AdaptiveDctEmbedder` wires it in)
+- [x] Add watermark strength auto-tuning in `wm_strength` that maximizes robustness while staying below perceptual threshold (implemented 2026-05-15: `WatermarkStrengthTuner::find_optimal_strength()` with 30-iteration binary search; `compute_psnr_f32()` helper; `WatermarkEmbedder` trait)
 
 ## New Features
 - [x] Implement `video_watermark` module for spatial-domain video frame watermarking (DCT-based per-frame embedding with spatial and frequency modes) (`video_watermark.rs`)
-- [ ] Add `fingerprint_watermark` module combining `perceptual_hash` with watermark for dual content identification
-- [ ] Implement `realtime_embedder` for streaming/live audio watermarking with frame-by-frame processing and state persistence
-- [ ] Add `watermark_comparator` module for comparing extracted watermarks against database with fuzzy matching
-- [ ] Implement `multi_layer_watermark` for embedding multiple independent watermarks (owner + distributor + session) in same audio
-- [ ] Add `temporal_watermark` module that encodes data across time (frame sequence) rather than within single frames
-- [ ] Implement `watermark_analyzer` CLI-style module that reports embedded watermark metadata, strength, and degradation level
-- [ ] Add `image_watermark` module extending spatial_watermark with DWT-based robust image watermarking
+- [x] Add `fingerprint_watermark` module combining `perceptual_hash` with watermark for dual content identification (verified 2026-05-16; src/fingerprint_watermark.rs:550 lines)
+- [x] Implement `realtime_embedder` for streaming/live audio watermarking with frame-by-frame processing and state persistence (verified 2026-05-16; src/realtime_embedder.rs:744 lines)
+- [x] Add `watermark_comparator` module for comparing extracted watermarks against database with fuzzy matching (verified 2026-05-16; src/watermark_comparator.rs:519 lines)
+- [x] Implement `multi_layer_watermark` for embedding multiple independent watermarks (owner + distributor + session) in same audio (verified 2026-05-16; src/multi_layer_watermark.rs:523 lines)
+- [x] Add `temporal_watermark` module that encodes data across time (frame sequence) rather than within single frames (verified 2026-05-16; src/temporal_watermark.rs:471 lines)
+- [x] Implement `watermark_analyzer` CLI-style module that reports embedded watermark metadata, strength, and degradation level (verified 2026-05-16; src/watermark_analyzer.rs:613 lines)
+- [x] Add `image_watermark` module extending spatial_watermark with DWT-based robust image watermarking (verified 2026-05-16; src/image_watermark.rs:536 lines)
 
 ## Performance
-- [ ] Optimize `spread_spectrum` FFT-based embedding with in-place transforms to halve memory allocation
-- [ ] Add batch FFT processing in `phase` embedder to amortize FFT setup across multiple frames
-- [ ] Implement SIMD-optimized correlation computation in `spread_spectrum` detector for faster extraction
-- [ ] Cache PN sequence generation in `spread_spectrum` (currently regenerated per embed/detect call)
-- [ ] Optimize `echo` embedder overlap-add convolution with FFT-based fast convolution for long kernels
-- [ ] Profile `qim` quantizer and eliminate unnecessary f32<->i32 conversions in inner loop
+- [x] Optimize `spread_spectrum` FFT-based embedding with in-place transforms to halve memory allocation (implemented 2026-05-15: `InPlaceFftEmbedder` pre-allocates `Plan<f32>` + two `Vec<Complex<f32>>` scratch buffers; reuses across `embed_in_place()` calls)
+- [x] Add batch FFT processing in `phase` embedder to amortize FFT setup across multiple frames (implemented 2026-05-15: `PhaseEmbedder::embed_batch()` pre-allocates shared `freq_buf` + `ifft_buf` and reuses for every frame in the batch)
+- [x] Implement SIMD-optimized correlation computation in `spread_spectrum` detector for faster extraction (implemented 2026-05-15: `correlate_simd()` uses `scirs2_core::simd_aligned::simd_dot_aligned_f32()` (AVX2/NEON runtime dispatch via safe API); `correlate_scalar()` fallback)
+- [ ] Cache PN sequence generation in `spread_spectrum` (currently regenerated per embed/detect call) (verified-open 2026-05-16: not yet implemented)
+- [ ] Optimize `echo` embedder overlap-add convolution with FFT-based fast convolution for long kernels (verified-open 2026-05-16: not yet implemented)
+- [ ] Profile `qim` quantizer and eliminate unnecessary f32<->i32 conversions in inner loop (verified-open 2026-05-16: not yet implemented)
 
 ## Testing
 - [ ] Add round-trip embed/detect tests for all 6 algorithms with various payload sizes (1 byte, 32 bytes, 256 bytes)

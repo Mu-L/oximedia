@@ -19,7 +19,7 @@ oximedia-core = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-sysinfo = "0.38"
+sysinfo = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

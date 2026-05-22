@@ -30,6 +30,12 @@ mdns-sd = { workspace = true, optional = true }
 
 [dev-dependencies]
 approx = "0.5"
+tokio = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
 
 [lints.rust]
 unsafe_code = "allow"

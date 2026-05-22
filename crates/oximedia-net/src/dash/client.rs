@@ -54,7 +54,6 @@ use super::segment::{DashSegment, SegmentGenerator, SegmentInfo};
 use crate::abr::{AbrDecision, AdaptiveBitrateController, QualityLevel};
 use crate::error::{NetError, NetResult};
 use bytes::Bytes;
-use parking_lot::Mutex;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -379,10 +378,10 @@ pub struct DashClient {
     total_bytes_downloaded: u64,
     /// Total download time.
     total_download_time: Duration,
-    /// Lazily-initialised HTTP client. Using `Mutex<Option<Client>>` so that
+    /// Lazily-initialised HTTP client. Wrapped in `Mutex<Option<>>` so that
     /// `fetch_http_segment` can initialise the client on first use without
     /// requiring `&mut self`.
-    http_client: Mutex<Option<Client>>,
+    http_client: std::sync::Mutex<Option<Client>>,
 }
 
 impl DashClient {
@@ -396,7 +395,7 @@ impl DashClient {
             abr_controller: None,
             total_bytes_downloaded: 0,
             total_download_time: Duration::ZERO,
-            http_client: Mutex::new(None),
+            http_client: std::sync::Mutex::new(None),
         }
     }
 
@@ -781,10 +780,13 @@ impl DashClient {
     /// Returns a clone of the lazily-initialised HTTP client.
     ///
     /// The client is built on the first call and reused for all subsequent
-    /// requests via `Clone` (reqwest's `Client` is cheaply cloneable — it
-    /// shares the underlying connection pool through an `Arc`).
-    fn get_or_init_http_client(&self) -> NetResult<Client> {
-        let mut guard = self.http_client.lock();
+    /// requests (reqwest `Client` is cheaply cloneable — it shares the
+    /// underlying connection pool through an `Arc`).
+    fn http_client(&self) -> NetResult<Client> {
+        let mut guard = self
+            .http_client
+            .lock()
+            .map_err(|_| NetError::connection("HTTP client mutex poisoned"))?;
         if guard.is_none() {
             let client = Client::builder()
                 .timeout(self.config.timeout)
@@ -809,7 +811,7 @@ impl DashClient {
         url: &str,
         byte_range: Option<(u64, u64)>,
     ) -> NetResult<Bytes> {
-        let client = self.get_or_init_http_client()?;
+        let client = self.http_client()?.clone();
         let timeout = self.config.timeout;
         let max_segment_size = self.config.max_segment_size;
         let range_header = byte_range.map(|(start, end)| format!("bytes={start}-{end}"));

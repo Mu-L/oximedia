@@ -6,7 +6,7 @@ Video alignment and registration tools for multi-camera synchronization in OxiMe
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.6 — 2026-04-26 — 642 tests
+Version: 0.1.7 — 2026-05-16 — 642 tests
 
 ## Features
 
@@ -64,7 +64,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-align = "0.1.6"
+oximedia-align = "0.1.7"
 ```
 
 ### Audio-Based Synchronization

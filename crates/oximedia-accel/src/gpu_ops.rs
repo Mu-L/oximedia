@@ -274,18 +274,20 @@ pub fn idct_8x8(coeffs: &[f32; 64]) -> [f32; 64] {
 // Noise reducer
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// GPU-accelerated (stub) noise reducer.
+/// Spatial noise reducer using separable Gaussian blur.
 ///
-/// All paths fall through to a CPU box-blur until a real GPU backend is wired.
+/// The GPU path (WebGPU/Metal) is not activated in this sync API because
+/// `pollster::block_on` inside a sync function risks deadlock when called from
+/// an async runtime.  The CPU Gaussian path is the correct, working
+/// implementation.  A real GPU path can be exposed via an async method in a
+/// future iteration.
 pub struct NoiseReducer;
 
 impl NoiseReducer {
-    /// Apply spatial noise reduction using a box-blur as a stub.
+    /// Apply spatial noise reduction via a separable Gaussian blur (CPU).
     ///
-    /// The `strength` parameter controls the blur radius:
-    /// - `strength ≤ 0.33` → radius 1 (3×3 box blur)
-    /// - `strength ≤ 0.66` → radius 2 (5×5 box blur)
-    /// - `strength > 0.66` → radius 3 (7×7 box blur)
+    /// The `strength` parameter controls the Gaussian sigma:
+    /// - `sigma = strength * 3.0` (clamped so radius ≤ 15)
     ///
     /// # Arguments
     ///
@@ -304,44 +306,91 @@ impl NoiseReducer {
             return frame.to_vec();
         }
 
-        let radius = if strength <= 0.33 {
-            1usize
-        } else if strength <= 0.66 {
-            2
-        } else {
-            3
-        };
-
-        box_blur_rgb(frame, width as usize, height as usize, radius)
+        gaussian_blur_rgb(frame, width as usize, height as usize, strength)
     }
 }
 
-/// Apply a box blur to a packed RGB24 image.
-fn box_blur_rgb(src: &[u8], width: usize, height: usize, radius: usize) -> Vec<u8> {
-    let mut dst = vec![0u8; width * height * 3];
-    let r = radius as i32;
-    let diam = (2 * r + 1) as f32;
-    let area = diam * diam;
-
-    for y in 0..height {
-        for x in 0..width {
-            let mut sum = [0.0f32; 3];
-            for dy in -r..=r {
-                let sy = (y as i32 + dy).clamp(0, height as i32 - 1) as usize;
-                for dx in -r..=r {
-                    let sx = (x as i32 + dx).clamp(0, width as i32 - 1) as usize;
-                    let idx = (sy * width + sx) * 3;
-                    sum[0] += f32::from(src[idx]);
-                    sum[1] += f32::from(src[idx + 1]);
-                    sum[2] += f32::from(src[idx + 2]);
-                }
-            }
-            let out = (y * width + x) * 3;
-            dst[out] = (sum[0] / area).round() as u8;
-            dst[out + 1] = (sum[1] / area).round() as u8;
-            dst[out + 2] = (sum[2] / area).round() as u8;
+/// Build a 1-D Gaussian kernel with the given `sigma`.
+///
+/// Returns a `Vec<f32>` of length `2*r+1` that sums to 1.0, where
+/// `r = (sigma * 3.0).ceil() as i32` clamped to 15.
+fn build_gaussian_kernel(sigma: f32) -> (i32, Vec<f32>) {
+    // When sigma is effectively zero, return a trivial kernel of size 1.
+    if sigma < 1e-6 {
+        return (0, vec![1.0f32]);
+    }
+    let radius = ((sigma * 3.0).ceil() as i32).min(15).max(1);
+    let two_sigma_sq = 2.0 * sigma * sigma;
+    let mut weights: Vec<f32> = (-radius..=radius)
+        .map(|d| {
+            let dist = d as f32;
+            (-dist * dist / two_sigma_sq).exp()
+        })
+        .collect();
+    // Normalize so weights sum to exactly 1.0.
+    let total: f32 = weights.iter().sum();
+    if total > 0.0 {
+        for w in &mut weights {
+            *w /= total;
         }
     }
+    (radius, weights)
+}
+
+/// Apply a separable Gaussian blur to a packed RGB24 image.
+///
+/// Two 1-D passes (horizontal then vertical) produce the same result as a
+/// full 2-D Gaussian convolution but with O(r) work per pixel per pass.
+fn gaussian_blur_rgb(src: &[u8], width: usize, height: usize, strength: f32) -> Vec<u8> {
+    let sigma = strength * 3.0;
+    let (radius, kernel) = build_gaussian_kernel(sigma);
+
+    let pixel_count = width * height;
+    // Temporary buffer: f32 triples to avoid clamping/rounding in the
+    // horizontal pass — we only quantise back to u8 at the end.
+    let mut tmp = vec![0.0f32; pixel_count * 3];
+    let mut dst = vec![0u8; pixel_count * 3];
+
+    let r = radius as i32;
+
+    // --- Horizontal pass ---
+    for y in 0..height {
+        for x in 0..width {
+            let mut acc = [0.0f32; 3];
+            for (ki, kd) in (-r..=r).enumerate() {
+                let sx = (x as i32 + kd).clamp(0, width as i32 - 1) as usize;
+                let idx = (y * width + sx) * 3;
+                let w = kernel[ki];
+                acc[0] += f32::from(src[idx]) * w;
+                acc[1] += f32::from(src[idx + 1]) * w;
+                acc[2] += f32::from(src[idx + 2]) * w;
+            }
+            let out = (y * width + x) * 3;
+            tmp[out] = acc[0];
+            tmp[out + 1] = acc[1];
+            tmp[out + 2] = acc[2];
+        }
+    }
+
+    // --- Vertical pass ---
+    for y in 0..height {
+        for x in 0..width {
+            let mut acc = [0.0f32; 3];
+            for (ki, kd) in (-r..=r).enumerate() {
+                let sy = (y as i32 + kd).clamp(0, height as i32 - 1) as usize;
+                let idx = (sy * width + x) * 3;
+                let w = kernel[ki];
+                acc[0] += tmp[idx] * w;
+                acc[1] += tmp[idx + 1] * w;
+                acc[2] += tmp[idx + 2] * w;
+            }
+            let out = (y * width + x) * 3;
+            dst[out] = acc[0].round().clamp(0.0, 255.0) as u8;
+            dst[out + 1] = acc[1].round().clamp(0.0, 255.0) as u8;
+            dst[out + 2] = acc[2].round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
     dst
 }
 
@@ -544,7 +593,38 @@ mod tests {
         let frame = vec![128u8; 4 * 4 * 3];
         let out = NoiseReducer::spatial_nr(&frame, 4, 4, 0.5);
         for (&a, &b) in frame.iter().zip(out.iter()) {
-            assert_eq!(a, b, "uniform frame should be unchanged by box blur");
+            assert_eq!(a, b, "uniform frame should be unchanged by Gaussian blur");
         }
+    }
+
+    /// Gaussian blur with strength > 0 must produce output different from the
+    /// noisy input (i.e., it actually blurs).
+    #[test]
+    fn test_gaussian_blur_reduces_noise() {
+        // Build a noisy 8×8 RGB frame with alternating 0/255 values.
+        let mut frame = vec![0u8; 8 * 8 * 3];
+        for (i, p) in frame.iter_mut().enumerate() {
+            *p = if (i / 3 + i % 3) % 2 == 0 { 255 } else { 0 };
+        }
+        let out = NoiseReducer::spatial_nr(&frame, 8, 8, 1.0);
+        assert_eq!(out.len(), frame.len(), "output size must match");
+        // At least one pixel should differ from the noisy input.
+        let differs = frame.iter().zip(out.iter()).any(|(a, b)| a != b);
+        assert!(differs, "Gaussian blur should change at least one pixel of a noisy frame");
+    }
+
+    #[test]
+    fn test_build_gaussian_kernel_sum_to_one() {
+        let (_, kernel) = build_gaussian_kernel(1.5);
+        let total: f32 = kernel.iter().sum();
+        assert!((total - 1.0).abs() < 1e-5, "kernel must sum to 1.0, got {total}");
+    }
+
+    #[test]
+    fn test_build_gaussian_kernel_zero_sigma() {
+        let (r, kernel) = build_gaussian_kernel(0.0);
+        assert_eq!(r, 0);
+        assert_eq!(kernel.len(), 1);
+        assert!((kernel[0] - 1.0).abs() < 1e-6);
     }
 }

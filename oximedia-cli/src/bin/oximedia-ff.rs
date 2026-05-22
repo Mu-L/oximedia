@@ -16,8 +16,11 @@
 //! ```
 
 use colored::Colorize;
+use oximedia_cli::progress::ProgressFormat;
 use oximedia_cli::transcode::{self, TranscodeOptions};
-use oximedia_compat_ffmpeg::{parse_and_translate, ParsedFilter, TranscodeJob};
+use oximedia_compat_ffmpeg::{
+    parse_and_translate, Diagnostic, DiagnosticKind, ParsedFilter, TranscodeJob, TranslateResult,
+};
 use std::path::PathBuf;
 use tracing::warn;
 
@@ -59,18 +62,47 @@ async fn main() {
 }
 
 async fn run(args: &[String]) -> anyhow::Result<()> {
-    // Strip --dry-run / --plan before passing to the FFmpeg compat parser.
+    // Strip --dry-run / --plan / --explain / --json before passing to the FFmpeg compat parser.
     let dry_run = args
         .iter()
         .any(|a| a == "--dry-run" || a == "--plan" || a == "-dry-run");
 
-    let filtered: Vec<String> = args
+    let explain_mode = args.iter().any(|a| a == "--explain");
+    let json_mode = args.iter().any(|a| a == "--json");
+
+    // Pre-process: extract `-o <file>` or `-o=<file>` as a positional output alias,
+    // then strip those tokens so the FFmpeg-compat parser sees only known forms.
+    let (prefiltered, dash_o_output) = extract_dash_o(args)?;
+
+    let mut filtered: Vec<String> = prefiltered
         .iter()
-        .filter(|a| *a != "--dry-run" && *a != "--plan" && *a != "-dry-run")
+        .filter(|a| {
+            *a != "--dry-run"
+                && *a != "--plan"
+                && *a != "-dry-run"
+                && *a != "--explain"
+                && *a != "--json"
+        })
         .cloned()
         .collect();
 
+    // Append the -o value as a bare positional output (FFmpeg convention: last bare arg).
+    if let Some(out) = dash_o_output {
+        filtered.push(out);
+    }
+
     let result = parse_and_translate(&filtered);
+
+    // --json: emit the structured TranslateResult as JSON on stdout and exit.
+    // Honoured both with and without --dry-run; the JSON form never executes a transcode.
+    if json_mode {
+        let json = render_translate_json(&result)?;
+        println!("{}", json);
+        if result.has_errors() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     // Print diagnostics to stderr in FFmpeg style.
     for diag in &result.diagnostics {
@@ -84,6 +116,12 @@ async fn run(args: &[String]) -> anyhow::Result<()> {
 
     if result.jobs.is_empty() {
         print_help();
+        return Ok(());
+    }
+
+    // --explain: print the argument → field translation table and exit.
+    if explain_mode {
+        print_explain_table(&result.jobs);
         return Ok(());
     }
 
@@ -163,6 +201,46 @@ async fn run(args: &[String]) -> anyhow::Result<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Argument pre-processing
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Scan `args` for `-o <value>` or `-o=<value>` and return:
+/// - a vec of the remaining args (with the `-o` pair removed), and
+/// - the extracted output path, if any.
+///
+/// The extracted path will later be appended as a bare positional output
+/// argument so that `parse_and_translate` sees it as the FFmpeg output file.
+fn extract_dash_o(args: &[String]) -> anyhow::Result<(Vec<String>, Option<String>)> {
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    let mut output_override: Option<String> = None;
+    let mut iter = args.iter();
+
+    while let Some(tok) = iter.next() {
+        if tok == "-o" {
+            // `-o <file>` form — value is the next token.
+            match iter.next() {
+                Some(val) if !val.is_empty() => {
+                    output_override = Some(val.clone());
+                }
+                Some(_) | None => {
+                    anyhow::bail!("option '-o' requires an output path argument");
+                }
+            }
+        } else if let Some(val) = tok.strip_prefix("-o=") {
+            // `-o=<file>` form — value is embedded.
+            if val.is_empty() {
+                anyhow::bail!("option '-o=' requires a non-empty output path");
+            }
+            output_override = Some(val.to_string());
+        } else {
+            out.push(tok.clone());
+        }
+    }
+
+    Ok((out, output_override))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Job execution
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -217,6 +295,7 @@ async fn execute_job(job: &TranscodeJob) -> anyhow::Result<()> {
         threads,
         overwrite: job.overwrite,
         resume: false,
+        progress_format: ProgressFormat::Plain,
     };
 
     transcode::transcode(options).await
@@ -295,6 +374,254 @@ fn extract_scale_filter(filters: &[ParsedFilter]) -> Option<String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// JSON serialization (--json mode)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Render a [`TranslateResult`] as a stable, human-and-machine-readable JSON
+/// document for `--json` mode.
+///
+/// The schema is intentionally narrow and stable so the golden test suite in
+/// `tests/ff_golden.rs` can pin expected outputs without tracking every field
+/// of [`TranscodeJob`]. The shape is:
+///
+/// ```json
+/// {
+///   "diagnostics": [{"kind": "PatentCodecSubstituted", "message": "..."}, ...],
+///   "jobs": [
+///     {
+///       "input": "in.mp4",
+///       "output": "out.mkv",
+///       "video_codec": "av1",
+///       "audio_codec": "opus",
+///       "video_bitrate": "2M",
+///       "audio_bitrate": "128k",
+///       "crf": 23.0,
+///       "preset": "fast",
+///       "tune": null,
+///       "profile": null,
+///       "video_filters": 1,
+///       "audio_filters": 0,
+///       "seek": null,
+///       "duration": null,
+///       "format": null,
+///       "overwrite": true,
+///       "no_video": false,
+///       "no_audio": false,
+///       "metadata": {"title": "..."},
+///       "map": 0,
+///       "map_metadata": 0,
+///       "muxer_actions": ["FastStart"],
+///       "hwaccel": "Cuda",
+///       "pass": null,
+///       "gop_size": null
+///     }
+///   ]
+/// }
+/// ```
+fn render_translate_json(result: &TranslateResult) -> anyhow::Result<String> {
+    let diagnostics: Vec<serde_json::Value> =
+        result.diagnostics.iter().map(diagnostic_to_json).collect();
+
+    let jobs: Vec<serde_json::Value> = result.jobs.iter().map(job_to_json).collect();
+
+    let doc = serde_json::json!({
+        "diagnostics": diagnostics,
+        "jobs": jobs,
+    });
+
+    Ok(serde_json::to_string_pretty(&doc)?)
+}
+
+fn diagnostic_to_json(diag: &Diagnostic) -> serde_json::Value {
+    let kind = match &diag.kind {
+        DiagnosticKind::PatentCodecSubstituted { .. } => "PatentCodecSubstituted",
+        DiagnosticKind::UnknownOptionIgnored { .. } => "UnknownOptionIgnored",
+        DiagnosticKind::FilterNotSupported { .. } => "FilterNotSupported",
+        DiagnosticKind::UnsupportedFeature { .. } => "UnsupportedFeature",
+        DiagnosticKind::Info { .. } => "Info",
+        DiagnosticKind::Error { .. } => "Error",
+        DiagnosticKind::Warning { .. } => "Warning",
+    };
+
+    let message = diag.format_ffmpeg_style("oximedia-ff");
+
+    serde_json::json!({
+        "kind": kind,
+        "message": message,
+        "suggestion": diag.suggestion,
+    })
+}
+
+fn job_to_json(job: &TranscodeJob) -> serde_json::Value {
+    let muxer_actions: Vec<String> = job
+        .muxer_options
+        .iter()
+        .map(|opt| muxer_action_label(&opt.oxi_action).to_string())
+        .collect();
+
+    let hwaccel = job.hwaccel.as_ref().map(|cfg| format!("{:?}", cfg.backend));
+
+    serde_json::json!({
+        "input": job.input_path,
+        "output": job.output_path,
+        "video_codec": job.video_codec,
+        "audio_codec": job.audio_codec,
+        "video_bitrate": job.video_bitrate,
+        "audio_bitrate": job.audio_bitrate,
+        "crf": job.crf,
+        "preset": job.preset,
+        "tune": job.tune,
+        "profile": job.profile,
+        "video_filters": job.video_filters.len(),
+        "audio_filters": job.audio_filters.len(),
+        "seek": job.seek,
+        "duration": job.duration,
+        "format": job.format,
+        "overwrite": job.overwrite,
+        "no_video": job.no_video,
+        "no_audio": job.no_audio,
+        "metadata": job.metadata,
+        "map": job.map.len(),
+        "map_metadata": job.map_metadata.len(),
+        "muxer_actions": muxer_actions,
+        "hwaccel": hwaccel,
+        "pass": job.pass,
+        "gop_size": job.gop_size,
+    })
+}
+
+fn muxer_action_label(action: &oximedia_compat_ffmpeg::MuxerAction) -> &'static str {
+    use oximedia_compat_ffmpeg::MuxerAction;
+    match action {
+        MuxerAction::FastStart => "FastStart",
+        MuxerAction::FragmentedMp4 => "FragmentedMp4",
+        MuxerAction::DashCompat => "DashCompat",
+        MuxerAction::DisableAudio => "DisableAudio",
+        MuxerAction::GlobalHeader => "GlobalHeader",
+        MuxerAction::GeneratePts => "GeneratePts",
+        MuxerAction::DiscardCorrupt => "DiscardCorrupt",
+        MuxerAction::Shortest => "Shortest",
+        MuxerAction::Unknown { .. } => "Unknown",
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Explain mode
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Print a human-readable translation table for `--explain` mode.
+///
+/// Shows each FFmpeg argument and what OxiMedia field/value it mapped to.
+/// Exits without executing any transcode.
+fn print_explain_table(jobs: &[TranscodeJob]) {
+    println!(
+        "{} Translation table (--explain mode):",
+        "oximedia-ff:".cyan().bold()
+    );
+    println!();
+
+    for (idx, job) in jobs.iter().enumerate() {
+        println!("{} Job {} of {}", "──".dimmed(), idx + 1, jobs.len());
+        println!("  {:22} = {}", "-i".yellow(), job.input_path);
+        println!("  {:22} = {}", "<output>".yellow(), job.output_path);
+
+        if let Some(vc) = &job.video_codec {
+            println!("  {:22} = {}", "-c:v".yellow(), vc);
+        }
+        if let Some(ac) = &job.audio_codec {
+            println!("  {:22} = {}", "-c:a".yellow(), ac);
+        }
+        if let Some(vb) = &job.video_bitrate {
+            println!("  {:22} = {}", "-b:v".yellow(), vb);
+        }
+        if let Some(ab) = &job.audio_bitrate {
+            println!("  {:22} = {}", "-b:a".yellow(), ab);
+        }
+        if let Some(crf) = job.crf {
+            println!("  {:22} = {:.1}", "-crf".yellow(), crf);
+        }
+        if !job.video_filters.is_empty() {
+            println!(
+                "  {:22} = {} filter(s)",
+                "-vf".yellow(),
+                job.video_filters.len()
+            );
+        }
+        if !job.audio_filters.is_empty() {
+            println!(
+                "  {:22} = {} filter(s)",
+                "-af".yellow(),
+                job.audio_filters.len()
+            );
+        }
+        if let Some(seek) = &job.seek {
+            println!("  {:22} = {}", "-ss".yellow(), seek);
+        }
+        if let Some(dur) = &job.duration {
+            println!("  {:22} = {}", "-t".yellow(), dur);
+        }
+        if let Some(fmt) = &job.format {
+            println!("  {:22} = {}", "-f".yellow(), fmt);
+        }
+        if let Some(preset) = &job.preset {
+            println!("  {:22} = {}", "-preset".yellow(), preset);
+        }
+        if let Some(tune) = &job.tune {
+            println!("  {:22} = {}", "-tune".yellow(), tune);
+        }
+        if let Some(profile) = &job.profile {
+            println!("  {:22} = {}", "-profile:v".yellow(), profile);
+        }
+        if let Some(pass) = job.pass {
+            println!("  {:22} = {}", "-pass".yellow(), pass);
+        }
+        if job.overwrite {
+            println!("  {:22} = yes", "-y".yellow());
+        }
+        if job.no_video {
+            println!("  {:22} = yes", "-vn".yellow());
+        }
+        if job.no_audio {
+            println!("  {:22} = yes", "-an".yellow());
+        }
+        if !job.map.is_empty() {
+            println!("  {:22} = {} selector(s)", "-map".yellow(), job.map.len());
+        }
+        for (k, v) in &job.metadata {
+            println!("  {:22} = {}={}", "-metadata".yellow(), k, v);
+        }
+        if !job.map_metadata.is_empty() {
+            println!(
+                "  {:22} = {} directive(s)",
+                "-map_metadata".yellow(),
+                job.map_metadata.len()
+            );
+        }
+        if let Some(hw) = &job.hwaccel {
+            println!(
+                "  {:22} = {} ({})",
+                "-hwaccel".yellow(),
+                hw.backend,
+                hw.description
+            );
+        }
+        if !job.muxer_options.is_empty() {
+            println!(
+                "  {:22} = {} option(s)",
+                "muxer opts".yellow(),
+                job.muxer_options.len()
+            );
+        }
+        println!();
+    }
+
+    eprintln!(
+        "{} Use --dry-run to skip execution without the full translation table.",
+        "oximedia-ff: note:".cyan()
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Help text
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -316,7 +643,12 @@ fn print_help() {
     println!("  -y                  Overwrite output without asking");
     println!("  -n                  Never overwrite output");
     println!("  --dry-run / --plan  Print plan without executing");
+    println!("  --explain           Print arg→field translation table and exit");
+    println!(
+        "  --json              Print structured JSON of the translation and exit (no execution)"
+    );
     println!("  -i <path>           Input file");
+    println!("  -o <path>           Output file (alias for positional output)");
     println!("  -c:v / -vcodec      Video codec");
     println!("  -c:a / -acodec      Audio codec");
     println!("  -c:s / -scodec      Subtitle codec");

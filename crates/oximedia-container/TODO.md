@@ -9,13 +9,13 @@
 
 ## Enhancements
 - [x] mp4-muxer — muxer exists at mux/mp4/ (5 files: basic.rs, simple.rs, mod.rs, facade.rs, writer.rs); fMP4 fragmented mode tracked by Wave 3 Slice D
-- [ ] Extend `demux/matroska/parser.rs` with full support for Matroska v4 elements (Block Addition Mappings)
-- [ ] Add sample-accurate seeking in `seek.rs` for all container formats (not just keyframe-based)
+- [ ] Extend `demux/matroska/parser.rs` with full support for Matroska v4 elements (Block Addition Mappings) (verified-open 2026-05-16: Wave 4 added BlockAdditionMapping emit but full parser coverage not complete)
+- [ ] Add sample-accurate seeking in `seek.rs` for all container formats (not just keyframe-based) (verified-open 2026-05-16: Wave 4 extended MKV+MP4+AVI but seek.rs generic abstraction is partial)
 - [x] Extend `metadata/editor.rs` with batch tag operations (copy all tags between files)
-- [ ] Improve `streaming/mux.rs` with CMAF low-latency chunked transfer encoding
-- [ ] Add edit list support in `edit_list.rs` for gapless audio and trimmed video playback
+- [ ] Improve `streaming/mux.rs` with CMAF low-latency chunked transfer encoding (verified-open 2026-05-16: CMAF chunked in fragment/ but streaming/mux.rs not updated)
+- [x] Add edit list support in `edit_list.rs` for gapless audio and trimmed video playback (verified 2026-05-16; src/demux/mp4/boxes.rs:550 gapless elst parse, preroll_samples:636; src/edit/list.rs:75 EditList)
 - [x] Extend `demux/mpegts/` with SCTE-35 ad insertion marker parsing and mux emission
-- [ ] Add `container_probe.rs` detailed stream analysis (bitrate distribution, keyframe interval)
+- [x] Add `container_probe.rs` detailed stream analysis (bitrate distribution, keyframe interval) (verified 2026-05-16; src/container_probe.rs:probe_detailed — DetailedStreamStats with bitrate/keyframe histograms, percentile stats)
 
 ## Wave 2 Progress (2026-04-17)
 - [x] AVI container: muxer (mux/avi/writer.rs) + demuxer (demux/avi/reader.rs) implemented — MJPEG-only, ≤1 GB. Wave 2 Slice F (2026-04-17). Follow-ups: OpenDML >1GB, audio streams, non-MJPEG codecs.
@@ -39,13 +39,13 @@
 
 ## New Features
 - [x] Implement CAF (Core Audio Format) demuxer/muxer for Apple ecosystem compatibility
-- [ ] Add MPEG-DASH segment template generation in `streaming/`
-- [ ] Implement sample grouping and random access point indexing in `sample_table.rs`
+- [x] Add MPEG-DASH segment template generation in `streaming/` (verified 2026-05-16; src/streaming/dash.rs:260 SegmentTemplate XML emission)
+- [x] Implement sample grouping and random access point indexing in `sample_table.rs` (verified 2026-05-16; src/sample_table.rs:394 lines, random access lookup)
 - [x] Add subtitle stream muxing support for Matroska (WebVTT/ASS embedded subtitles)
-- [ ] Implement `timecode/track.rs` SMPTE timecode track reading for professional workflows
+- [x] Implement `timecode/track.rs` SMPTE timecode track reading for professional workflows (verified 2026-05-16; src/timecode/track.rs:305 lines)
 - [x] Add multi-angle support in Matroska via `tracks/selector.rs`
-- [ ] Implement fragmented MP4 (fMP4) live ingest support in `fragment/`
-- [ ] Add MKV attachment extraction and insertion CLI in `attach/matroska.rs`
+- [x] Implement fragmented MP4 (fMP4) live ingest support in `fragment/` (verified 2026-05-16; src/fragment/mp4.rs:367 FragmentedMp4Ingest, ingest fn:400)
+- [x] Add MKV attachment extraction and insertion CLI in `attach/matroska.rs` (verified 2026-05-16; src/attach/matroska.rs:270 lines)
 
 ## Performance
 - [ ] Implement buffered async I/O in `demux/buffer.rs` with configurable read-ahead size
@@ -57,11 +57,11 @@
 
 ## Testing
 - [ ] Add conformance tests for Matroska demuxer against Matroska test suite files
-- [ ] Test MP4 demuxer with fragmented MP4 (fMP4) and progressive MP4 variants
-- [ ] Add round-trip test: demux -> mux -> demux -> verify packet-level equality for all formats
-- [ ] Test MPEG-TS demuxer with real broadcast streams containing multiple programs
-- [ ] Add stress test for `streaming/demux.rs` with simulated live stream input (continuous data)
-- [ ] Test `metadata/vorbis.rs` Vorbis comment handling with edge cases (empty tags, unicode)
+- [x] Test MP4 demuxer with fragmented MP4 (fMP4) and progressive MP4 variants
+- [x] Add round-trip test: demux -> mux -> demux -> verify packet-level equality for all formats
+- [x] Test MPEG-TS demuxer with real broadcast streams containing multiple programs
+- [x] Add stress test for `streaming/demux.rs` with simulated live stream input (continuous data)
+- [x] Test `metadata/vorbis.rs` Vorbis comment handling with edge cases (empty tags, unicode)
 
 ## Documentation
 - [ ] Document container format support matrix (which codecs in which containers)

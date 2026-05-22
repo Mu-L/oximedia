@@ -15,7 +15,7 @@ use super::{BitRead, ByteRead};
 /// # Example
 /// ```
 /// use std::io::Read;
-/// use bitstream_io::{BigEndian, BitRead, BitReader, FromBitStream};
+/// use oximedia_bitstream::{BigEndian, BitRead, BitReader, FromBitStream};
 ///
 /// #[derive(Debug, PartialEq, Eq)]
 /// struct BlockHeader {
@@ -58,7 +58,7 @@ pub trait FromBitStream {
 /// # Example
 /// ```
 /// use std::io::Read;
-/// use bitstream_io::{BigEndian, BitRead, BitReader, FromBitStreamWith};
+/// use oximedia_bitstream::{BigEndian, BitRead, BitReader, FromBitStreamWith};
 ///
 /// #[derive(Default)]
 /// struct Streaminfo {
@@ -206,7 +206,7 @@ pub trait FromBitStream {
 ///
 /// ```
 /// use std::io::Read;
-/// use bitstream_io::{BigEndian, BitRead, BitReader, FromBitStreamWith};
+/// use oximedia_bitstream::{BigEndian, BitRead, BitReader, FromBitStreamWith};
 ///
 /// #[derive(Default)]
 /// struct ModeParameters {

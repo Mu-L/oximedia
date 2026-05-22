@@ -6,5 +6,5 @@
 pub mod extract;
 pub mod track;
 
-pub use extract::AudioExtractor;
-pub use track::AudioTrackSelector;
+pub use extract::{AudioExtractor, AudioFormat};
+pub use track::{AudioTrackInfo, AudioTrackSelector};

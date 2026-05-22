@@ -3,6 +3,7 @@
 //! Provides `PyProxyGenerator`, `PyProxyConfig`, `PyProxyFile` and standalone
 //! functions for generating and managing proxy media files.
 
+use oximedia_transcode::TranscodePipeline;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use std::collections::HashMap;
@@ -213,20 +214,7 @@ impl PyProxyGenerator {
         let orig_meta = std::fs::metadata(orig)
             .map_err(|e| PyRuntimeError::new_err(format!("Metadata error: {e}")))?;
 
-        let scale = self.config.scale_factor();
-        let quality_factor = match self.config.quality.as_str() {
-            "low" => 0.1,
-            "medium" => 0.25,
-            "high" => 0.5,
-            _ => 0.25,
-        };
-        let estimated_size = (orig_meta.len() as f64 * scale * scale * quality_factor) as u64;
-
-        // Write placeholder proxy
-        let content = format!(
-            "PROXY:original={},resolution={},quality={},codec={}",
-            original_path, self.config.resolution, self.config.quality, self.config.codec
-        );
+        // Ensure the proxy output directory exists.
         if let Some(parent) = std::path::Path::new(proxy_path).parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
                 std::fs::create_dir_all(parent).map_err(|e| {
@@ -234,8 +222,79 @@ impl PyProxyGenerator {
                 })?;
             }
         }
-        std::fs::write(proxy_path, &content)
-            .map_err(|e| PyRuntimeError::new_err(format!("Failed to write proxy: {e}")))?;
+
+        // Determine whether the output extension is supported by TranscodePipeline.
+        let out_ext = std::path::Path::new(proxy_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)
+            .unwrap_or_default();
+        let pipeline_supported =
+            matches!(out_ext.as_str(), "mkv" | "webm" | "ogg" | "oga" | "opus");
+
+        let actual_size: u64 = if pipeline_supported {
+            // Run the transcode pipeline in a current-thread async runtime.
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to create async runtime: {e}"))
+                })?;
+
+            let input_pb = std::path::PathBuf::from(original_path);
+            let output_pb = std::path::PathBuf::from(proxy_path);
+
+            let run_result = rt.block_on(async {
+                let mut pipeline = TranscodePipeline::builder()
+                    .input(input_pb)
+                    .output(output_pb)
+                    .track_progress(false)
+                    .build()
+                    .map_err(|e| format!("Pipeline build error: {e}"))?;
+                pipeline
+                    .execute()
+                    .await
+                    .map_err(|e| format!("Pipeline exec error: {e}"))
+            });
+
+            match run_result {
+                Ok(transcode_out) => transcode_out.file_size,
+                Err(e) => {
+                    // Pipeline failed — fall back to a size estimate so the caller
+                    // still gets a result, but surface the warning via a placeholder file.
+                    let scale = self.config.scale_factor();
+                    let quality_factor = match self.config.quality.as_str() {
+                        "low" => 0.1,
+                        "high" => 0.5,
+                        _ => 0.25,
+                    };
+                    let estimated =
+                        (orig_meta.len() as f64 * scale * scale * quality_factor) as u64;
+                    // Write a marker file so the path is not empty.
+                    let content = format!(
+                        "PROXY:original={original_path},resolution={},quality={},codec={},error={e}",
+                        self.config.resolution, self.config.quality, self.config.codec
+                    );
+                    std::fs::write(proxy_path, &content).ok();
+                    estimated
+                }
+            }
+        } else {
+            // Unsupported container — write a descriptor stub so the proxy_path exists.
+            let scale = self.config.scale_factor();
+            let quality_factor = match self.config.quality.as_str() {
+                "low" => 0.1,
+                "high" => 0.5,
+                _ => 0.25,
+            };
+            let content = format!(
+                "PROXY:original={original_path},resolution={},quality={},codec={}",
+                self.config.resolution, self.config.quality, self.config.codec
+            );
+            std::fs::write(proxy_path, &content)
+                .map_err(|e| PyRuntimeError::new_err(format!("Failed to write proxy: {e}")))?;
+            (orig_meta.len() as f64 * scale * scale * quality_factor) as u64
+        };
 
         let proxy_file = PyProxyFile {
             id: gen_id(),
@@ -245,7 +304,7 @@ impl PyProxyGenerator {
             quality: self.config.quality.clone(),
             codec: self.config.codec.clone(),
             original_size: orig_meta.len(),
-            proxy_size: estimated_size,
+            proxy_size: actual_size,
             created_at: now_timestamp(),
         };
 

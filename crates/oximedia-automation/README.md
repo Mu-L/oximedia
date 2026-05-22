@@ -6,7 +6,7 @@ Professional broadcast automation and control system for 24/7 operation with Lua
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.6 — 2026-04-26 — 688 tests
+Version: 0.1.7 — 2026-05-16 — 688 tests
 
 ## Overview
 
@@ -72,7 +72,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-automation = "0.1.6"
+oximedia-automation = "0.1.7"
 ```
 
 ### Basic Example

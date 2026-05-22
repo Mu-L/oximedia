@@ -318,15 +318,21 @@ fn validate_spec(spec: &JobSpec) -> Result<(), SubmitError> {
     match &spec.payload {
         JobPayload::Transcode(p) => {
             if p.input.trim().is_empty() {
-                return Err(SubmitError("transcode: input path must not be empty".to_string()));
+                return Err(SubmitError(
+                    "transcode: input path must not be empty".to_string(),
+                ));
             }
             if p.output.trim().is_empty() {
-                return Err(SubmitError("transcode: output path must not be empty".to_string()));
+                return Err(SubmitError(
+                    "transcode: output path must not be empty".to_string(),
+                ));
             }
         }
         JobPayload::Thumbnail(p) => {
             if p.input.trim().is_empty() {
-                return Err(SubmitError("thumbnail: input path must not be empty".to_string()));
+                return Err(SubmitError(
+                    "thumbnail: input path must not be empty".to_string(),
+                ));
             }
             if p.count == 0 {
                 return Err(SubmitError("thumbnail: count must be > 0".to_string()));
@@ -341,7 +347,9 @@ fn validate_spec(spec: &JobSpec) -> Result<(), SubmitError> {
         }
         JobPayload::Analysis(p) => {
             if p.input.trim().is_empty() {
-                return Err(SubmitError("analysis: input path must not be empty".to_string()));
+                return Err(SubmitError(
+                    "analysis: input path must not be empty".to_string(),
+                ));
             }
         }
         JobPayload::Batch(p) => {
@@ -430,7 +438,10 @@ mod tests {
         let result = submitter.submit(batch, &config);
         assert!(matches!(
             result,
-            Err(ValidationError::BatchTooLarge { actual: 3, limit: 2 })
+            Err(ValidationError::BatchTooLarge {
+                actual: 3,
+                limit: 2
+            })
         ));
     }
 
@@ -568,7 +579,9 @@ mod tests {
         let id = Uuid::new_v4();
         let spec = transcode_spec("explicit").with_id(id);
         let batch = BatchRequest::new().with_job(spec);
-        let result = submitter.submit(batch, &BatchSubmitConfig::default()).expect("ok");
+        let result = submitter
+            .submit(batch, &BatchSubmitConfig::default())
+            .expect("ok");
         assert_eq!(result.submitted[0], id.to_string());
     }
 }

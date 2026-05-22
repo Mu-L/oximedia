@@ -9,7 +9,7 @@
 //!
 //! # Tile Grid
 //!
-//! The source frame is divided into an evenly-spaced grid of [`Tile`]s.
+//! The source frame is divided into an evenly-spaced grid of `Tile`s.
 //! Each tile is a rectangular block of source pixels; tiles are the atomic
 //! unit of change detection.  When a tile's pixel content differs from the
 //! previous frame, it is marked as *dirty* and re-processed.  Unchanged tiles
@@ -132,10 +132,14 @@ impl IncrementalUpdater {
         threshold: ChangeThreshold,
     ) -> OxiResult<Self> {
         if width == 0 || height == 0 {
-            return Err(OxiError::InvalidData("Frame dimensions must be non-zero".into()));
+            return Err(OxiError::InvalidData(
+                "Frame dimensions must be non-zero".into(),
+            ));
         }
         if tile_w == 0 || tile_h == 0 {
-            return Err(OxiError::InvalidData("Tile dimensions must be non-zero".into()));
+            return Err(OxiError::InvalidData(
+                "Tile dimensions must be non-zero".into(),
+            ));
         }
 
         let cols = (width + tile_w - 1) / tile_w;
@@ -266,7 +270,7 @@ impl IncrementalUpdater {
         Ok(())
     }
 
-    /// Force all tiles dirty on the next call to [`update`].
+    /// Force all tiles dirty on the next call to [`Self::update`].
     ///
     /// Useful when a non-incremental event occurs (e.g. a cut in the edit).
     pub fn invalidate_all(&mut self) {
@@ -347,8 +351,7 @@ impl UpdateStats {
         if self.frames_processed == 0 || self.tiles_per_frame == 0 {
             return 0.0;
         }
-        let total_possible =
-            self.frames_processed as f64 * self.tiles_per_frame as f64;
+        let total_possible = self.frames_processed as f64 * self.tiles_per_frame as f64;
         self.total_dirty_tiles as f64 / total_possible
     }
 }
@@ -378,8 +381,7 @@ mod tests {
 
     #[test]
     fn test_first_frame_all_tiles_dirty() {
-        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact)
-            .expect("ok");
+        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact).expect("ok");
         let frame = rgb_frame(10, 20, 30, 4, 4);
         u.update(&frame).expect("ok");
         assert_eq!(u.dirty_count(), u.cols * u.rows);
@@ -388,8 +390,7 @@ mod tests {
 
     #[test]
     fn test_identical_second_frame_no_dirty_tiles() {
-        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact)
-            .expect("ok");
+        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact).expect("ok");
         let frame = rgb_frame(50, 60, 70, 4, 4);
         u.update(&frame).expect("ok");
         u.update(&frame).expect("ok");
@@ -399,8 +400,7 @@ mod tests {
 
     #[test]
     fn test_changed_pixel_marks_tile_dirty() {
-        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact)
-            .expect("ok");
+        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact).expect("ok");
         let frame1 = rgb_frame(0, 0, 0, 4, 4);
         u.update(&frame1).expect("ok");
 
@@ -418,8 +418,7 @@ mod tests {
 
     #[test]
     fn test_tolerant_threshold_ignores_small_changes() {
-        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Tolerant(10))
-            .expect("ok");
+        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Tolerant(10)).expect("ok");
         let frame1 = rgb_frame(100, 100, 100, 4, 4);
         u.update(&frame1).expect("ok");
 
@@ -431,8 +430,7 @@ mod tests {
 
     #[test]
     fn test_tolerant_threshold_detects_large_changes() {
-        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Tolerant(10))
-            .expect("ok");
+        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Tolerant(10)).expect("ok");
         let frame1 = rgb_frame(100, 100, 100, 4, 4);
         u.update(&frame1).expect("ok");
 
@@ -444,8 +442,7 @@ mod tests {
 
     #[test]
     fn test_invalidate_all_resets_to_full_dirty() {
-        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact)
-            .expect("ok");
+        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact).expect("ok");
         let frame = rgb_frame(0, 0, 0, 4, 4);
         u.update(&frame).expect("ok");
         u.update(&frame).expect("ok"); // now clean
@@ -459,8 +456,7 @@ mod tests {
 
     #[test]
     fn test_invalidate_tile_marks_single_tile_dirty() {
-        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact)
-            .expect("ok");
+        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact).expect("ok");
         let frame = rgb_frame(0, 0, 0, 4, 4);
         u.update(&frame).expect("ok");
         u.update(&frame).expect("ok"); // clean
@@ -472,15 +468,13 @@ mod tests {
 
     #[test]
     fn test_invalidate_tile_oob_returns_false() {
-        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact)
-            .expect("ok");
+        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact).expect("ok");
         assert!(!u.invalidate_tile(99, 0));
     }
 
     #[test]
     fn test_dirty_tiles_returns_correct_coords() {
-        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact)
-            .expect("ok");
+        let mut u = IncrementalUpdater::new(4, 4, 2, 2, ChangeThreshold::Exact).expect("ok");
         let frame1 = rgb_frame(0, 0, 0, 4, 4);
         u.update(&frame1).expect("ok");
 
@@ -496,8 +490,7 @@ mod tests {
 
     #[test]
     fn test_tile_rect_boundary() {
-        let u = IncrementalUpdater::new(5, 5, 3, 3, ChangeThreshold::Exact)
-            .expect("ok");
+        let u = IncrementalUpdater::new(5, 5, 3, 3, ChangeThreshold::Exact).expect("ok");
         // Last tile (col=1, row=1) should be clipped to 2×2 (5 - 3 = 2).
         let r = u.tile_rect(1, 1).expect("in range");
         assert_eq!(r.x, 3);
@@ -519,8 +512,7 @@ mod tests {
 
     #[test]
     fn test_frame_count_increments() {
-        let mut u = IncrementalUpdater::new(2, 2, 1, 1, ChangeThreshold::Exact)
-            .expect("ok");
+        let mut u = IncrementalUpdater::new(2, 2, 1, 1, ChangeThreshold::Exact).expect("ok");
         assert_eq!(u.frame_count(), 0);
         let f = rgb_frame(0, 0, 0, 2, 2);
         u.update(&f).expect("ok");

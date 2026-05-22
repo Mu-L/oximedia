@@ -4,10 +4,9 @@
 //! key hierarchy support for multi-key encryption schemes such as those
 //! used in CENC (Common Encryption).
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // Key derivation
@@ -145,7 +144,14 @@ impl fmt::Display for ContentKeyUsage {
 }
 
 /// A single content encryption key with its metadata.
-#[derive(Debug, Clone)]
+///
+/// The `cached_schedule` field holds a lazily-initialised AES-128 key schedule
+/// backed by [`OnceLock`].  The first call to [`ContentKey::aes128`] performs
+/// key expansion (≈ 10 round-key derivations) and caches the result; all
+/// subsequent calls return the pre-computed cipher at zero cost.
+///
+/// `aes::Aes128` is `Send + Sync` in `aes 0.8+`, so sharing a `ContentKey`
+/// across threads is safe.
 pub struct ContentKey {
     /// Unique key identifier (typically 16 bytes / UUID).
     pub key_id: Vec<u8>,
@@ -157,6 +163,43 @@ pub struct ContentKey {
     pub iv_size: u8,
     /// If `true`, the subsample encryption pattern is used (CENC / CBCS).
     pub subsample_encryption: bool,
+    /// Cached AES-128 cipher initialised from `key_data` on first access.
+    cached_schedule: OnceLock<aes::Aes128>,
+}
+
+impl std::fmt::Debug for ContentKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContentKey")
+            .field("key_id", &self.key_id)
+            .field("usage", &self.usage)
+            .field("iv_size", &self.iv_size)
+            .field("subsample_encryption", &self.subsample_encryption)
+            .field(
+                "cached_schedule",
+                &self
+                    .cached_schedule
+                    .get()
+                    .map(|_| "<initialised>")
+                    .unwrap_or("<uninit>"),
+            )
+            .finish()
+    }
+}
+
+impl Clone for ContentKey {
+    fn clone(&self) -> Self {
+        // OnceLock cannot be cloned directly; reset the cache in the clone so
+        // it is re-initialised on first use.  The key material is identical so
+        // the result will be the same.
+        Self {
+            key_id: self.key_id.clone(),
+            key_data: self.key_data.clone(),
+            usage: self.usage,
+            iv_size: self.iv_size,
+            subsample_encryption: self.subsample_encryption,
+            cached_schedule: OnceLock::new(),
+        }
+    }
 }
 
 impl ContentKey {
@@ -168,6 +211,7 @@ impl ContentKey {
             usage,
             iv_size: 16,
             subsample_encryption: false,
+            cached_schedule: OnceLock::new(),
         }
     }
 
@@ -193,6 +237,33 @@ impl ContentKey {
     /// certainly an error in production).
     pub fn is_zero_key(&self) -> bool {
         self.key_data.iter().all(|&b| b == 0)
+    }
+
+    /// Return a reference to the cached AES-128 cipher derived from `key_data`.
+    ///
+    /// The key schedule is computed at most once per `ContentKey` instance
+    /// (thread-safely via [`OnceLock`]).  Subsequent calls return the cached
+    /// cipher without any computation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::DrmError::InvalidKey`] if `key_data` is not exactly
+    /// 16 bytes (required by AES-128).
+    pub fn aes128(&self) -> crate::Result<&aes::Aes128> {
+        use aes::cipher::KeyInit;
+
+        if self.key_data.len() != 16 {
+            return Err(crate::DrmError::InvalidKey(format!(
+                "AES-128 requires a 16-byte key, got {} bytes",
+                self.key_data.len()
+            )));
+        }
+        // SAFETY: key length validated above; the closure never fails.
+        let cipher = self.cached_schedule.get_or_init(|| {
+            aes::Aes128::new_from_slice(&self.key_data)
+                .expect("key length validated as 16 bytes above; infallible")
+        });
+        Ok(cipher)
     }
 }
 
@@ -507,6 +578,32 @@ mod tests {
         let mut handle = KeyRotationHandle::new(set1, 60);
         assert!(!handle.rotate());
         assert_eq!(handle.current.label, "only");
+    }
+
+    /// Verifies that `aes128()` returns a stable cached value across many calls.
+    #[test]
+    fn test_content_key_aes_schedule_cached() {
+        let key_data = vec![0xA5u8; 16];
+        let key = ContentKey::new(vec![1, 2, 3], key_data, ContentKeyUsage::Video);
+
+        // Call 1000 times; all must succeed and the pointer must be identical
+        // (proving the OnceLock is not re-initialised).
+        let first_ptr = std::ptr::from_ref(key.aes128().expect("aes128 should succeed"));
+        for _ in 0..999 {
+            let ptr = std::ptr::from_ref(key.aes128().expect("aes128 should succeed"));
+            assert_eq!(
+                ptr, first_ptr,
+                "aes128() must return the same cached object on every call"
+            );
+        }
+    }
+
+    /// Verifies that an invalid key length returns an error.
+    #[test]
+    fn test_content_key_aes128_invalid_key_length() {
+        let key = ContentKey::new(vec![0], vec![0xBBu8; 12], ContentKeyUsage::Audio);
+        let err = key.aes128();
+        assert!(err.is_err(), "12-byte key must fail for AES-128");
     }
 
     #[test]

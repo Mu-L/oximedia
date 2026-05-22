@@ -660,11 +660,11 @@ mod tests {
         cfg.block_size = 256;
         let mut engine = BounceEngine::new(cfg).unwrap();
         engine.set_progress_callback(Box::new(move |_, _| {
-            *calls_clone.lock().unwrap() += 1;
+            *calls_clone.lock().unwrap_or_else(|e| e.into_inner()) += 1;
         }));
         let mut source = SineSource::new(440.0, 48000.0, 2048);
         engine.bounce(&mut source).unwrap();
-        assert!(*calls.lock().unwrap() >= 1);
+        assert!(*calls.lock().unwrap_or_else(|e| e.into_inner()) >= 1);
     }
 
     #[test]

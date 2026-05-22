@@ -107,109 +107,114 @@ pub fn canny(
     let _ = aperture_size; // only 3×3 Sobel is implemented
     let (data, h, w, ch) = extract_img(py, &src)?;
 
-    // Step 1: grayscale
-    let gray: Vec<f32> = to_grayscale(&data, h, w, ch)
-        .into_iter()
-        .map(|v| v as f32)
-        .collect();
+    // Release GIL for the multi-step Canny pipeline (Gaussian + Sobel + NMS + BFS)
+    let edges = py.detach(move || {
+        // Step 1: grayscale
+        let gray: Vec<f32> = to_grayscale(&data, h, w, ch)
+            .into_iter()
+            .map(|v| v as f32)
+            .collect();
 
-    // Step 2: Gaussian smoothing
-    let smoothed = convolve_f32(&gray, h, w, &GAUSS5X5, 5, 5);
+        // Step 2: Gaussian smoothing
+        let smoothed = convolve_f32(&gray, h, w, &GAUSS5X5, 5, 5);
 
-    // Step 3: Sobel gradients
-    let gx = convolve_f32(&smoothed, h, w, &SOBEL_X, 3, 3);
-    let gy = convolve_f32(&smoothed, h, w, &SOBEL_Y, 3, 3);
+        // Step 3: Sobel gradients
+        let gx = convolve_f32(&smoothed, h, w, &SOBEL_X, 3, 3);
+        let gy = convolve_f32(&smoothed, h, w, &SOBEL_Y, 3, 3);
 
-    let n = h * w;
-    let mut magnitude = vec![0.0f32; n];
-    let mut angle = vec![0.0f32; n]; // quantised: 0 / 45 / 90 / 135 degrees
-    for i in 0..n {
-        let mx = gx[i];
-        let my = gy[i];
-        magnitude[i] = if l2_gradient {
-            (mx * mx + my * my).sqrt()
-        } else {
-            mx.abs() + my.abs()
-        };
-        // Angle in [0, 180) degrees
-        let deg = my.atan2(mx).to_degrees();
-        let deg = if deg < 0.0 { deg + 180.0 } else { deg };
-        angle[i] = if deg < 22.5 || deg >= 157.5 {
-            0.0
-        } else if deg < 67.5 {
-            45.0
-        } else if deg < 112.5 {
-            90.0
-        } else {
-            135.0
-        };
-    }
-
-    // Step 4: Non-maximum suppression
-    let low = threshold1 as f32;
-    let high = threshold2 as f32;
-    // 0=suppressed, 1=weak, 2=strong
-    let mut nms = vec![0u8; n];
-    for row in 1..h.saturating_sub(1) {
-        for col in 1..w.saturating_sub(1) {
-            let idx = row * w + col;
-            let mag = magnitude[idx];
-            let (n1, n2) = match angle[idx] as u32 {
-                0 => (idx.wrapping_sub(1), idx + 1),
-                45 => (
-                    row.wrapping_sub(1) * w + (col + 1),
-                    (row + 1) * w + col.wrapping_sub(1),
-                ),
-                90 => (row.wrapping_sub(1) * w + col, (row + 1) * w + col),
-                _ => (
-                    row.wrapping_sub(1) * w + col.wrapping_sub(1),
-                    (row + 1) * w + (col + 1),
-                ),
+        let n = h * w;
+        let mut magnitude = vec![0.0f32; n];
+        let mut angle = vec![0.0f32; n]; // quantised: 0 / 45 / 90 / 135 degrees
+        for i in 0..n {
+            let mx = gx[i];
+            let my = gy[i];
+            magnitude[i] = if l2_gradient {
+                (mx * mx + my * my).sqrt()
+            } else {
+                mx.abs() + my.abs()
             };
-            let m1 = if n1 < n { magnitude[n1] } else { 0.0 };
-            let m2 = if n2 < n { magnitude[n2] } else { 0.0 };
-            if mag >= m1 && mag >= m2 {
-                nms[idx] = if mag >= high {
-                    2
-                } else if mag >= low {
-                    1
-                } else {
-                    0
-                };
-            }
+            // Angle in [0, 180) degrees
+            let deg = my.atan2(mx).to_degrees();
+            let deg = if deg < 0.0 { deg + 180.0 } else { deg };
+            angle[i] = if deg < 22.5 || deg >= 157.5 {
+                0.0
+            } else if deg < 67.5 {
+                45.0
+            } else if deg < 112.5 {
+                90.0
+            } else {
+                135.0
+            };
         }
-    }
 
-    // Step 5: Hysteresis — BFS flood from strong edges
-    let mut edges = vec![0u8; n];
-    let mut queue: VecDeque<usize> = VecDeque::new();
-    for i in 0..n {
-        if nms[i] == 2 {
-            edges[i] = 255;
-            queue.push_back(i);
-        }
-    }
-    while let Some(idx) = queue.pop_front() {
-        let row = idx / w;
-        let col = idx % w;
-        for dr in [-1i64, 0, 1] {
-            for dc in [-1i64, 0, 1] {
-                if dr == 0 && dc == 0 {
-                    continue;
-                }
-                let nr = row as i64 + dr;
-                let nc = col as i64 + dc;
-                if nr < 0 || nr >= h as i64 || nc < 0 || nc >= w as i64 {
-                    continue;
-                }
-                let ni = nr as usize * w + nc as usize;
-                if nms[ni] == 1 && edges[ni] == 0 {
-                    edges[ni] = 255;
-                    queue.push_back(ni);
+        // Step 4: Non-maximum suppression
+        let low = threshold1 as f32;
+        let high = threshold2 as f32;
+        // 0=suppressed, 1=weak, 2=strong
+        let mut nms = vec![0u8; n];
+        for row in 1..h.saturating_sub(1) {
+            for col in 1..w.saturating_sub(1) {
+                let idx = row * w + col;
+                let mag = magnitude[idx];
+                let (n1, n2) = match angle[idx] as u32 {
+                    0 => (idx.wrapping_sub(1), idx + 1),
+                    45 => (
+                        row.wrapping_sub(1) * w + (col + 1),
+                        (row + 1) * w + col.wrapping_sub(1),
+                    ),
+                    90 => (row.wrapping_sub(1) * w + col, (row + 1) * w + col),
+                    _ => (
+                        row.wrapping_sub(1) * w + col.wrapping_sub(1),
+                        (row + 1) * w + (col + 1),
+                    ),
+                };
+                let m1 = if n1 < n { magnitude[n1] } else { 0.0 };
+                let m2 = if n2 < n { magnitude[n2] } else { 0.0 };
+                if mag >= m1 && mag >= m2 {
+                    nms[idx] = if mag >= high {
+                        2
+                    } else if mag >= low {
+                        1
+                    } else {
+                        0
+                    };
                 }
             }
         }
-    }
+
+        // Step 5: Hysteresis — BFS flood from strong edges
+        let mut edges = vec![0u8; n];
+        let mut queue: VecDeque<usize> = VecDeque::new();
+        for i in 0..n {
+            if nms[i] == 2 {
+                edges[i] = 255;
+                queue.push_back(i);
+            }
+        }
+        while let Some(idx) = queue.pop_front() {
+            let row = idx / w;
+            let col = idx % w;
+            for dr in [-1i64, 0, 1] {
+                for dc in [-1i64, 0, 1] {
+                    if dr == 0 && dc == 0 {
+                        continue;
+                    }
+                    let nr = row as i64 + dr;
+                    let nc = col as i64 + dc;
+                    if nr < 0 || nr >= h as i64 || nc < 0 || nc >= w as i64 {
+                        continue;
+                    }
+                    let ni = nr as usize * w + nc as usize;
+                    if nms[ni] == 1 && edges[ni] == 0 {
+                        edges[ni] = 255;
+                        queue.push_back(ni);
+                    }
+                }
+            }
+        }
+
+        edges
+    });
 
     make_image_output(py, edges, h, w, 1)
 }
@@ -237,43 +242,48 @@ pub fn sobel(
     let _ = (ksize, ddepth); // 3×3 only
     let (data, h, w, ch) = extract_img(py, &src)?;
 
-    if dx == 1 && dy == 0 {
+    // Release GIL for the Sobel convolution pass
+    let out = py.detach(move || {
+        if dx == 1 && dy == 0 {
+            let mut out = vec![0u8; h * w * ch];
+            for c in 0..ch {
+                let plane: Vec<f32> = (0..h * w).map(|i| data[i * ch + c] as f32).collect();
+                let conv = convolve_f32(&plane, h, w, &SOBEL_X, 3, 3);
+                for i in 0..h * w {
+                    out[i * ch + c] =
+                        ((conv[i] * scale as f32 + delta as f32).abs()).clamp(0.0, 255.0) as u8;
+                }
+            }
+            return out;
+        }
+
+        if dx == 0 && dy == 1 {
+            let mut out = vec![0u8; h * w * ch];
+            for c in 0..ch {
+                let plane: Vec<f32> = (0..h * w).map(|i| data[i * ch + c] as f32).collect();
+                let conv = convolve_f32(&plane, h, w, &SOBEL_Y, 3, 3);
+                for i in 0..h * w {
+                    out[i * ch + c] =
+                        ((conv[i] * scale as f32 + delta as f32).abs()).clamp(0.0, 255.0) as u8;
+                }
+            }
+            return out;
+        }
+
+        // Both derivatives: L2 magnitude
         let mut out = vec![0u8; h * w * ch];
         for c in 0..ch {
             let plane: Vec<f32> = (0..h * w).map(|i| data[i * ch + c] as f32).collect();
-            let conv = convolve_f32(&plane, h, w, &SOBEL_X, 3, 3);
+            let gx_conv = convolve_f32(&plane, h, w, &SOBEL_X, 3, 3);
+            let gy_conv = convolve_f32(&plane, h, w, &SOBEL_Y, 3, 3);
             for i in 0..h * w {
-                out[i * ch + c] =
-                    ((conv[i] * scale as f32 + delta as f32).abs()).clamp(0.0, 255.0) as u8;
+                let mag = (gx_conv[i] * gx_conv[i] + gy_conv[i] * gy_conv[i]).sqrt();
+                out[i * ch + c] = (mag * scale as f32 + delta as f32).clamp(0.0, 255.0) as u8;
             }
         }
-        return make_image_output(py, out, h, w, ch);
-    }
+        out
+    });
 
-    if dx == 0 && dy == 1 {
-        let mut out = vec![0u8; h * w * ch];
-        for c in 0..ch {
-            let plane: Vec<f32> = (0..h * w).map(|i| data[i * ch + c] as f32).collect();
-            let conv = convolve_f32(&plane, h, w, &SOBEL_Y, 3, 3);
-            for i in 0..h * w {
-                out[i * ch + c] =
-                    ((conv[i] * scale as f32 + delta as f32).abs()).clamp(0.0, 255.0) as u8;
-            }
-        }
-        return make_image_output(py, out, h, w, ch);
-    }
-
-    // Both derivatives: L2 magnitude
-    let mut out = vec![0u8; h * w * ch];
-    for c in 0..ch {
-        let plane: Vec<f32> = (0..h * w).map(|i| data[i * ch + c] as f32).collect();
-        let gx_conv = convolve_f32(&plane, h, w, &SOBEL_X, 3, 3);
-        let gy_conv = convolve_f32(&plane, h, w, &SOBEL_Y, 3, 3);
-        for i in 0..h * w {
-            let mag = (gx_conv[i] * gx_conv[i] + gy_conv[i] * gy_conv[i]).sqrt();
-            out[i * ch + c] = (mag * scale as f32 + delta as f32).clamp(0.0, 255.0) as u8;
-        }
-    }
     make_image_output(py, out, h, w, ch)
 }
 
@@ -295,14 +305,19 @@ pub fn laplacian(
     let _ = (ksize, ddepth); // only 3×3 is supported
     let (data, h, w, ch) = extract_img(py, &src)?;
 
-    let mut out = vec![0u8; h * w * ch];
-    for c in 0..ch {
-        let plane: Vec<f32> = (0..h * w).map(|i| data[i * ch + c] as f32).collect();
-        let conv = convolve_f32(&plane, h, w, &LAPLACIAN_3X3, 3, 3);
-        for i in 0..h * w {
-            out[i * ch + c] = (conv[i].abs() * scale as f32 + delta as f32).clamp(0.0, 255.0) as u8;
+    // Release GIL for the Laplacian convolution pass
+    let out = py.detach(move || {
+        let mut out = vec![0u8; h * w * ch];
+        for c in 0..ch {
+            let plane: Vec<f32> = (0..h * w).map(|i| data[i * ch + c] as f32).collect();
+            let conv = convolve_f32(&plane, h, w, &LAPLACIAN_3X3, 3, 3);
+            for i in 0..h * w {
+                out[i * ch + c] =
+                    (conv[i].abs() * scale as f32 + delta as f32).clamp(0.0, 255.0) as u8;
+            }
         }
-    }
+        out
+    });
 
     make_image_output(py, out, h, w, ch)
 }

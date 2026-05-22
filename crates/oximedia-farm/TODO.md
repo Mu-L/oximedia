@@ -27,13 +27,13 @@
 - [x] Implement job templates in `job_template.rs` with parameterized encoding presets
 - [x] Add multi-tenant support with per-tenant job quotas and resource isolation
 - [x] Implement cost estimation per job based on resource usage and time
-- [ ] Add S3/cloud object storage integration for input/output file management
+- [x] Add S3/cloud object storage integration for input/output file management (verified 2026-05-16; src/cloud_storage.rs:134 CloudObject, CloudStorageClient, 1419 lines)
 - [x] Implement worker health scoring with automatic quarantine of failing workers
 - [x] Add job dependency DAG visualization for complex encoding pipelines
 
 ## Performance
 - [x] Optimize `persistence/schema.rs` SQLite queries with prepared statements and indexes
-- [ ] Add connection pooling for SQLite using r2d2 (already a dependency, ensure usage)
+- [x] Add connection pooling for SQLite using r2d2 (already a dependency, ensure usage) (verified 2026-05-16; src/persistence/mod.rs:14 r2d2::Pool, SqliteConnectionManager, DbPool type alias:23)
 - [ ] Implement batch heartbeat processing in coordinator to reduce per-heartbeat overhead
 - [x] Use gRPC streaming for progress updates instead of individual RPCs
 - [ ] Add in-memory caching layer in front of SQLite for frequently accessed job state

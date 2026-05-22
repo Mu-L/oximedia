@@ -129,7 +129,7 @@ fn attrs_to_map(e: &quick_xml::events::BytesStart<'_>) -> EdlResult<AttrMap> {
             attr_result.map_err(|err| EdlError::XmlError(format!("attribute error: {}", err)))?;
         let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
         let value = attr
-            .unescape_value()
+            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
             .map_err(|err| EdlError::XmlError(format!("unescape error: {}", err)))?
             .into_owned();
         map.insert(key, value);

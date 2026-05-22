@@ -162,16 +162,40 @@ async fn cmd_analyze(input: &PathBuf, standard_str: &str, output_format: &str) -
     let target = preset.to_target();
     let metering_standard = preset.to_standard();
 
-    // Build normalizer in AnalyzeOnly mode
-    let mut config = oximedia_normalize::NormalizerConfig::new(metering_standard, 48000.0, 2);
-    config.processing_mode = oximedia_normalize::ProcessingMode::AnalyzeOnly;
-    let mut normalizer =
-        oximedia_normalize::Normalizer::new(config).map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    // Feed a short block of silence to initialise state (full decode pending)
-    let silent = vec![0.0_f32; 4800 * 2];
-    normalizer.analyze_f32(&silent);
-    let analysis = normalizer.get_analysis();
+    // Feed real audio samples from the input file when possible.
+    // Falls back to synthetic silence on unsupported / non-WAV formats so
+    // the command continues to produce useful output in all cases.
+    let analysis = match crate::decode_helper::decode_wav_f32(input).await {
+        Ok(audio) => {
+            // Rebuild normalizer with the file's actual sample rate and channel count.
+            let mut cfg = oximedia_normalize::NormalizerConfig::new(
+                metering_standard,
+                f64::from(audio.sample_rate),
+                audio.channels as usize,
+            );
+            cfg.processing_mode = oximedia_normalize::ProcessingMode::AnalyzeOnly;
+            let mut norm =
+                oximedia_normalize::Normalizer::new(cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+            norm.analyze_f32(&audio.samples);
+            norm.get_analysis()
+        }
+        Err(e) => {
+            tracing::warn!(
+                "could not decode audio from {}: {}; using silent fallback",
+                input.display(),
+                e
+            );
+            // Build normalizer with default parameters for silent fallback.
+            let mut config =
+                oximedia_normalize::NormalizerConfig::new(metering_standard, 48000.0, 2);
+            config.processing_mode = oximedia_normalize::ProcessingMode::AnalyzeOnly;
+            let mut normalizer =
+                oximedia_normalize::Normalizer::new(config).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let silent = vec![0.0_f32; 4800 * 2];
+            normalizer.analyze_f32(&silent);
+            normalizer.get_analysis()
+        }
+    };
 
     let file_size = std::fs::metadata(input)
         .with_context(|| format!("Cannot stat: {}", input.display()))
@@ -265,22 +289,45 @@ async fn cmd_process(
         .unwrap_or_default();
     let pipeline_supported = matches!(out_ext.as_str(), "mkv" | "webm" | "ogg" | "oga" | "opus");
 
-    // Compute recommended gain for reporting: run a lightweight normalizer analysis
-    // on a short block so we have numbers to report without a full decode cycle.
-    let norm_config_light = oximedia_normalize::NormalizerConfig::new(
-        oximedia_metering::Standard::Custom {
-            target_lufs,
-            max_peak_dbtp: true_peak,
-            tolerance_lu: 1.0,
-        },
-        48000.0,
-        2,
-    );
-    let mut normalizer = oximedia_normalize::Normalizer::new(norm_config_light)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let silent = vec![0.0_f32; 9600 * 2];
-    normalizer.analyze_f32(&silent);
-    let analysis = normalizer.get_analysis();
+    // Compute recommended gain for reporting: decode real audio when possible.
+    let analysis = match crate::decode_helper::decode_wav_f32(input).await {
+        Ok(audio) => {
+            let norm_config_light = oximedia_normalize::NormalizerConfig::new(
+                oximedia_metering::Standard::Custom {
+                    target_lufs,
+                    max_peak_dbtp: true_peak,
+                    tolerance_lu: 1.0,
+                },
+                f64::from(audio.sample_rate),
+                audio.channels as usize,
+            );
+            let mut normalizer = oximedia_normalize::Normalizer::new(norm_config_light)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            normalizer.analyze_f32(&audio.samples);
+            normalizer.get_analysis()
+        }
+        Err(e) => {
+            tracing::warn!(
+                "could not decode audio from {}: {}; using silent fallback",
+                input.display(),
+                e
+            );
+            let norm_config_light = oximedia_normalize::NormalizerConfig::new(
+                oximedia_metering::Standard::Custom {
+                    target_lufs,
+                    max_peak_dbtp: true_peak,
+                    tolerance_lu: 1.0,
+                },
+                48000.0,
+                2,
+            );
+            let mut normalizer = oximedia_normalize::Normalizer::new(norm_config_light)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let silent = vec![0.0_f32; 9600 * 2];
+            normalizer.analyze_f32(&silent);
+            normalizer.get_analysis()
+        }
+    };
 
     // Build the normalization target for display.
     let norm_target = oximedia_normalize::NormalizationTarget::new(
@@ -407,14 +454,35 @@ async fn cmd_check(
     let target = preset.to_target();
     let metering_standard = preset.to_standard();
 
-    let mut config = oximedia_normalize::NormalizerConfig::new(metering_standard, 48000.0, 2);
-    config.processing_mode = oximedia_normalize::ProcessingMode::AnalyzeOnly;
-    let mut normalizer =
-        oximedia_normalize::Normalizer::new(config).map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    let silent = vec![0.0_f32; 4800 * 2];
-    normalizer.analyze_f32(&silent);
-    let analysis = normalizer.get_analysis();
+    let analysis = match crate::decode_helper::decode_wav_f32(input).await {
+        Ok(audio) => {
+            let mut cfg = oximedia_normalize::NormalizerConfig::new(
+                metering_standard,
+                f64::from(audio.sample_rate),
+                audio.channels as usize,
+            );
+            cfg.processing_mode = oximedia_normalize::ProcessingMode::AnalyzeOnly;
+            let mut norm =
+                oximedia_normalize::Normalizer::new(cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+            norm.analyze_f32(&audio.samples);
+            norm.get_analysis()
+        }
+        Err(e) => {
+            tracing::warn!(
+                "could not decode audio from {}: {}; using silent fallback",
+                input.display(),
+                e
+            );
+            let mut config =
+                oximedia_normalize::NormalizerConfig::new(metering_standard, 48000.0, 2);
+            config.processing_mode = oximedia_normalize::ProcessingMode::AnalyzeOnly;
+            let mut normalizer =
+                oximedia_normalize::Normalizer::new(config).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let silent = vec![0.0_f32; 4800 * 2];
+            normalizer.analyze_f32(&silent);
+            normalizer.get_analysis()
+        }
+    };
     let compliant = target.is_compliant(analysis.integrated_lufs);
 
     if json_output {

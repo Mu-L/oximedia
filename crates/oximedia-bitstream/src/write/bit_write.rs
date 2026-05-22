@@ -25,7 +25,7 @@ pub trait BitWrite {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian};
     ///
     /// let mut w  = BitWriter::endian(vec![], BigEndian);
     /// assert!(w.write_bit(true).is_ok());
@@ -40,7 +40,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, LittleEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, LittleEndian};
     ///
     /// let mut w  = BitWriter::endian(vec![], LittleEndian);
     /// assert!(w.write_bit(false).is_ok());
@@ -71,7 +71,7 @@ pub trait BitWrite {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// // writing unsigned value is ok
@@ -89,7 +89,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```rust,compile_fail
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// // trying to write 9 bits from a u8 is a compile-time error
@@ -116,7 +116,7 @@ pub trait BitWrite {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// // writing unsigned value is ok
@@ -127,7 +127,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// // writing a value larger than 4 bits in 4 bits is a runtime error
@@ -156,7 +156,7 @@ pub trait BitWrite {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     ///
     /// let mut writer = BitWriter::endian(vec![], BigEndian);
     /// writer.write_unsigned::<1, u8>(0b1).unwrap();
@@ -166,7 +166,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{LittleEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{LittleEndian, BitWriter, BitWrite};
     ///
     /// let mut writer = BitWriter::endian(vec![], LittleEndian);
     /// writer.write_unsigned::<1, u8>(0b1).unwrap();
@@ -176,7 +176,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```rust,compile_fail
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     ///
     /// let mut writer = BitWriter::endian(vec![], BigEndian);
     /// // trying to write 9 bits from a u8 is a compile-time error
@@ -185,7 +185,7 @@ pub trait BitWrite {
     ///
     /// ```
     /// use std::io::{Write, sink};
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     ///
     /// let mut w = BitWriter::endian(sink(), BigEndian);
     /// assert!(w.write_unsigned::<1, u8>(2).is_err());    // can't write   2 in 1 bit
@@ -214,7 +214,7 @@ pub trait BitWrite {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     ///
     /// let mut writer = BitWriter::endian(vec![], BigEndian);
     /// writer.write_unsigned_var::<u8>(1, 0b1).unwrap();
@@ -225,7 +225,7 @@ pub trait BitWrite {
     ///
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{LittleEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{LittleEndian, BitWriter, BitWrite};
     ///
     /// let mut writer = BitWriter::endian(vec![], LittleEndian);
     /// writer.write_unsigned_var::<u8>(1, 0b1).unwrap();
@@ -236,7 +236,7 @@ pub trait BitWrite {
     ///
     /// ```
     /// use std::io::{Write, sink};
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     ///
     /// let mut w = BitWriter::endian(sink(), BigEndian);
     /// assert!(w.write_unsigned_var::<u8>(9, 0).is_err());    // can't write  u8 in 9 bits
@@ -270,7 +270,7 @@ pub trait BitWrite {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     ///
     /// let mut writer = BitWriter::endian(vec![], BigEndian);
     /// writer.write_signed::<4, i8>(-5).unwrap();
@@ -279,7 +279,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{LittleEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{LittleEndian, BitWriter, BitWrite};
     ///
     /// let mut writer = BitWriter::endian(vec![], LittleEndian);
     /// writer.write_signed::<4, i8>(7).unwrap();
@@ -288,7 +288,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{LittleEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{LittleEndian, BitWriter, BitWrite};
     ///
     /// let mut writer = BitWriter::endian(vec![], LittleEndian);
     /// // writing a value too large for 4 bits in 4 bits is a runtime error
@@ -296,7 +296,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```rust,compile_fail
-    /// use bitstream_io::{LittleEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{LittleEndian, BitWriter, BitWrite};
     ///
     /// let mut writer = BitWriter::endian(vec![], LittleEndian);
     /// // writing 9 bits from an i8 is a compile-time error
@@ -324,7 +324,7 @@ pub trait BitWrite {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     ///
     /// let mut writer = BitWriter::endian(vec![], BigEndian);
     /// writer.write_signed_var(4, -5).unwrap();
@@ -333,7 +333,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{LittleEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{LittleEndian, BitWriter, BitWrite};
     ///
     /// let mut writer = BitWriter::endian(vec![], LittleEndian);
     /// writer.write_signed_var(4, 7).unwrap();
@@ -365,7 +365,7 @@ pub trait BitWrite {
     /// Passes along an I/O error from the underlying stream.
     ///
     /// ```
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// let count = 4;
@@ -377,7 +377,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite, BitCount};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite, BitCount};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// // a bit count of 4, with a maximum of 7 (0b111)
@@ -391,7 +391,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite, BitCount};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite, BitCount};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// // a bit count of 4, with a maximum of 6 (0b110)
@@ -431,7 +431,7 @@ pub trait BitWrite {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian, BitCount};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian, BitCount};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// // writing 4 bits with a maximum of 8 will fit into a u8
@@ -461,7 +461,7 @@ pub trait BitWrite {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian, BitCount};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian, BitCount};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// // writing 4 bits with a maximum of 8 will fit into a u8
@@ -492,7 +492,7 @@ pub trait BitWrite {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian, BitCount};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian, BitCount};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// // writing 4 bits with a maximum of 8 will fit into an i8
@@ -528,7 +528,7 @@ pub trait BitWrite {
     /// # Examples
     ///
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// assert!(w.write_const::<4, 0b1000>().is_ok());
@@ -537,7 +537,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```rust,compile_fail
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// // trying to write a 5 bit value in 4 bits is a compile-time error
@@ -545,7 +545,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```rust,compile_fail
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// // trying to write a 33 bit value is also a compile-time error
@@ -572,7 +572,7 @@ pub trait BitWrite {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// assert!(w.write_from::<u32>(0x12_34_56_78).is_ok());
@@ -580,7 +580,7 @@ pub trait BitWrite {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// assert!(w.write_from::<[u8; 4]>([0x12, 0x34, 0x56, 0x78]).is_ok());
@@ -600,7 +600,7 @@ pub trait BitWrite {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian, LittleEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian, LittleEndian};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// assert!(w.write_as_from::<LittleEndian, u32>(0x12_34_56_78).is_ok());
@@ -620,7 +620,7 @@ pub trait BitWrite {
     /// # Example
     ///
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian};
     ///
     /// let mut w = BitWriter::endian(vec![], BigEndian);
     /// assert!(w.write_bit(true).is_ok());
@@ -650,7 +650,7 @@ pub trait BitWrite {
     ///
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
     /// writer.write_var(8, 0x66u8).unwrap();
     /// writer.write_var(8, 0x6Fu8).unwrap();
@@ -674,7 +674,7 @@ pub trait BitWrite {
     /// # Examples
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
     /// writer.write_unary::<0>(0).unwrap();
     /// writer.write_unary::<0>(3).unwrap();
@@ -684,7 +684,7 @@ pub trait BitWrite {
     ///
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{LittleEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{LittleEndian, BitWriter, BitWrite};
     /// let mut writer = BitWriter::endian(Vec::new(), LittleEndian);
     /// writer.write_unary::<0>(0).unwrap();
     /// writer.write_unary::<0>(3).unwrap();
@@ -694,7 +694,7 @@ pub trait BitWrite {
     ///
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
     /// writer.write_unary::<1>(0).unwrap();
     /// writer.write_unary::<1>(3).unwrap();
@@ -704,7 +704,7 @@ pub trait BitWrite {
     ///
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{LittleEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{LittleEndian, BitWriter, BitWrite};
     /// let mut writer = BitWriter::endian(Vec::new(), LittleEndian);
     /// writer.write_unary::<1>(0).unwrap();
     /// writer.write_unary::<1>(3).unwrap();
@@ -773,7 +773,7 @@ pub trait BitWrite {
     /// # Example
     /// ```
     /// use std::io::{Write, sink};
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     /// let mut writer = BitWriter::endian(sink(), BigEndian);
     /// assert_eq!(writer.byte_aligned(), true);
     /// writer.write_var(1, 0u8).unwrap();
@@ -793,7 +793,7 @@ pub trait BitWrite {
     /// # Example
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
     /// writer.write_var(1, 0u8).unwrap();
     /// writer.byte_align().unwrap();
@@ -816,8 +816,8 @@ pub trait BitWrite {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
-    /// use bitstream_io::define_huffman_tree;
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::define_huffman_tree;
     ///
     /// define_huffman_tree!(TreeName : char = ['a', ['b', ['c', 'd']]]);
     /// // 'a' is 0
@@ -851,7 +851,7 @@ pub trait BitWrite {
     /// # Example
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
     /// writer.write_unsigned_vbr::<4,_>(7u32);
     /// writer.write_unsigned_vbr::<4,_>(100u32);
@@ -895,7 +895,7 @@ pub trait BitWrite {
     /// # Example
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
     /// writer.write_signed_vbr::<4,_>(3);
     /// writer.write_signed_vbr::<4,_>(-50);
@@ -919,7 +919,7 @@ pub trait BitWrite {
     /// # Example
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
     /// writer.write_vbr::<4,_>(6u32);
     /// writer.write_vbr::<4,_>(-50i32);
@@ -937,7 +937,7 @@ pub trait BitWrite {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::{BitWriter, BitWrite, BigEndian};
+    /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian};
     ///
     /// fn build<W: BitWrite>(w: W) {
     ///     // perform some building

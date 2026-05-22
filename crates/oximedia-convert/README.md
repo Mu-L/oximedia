@@ -1,13 +1,13 @@
 # oximedia-convert
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.6](https://img.shields.io/badge/version-0.1.6-blue)
+![Version: 0.1.7](https://img.shields.io/badge/version-0.1.7-blue)
 
 Universal media format converter for `OxiMedia`.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.6 — 2026-04-26 — 826 tests
+Version: 0.1.7 — 2026-05-16 — 826 tests
 
 ## Features
 
@@ -81,10 +81,10 @@ use oximedia_convert::AudioExtractor;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let extractor = AudioExtractor::new()
-        .as_mp3()
+        .as_opus()
         .with_bitrate(192_000);
 
-    extractor.extract("video.mp4", "audio.mp3").await?;
+    extractor.extract("video.mp4", "audio.opus").await?;
 
     Ok(())
 }

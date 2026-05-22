@@ -39,7 +39,7 @@ chrono.workspace = true
 # Serialization support
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
-quick-xml = { version = "0.39", features = ["serialize"], optional = true }
+quick-xml = { workspace = true, features = ["serialize"], optional = true }
 
 # Database support
 rusqlite = { workspace = true, optional = true }

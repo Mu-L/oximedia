@@ -3,6 +3,9 @@
 //! Provides full-reference metrics (PSNR, SSIM) and no-reference metrics
 //! (BRISQUE, NIQE, Blockiness, Blur, Noise) via `PyQualityAssessor` and
 //! standalone functions.
+//!
+//! All CPU-intensive metric computations release the GIL via `py.detach()`
+//! so Python threads are not serialised during image quality analysis.
 
 use pyo3::prelude::*;
 
@@ -36,10 +39,11 @@ impl PyQualityScore {
 }
 
 /// Quality assessor wrapping `oximedia-quality`.
+///
+/// Each metric computation constructs an assessor inside `py.detach()` so the
+/// GIL is released for the duration of the CPU-intensive calculation.
 #[pyclass]
-pub struct PyQualityAssessor {
-    inner: QualityAssessor,
-}
+pub struct PyQualityAssessor {}
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -85,33 +89,44 @@ fn to_py_score(qs: &oximedia_quality::QualityScore) -> PyQualityScore {
 }
 
 fn assess_full_ref(
-    assessor: &QualityAssessor,
+    py: Python<'_>,
     ref_data: &[u8],
     dist_data: &[u8],
     width: usize,
     height: usize,
     mt: MetricType,
 ) -> PyResult<PyQualityScore> {
+    // Build frames while holding the GIL (they borrow &[u8] which is already Send-safe as Vec)
     let reference = make_frame(ref_data, width, height)?;
     let distorted = make_frame(dist_data, width, height)?;
-    let qs = assessor
-        .assess(&reference, &distorted, mt)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e}")))?;
-    Ok(to_py_score(&qs))
+    // Release GIL for the CPU-intensive metric computation
+    let result = py.detach(move || {
+        let assessor = QualityAssessor::new();
+        assessor
+            .assess(&reference, &distorted, mt)
+            .map(|qs| to_py_score(&qs))
+            .map_err(|e| e.to_string())
+    });
+    result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
 fn assess_no_ref(
-    assessor: &QualityAssessor,
+    py: Python<'_>,
     data: &[u8],
     width: usize,
     height: usize,
     mt: MetricType,
 ) -> PyResult<PyQualityScore> {
     let frame = make_frame(data, width, height)?;
-    let qs = assessor
-        .assess_no_reference(&frame, mt)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e}")))?;
-    Ok(to_py_score(&qs))
+    // Release GIL for the CPU-intensive metric computation
+    let result = py.detach(move || {
+        let assessor = QualityAssessor::new();
+        assessor
+            .assess_no_reference(&frame, mt)
+            .map(|qs| to_py_score(&qs))
+            .map_err(|e| e.to_string())
+    });
+    result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
 // ---------------------------------------------------------------------------
@@ -122,65 +137,59 @@ fn assess_no_ref(
 impl PyQualityAssessor {
     #[new]
     fn new() -> Self {
-        Self {
-            inner: QualityAssessor::new(),
-        }
+        Self {}
     }
 
     /// Compute PSNR between reference and distorted frames.
     fn compute_psnr(
         &self,
+        py: Python<'_>,
         ref_data: &[u8],
         dist_data: &[u8],
         width: usize,
         height: usize,
     ) -> PyResult<PyQualityScore> {
-        assess_full_ref(
-            &self.inner,
-            ref_data,
-            dist_data,
-            width,
-            height,
-            MetricType::Psnr,
-        )
+        assess_full_ref(py, ref_data, dist_data, width, height, MetricType::Psnr)
     }
 
     /// Compute SSIM between reference and distorted frames.
     fn compute_ssim(
         &self,
+        py: Python<'_>,
         ref_data: &[u8],
         dist_data: &[u8],
         width: usize,
         height: usize,
     ) -> PyResult<PyQualityScore> {
-        assess_full_ref(
-            &self.inner,
-            ref_data,
-            dist_data,
-            width,
-            height,
-            MetricType::Ssim,
-        )
+        assess_full_ref(py, ref_data, dist_data, width, height, MetricType::Ssim)
     }
 
     /// Compute BRISQUE no-reference quality score.
     fn compute_brisque(
         &self,
+        py: Python<'_>,
         data: &[u8],
         width: usize,
         height: usize,
     ) -> PyResult<PyQualityScore> {
-        assess_no_ref(&self.inner, data, width, height, MetricType::Brisque)
+        assess_no_ref(py, data, width, height, MetricType::Brisque)
     }
 
     /// Compute NIQE no-reference quality score.
-    fn compute_niqe(&self, data: &[u8], width: usize, height: usize) -> PyResult<PyQualityScore> {
-        assess_no_ref(&self.inner, data, width, height, MetricType::Niqe)
+    fn compute_niqe(
+        &self,
+        py: Python<'_>,
+        data: &[u8],
+        width: usize,
+        height: usize,
+    ) -> PyResult<PyQualityScore> {
+        assess_no_ref(py, data, width, height, MetricType::Niqe)
     }
 
     /// Generate a comprehensive quality report with all no-reference metrics.
     fn quality_report(
         &self,
+        py: Python<'_>,
         data: &[u8],
         width: usize,
         height: usize,
@@ -194,7 +203,7 @@ impl PyQualityAssessor {
         ];
         let mut results = Vec::with_capacity(no_ref_metrics.len());
         for mt in &no_ref_metrics {
-            results.push(assess_no_ref(&self.inner, data, width, height, *mt)?);
+            results.push(assess_no_ref(py, data, width, height, *mt)?);
         }
         Ok(results)
     }
@@ -207,41 +216,37 @@ impl PyQualityAssessor {
 /// Compute PSNR between two grayscale images. Returns the score as a float.
 #[pyfunction]
 pub fn compute_psnr(
+    py: Python<'_>,
     ref_data: &[u8],
     dist_data: &[u8],
     width: usize,
     height: usize,
 ) -> PyResult<f64> {
-    let assessor = QualityAssessor::new();
-    let reference = make_frame(ref_data, width, height)?;
-    let distorted = make_frame(dist_data, width, height)?;
-    let qs = assessor
-        .assess(&reference, &distorted, MetricType::Psnr)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e}")))?;
+    let qs = assess_full_ref(py, ref_data, dist_data, width, height, MetricType::Psnr)?;
     Ok(qs.score)
 }
 
 /// Compute SSIM between two grayscale images. Returns the score as a float.
 #[pyfunction]
 pub fn compute_ssim(
+    py: Python<'_>,
     ref_data: &[u8],
     dist_data: &[u8],
     width: usize,
     height: usize,
 ) -> PyResult<f64> {
-    let assessor = QualityAssessor::new();
-    let reference = make_frame(ref_data, width, height)?;
-    let distorted = make_frame(dist_data, width, height)?;
-    let qs = assessor
-        .assess(&reference, &distorted, MetricType::Ssim)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e}")))?;
+    let qs = assess_full_ref(py, ref_data, dist_data, width, height, MetricType::Ssim)?;
     Ok(qs.score)
 }
 
 /// Generate a quality report with all no-reference metrics for a grayscale image.
 #[pyfunction]
-pub fn quality_report(data: &[u8], width: usize, height: usize) -> PyResult<Vec<PyQualityScore>> {
-    let assessor = QualityAssessor::new();
+pub fn quality_report(
+    py: Python<'_>,
+    data: &[u8],
+    width: usize,
+    height: usize,
+) -> PyResult<Vec<PyQualityScore>> {
     let no_ref_metrics = [
         MetricType::Brisque,
         MetricType::Niqe,
@@ -251,7 +256,7 @@ pub fn quality_report(data: &[u8], width: usize, height: usize) -> PyResult<Vec<
     ];
     let mut results = Vec::with_capacity(no_ref_metrics.len());
     for mt in &no_ref_metrics {
-        results.push(assess_no_ref(&assessor, data, width, height, *mt)?);
+        results.push(assess_no_ref(py, data, width, height, *mt)?);
     }
     Ok(results)
 }

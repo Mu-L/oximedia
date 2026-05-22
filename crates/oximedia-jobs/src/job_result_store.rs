@@ -380,10 +380,7 @@ impl JobResultStore {
     /// Query results by status.
     #[must_use]
     pub fn by_status(&self, status: JobStatus) -> Vec<&JobResult> {
-        self.store
-            .values()
-            .filter(|r| r.status == status)
-            .collect()
+        self.store.values().filter(|r| r.status == status).collect()
     }
 
     /// Query results for jobs that carry at least one of the given tags.
@@ -397,11 +394,7 @@ impl JobResultStore {
 
     /// Query results recorded within the given time range (inclusive).
     #[must_use]
-    pub fn by_time_range(
-        &self,
-        from: DateTime<Utc>,
-        to: DateTime<Utc>,
-    ) -> Vec<&JobResult> {
+    pub fn by_time_range(&self, from: DateTime<Utc>, to: DateTime<Utc>) -> Vec<&JobResult> {
         self.store
             .values()
             .filter(|r| r.recorded_at >= from && r.recorded_at <= to)
@@ -594,12 +587,7 @@ mod tests {
     #[test]
     fn test_slowest_returns_in_order() {
         let mut store = JobResultStore::new(RetentionPolicy::default());
-        let fast = JobResult::success(
-            Uuid::new_v4(),
-            "fast".into(),
-            Duration::seconds(1),
-            vec![],
-        );
+        let fast = JobResult::success(Uuid::new_v4(), "fast".into(), Duration::seconds(1), vec![]);
         let slow = JobResult::success(
             Uuid::new_v4(),
             "slow".into(),

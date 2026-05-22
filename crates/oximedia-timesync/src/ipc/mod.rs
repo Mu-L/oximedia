@@ -2,7 +2,10 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod shmem;
-#[cfg(not(target_arch = "wasm32"))]
+// Unix domain sockets are only available on Unix-like targets. Tokio gates
+// `UnixListener`/`UnixStream` behind `#[cfg(unix)]`, so the socket module must
+// be gated identically — see issue #13.
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 pub mod socket;
 
 use serde::{Deserialize, Serialize};
@@ -72,5 +75,24 @@ mod tests {
 
         assert!(state.synchronized);
         assert_eq!(state.offset_ns, 1000);
+    }
+
+    /// Regression test for issue #13: the Unix-socket IPC module must only be
+    /// compiled on Unix-like targets. On Unix this asserts the module is
+    /// reachable; on non-Unix (e.g. Windows) the module simply does not exist
+    /// and this whole test is configured out — proving the gate works because
+    /// the crate compiles at all on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn test_issue_13_socket_module_gated_on_unix() {
+        // Force a name resolution into the gated module. If the gating ever
+        // regresses (e.g. socket.rs becomes visible on Windows), the cfg here
+        // and the cfg in mod.rs must stay in lockstep, otherwise this won't
+        // build on Unix.
+        let sock_path = std::env::temp_dir()
+            .join("oximedia-issue-13.sock")
+            .display()
+            .to_string();
+        let _server = super::socket::TimeSyncServer::new(&sock_path);
     }
 }

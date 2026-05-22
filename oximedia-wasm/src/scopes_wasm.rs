@@ -175,6 +175,7 @@ impl WasmVideoScopes {
             vectorscope_gain: 1.0,
             highlight_gamut: false,
             gamut_colorspace: GamutColorspace::Rec709,
+            resolution: None,
         }
     }
 }
@@ -449,6 +450,7 @@ mod tests {
             vectorscope_gain: 1.0,
             highlight_gamut: false,
             gamut_colorspace: GamutColorspace::Rec709,
+            resolution: None,
         };
         let scopes = VideoScopes::new(config);
         let result = scopes.analyze(&frame, 32, 32, ScopeType::WaveformLuma);
@@ -472,6 +474,7 @@ mod tests {
             vectorscope_gain: 1.0,
             highlight_gamut: false,
             gamut_colorspace: GamutColorspace::Rec709,
+            resolution: None,
         };
         let scopes = VideoScopes::new(config);
         for scope_type in &[ScopeType::HistogramRgb, ScopeType::HistogramLuma] {
@@ -495,6 +498,7 @@ mod tests {
             vectorscope_gain: 1.0,
             highlight_gamut: false,
             gamut_colorspace: GamutColorspace::Rec709,
+            resolution: None,
         };
         let scopes = VideoScopes::new(config);
         let result = scopes.analyze(&frame, 32, 32, ScopeType::Vectorscope);
@@ -516,6 +520,7 @@ mod tests {
             vectorscope_gain: 1.0,
             highlight_gamut: false,
             gamut_colorspace: GamutColorspace::Rec709,
+            resolution: None,
         };
         let scopes = VideoScopes::new(config);
         let result = scopes.analyze(&frame, 32, 32, ScopeType::ParadeRgb);

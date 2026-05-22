@@ -7,33 +7,33 @@
 - Dependencies: oximedia-core, oximedia-cv, scirs2-core, rayon, serde, thiserror
 
 ## Enhancements
-- [ ] Add multi-scale detection in `detect::face::FaceDetector` for improved accuracy across face sizes
+- [x] Add multi-scale detection in `detect::face::FaceDetector` for improved accuracy across face sizes (verified 2026-05-16; src/detect/face.rs:95 scale_factor for multi-scale, NMS across scales:211)
 - [x] Extend `classify::scene::SceneClassifier` with temporal smoothing to avoid flickering classifications
-- [ ] Add `composition::rules::CompositionAnalyzer` support for golden ratio and phi grid in addition to rule of thirds
+- [x] Add `composition::rules::CompositionAnalyzer` support for golden ratio and phi grid in addition to rule of thirds (verified 2026-05-16; src/composition/rules.rs:15 golden_ratio+phi_grid fields, phi_grid fn:32)
 - [x] Implement non-maximum suppression (NMS) in `detect` for overlapping detections across all detector types
-- [ ] Extend `saliency` with temporal saliency for video (motion-weighted attention maps)
+- [ ] Extend `saliency` with temporal saliency for video (motion-weighted attention maps) (verified-open 2026-05-16: no temporal/motion-weighted saliency in saliency modules)
 - [x] Add `scene_boundary` configurable threshold sensitivity with automatic threshold estimation
-- [ ] Improve `camera_motion` estimation with robust RANSAC-based homography fitting
-- [ ] Extend `aesthetic` scoring with content-type-specific models (landscape, portrait, action, still life)
+- [x] Improve `camera_motion` estimation with robust RANSAC-based homography fitting (verified 2026-05-16; src/camera_motion.rs:238 estimate_ransac, RANSAC iterations:244)
+- [x] Extend `aesthetic` scoring with content-type-specific models (landscape, portrait, action, still life) (verified 2026-05-16; src/aesthetic/score.rs:184 content-type-specific models, AutoScorer:371)
 
 ## New Features
-- [ ] Add `text_detection` module for detecting and localizing text regions in frames (scene text, overlays, subtitles)
-- [ ] Implement `emotion_recognition` module analyzing facial expressions in detected faces
-- [ ] Add `object_tracking` module for tracking detected objects across frames with Kalman filtering
-- [ ] Implement `scene_captioning` module generating natural-language descriptions from scene features
-- [ ] Add `content_moderation` module for detecting sensitive content categories (violence, NSFW)
-- [ ] Implement `temporal_graph` module connecting scene analysis results across time for narrative structure
-- [ ] Add `thumbnail_selector` module choosing the most visually representative frame per scene
-- [ ] Implement `motion_energy` module for quantifying overall motion intensity per scene segment
-- [ ] Add `audio_visual_correlation` module detecting sync between audio events and visual changes
+- [x] Add `text_detection` module for detecting and localizing text regions in frames (scene text, overlays, subtitles) (verified 2026-05-16; src/text_detect.rs:1231 lines, src/detect/text.rs)
+- [x] Implement `emotion_recognition` module analyzing facial expressions in detected faces (verified 2026-05-16; src/emotion_recognition.rs:691 lines EmotionRecognizer)
+- [x] Add `object_tracking` module for tracking detected objects across frames with Kalman filtering (verified 2026-05-16; src/object_tracker.rs:751 lines ObjectTracker Kalman filtering)
+- [x] Implement `scene_captioning` module generating natural-language descriptions from scene features (verified 2026-05-16; src/scene_captioning.rs:665 lines SceneCaptioner)
+- [x] Add `content_moderation` module for detecting sensitive content categories (violence, NSFW) (verified 2026-05-16; src/content_moderation.rs:827 lines ContentModerator)
+- [x] Implement `temporal_graph` module connecting scene analysis results across time for narrative structure (verified 2026-05-16; src/temporal_graph.rs:677 lines TemporalGraph)
+- [x] Add `thumbnail_selector` module choosing the most visually representative frame per scene (verified 2026-05-16; src/thumbnail_selector.rs:446 lines ThumbnailSelector)
+- [x] Implement `motion_energy` module for quantifying overall motion intensity per scene segment (verified 2026-05-16; src/motion_energy.rs:536 lines MotionEnergy)
+- [x] Add `audio_visual_correlation` module detecting sync between audio events and visual changes (verified 2026-05-16; src/audio_visual_correlation.rs:629 lines AudioVisualCorrelation)
 
 ## Performance
-- [ ] Add rayon parallel processing in `segment::Segmenter` for graph-based segmentation on large frames
-- [ ] Implement multi-resolution pyramid processing in `detect` to avoid full-resolution scans
-- [ ] Add batch frame processing in `classify` to amortize model initialization across frames
-- [ ] Cache feature descriptors in `features` module to avoid recomputation when multiple analyzers use them
-- [ ] Optimize `saliency::spectral` FFT-based saliency with pre-allocated FFT buffers
-- [ ] Add frame decimation in `summarization` to process every Nth frame for long videos
+- [ ] Add rayon parallel processing in `segment::Segmenter` for graph-based segmentation on large frames (verified-open 2026-05-16: no rayon par_iter in segmentation.rs)
+- [x] Implement multi-resolution pyramid processing in `detect` to avoid full-resolution scans (verified 2026-05-16; src/detect/pyramid.rs:1 multi-resolution image pyramid, levels:18)
+- [x] Add batch frame processing in `classify` to amortize model initialization across frames (verified 2026-05-16; src/classify/batch.rs:75 BatchClassifier amortizes init, classify_batch:177)
+- [x] Cache feature descriptors in `features` module to avoid recomputation when multiple analyzers use them (verified 2026-05-16; src/features/cache.rs:12 FeatureCache, get_cached/set_cached)
+- [ ] Optimize `saliency::spectral` FFT-based saliency with pre-allocated FFT buffers (verified-open 2026-05-16: no pre-allocated FFT buffers in saliency spectral module)
+- [ ] Add frame decimation in `summarization` to process every Nth frame for long videos (verified-open 2026-05-16: no every-Nth-frame decimation in summarization.rs)
 
 ## Testing
 - [ ] Add accuracy benchmarks for `detect::face` using standard face detection datasets (FDDB-like metrics)

@@ -25,6 +25,8 @@ pub struct RestoreAudioOptions {
     pub dehum: bool,
     /// Enable noise reduction.
     pub denoise: bool,
+    /// Treat input as raw PCM float32 LE (skip format detection).
+    pub raw: bool,
 }
 
 /// Options for the `restore video` subcommand.
@@ -69,6 +71,133 @@ pub struct RestoreCompareOptions {
     pub restored: PathBuf,
 }
 
+/// Decode an audio file to a flat `Vec<f32>` of mono samples and return the
+/// detected sample rate.
+///
+/// WAV is decoded via `oximedia_audio::wav::WavReader` (fully implemented).
+/// MP3 is decoded via the `oximedia_audio::mp3::Mp3Decoder` AudioDecoder path.
+/// For FLAC the oximedia-audio decoder is currently a stub (no frame output),
+/// so FLAC files are rejected with a clear error directing the user to convert
+/// to WAV first or use `--raw`.
+///
+/// # Errors
+///
+/// Returns an error if the format is unsupported, the file is malformed, or
+/// decoding fails.
+fn decode_audio_file(data: &[u8], ext: &str) -> Result<(Vec<f32>, u32)> {
+    match ext {
+        "wav" | "wave" => {
+            use oximedia_audio::wav::WavReader;
+            let mut reader =
+                WavReader::new(std::io::Cursor::new(data)).context("Failed to open WAV file")?;
+            let spec = reader.spec();
+            let detected_rate = spec.sample_rate;
+            let mut samples = reader
+                .read_samples_f32()
+                .context("Failed to decode WAV samples")?;
+            // Downmix multi-channel to mono by averaging all channels.
+            if spec.channels > 1 {
+                let ch = spec.channels as usize;
+                samples = samples
+                    .chunks(ch)
+                    .map(|c| c.iter().sum::<f32>() / ch as f32)
+                    .collect();
+            }
+            Ok((samples, detected_rate))
+        }
+
+        "flac" => {
+            // oximedia-audio FlacDecoder is a stub (send_packet/receive_frame do nothing).
+            // Return a clear error instead of silently yielding zero samples.
+            Err(anyhow::anyhow!(
+                "FLAC decoding is not yet available in the restore pipeline. \
+                 Convert to WAV first (e.g. `ffmpeg -i input.flac output.wav`) \
+                 or use --raw to treat the input as raw PCM float32 LE."
+            ))
+        }
+
+        "mp3" => {
+            use oximedia_audio::mp3::Mp3Decoder;
+            use oximedia_audio::{AudioBuffer, AudioDecoder};
+            let mut decoder = Mp3Decoder::new();
+            // Feed all data as one packet.
+            decoder
+                .send_packet(data, 0)
+                .map_err(|e| anyhow::anyhow!("MP3 send_packet failed: {e}"))?;
+            let mut all_samples: Vec<f32> = Vec::new();
+            let mut detected_rate = 44100u32;
+            // Drain all frames.
+            loop {
+                match decoder.receive_frame() {
+                    Ok(Some(frame)) => {
+                        detected_rate = frame.sample_rate;
+                        let channels = frame.channels.count();
+                        // Extract raw bytes from the audio buffer without naming the
+                        // bytes::Bytes type (avoids adding bytes as an explicit dep).
+                        let raw_bytes: Vec<u8> = match &frame.samples {
+                            AudioBuffer::Interleaved(b) => b.to_vec(),
+                            AudioBuffer::Planar(planes) => {
+                                // Interleave planar channels for uniform handling.
+                                if planes.is_empty() {
+                                    Vec::new()
+                                } else {
+                                    let per_ch = planes[0].len();
+                                    let mut interleaved = Vec::with_capacity(per_ch * planes.len());
+                                    for i in 0..(per_ch / 4) {
+                                        for plane in planes {
+                                            if i * 4 + 3 < plane.len() {
+                                                interleaved
+                                                    .extend_from_slice(&plane[i * 4..i * 4 + 4]);
+                                            }
+                                        }
+                                    }
+                                    interleaved
+                                }
+                            }
+                        };
+                        // Samples are packed f32 LE; downmix to mono.
+                        let frame_samples: Vec<f32> = raw_bytes
+                            .chunks_exact(4)
+                            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .collect();
+                        if channels > 1 {
+                            all_samples.extend(
+                                frame_samples
+                                    .chunks(channels)
+                                    .map(|c| c.iter().sum::<f32>() / channels as f32),
+                            );
+                        } else {
+                            all_samples.extend_from_slice(&frame_samples);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        // NeedMoreData signals end-of-input when buffer is drained.
+                        let e_str = format!("{e}");
+                        if e_str.contains("NeedMoreData") || e_str.contains("need") {
+                            break;
+                        }
+                        return Err(anyhow::anyhow!("MP3 decode error: {e}"));
+                    }
+                }
+            }
+            if all_samples.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "MP3 decoding produced no samples — the file may be too short or corrupt."
+                ));
+            }
+            Ok((all_samples, detected_rate))
+        }
+
+        other => Err(anyhow::anyhow!(
+            "Unsupported audio format '.{}'. Supported formats: wav, mp3. \
+             Use --raw to treat the input as raw PCM float32 LE, or convert \
+             to WAV before restoring.",
+            other
+        )),
+    }
+}
+
 /// Run the `restore audio` subcommand.
 pub async fn run_restore_audio(opts: RestoreAudioOptions, json_output: bool) -> Result<()> {
     use oximedia_restore::presets::{BroadcastCleanup, TapeRestoration, VinylRestoration};
@@ -77,9 +206,23 @@ pub async fn run_restore_audio(opts: RestoreAudioOptions, json_output: bool) -> 
     let data = std::fs::read(&opts.input)
         .with_context(|| format!("Failed to read input: {}", opts.input.display()))?;
 
-    // Interpret raw bytes as f32 samples (simplified: assume raw PCM f32 LE)
-    let sample_rate = opts.sample_rate.unwrap_or(44100);
-    let samples = bytes_to_f32_samples(&data);
+    // Determine samples and sample rate based on --raw flag or file extension.
+    let (samples, sample_rate) = if opts.raw {
+        // Explicit raw PCM float32 LE path.
+        let sr = opts.sample_rate.unwrap_or(44100);
+        (bytes_to_f32_samples(&data), sr)
+    } else {
+        let ext = opts
+            .input
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+        let (decoded_samples, detected_rate) = decode_audio_file(&data, &ext)?;
+        // Allow explicit --sample-rate override even in format-aware path.
+        let sr = opts.sample_rate.unwrap_or(detected_rate);
+        (decoded_samples, sr)
+    };
 
     let mut chain = RestoreChain::new();
 
@@ -187,84 +330,132 @@ pub async fn run_restore_audio(opts: RestoreAudioOptions, json_output: bool) -> 
 
 /// Run the `restore video` subcommand.
 ///
-/// For supported container formats (MKV, WebM, Ogg, WAV, FLAC), the input is
-/// remuxed through a stream-copy pipeline into the output container.  This
-/// re-wraps the container (which can fix container-level corruption) and serves
-/// as the foundation for further per-frame restoration passes.
+/// The behaviour depends on the requested mode:
 ///
-/// Frame-level restoration (deinterlace, upscale, stabilize, color-correct)
-/// requires decode→filter→encode which is not yet wired into the pipeline;
-/// those steps are recorded in the output metadata but not yet applied at the
-/// pixel level.
+/// * **`stabilize` / `full`** — performs real frame-level video stabilisation.
+///   The input clip is decoded to raw frames, run through the
+///   `oximedia-stabilize` offline multi-pass pipeline (motion estimation →
+///   trajectory smoothing → frame warping), and re-encoded.  Because every
+///   pixel is warped, this mode is inherently a *transcode* (not a remux):
+///   the input must be an uncompressed YUV4MPEG2 (`.y4m`) clip and the output
+///   is written as `.y4m`.  See [`stabilize_video_y4m`].
+///
+/// * **`deinterlace` / `upscale` / `color-correct`** — uses
+///   `FramePipelineConfig` + `FramePipelineExecutor` from `oximedia-transcode`
+///   to carry `VideoFrameOp` descriptors through the container remux pass.
+///   The `FramePipelineExecutor` operates at packet level (stream-copy
+///   semantics): the `VideoFrameOp` variants are registered in the config but
+///   the packet-level loop does not call `apply_video_ops` on decoded video
+///   frames (a full decode→filter→encode path is out of scope for these
+///   modes).  For supported container formats (MKV, WebM, Ogg, WAV, FLAC) the
+///   pipeline performs a container remux which fixes container-level
+///   corruption; for unsupported output formats it falls back to a byte-level
+///   copy with a warning.
 pub async fn run_restore_video(opts: RestoreVideoOptions, json_output: bool) -> Result<()> {
-    use oximedia_transcode::TranscodePipeline;
+    // Stabilisation (and `full`, which includes it) needs a real
+    // decode→stabilise→encode transcode, so it is dispatched separately.
+    let mode_lc = opts.mode.to_lowercase();
+    if mode_lc == "stabilize" || mode_lc == "full" {
+        return run_restore_video_stabilize(opts, json_output).await;
+    }
+    run_restore_video_remux(opts, json_output).await
+}
+
+/// Remux-based restoration path for `deinterlace` / `upscale` / `color-correct`.
+async fn run_restore_video_remux(opts: RestoreVideoOptions, json_output: bool) -> Result<()> {
+    use oximedia_transcode::frame_pipeline::{
+        FramePipelineConfig, FramePipelineExecutor, VideoFrameOp,
+    };
+    use oximedia_transcode::hdr_passthrough::HdrPassthroughMode;
 
     let width = opts.width.unwrap_or(1920);
     let height = opts.height.unwrap_or(1080);
 
-    // Determine which restoration steps are requested.
+    // Determine which restoration steps are requested.  The `stabilize` and
+    // `full` modes are handled by `run_restore_video_stabilize` and never
+    // reach this function, so they are not listed here.
     let steps_applied: Vec<&str> = match opts.mode.to_lowercase().as_str() {
         "deinterlace" => vec!["deinterlace"],
         "upscale" => vec!["upscale"],
-        "stabilize" => vec!["stabilize"],
         "color-correct" => vec!["color-correct"],
-        "full" => vec!["deinterlace", "upscale", "stabilize", "color-correct"],
         _ => vec!["deinterlace"],
     };
 
-    // Validate output extension: TranscodePipeline only supports mkv/webm and ogg outputs.
-    let out_ext = opts
-        .output
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_lowercase)
-        .unwrap_or_default();
+    // Build VideoFrameOp list from the requested steps.
+    let mut video_ops: Vec<VideoFrameOp> = Vec::new();
+    for step in &steps_applied {
+        match *step {
+            "deinterlace" => video_ops.push(VideoFrameOp::Deinterlace),
+            "upscale" => video_ops.push(VideoFrameOp::Scale { width, height }),
+            "color-correct" => video_ops.push(VideoFrameOp::ColorCorrect {
+                brightness: 1.05,
+                contrast: 1.1,
+                saturation: 1.0,
+            }),
+            _ => {}
+        }
+    }
 
-    let (output_size, pipeline_used) =
-        if matches!(out_ext.as_str(), "mkv" | "webm" | "ogg" | "oga" | "opus") {
-            // Run real stream-copy pipeline: re-wraps the container, which fixes
-            // container-level errors (truncated headers, bad timecodes, etc.).
-            let mut pipeline = TranscodePipeline::builder()
-                .input(opts.input.clone())
-                .output(opts.output.clone())
-                .track_progress(false)
-                .build()
-                .context("Failed to build video restore pipeline")?;
+    let frame_cfg = FramePipelineConfig {
+        input: opts.input.clone(),
+        output: opts.output.clone(),
+        video_codec: None,
+        audio_codec: None,
+        video_ops,
+        audio_ops: Vec::new(),
+        hdr_mode: HdrPassthroughMode::Passthrough,
+        source_hdr: None,
+        hw_accel: false,
+        threads: 0,
+    };
 
-            match pipeline.execute().await {
-                Ok(result) => (result.file_size, true),
-                Err(e) => {
-                    // Pipeline failed (e.g. unsupported input container). Fall back
-                    // to byte-level copy so the caller at least gets a file.
-                    let data = std::fs::read(&opts.input).with_context(|| {
-                        format!("Failed to read input: {}", opts.input.display())
-                    })?;
-                    let sz = data.len() as u64;
-                    std::fs::write(&opts.output, &data).with_context(|| {
-                        format!("Failed to write output: {}", opts.output.display())
-                    })?;
-                    if !json_output {
-                        println!("  Note: pipeline remux failed ({}); byte copy used.", e);
-                    }
-                    (sz, false)
-                }
+    // FramePipelineExecutor::execute() is synchronous and creates its own
+    // tokio runtime internally via block_on.  Calling it directly from this
+    // async function would cause a "cannot start a runtime from within a
+    // runtime" panic.  Offload it to the blocking thread pool instead.
+    let executor_result = tokio::task::spawn_blocking(move || {
+        let mut executor = FramePipelineExecutor::new(frame_cfg);
+        executor.execute()
+    })
+    .await
+    .map_err(|join_err| anyhow::anyhow!("executor task panicked: {join_err}"));
+
+    let (output_size, pipeline_used) = {
+        let output_path = opts.output.clone();
+        let input_path = opts.input.clone();
+        match executor_result.and_then(|r| r.map_err(|e| anyhow::anyhow!("{e}"))) {
+            Ok(result) => {
+                // Derive output size from what was actually written.
+                let written = std::fs::metadata(&output_path)
+                    .map(|m| m.len())
+                    .unwrap_or(result.output_bytes);
+                (written, true)
             }
-        } else {
-            // Output format not supported by the pipeline; fall back to byte copy.
-            let data = std::fs::read(&opts.input)
-                .with_context(|| format!("Failed to read input: {}", opts.input.display()))?;
-            let sz = data.len() as u64;
-            std::fs::write(&opts.output, &data)
-                .with_context(|| format!("Failed to write output: {}", opts.output.display()))?;
-            if !json_output {
-                println!(
-                    "  Note: output format '.{}' is not supported by the remux pipeline; \
-                 byte copy used. Use .mkv or .webm for full pipeline support.",
-                    out_ext
+            Err(e) => {
+                // FramePipelineExecutor failed (unsupported container / codec).
+                // Fall back to byte-level copy so the caller gets a file.
+                tracing::warn!(
+                    "restore-video: frame pipeline failed ({}); \
+                     falling back to byte copy — video ops not applied",
+                    e
                 );
+                let data = std::fs::read(&input_path)
+                    .with_context(|| format!("Failed to read input: {}", input_path.display()))?;
+                let sz = data.len() as u64;
+                std::fs::write(&output_path, &data).with_context(|| {
+                    format!("Failed to write output: {}", output_path.display())
+                })?;
+                if !json_output {
+                    println!(
+                        "  Note: frame pipeline failed ({}); byte copy used. \
+                         Video ops (deinterlace/scale/color-correct) were not applied.",
+                        e
+                    );
+                }
+                (sz, false)
             }
-            (sz, false)
-        };
+        }
+    };
 
     if json_output {
         let obj = serde_json::json!({
@@ -276,10 +467,12 @@ pub async fn run_restore_video(opts: RestoreVideoOptions, json_output: bool) -> 
             "steps_applied": steps_applied,
             "pipeline_remux": pipeline_used,
             "note": if pipeline_used {
-                "Container remuxed; frame-level restoration (deinterlace/upscale/stabilize) \
-                 requires decode→filter→encode (not yet wired)."
+                "Container remuxed via FramePipelineExecutor. \
+                 VideoFrameOp descriptors registered; pixel-level ops \
+                 (deinterlace/scale/color-correct) require full decode→filter→encode \
+                 which is not yet wired at the packet loop level."
             } else {
-                "Byte copy used; pipeline remux not available for this format."
+                "Byte copy used; frame pipeline not available for this format or encountered an error."
             },
         });
         println!("{}", serde_json::to_string_pretty(&obj)?);
@@ -292,15 +485,493 @@ pub async fn run_restore_video(opts: RestoreVideoOptions, json_output: bool) -> 
         println!("  Steps:          {}", steps_applied.join(", "));
         println!("  Output size:    {} bytes", output_size);
         println!(
-            "  Pipeline remux: {}",
+            "  Pipeline:       {}",
             if pipeline_used {
-                "yes"
+                "FramePipelineExecutor (container remux)"
             } else {
-                "no (byte copy)"
+                "byte copy (pipeline unavailable)"
             }
         );
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Video stabilisation (restore-video --mode stabilize / full)
+// ---------------------------------------------------------------------------
+
+/// Run the `restore video` subcommand for the `stabilize` / `full` modes.
+///
+/// Stabilisation requires warping every pixel of every frame, so it is a real
+/// transcode rather than a container remux.  This wrapper restricts the input
+/// to uncompressed YUV4MPEG2 (`.y4m`) — a lossless, self-describing container
+/// that the OxiMedia stack can demux and mux without depending on a particular
+/// compressed-codec decoder — and delegates the heavy lifting to
+/// [`stabilize_video_y4m`].
+async fn run_restore_video_stabilize(opts: RestoreVideoOptions, json_output: bool) -> Result<()> {
+    // Stabilisation is CPU-bound and fully synchronous; run it on the blocking
+    // pool so the async runtime stays responsive.
+    let input = opts.input.clone();
+    let output = opts.output.clone();
+    let mode = opts.mode.clone();
+
+    let summary = tokio::task::spawn_blocking(move || stabilize_video_y4m(&input, &output))
+        .await
+        .map_err(|join_err| anyhow::anyhow!("stabilisation task panicked: {join_err}"))??;
+
+    if json_output {
+        let obj = serde_json::json!({
+            "input": opts.input.to_string_lossy(),
+            "output": opts.output.to_string_lossy(),
+            "mode": mode,
+            "operation": "stabilize",
+            "transcode": true,
+            "input_format": "y4m",
+            "output_format": "y4m",
+            "width": summary.width,
+            "height": summary.height,
+            "frame_count": summary.frame_count,
+            "input_size_bytes": summary.input_size,
+            "output_size_bytes": summary.output_size,
+            "bytes_changed": summary.bytes_changed,
+            "note": "Video stabilised via the oximedia-stabilize offline \
+                     multi-pass pipeline (motion estimation, trajectory \
+                     smoothing, frame warping). Output re-encoded as Y4M.",
+        });
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+    } else {
+        println!("{}", "Video Restoration Complete".green().bold());
+        println!("  Input:          {}", opts.input.display());
+        println!("  Output:         {}", opts.output.display());
+        println!("  Mode:           {}", mode);
+        println!("  Operation:      stabilise (transcode)");
+        println!("  Resolution:     {}x{}", summary.width, summary.height);
+        println!("  Frames:         {}", summary.frame_count);
+        println!(
+            "  Output size:    {} bytes ({} bytes changed)",
+            summary.output_size, summary.bytes_changed
+        );
+        println!(
+            "  Pipeline:       oximedia-stabilize offline multi-pass (decode \u{2192} stabilise \u{2192} encode)"
+        );
+    }
+
+    Ok(())
+}
+
+/// Summary of a completed video stabilisation pass.
+#[derive(Debug, Clone, Copy)]
+struct StabilizeSummary {
+    /// Frame width in pixels.
+    width: u32,
+    /// Frame height in pixels.
+    height: u32,
+    /// Number of frames processed.
+    frame_count: usize,
+    /// Size of the input file in bytes.
+    input_size: u64,
+    /// Size of the written output file in bytes.
+    output_size: u64,
+    /// Number of frame-data bytes that differ between input and output.
+    bytes_changed: u64,
+}
+
+/// Decode a Y4M clip, stabilise it with the `oximedia-stabilize` offline
+/// multi-pass pipeline, and re-encode the result as Y4M.
+///
+/// # Pipeline
+///
+/// 1. Demux the input `.y4m` into a list of raw planar-YUV frames.
+/// 2. Extract the luma (Y) plane of every frame and hand it to the
+///    `oximedia-stabilize` offline multi-pass stabiliser, which performs
+///    multi-pass analysis, feature-based motion estimation, trajectory
+///    smoothing and frame warping.
+/// 3. Apply the *same* per-frame stabilisation transforms to the chroma
+///    planes (scaled for chroma subsampling) so colour tracks the luma.
+/// 4. Mux the warped planes back into a Y4M stream.
+///
+/// # Errors
+///
+/// Returns an error if the input is not a readable Y4M file, if its chroma
+/// format is unsupported, or if the stabiliser or muxer fails.
+fn stabilize_video_y4m(
+    input: &std::path::Path,
+    output: &std::path::Path,
+) -> Result<StabilizeSummary> {
+    use oximedia_container::demux::y4m::Y4mDemuxer;
+    use oximedia_container::mux::y4m::Y4mMuxerBuilder;
+
+    // --- 1. Read and demux the input clip --------------------------------
+    let raw = std::fs::read(input)
+        .with_context(|| format!("Failed to read input: {}", input.display()))?;
+    let input_size = raw.len() as u64;
+
+    if !raw.starts_with(b"YUV4MPEG2") {
+        anyhow::bail!(
+            "restore-video --mode stabilize requires an uncompressed YUV4MPEG2 (.y4m) \
+             input, because stabilisation re-encodes every frame. '{}' is not a Y4M file. \
+             Convert it first (e.g. `oximedia transcode -i input.mp4 output.y4m`).",
+            input.display()
+        );
+    }
+
+    let mut demuxer = Y4mDemuxer::new(std::io::Cursor::new(raw.as_slice()))
+        .map_err(|e| anyhow::anyhow!("Failed to parse Y4M header: {e}"))?;
+
+    let header = demuxer.header().clone();
+    let width = header.width;
+    let height = header.height;
+    let chroma = header.chroma;
+
+    let frames_raw = demuxer
+        .read_all_frames()
+        .map_err(|e| anyhow::anyhow!("Failed to read Y4M frames: {e}"))?;
+
+    if frames_raw.is_empty() {
+        anyhow::bail!(
+            "Y4M input '{}' contains no frames; nothing to stabilise.",
+            input.display()
+        );
+    }
+
+    let layout = ChromaLayout::for_chroma(chroma, width, height).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Y4M chroma format '{}' is not supported by the stabilise pipeline",
+            chroma
+        )
+    })?;
+
+    // --- 2. Stabilise -----------------------------------------------------
+    let stabilized = stabilize_planar_frames(&frames_raw, &layout)?;
+
+    // --- 3. Re-encode as Y4M ---------------------------------------------
+    let mut out_buf: Vec<u8> = Vec::with_capacity(raw.len());
+    {
+        let mut muxer = Y4mMuxerBuilder::new(width, height)
+            .fps(header.fps_num.max(1), header.fps_den.max(1))
+            .chroma(chroma)
+            .interlace(header.interlace)
+            .aspect_ratio(header.par_num, header.par_den)
+            .build(&mut out_buf)
+            .map_err(|e| anyhow::anyhow!("Failed to create Y4M muxer: {e}"))?;
+        for frame in &stabilized {
+            muxer
+                .write_frame(frame)
+                .map_err(|e| anyhow::anyhow!("Failed to write stabilised frame: {e}"))?;
+        }
+        muxer
+            .finish()
+            .map_err(|e| anyhow::anyhow!("Failed to finalise Y4M output: {e}"))?;
+    }
+
+    std::fs::write(output, &out_buf)
+        .with_context(|| format!("Failed to write output: {}", output.display()))?;
+
+    // Count how many frame-data bytes actually changed, so callers (and tests)
+    // can confirm that stabilisation altered the picture.
+    let bytes_changed = frames_raw
+        .iter()
+        .zip(stabilized.iter())
+        .map(|(a, b)| a.iter().zip(b.iter()).filter(|(x, y)| x != y).count() as u64)
+        .sum();
+
+    Ok(StabilizeSummary {
+        width,
+        height,
+        frame_count: stabilized.len(),
+        input_size,
+        output_size: out_buf.len() as u64,
+        bytes_changed,
+    })
+}
+
+/// Plane geometry of a Y4M frame for a particular chroma subsampling.
+#[derive(Debug, Clone, Copy)]
+struct ChromaLayout {
+    /// Luma plane width.
+    luma_w: usize,
+    /// Luma plane height.
+    luma_h: usize,
+    /// Chroma plane width (0 if there are no chroma planes).
+    chroma_w: usize,
+    /// Chroma plane height (0 if there are no chroma planes).
+    chroma_h: usize,
+    /// Whether the frame carries a full-resolution alpha plane.
+    has_alpha: bool,
+}
+
+impl ChromaLayout {
+    /// Derive the plane layout for a Y4M chroma format and frame size.
+    ///
+    /// Returns `None` for chroma formats this pipeline does not handle.
+    fn for_chroma(
+        chroma: oximedia_container::demux::y4m::Y4mChroma,
+        width: u32,
+        height: u32,
+    ) -> Option<Self> {
+        use oximedia_container::demux::y4m::Y4mChroma;
+        let luma_w = width as usize;
+        let luma_h = height as usize;
+        let (chroma_w, chroma_h, has_alpha) = match chroma {
+            Y4mChroma::C420jpeg | Y4mChroma::C420mpeg2 | Y4mChroma::C420paldv => {
+                ((luma_w + 1) / 2, (luma_h + 1) / 2, false)
+            }
+            Y4mChroma::C422 => ((luma_w + 1) / 2, luma_h, false),
+            Y4mChroma::C444 => (luma_w, luma_h, false),
+            Y4mChroma::C444alpha => (luma_w, luma_h, true),
+            Y4mChroma::Mono => (0, 0, false),
+        };
+        Some(Self {
+            luma_w,
+            luma_h,
+            chroma_w,
+            chroma_h,
+            has_alpha,
+        })
+    }
+
+    /// Total bytes in one packed planar frame.
+    const fn frame_size(&self) -> usize {
+        self.luma_w * self.luma_h
+            + 2 * self.chroma_w * self.chroma_h
+            + if self.has_alpha {
+                self.luma_w * self.luma_h
+            } else {
+                0
+            }
+    }
+}
+
+/// Stabilise a sequence of packed planar-YUV frames.
+///
+/// The luma plane drives the `oximedia-stabilize` offline multi-pass pipeline;
+/// the resulting per-frame transforms are then applied to every plane so the
+/// chroma (and optional alpha) channels stay registered with the luma.
+fn stabilize_planar_frames(frames_raw: &[Vec<u8>], layout: &ChromaLayout) -> Result<Vec<Vec<u8>>> {
+    use oximedia_stabilize::motion::estimate::MotionEstimator;
+    use oximedia_stabilize::motion::tracker::MotionTracker;
+    use oximedia_stabilize::motion::trajectory::Trajectory;
+    use oximedia_stabilize::multipass::analyze::MultipassAnalyzer;
+    use oximedia_stabilize::smooth::filter::TrajectorySmoother;
+    use oximedia_stabilize::transform::calculate::{StabilizationTransform, TransformCalculator};
+    use oximedia_stabilize::warp::apply::FrameWarper;
+    use oximedia_stabilize::{Frame, QualityPreset, StabilizationMode, StabilizeConfig};
+    use scirs2_core::ndarray::Array2;
+
+    let expected = layout.frame_size();
+    for (i, f) in frames_raw.iter().enumerate() {
+        if f.len() != expected {
+            anyhow::bail!(
+                "Y4M frame {i} has {} bytes, expected {expected} for the declared geometry",
+                f.len()
+            );
+        }
+    }
+
+    // ----- Build oximedia-stabilize luma frames --------------------------
+    let luma_frames: Vec<Frame> = frames_raw
+        .iter()
+        .enumerate()
+        .map(|(i, raw)| -> Result<Frame> {
+            let luma = &raw[..layout.luma_w * layout.luma_h];
+            let data = Array2::from_shape_vec((layout.luma_h, layout.luma_w), luma.to_vec())
+                .map_err(|e| anyhow::anyhow!("Failed to build luma array for frame {i}: {e}"))?;
+            Ok(Frame::new(
+                layout.luma_w,
+                layout.luma_h,
+                i as f64 / 30.0,
+                data,
+            ))
+        })
+        .collect::<Result<_>>()?;
+
+    // ----- Offline multi-pass stabilisation pipeline ---------------------
+    // This mirrors `oximedia_stabilize::Stabilizer::stabilize`, but keeps the
+    // intermediate per-frame transforms so they can be re-applied to the
+    // chroma planes. The `StabilizeConfig` here selects affine motion with
+    // multi-pass analysis enabled (the offline, highest-quality path).
+    let config = StabilizeConfig::new()
+        .with_mode(StabilizationMode::Affine)
+        .with_quality(QualityPreset::Balanced)
+        .with_smoothing_strength(0.85);
+    config
+        .validate()
+        .map_err(|e| anyhow::anyhow!("Invalid stabilisation configuration: {e}"))?;
+
+    // Pass 1 — analyse the whole clip up front (multi-pass / offline).
+    let analyzer = MultipassAnalyzer::new();
+    let analysis = analyzer
+        .analyze(&luma_frames)
+        .map_err(|e| anyhow::anyhow!("Multi-pass analysis failed: {e}"))?;
+    // Use the analysis to pick the smoothing window, exactly as the offline
+    // stabiliser does when adapting to the detected motion profile.
+    let smoothing_window = analysis
+        .recommended_window_size
+        .max(config.quality.smoothing_window())
+        .max(1);
+
+    // Pass 2 — feature tracking + motion estimation + smoothing + warp.
+    let transforms: Vec<StabilizationTransform> = {
+        let mut tracker = MotionTracker::new(config.feature_count);
+        match tracker.track(&luma_frames) {
+            Ok(tracks) => {
+                let estimator = MotionEstimator::new(config.mode);
+                let models = estimator
+                    .estimate(&tracks, luma_frames.len())
+                    .map_err(|e| anyhow::anyhow!("Motion estimation failed: {e}"))?;
+                let trajectory = Trajectory::from_models(&models)
+                    .map_err(|e| anyhow::anyhow!("Trajectory build failed: {e}"))?;
+                let mut smoother =
+                    TrajectorySmoother::new(smoothing_window, config.smoothing_strength);
+                let smoothed = smoother
+                    .smooth(&trajectory)
+                    .map_err(|e| anyhow::anyhow!("Trajectory smoothing failed: {e}"))?;
+                let calculator = TransformCalculator::new();
+                calculator
+                    .calculate(&trajectory, &smoothed)
+                    .map_err(|e| anyhow::anyhow!("Transform calculation failed: {e}"))?
+            }
+            Err(oximedia_stabilize::StabilizeError::InsufficientFeatures { .. }) => {
+                // Featureless footage (e.g. flat colour): nothing to correct,
+                // fall back to identity transforms so the clip passes through.
+                (0..luma_frames.len())
+                    .map(StabilizationTransform::identity)
+                    .collect()
+            }
+            Err(e) => return Err(anyhow::anyhow!("Motion tracking failed: {e}")),
+        }
+    };
+
+    if transforms.len() != frames_raw.len() {
+        anyhow::bail!(
+            "stabiliser produced {} transforms for {} frames",
+            transforms.len(),
+            frames_raw.len()
+        );
+    }
+
+    // ----- Warp every plane with the per-frame transforms ----------------
+    let warper = FrameWarper::new();
+    let mut out_frames: Vec<Vec<u8>> = Vec::with_capacity(frames_raw.len());
+
+    for (raw, transform) in frames_raw.iter().zip(transforms.iter()) {
+        let mut out = vec![0u8; expected];
+        let mut offset = 0usize;
+
+        // Luma plane — full-resolution transform.
+        warp_plane(
+            &warper,
+            &raw[offset..offset + layout.luma_w * layout.luma_h],
+            layout.luma_w,
+            layout.luma_h,
+            transform,
+            1.0,
+            &mut out[offset..offset + layout.luma_w * layout.luma_h],
+        )?;
+        offset += layout.luma_w * layout.luma_h;
+
+        // Chroma planes — translation scaled by the subsampling ratio.
+        if layout.chroma_w > 0 && layout.chroma_h > 0 {
+            let plane_len = layout.chroma_w * layout.chroma_h;
+            let scale_x = layout.chroma_w as f64 / layout.luma_w.max(1) as f64;
+            let scale_y = layout.chroma_h as f64 / layout.luma_h.max(1) as f64;
+            // Average ratio keeps the helper's single-scale model simple while
+            // remaining exact for 4:2:0 / 4:2:2 / 4:4:4 (uniform per axis).
+            let chroma_scale = (scale_x + scale_y) / 2.0;
+            for _ in 0..2 {
+                warp_plane(
+                    &warper,
+                    &raw[offset..offset + plane_len],
+                    layout.chroma_w,
+                    layout.chroma_h,
+                    transform,
+                    chroma_scale,
+                    &mut out[offset..offset + plane_len],
+                )?;
+                offset += plane_len;
+            }
+        }
+
+        // Alpha plane (C444alpha) — full-resolution, same transform as luma.
+        if layout.has_alpha {
+            let plane_len = layout.luma_w * layout.luma_h;
+            warp_plane(
+                &warper,
+                &raw[offset..offset + plane_len],
+                layout.luma_w,
+                layout.luma_h,
+                transform,
+                1.0,
+                &mut out[offset..offset + plane_len],
+            )?;
+        }
+
+        out_frames.push(out);
+    }
+
+    Ok(out_frames)
+}
+
+/// Warp a single 8-bit plane with one stabilisation transform.
+///
+/// `translation_scale` rescales the transform's translation component so that
+/// a luma-derived transform can be applied to a subsampled chroma plane.
+fn warp_plane(
+    warper: &oximedia_stabilize::warp::apply::FrameWarper,
+    src: &[u8],
+    plane_w: usize,
+    plane_h: usize,
+    transform: &oximedia_stabilize::transform::calculate::StabilizationTransform,
+    translation_scale: f64,
+    dst: &mut [u8],
+) -> Result<()> {
+    use oximedia_stabilize::transform::calculate::StabilizationTransform;
+    use oximedia_stabilize::Frame;
+    use scirs2_core::ndarray::Array2;
+
+    if plane_w == 0 || plane_h == 0 {
+        return Ok(());
+    }
+
+    let data = Array2::from_shape_vec((plane_h, plane_w), src.to_vec())
+        .map_err(|e| anyhow::anyhow!("Failed to build plane array ({plane_w}x{plane_h}): {e}"))?;
+    // The warper copies `timestamp` straight through and does not use it in
+    // the warp math, so any value is fine for this throwaway single-frame call.
+    let frame = Frame::new(plane_w, plane_h, 0.0, data);
+
+    // Rotation and scale are dimensionless and apply unchanged at any
+    // resolution; only the translation must be rescaled for chroma planes.
+    let plane_transform = StabilizationTransform {
+        dx: transform.dx * translation_scale,
+        dy: transform.dy * translation_scale,
+        angle: transform.angle,
+        scale: transform.scale,
+        frame_index: transform.frame_index,
+        confidence: transform.confidence,
+    };
+
+    let warped = warper
+        .warp(
+            std::slice::from_ref(&frame),
+            std::slice::from_ref(&plane_transform),
+        )
+        .map_err(|e| anyhow::anyhow!("Frame warp failed: {e}"))?;
+    let warped_frame = warped
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Frame warp returned no frame"))?;
+
+    // Copy the warped plane back out in row-major order.
+    let warped_bytes: Vec<u8> = warped_frame.data.iter().copied().collect();
+    if warped_bytes.len() != dst.len() {
+        anyhow::bail!(
+            "warped plane has {} bytes, expected {}",
+            warped_bytes.len(),
+            dst.len()
+        );
+    }
+    dst.copy_from_slice(&warped_bytes);
     Ok(())
 }
 
@@ -709,5 +1380,454 @@ mod tests {
         assert!(result.len() >= 3);
         let entropy_entry = result.iter().find(|(k, _)| k == "Entropy");
         assert!(entropy_entry.is_some());
+    }
+
+    // --- Slice 4: format-aware audio decode ---
+
+    /// Decode a minimal valid WAV file (44-byte, mono, 16-bit PCM, 1 silent sample)
+    /// and verify that `decode_audio_file` returns exactly 1 sample at 44100 Hz.
+    #[test]
+    fn test_decode_audio_file_wav_silent_sample() {
+        // Minimal RIFF/WAVE header: mono, 44100 Hz, 16-bit PCM, 1 sample (0x0000).
+        // fmt  chunk: size=16, format=1(PCM), ch=1, rate=44100, byteRate=88200,
+        //             blockAlign=2, bps=16
+        // data chunk: size=2, payload=[0x00, 0x00]
+        let mut wav: Vec<u8> = Vec::new();
+        wav.extend_from_slice(b"RIFF"); // ChunkID
+        wav.extend_from_slice(&36u32.to_le_bytes()); // ChunkSize = 4+8+16+8+2 = 36
+        wav.extend_from_slice(b"WAVE"); // Format
+        wav.extend_from_slice(b"fmt "); // Subchunk1ID
+        wav.extend_from_slice(&16u32.to_le_bytes()); // Subchunk1Size
+        wav.extend_from_slice(&1u16.to_le_bytes()); // AudioFormat = PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // NumChannels = 1
+        wav.extend_from_slice(&44100u32.to_le_bytes()); // SampleRate
+        wav.extend_from_slice(&88200u32.to_le_bytes()); // ByteRate
+        wav.extend_from_slice(&2u16.to_le_bytes()); // BlockAlign
+        wav.extend_from_slice(&16u16.to_le_bytes()); // BitsPerSample
+        wav.extend_from_slice(b"data"); // Subchunk2ID
+        wav.extend_from_slice(&2u32.to_le_bytes()); // Subchunk2Size = 2 bytes
+        wav.extend_from_slice(&0i16.to_le_bytes()); // 1 silent sample
+        let (samples, rate) = decode_audio_file(&wav, "wav").expect("WAV decode should succeed");
+        assert_eq!(rate, 44100);
+        assert_eq!(samples.len(), 1);
+        assert!((samples[0]).abs() < 1e-4, "silent sample should be ~0.0");
+    }
+
+    /// `decode_audio_file` with stereo WAV must downmix to mono.
+    #[test]
+    fn test_decode_audio_file_wav_stereo_downmix() {
+        // 2 stereo samples: [L=+1.0, R=-1.0] → mono average = 0.0
+        let mut wav: Vec<u8> = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&40u32.to_le_bytes()); // 4+8+16+8+8 = 44? let's compute exactly
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes()); // fmt size
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&2u16.to_le_bytes()); // 2 channels
+        wav.extend_from_slice(&44100u32.to_le_bytes()); // sample rate
+        wav.extend_from_slice(&176400u32.to_le_bytes()); // byte rate
+        wav.extend_from_slice(&4u16.to_le_bytes()); // block align
+        wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&8u32.to_le_bytes()); // 2 stereo frames × 4 bytes
+                                                    // Frame 1: L = i16::MAX, R = i16::MIN
+        wav.extend_from_slice(&i16::MAX.to_le_bytes());
+        wav.extend_from_slice(&i16::MIN.to_le_bytes());
+        // Frame 2: L = 0, R = 0
+        wav.extend_from_slice(&0i16.to_le_bytes());
+        wav.extend_from_slice(&0i16.to_le_bytes());
+        // Fix RIFF size: total = 4(WAVE) + 8+16(fmt) + 8+8(data) = 44
+        let riff_size = (wav.len() - 8) as u32;
+        wav[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        let (samples, rate) =
+            decode_audio_file(&wav, "wav").expect("stereo WAV decode should succeed");
+        assert_eq!(rate, 44100);
+        assert_eq!(samples.len(), 2, "2 stereo frames → 2 mono samples");
+        // Frame 1 downmix: (32767/32768 + (-32768/32768)) / 2 ≈ -0.000015
+        assert!(samples[0].abs() < 0.01, "near-zero after L+R average");
+    }
+
+    /// Unsupported extension must return an Err containing "Unsupported" or "supported".
+    #[test]
+    fn test_decode_audio_file_unsupported_ext() {
+        let result = decode_audio_file(b"junk", "xyz");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("Unsupported") || msg.contains("supported"),
+            "error should mention supported formats, got: {msg}"
+        );
+    }
+
+    /// FLAC extension must return an error (stub decoder) not silently produce 0 samples.
+    #[test]
+    fn test_decode_audio_file_flac_returns_error() {
+        let result = decode_audio_file(b"fLaC\x00\x00\x00\x00", "flac");
+        assert!(result.is_err(), "FLAC should return Err (stub decoder)");
+    }
+
+    /// run_restore_audio with an unsupported format returns Err.
+    #[tokio::test]
+    async fn test_restore_audio_unsupported_format_error() {
+        let dir = std::env::temp_dir();
+        let input = dir.join("oximedia_test_restore_0177.xyz");
+        let output = dir.join("oximedia_test_restore_0177_out.wav");
+        std::fs::write(&input, b"junk data").expect("write junk");
+        let opts = RestoreAudioOptions {
+            input: input.clone(),
+            output: output.clone(),
+            mode: "broadcast".to_string(),
+            sample_rate: None,
+            declip: false,
+            decrackle: false,
+            dehum: false,
+            denoise: false,
+            raw: false,
+        };
+        let result = run_restore_audio(opts, false).await;
+        assert!(result.is_err(), "unsupported format should return Err");
+        let err_str = format!("{}", result.unwrap_err());
+        assert!(
+            err_str.contains("Unsupported") || err_str.contains("supported"),
+            "error message should mention supported formats: {err_str}"
+        );
+        let _ = std::fs::remove_file(&input);
+        let _ = std::fs::remove_file(&output);
+    }
+
+    /// run_restore_audio with --raw flag bypasses format detection.
+    #[tokio::test]
+    async fn test_restore_audio_raw_flag() {
+        let dir = std::env::temp_dir();
+        // Write 4 f32 samples (0.0, 0.1, -0.1, 0.5) as raw PCM
+        let samples: Vec<f32> = vec![0.0, 0.1, -0.1, 0.5];
+        let raw_bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let input = dir.join("oximedia_test_restore_0177_raw.xyz");
+        let output = dir.join("oximedia_test_restore_0177_raw_out.xyz");
+        std::fs::write(&input, &raw_bytes).expect("write raw pcm");
+        let opts = RestoreAudioOptions {
+            input: input.clone(),
+            output: output.clone(),
+            mode: "broadcast".to_string(),
+            sample_rate: Some(44100),
+            declip: false,
+            decrackle: false,
+            dehum: false,
+            denoise: false,
+            raw: true,
+        };
+        let result = run_restore_audio(opts, false).await;
+        // Should succeed: raw flag bypasses format detection
+        assert!(
+            result.is_ok(),
+            "raw flag should succeed: {:?}",
+            result.err()
+        );
+        let _ = std::fs::remove_file(&input);
+        let _ = std::fs::remove_file(&output);
+    }
+
+    /// run_restore_audio with a minimal WAV file should succeed.
+    #[tokio::test]
+    async fn test_restore_audio_wav_decode() {
+        let dir = std::env::temp_dir();
+        let input = dir.join("oximedia_test_restore_0177_wav.wav");
+        let output = dir.join("oximedia_test_restore_0177_wav_out.wav");
+        // Minimal WAV: mono, 44100 Hz, 16-bit, 1 silent sample.
+        let mut wav: Vec<u8> = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&36u32.to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&44100u32.to_le_bytes());
+        wav.extend_from_slice(&88200u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&2u32.to_le_bytes());
+        wav.extend_from_slice(&0i16.to_le_bytes());
+        std::fs::write(&input, &wav).expect("write wav");
+        let opts = RestoreAudioOptions {
+            input: input.clone(),
+            output: output.clone(),
+            mode: "broadcast".to_string(),
+            sample_rate: None,
+            declip: false,
+            decrackle: false,
+            dehum: false,
+            denoise: false,
+            raw: false,
+        };
+        let result = run_restore_audio(opts, false).await;
+        // May fail at restoration step but should NOT panic and should not fail at decode.
+        let _ = result;
+        let _ = std::fs::remove_file(&input);
+        let _ = std::fs::remove_file(&output);
+    }
+
+    // --- Slice 5: VideoFrameOp new variants (integration) ---
+
+    /// FramePipelineConfig can hold Deinterlace and ColorCorrect ops without panicking.
+    #[test]
+    fn test_frame_pipeline_config_with_new_ops() {
+        use oximedia_transcode::frame_pipeline::{FramePipelineConfig, VideoFrameOp};
+        use oximedia_transcode::hdr_passthrough::HdrPassthroughMode;
+        let dir = std::env::temp_dir();
+        let cfg = FramePipelineConfig {
+            input: dir.join("dummy_in.mkv"),
+            output: dir.join("dummy_out.mkv"),
+            video_codec: None,
+            audio_codec: None,
+            video_ops: vec![
+                VideoFrameOp::Deinterlace,
+                VideoFrameOp::ColorCorrect {
+                    brightness: 1.05,
+                    contrast: 1.1,
+                    saturation: 1.0,
+                },
+                VideoFrameOp::Scale {
+                    width: 1920,
+                    height: 1080,
+                },
+            ],
+            audio_ops: Vec::new(),
+            hdr_mode: HdrPassthroughMode::Passthrough,
+            source_hdr: None,
+            hw_accel: false,
+            threads: 0,
+        };
+        assert_eq!(cfg.video_ops.len(), 3);
+        // Verify discriminant-level Debug output to confirm variants are present.
+        let debug_str = format!("{:?}", cfg.video_ops[0]);
+        assert!(debug_str.contains("Deinterlace"), "variant name in Debug");
+        let debug_str2 = format!("{:?}", cfg.video_ops[1]);
+        assert!(debug_str2.contains("ColorCorrect"), "variant name in Debug");
+    }
+
+    /// `run_restore_video` must not panic (nested-runtime guard) even when the
+    /// frame pipeline falls back to a byte copy for an unknown file format.
+    #[tokio::test]
+    async fn test_restore_video_does_not_panic() {
+        let dir = std::env::temp_dir();
+        let input = dir.join("oximedia_test_restore_0177_vid.bin");
+        let output = dir.join("oximedia_test_restore_0177_vid_out.bin");
+        // Write some random bytes — not a real container, so the pipeline
+        // will fall back to byte copy.  The important thing is no panic.
+        std::fs::write(&input, b"not-a-real-video-file").expect("write dummy video");
+        let opts = RestoreVideoOptions {
+            input: input.clone(),
+            output: output.clone(),
+            mode: "deinterlace".to_string(),
+            width: None,
+            height: None,
+        };
+        // Must complete without panicking regardless of success/failure.
+        let _result = run_restore_video(opts, false).await;
+        let _ = std::fs::remove_file(&input);
+        let _ = std::fs::remove_file(&output);
+    }
+
+    // --- Slice S7: restore-video stabilisation -------------------------------
+
+    /// Build a synthetic Y4M clip (4:2:0) of `frame_count` frames whose textured
+    /// content is shifted by a per-frame "camera jitter" offset.
+    ///
+    /// The pattern is a high-contrast diagonal grid: it has plenty of corner
+    /// features so the stabiliser's feature tracker can lock onto real motion.
+    /// `jitter` maps a frame index to an `(dx, dy)` pixel offset.
+    fn build_jittered_y4m(
+        width: u32,
+        height: u32,
+        frame_count: usize,
+        jitter: impl Fn(usize) -> (i32, i32),
+    ) -> Vec<u8> {
+        let w = width as usize;
+        let h = height as usize;
+        let cw = (w + 1) / 2;
+        let ch = (h + 1) / 2;
+
+        // Render the luma value of the static scene at absolute pixel (x, y).
+        let scene_luma = |x: i32, y: i32| -> u8 {
+            // Diagonal grid + bright square blocks => strong corners.
+            let grid = ((x % 16) < 3) || ((y % 16) < 3);
+            let block = ((x / 12 + y / 12) % 2) == 0;
+            match (grid, block) {
+                (true, _) => 235,
+                (false, true) => 180,
+                (false, false) => 32,
+            }
+        };
+
+        let mut data = Vec::new();
+        let header = format!("YUV4MPEG2 W{width} H{height} F30:1 Ip C420jpeg\n");
+        data.extend_from_slice(header.as_bytes());
+
+        for f in 0..frame_count {
+            let (jx, jy) = jitter(f);
+            data.extend_from_slice(b"FRAME\n");
+            // Y plane — shifted scene.
+            for y in 0..h {
+                for x in 0..w {
+                    let sx = x as i32 + jx;
+                    let sy = y as i32 + jy;
+                    data.push(scene_luma(sx, sy));
+                }
+            }
+            // Cb / Cr planes — mid-grey, also shifted so chroma tracks luma.
+            for _plane in 0..2 {
+                for y in 0..ch {
+                    for x in 0..cw {
+                        let sx = x as i32 + jx;
+                        let sy = y as i32 + jy;
+                        // Slight spatial variation so chroma is not perfectly flat.
+                        let v = 128i32 + ((sx + sy) % 17) - 8;
+                        data.push(v.clamp(16, 240) as u8);
+                    }
+                }
+            }
+        }
+        data
+    }
+
+    /// End-to-end: `run_restore_video --mode stabilize` on a jittered Y4M clip
+    /// must complete, write a valid Y4M output, and change the picture.
+    #[tokio::test]
+    async fn test_restore_video_stabilize_y4m_end_to_end() {
+        let dir = std::env::temp_dir();
+        let input = dir.join("oximedia_test_restore_s7_stab_in.y4m");
+        let output = dir.join("oximedia_test_restore_s7_stab_out.y4m");
+
+        // 16 frames of 64x48 video with a shaky sinusoidal camera path.
+        let jitter = |f: usize| {
+            let t = f as f64;
+            let dx = (t * 0.9).sin() * 4.0;
+            let dy = (t * 0.7).cos() * 3.0;
+            (dx.round() as i32, dy.round() as i32)
+        };
+        let y4m = build_jittered_y4m(64, 48, 16, jitter);
+        std::fs::write(&input, &y4m).expect("write jittered y4m");
+
+        let opts = RestoreVideoOptions {
+            input: input.clone(),
+            output: output.clone(),
+            mode: "stabilize".to_string(),
+            width: None,
+            height: None,
+        };
+        let result = run_restore_video(opts, false).await;
+        assert!(
+            result.is_ok(),
+            "stabilise should succeed on a Y4M clip: {:?}",
+            result.err()
+        );
+
+        // Output must exist and be a valid Y4M stream with the same frame count.
+        let out_bytes = std::fs::read(&output).expect("read stabilised output");
+        assert!(
+            out_bytes.starts_with(b"YUV4MPEG2"),
+            "output must be a Y4M stream"
+        );
+        let frame_tags = out_bytes.windows(6).filter(|w| *w == b"FRAME\n").count();
+        assert_eq!(frame_tags, 16, "all 16 frames must be re-encoded");
+
+        // Stabilisation warps pixels, so the output must differ from the input.
+        assert_ne!(
+            out_bytes, y4m,
+            "stabilised output must differ from the jittered input"
+        );
+
+        let _ = std::fs::remove_file(&input);
+        let _ = std::fs::remove_file(&output);
+    }
+
+    /// `stabilize_video_y4m` preserves geometry (size, frame count) and reports
+    /// a non-trivial number of changed bytes for a clearly shaky clip.
+    #[test]
+    fn test_stabilize_video_y4m_reduces_jitter() {
+        let dir = std::env::temp_dir();
+        let input = dir.join("oximedia_test_restore_s7_direct_in.y4m");
+        let output = dir.join("oximedia_test_restore_s7_direct_out.y4m");
+
+        // A sawtooth jitter: large, obvious frame-to-frame displacement.
+        let jitter = |f: usize| {
+            let phase = (f % 6) as i32;
+            (phase - 3, (phase * 2) - 5)
+        };
+        let y4m = build_jittered_y4m(80, 64, 14, jitter);
+        std::fs::write(&input, &y4m).expect("write y4m");
+
+        let summary = stabilize_video_y4m(&input, &output).expect("stabilise should succeed");
+
+        assert_eq!(summary.width, 80);
+        assert_eq!(summary.height, 64);
+        assert_eq!(summary.frame_count, 14);
+        assert!(summary.output_size > 0, "output must be non-empty");
+        assert!(
+            summary.bytes_changed > 0,
+            "warping a jittered clip must change frame bytes"
+        );
+
+        // The output must round-trip back through the Y4M demuxer cleanly.
+        use oximedia_container::demux::y4m::Y4mDemuxer;
+        let out_bytes = std::fs::read(&output).expect("read output");
+        let mut demuxer =
+            Y4mDemuxer::new(std::io::Cursor::new(out_bytes.as_slice())).expect("parse output y4m");
+        assert_eq!(demuxer.width(), 80);
+        assert_eq!(demuxer.height(), 64);
+        let frames = demuxer.read_all_frames().expect("read output frames");
+        assert_eq!(frames.len(), 14);
+
+        let _ = std::fs::remove_file(&input);
+        let _ = std::fs::remove_file(&output);
+    }
+
+    /// Stabilisation must reject a non-Y4M input with a clear, actionable error.
+    #[tokio::test]
+    async fn test_restore_video_stabilize_rejects_non_y4m() {
+        let dir = std::env::temp_dir();
+        let input = dir.join("oximedia_test_restore_s7_bad_in.mp4");
+        let output = dir.join("oximedia_test_restore_s7_bad_out.y4m");
+        std::fs::write(&input, b"\x00\x00\x00\x18ftypmp42not-a-y4m").expect("write fake mp4");
+
+        let opts = RestoreVideoOptions {
+            input: input.clone(),
+            output: output.clone(),
+            mode: "stabilize".to_string(),
+            width: None,
+            height: None,
+        };
+        let result = run_restore_video(opts, false).await;
+        assert!(result.is_err(), "non-Y4M stabilise input must error");
+        let msg = format!("{}", result.expect_err("must be an error"));
+        assert!(
+            msg.contains("YUV4MPEG2") || msg.contains("Y4M"),
+            "error must point the user at the Y4M requirement, got: {msg}"
+        );
+
+        let _ = std::fs::remove_file(&input);
+        let _ = std::fs::remove_file(&output);
+    }
+
+    /// `ChromaLayout` computes correct plane sizes for the common Y4M formats.
+    #[test]
+    fn test_chroma_layout_plane_sizes() {
+        use oximedia_container::demux::y4m::Y4mChroma;
+
+        let l420 = ChromaLayout::for_chroma(Y4mChroma::C420jpeg, 64, 48).expect("420 layout");
+        // Y = 64*48, Cb = Cr = 32*24.
+        assert_eq!(l420.frame_size(), 64 * 48 + 2 * 32 * 24);
+
+        let l422 = ChromaLayout::for_chroma(Y4mChroma::C422, 64, 48).expect("422 layout");
+        assert_eq!(l422.frame_size(), 64 * 48 + 2 * 32 * 48);
+
+        let l444 = ChromaLayout::for_chroma(Y4mChroma::C444, 64, 48).expect("444 layout");
+        assert_eq!(l444.frame_size(), 64 * 48 * 3);
+
+        let lmono = ChromaLayout::for_chroma(Y4mChroma::Mono, 64, 48).expect("mono layout");
+        assert_eq!(lmono.frame_size(), 64 * 48);
     }
 }

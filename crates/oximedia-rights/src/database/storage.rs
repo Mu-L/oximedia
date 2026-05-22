@@ -3,6 +3,7 @@
 use crate::Result;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::str::FromStr;
+use std::time::Duration;
 
 /// Rights database using SQLite
 pub struct RightsDatabase {
@@ -10,12 +11,27 @@ pub struct RightsDatabase {
 }
 
 impl RightsDatabase {
-    /// Create a new rights database
+    /// Create a new rights database with default pool settings (max 5 connections).
     pub async fn new(path: &str) -> Result<Self> {
+        Self::new_with_pool(path, 5, 5).await
+    }
+
+    /// Create a new rights database with explicit pool configuration.
+    ///
+    /// # Parameters
+    /// - `path` — SQLite connection URL (e.g. `sqlite:///tmp/rights.db`)
+    /// - `max_connections` — maximum pool connections
+    /// - `connect_timeout_secs` — seconds to wait for an available connection
+    pub async fn new_with_pool(
+        path: &str,
+        max_connections: u32,
+        connect_timeout_secs: u64,
+    ) -> Result<Self> {
         let options = SqliteConnectOptions::from_str(path)?.create_if_missing(true);
 
         let pool = SqlitePoolOptions::new()
-            .max_connections(5)
+            .max_connections(max_connections)
+            .acquire_timeout(Duration::from_secs(connect_timeout_secs))
             .connect_with(options)
             .await?;
 
@@ -269,6 +285,20 @@ impl RightsDatabase {
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_trail_entity ON audit_trail(entity_type, entity_id)")
             .execute(&self.pool)
             .await?;
+
+        // Performance: index on territory_json (text prefix) and end_date for
+        // faster filtered queries in rights_grants.
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_rights_grants_territory ON rights_grants(territory_json)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_rights_grants_end_date ON rights_grants(end_date)",
+        )
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }

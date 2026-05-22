@@ -620,3 +620,283 @@ mod extended_tests {
         assert_eq!(ratio.relative_efficiency, 1.25);
     }
 }
+
+// ─── 4-point Vandermonde Bjøntegaard Delta (BD-Rate / BD-PSNR) ───────────────
+
+/// A single rate–distortion sample for the 4-point BD calculation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BdRdPoint {
+    /// Bitrate in kbps (must be positive).
+    pub rate: f64,
+    /// PSNR in dB (or any distortion metric, higher = better).
+    pub psnr: f64,
+}
+
+impl BdRdPoint {
+    /// Construct a new `BdRdPoint`.
+    #[must_use]
+    pub fn new(rate: f64, psnr: f64) -> Self {
+        Self { rate, psnr }
+    }
+}
+
+/// Errors produced by the 4-point BD-Rate / BD-PSNR functions.
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum BdDeltaError {
+    /// Both curves must have exactly 4 points.
+    #[error("expected exactly 4 RD points, got anchor={anchor} test={test}")]
+    WrongPointCount {
+        /// Number of points in the anchor curve.
+        anchor: usize,
+        /// Number of points in the test curve.
+        test: usize,
+    },
+    /// The Vandermonde system is rank-deficient (collinear points).
+    #[error("Vandermonde system is ill-conditioned: collinear RD points")]
+    IllConditioned,
+    /// The PSNR ranges of the two curves do not overlap.
+    #[error("PSNR ranges of the two curves do not overlap")]
+    NoOverlap,
+    /// A rate value was non-positive (logarithm undefined).
+    #[error("non-positive rate value {rate}: log is undefined")]
+    NonPositiveRate {
+        /// The invalid rate value.
+        rate: f64,
+    },
+}
+
+// ── Gaussian elimination (in-place, 4×5 augmented matrix) ─────────────────────
+
+/// Solve a 4×4 linear system via Gaussian elimination with partial pivoting.
+///
+/// `mat` is a 4×5 augmented matrix [A | b] stored row-major.
+/// Returns the solution vector, or `BdDeltaError::IllConditioned` if the system
+/// is rank-deficient (pivot magnitude < 1e-10).
+fn solve_4x4(mat: &mut [[f64; 5]; 4]) -> Result<[f64; 4], BdDeltaError> {
+    const EPS: f64 = 1e-10;
+
+    for col in 0..4 {
+        // Partial pivoting: find the row with the largest absolute value in this column.
+        let mut max_row = col;
+        let mut max_val = mat[col][col].abs();
+        for row in (col + 1)..4 {
+            let v = mat[row][col].abs();
+            if v > max_val {
+                max_val = v;
+                max_row = row;
+            }
+        }
+
+        if max_val < EPS {
+            return Err(BdDeltaError::IllConditioned);
+        }
+
+        mat.swap(col, max_row);
+
+        let pivot = mat[col][col];
+        for row in (col + 1)..4 {
+            let factor = mat[row][col] / pivot;
+            for k in col..5 {
+                let val = mat[col][k];
+                mat[row][k] -= factor * val;
+            }
+        }
+    }
+
+    // Back-substitution
+    let mut x = [0.0_f64; 4];
+    for i in (0..4).rev() {
+        x[i] = mat[i][4];
+        for j in (i + 1)..4 {
+            let xj = x[j];
+            x[i] -= mat[i][j] * xj;
+        }
+        x[i] /= mat[i][i];
+    }
+
+    Ok(x)
+}
+
+// ── Cubic polynomial fitting ───────────────────────────────────────────────────
+
+/// Fit a cubic polynomial  p(x) = c0 + c1·x + c2·x² + c3·x³  through exactly
+/// 4 (x, y) data points using a Vandermonde system solved by Gaussian elimination.
+///
+/// Returns coefficients `[c0, c1, c2, c3]`.
+fn fit_cubic(xs: &[f64; 4], ys: &[f64; 4]) -> Result<[f64; 4], BdDeltaError> {
+    // Augmented Vandermonde matrix [1, x, x², x³ | y] for each of 4 rows.
+    let mut mat = [[0.0_f64; 5]; 4];
+    for i in 0..4 {
+        let x = xs[i];
+        mat[i][0] = 1.0;
+        mat[i][1] = x;
+        mat[i][2] = x * x;
+        mat[i][3] = x * x * x;
+        mat[i][4] = ys[i];
+    }
+    solve_4x4(&mut mat)
+}
+
+/// Evaluate the analytic integral of  c0 + c1·x + c2·x² + c3·x³  over [lo, hi].
+fn integrate_cubic(coeffs: &[f64; 4], lo: f64, hi: f64) -> f64 {
+    // ∫(lo→hi) (c0 + c1·x + c2·x² + c3·x³) dx
+    //  = [c0·x + c1/2·x² + c2/3·x³ + c3/4·x⁴](lo→hi)
+    let antideriv = |t: f64| {
+        coeffs[0] * t
+            + coeffs[1] / 2.0 * t * t
+            + coeffs[2] / 3.0 * t * t * t
+            + coeffs[3] / 4.0 * t * t * t * t
+    };
+    antideriv(hi) - antideriv(lo)
+}
+
+// ── Public API ─────────────────────────────────────────────────────────────────
+
+/// Compute the Bjøntegaard Delta Rate (BD-Rate) between an anchor and a test curve.
+///
+/// BD-Rate is the average bitrate savings (negative = test is better) of the test
+/// codec relative to the anchor, integrated over the PSNR range common to both curves.
+/// A result of −10 % means the test codec requires 10 % less bitrate at the same quality.
+///
+/// Both slices must contain **exactly 4 points** sorted by increasing bitrate.
+/// Points must have positive rate values (log is taken internally).
+///
+/// Returns `Ok(percent_savings)` where savings < 0 is better.
+pub fn bd_rate(anchor: &[BdRdPoint; 4], test: &[BdRdPoint; 4]) -> Result<f64, BdDeltaError> {
+    // Validate positive rates
+    for p in anchor.iter().chain(test.iter()) {
+        if p.rate <= 0.0 {
+            return Err(BdDeltaError::NonPositiveRate { rate: p.rate });
+        }
+    }
+
+    // Work in log-rate space
+    let log_anchor_rates: [f64; 4] = [
+        anchor[0].rate.ln(),
+        anchor[1].rate.ln(),
+        anchor[2].rate.ln(),
+        anchor[3].rate.ln(),
+    ];
+    let anchor_psnrs: [f64; 4] = [
+        anchor[0].psnr,
+        anchor[1].psnr,
+        anchor[2].psnr,
+        anchor[3].psnr,
+    ];
+
+    let log_test_rates: [f64; 4] = [
+        test[0].rate.ln(),
+        test[1].rate.ln(),
+        test[2].rate.ln(),
+        test[3].rate.ln(),
+    ];
+    let test_psnrs: [f64; 4] = [test[0].psnr, test[1].psnr, test[2].psnr, test[3].psnr];
+
+    // Fit cubic log-rate = f(PSNR)  (PSNR on x-axis, log-rate on y-axis)
+    let coeffs_anchor = fit_cubic(&anchor_psnrs, &log_anchor_rates)?;
+    let coeffs_test = fit_cubic(&test_psnrs, &log_test_rates)?;
+
+    // Overlapping PSNR range
+    let psnr_lo = anchor_psnrs[0]
+        .max(anchor_psnrs[3].min(anchor_psnrs[0])) // min of anchor
+        .max(test_psnrs[0].min(test_psnrs[3])); // min of test
+    let psnr_hi = anchor_psnrs[0]
+        .min(anchor_psnrs[3].max(anchor_psnrs[0])) // max of anchor
+        .min(test_psnrs[0].max(test_psnrs[3])); // max of test
+
+    // Simpler: real min/max across all four
+    let anchor_psnr_min = anchor_psnrs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let anchor_psnr_max = anchor_psnrs
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let test_psnr_min = test_psnrs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let test_psnr_max = test_psnrs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+    let overlap_lo = anchor_psnr_min.max(test_psnr_min);
+    let overlap_hi = anchor_psnr_max.min(test_psnr_max);
+
+    // Suppress the earlier incorrect calculation and use the correct overlap
+    let _ = (psnr_lo, psnr_hi);
+
+    if overlap_hi <= overlap_lo {
+        return Err(BdDeltaError::NoOverlap);
+    }
+
+    // Average of each cubic in the overlapping range
+    let range = overlap_hi - overlap_lo;
+    let avg_anchor = integrate_cubic(&coeffs_anchor, overlap_lo, overlap_hi) / range;
+    let avg_test = integrate_cubic(&coeffs_test, overlap_lo, overlap_hi) / range;
+
+    // BD-Rate = (exp(avg_test − avg_anchor) − 1) × 100 %
+    let bd = (avg_test - avg_anchor).exp() - 1.0;
+    Ok(bd * 100.0)
+}
+
+/// Compute the Bjøntegaard Delta PSNR (BD-PSNR) between an anchor and a test curve.
+///
+/// BD-PSNR is the average PSNR gain (positive = test is better) of the test codec
+/// relative to the anchor, integrated over the log-bitrate range common to both curves.
+///
+/// Both slices must contain **exactly 4 points** sorted by increasing bitrate.
+pub fn bd_psnr(anchor: &[BdRdPoint; 4], test: &[BdRdPoint; 4]) -> Result<f64, BdDeltaError> {
+    for p in anchor.iter().chain(test.iter()) {
+        if p.rate <= 0.0 {
+            return Err(BdDeltaError::NonPositiveRate { rate: p.rate });
+        }
+    }
+
+    // Work in log-rate on x-axis, PSNR on y-axis (opposite of bd_rate)
+    let log_anchor_rates: [f64; 4] = [
+        anchor[0].rate.ln(),
+        anchor[1].rate.ln(),
+        anchor[2].rate.ln(),
+        anchor[3].rate.ln(),
+    ];
+    let anchor_psnrs: [f64; 4] = [
+        anchor[0].psnr,
+        anchor[1].psnr,
+        anchor[2].psnr,
+        anchor[3].psnr,
+    ];
+
+    let log_test_rates: [f64; 4] = [
+        test[0].rate.ln(),
+        test[1].rate.ln(),
+        test[2].rate.ln(),
+        test[3].rate.ln(),
+    ];
+    let test_psnrs: [f64; 4] = [test[0].psnr, test[1].psnr, test[2].psnr, test[3].psnr];
+
+    // Fit cubic PSNR = f(log-rate)
+    let coeffs_anchor = fit_cubic(&log_anchor_rates, &anchor_psnrs)?;
+    let coeffs_test = fit_cubic(&log_test_rates, &test_psnrs)?;
+
+    // Overlapping log-rate range
+    let anchor_min = log_anchor_rates
+        .iter()
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
+    let anchor_max = log_anchor_rates
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let test_min = log_test_rates.iter().cloned().fold(f64::INFINITY, f64::min);
+    let test_max = log_test_rates
+        .iter()
+        .cloned()
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    let overlap_lo = anchor_min.max(test_min);
+    let overlap_hi = anchor_max.min(test_max);
+
+    if overlap_hi <= overlap_lo {
+        return Err(BdDeltaError::NoOverlap);
+    }
+
+    let range = overlap_hi - overlap_lo;
+    let avg_anchor = integrate_cubic(&coeffs_anchor, overlap_lo, overlap_hi) / range;
+    let avg_test = integrate_cubic(&coeffs_test, overlap_lo, overlap_hi) / range;
+
+    Ok(avg_test - avg_anchor)
+}

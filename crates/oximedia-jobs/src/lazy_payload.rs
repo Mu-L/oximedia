@@ -8,8 +8,8 @@
 //! [`JobPayload`] at load time wastes CPU and memory — especially when
 //! only a handful of jobs will actually be dispatched in the near future.
 //!
-//! This module provides [`LazyPayload`], a wrapper that stores the raw
-//! JSON bytes and only deserializes on demand via [`LazyPayload::resolve`].
+//! This module provides `LazyPayload`, a wrapper that stores the raw
+//! JSON bytes and only deserializes on demand via `LazyPayload::resolve`.
 //! The resolved value is cached so that subsequent accesses are free.
 //!
 //! # Features
@@ -18,10 +18,10 @@
 //! * **One-shot cache** – once resolved, the deserialized value is memoized.
 //! * **Type-safe** – the generic parameter `T` ensures the caller gets the
 //!   correct type.
-//! * **Introspection** – [`LazyPayload::peek_type`] extracts the top-level
+//! * **Introspection** – `LazyPayload::peek_type` extracts the top-level
 //!   JSON tag without full deserialization, allowing routers to inspect the
 //!   job type cheaply.
-//! * **Size tracking** – [`LazyPayload::raw_size`] returns the byte length
+//! * **Size tracking** – `LazyPayload::raw_size` returns the byte length
 //!   of the serialized form.
 
 use serde::{de::DeserializeOwned, Serialize};
@@ -145,8 +145,8 @@ impl<T: DeserializeOwned + Serialize> LazyPayload<T> {
             return Err(LazyError::EmptyPayload);
         }
 
-        let value: T =
-            serde_json::from_slice(&self.raw).map_err(|e| LazyError::TypeMismatch(e.to_string()))?;
+        let value: T = serde_json::from_slice(&self.raw)
+            .map_err(|e| LazyError::TypeMismatch(e.to_string()))?;
 
         *self.cache.borrow_mut() = Some(value);
 
@@ -252,7 +252,10 @@ impl<T: DeserializeOwned + Serialize> LazyPayloadBatch<T> {
 
     /// Count how many payloads have been resolved.
     pub fn resolved_count(&self) -> usize {
-        self.payloads.iter().filter(|(_, p)| p.is_resolved()).count()
+        self.payloads
+            .iter()
+            .filter(|(_, p)| p.is_resolved())
+            .count()
     }
 
     /// Get a payload by index.

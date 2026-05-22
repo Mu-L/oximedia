@@ -424,6 +424,83 @@ fn l2_distance(a: &[f32], b: &[f32]) -> f32 {
         .sqrt()
 }
 
+// BRIEF sampling pattern: 256 point-pairs generated with a fixed LCG seed.
+// Each tuple is (dx1, dy1, dx2, dy2) in the range [-16, 15].
+const BRIEF_PATTERN: [(i8, i8, i8, i8); 256] = {
+    let mut pattern = [(0i8, 0i8, 0i8, 0i8); 256];
+    let mut state = 0x12345678u64;
+    let mut i = 0;
+    while i < 256 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let a = ((state >> 33) & 0x1F) as i8 - 16;
+        let b = ((state >> 38) & 0x1F) as i8 - 16;
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let c = ((state >> 33) & 0x1F) as i8 - 16;
+        let d = ((state >> 38) & 0x1F) as i8 - 16;
+        pattern[i] = (a, b, c, d);
+        i += 1;
+    }
+    pattern
+};
+
+/// Compute BRIEF-style 256-bit (32-byte) binary descriptors for a set of keypoints.
+///
+/// `image` must be a flat grayscale (or single-channel) pixel buffer of
+/// `width × height` bytes.  Each returned `[u8; 32]` encodes 256 binary tests:
+/// one bit per pair of sample points, set when the first sample is darker than
+/// the second.  The sampling pattern is fixed at compile time via a linear
+/// congruential generator so results are deterministic across invocations.
+///
+/// Keypoints whose patch extends outside the image boundary are silently
+/// assigned an all-zero descriptor.
+pub fn compute_brief_descriptors(
+    image: &[u8],
+    width: usize,
+    height: usize,
+    keypoints: &[(f32, f32)],
+) -> Vec<[u8; 32]> {
+    let mut result = Vec::with_capacity(keypoints.len());
+
+    for &(kx, ky) in keypoints {
+        let mut descriptor = [0u8; 32];
+
+        for (bit_idx, &(dx1, dy1, dx2, dy2)) in BRIEF_PATTERN.iter().enumerate() {
+            let x1 = kx as isize + dx1 as isize;
+            let y1 = ky as isize + dy1 as isize;
+            let x2 = kx as isize + dx2 as isize;
+            let y2 = ky as isize + dy2 as isize;
+
+            // Skip bits whose sample points fall outside the image.
+            if x1 < 0
+                || y1 < 0
+                || x2 < 0
+                || y2 < 0
+                || x1 >= width as isize
+                || y1 >= height as isize
+                || x2 >= width as isize
+                || y2 >= height as isize
+            {
+                continue;
+            }
+
+            let sample1 = image[y1 as usize * width + x1 as usize];
+            let sample2 = image[y2 as usize * width + x2 as usize];
+
+            if sample1 < sample2 {
+                descriptor[bit_idx / 8] |= 1 << (bit_idx % 8);
+            }
+        }
+
+        result.push(descriptor);
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,5 +665,50 @@ mod tests {
         let a = vec![0.0f32, 0.0, 0.0];
         let b = vec![1.0f32, 0.0, 0.0];
         assert!((l2_distance(&a, &b) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_brief_descriptors_length() {
+        let w = 64usize;
+        let h = 64usize;
+        let image: Vec<u8> = (0..w * h).map(|i| (i % 256) as u8).collect();
+        let kps = vec![(32.0f32, 32.0f32), (20.0f32, 20.0f32)];
+        let descs = compute_brief_descriptors(&image, w, h, &kps);
+        assert_eq!(descs.len(), 2);
+        assert_eq!(descs[0].len(), 32);
+        assert_eq!(descs[1].len(), 32);
+    }
+
+    #[test]
+    fn test_brief_descriptors_empty_keypoints() {
+        let image = vec![128u8; 32 * 32];
+        let descs = compute_brief_descriptors(&image, 32, 32, &[]);
+        assert!(descs.is_empty());
+    }
+
+    #[test]
+    fn test_brief_descriptors_uniform_image() {
+        // All pixels equal → all binary tests produce 0 (sample1 not < sample2)
+        let w = 64usize;
+        let h = 64usize;
+        let image = vec![128u8; w * h];
+        let kps = vec![(32.0f32, 32.0f32)];
+        let descs = compute_brief_descriptors(&image, w, h, &kps);
+        assert_eq!(descs.len(), 1);
+        // uniform image: no test passes (sample1 == sample2, not strictly less)
+        assert_eq!(descs[0], [0u8; 32]);
+    }
+
+    #[test]
+    fn test_brief_descriptors_deterministic() {
+        let w = 64usize;
+        let h = 64usize;
+        let image: Vec<u8> = (0..w * h)
+            .map(|i| (i.wrapping_mul(7) % 256) as u8)
+            .collect();
+        let kps = vec![(32.0f32, 32.0f32)];
+        let d1 = compute_brief_descriptors(&image, w, h, &kps);
+        let d2 = compute_brief_descriptors(&image, w, h, &kps);
+        assert_eq!(d1, d2);
     }
 }

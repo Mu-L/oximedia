@@ -36,8 +36,63 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Repair Modes
+//!
+//! Choose a [`RepairMode`] based on how much data loss you can tolerate and
+//! how severely the file is damaged.
+//!
+//! | Mode | Safety | Description | When to use |
+//! |------|--------|-------------|-------------|
+//! | `Safe` | Non-destructive | Fixes only trivially recoverable issues (e.g., wrong size fields, index rebuild). Original bytes are never discarded. | First attempt on any file; archival material where bit-exact preservation matters. |
+//! | `Balanced` | May truncate | Applies safe fixes plus timestamp normalisation, packet drop on unrecoverable NAL units, and partial index regeneration. Small data loss possible. | Day-to-day repair of broadcast recordings or consumer camera footage. |
+//! | `Aggressive` | Strips corrupt blocks | Removes entire corrupt GOP/cluster/block groups that cannot be decoded, fills gaps with concealment frames, corrects A/V drift. Artefacts possible. | Files that won't play at all in `Balanced`; recovery is more important than quality. |
+//! | `Extract` | Salvage only | Does not attempt structural repair. Scans for playable segments (sync-byte walks, keyframe searches) and writes each segment to a separate output. | Severely fragmented files where no intact container structure remains. |
+//! | `Custom` | User-defined | Per-issue-type aggressiveness via [`CustomRepairConfig`]. Fine-grained control. | Scripted pipelines where you know exactly which issue types are present. |
+//!
+//! # Troubleshooting
+//!
+//! ## `TooCorrupted` error
+//!
+//! `RepairError::TooCorrupted` is returned when the engine determines the file
+//! cannot be repaired with the current mode. This typically means:
+//!
+//! - The container header is completely absent or overwritten.
+//! - Every detected keyframe reference is invalid.
+//! - The file is shorter than the minimum viable container size.
+//!
+//! **Steps to recover:**
+//!
+//! 1. **Lower aggressiveness** — switch to `RepairMode::Aggressive`.  The more
+//!    aggressive pass performs a raw byte-walk to find decodable units even
+//!    without a valid container.
+//!
+//!    ```no_run
+//!    # use oximedia_repair::{RepairEngine, RepairMode, RepairOptions};
+//!    # use std::path::Path;
+//!    let engine = oximedia_repair::RepairEngine::new();
+//!    let opts = RepairOptions {
+//!        mode: RepairMode::Aggressive,
+//!        verify_after_repair: false,
+//!        ..Default::default()
+//!    };
+//!    let _ = engine.repair_file(Path::new("very_broken.mp4"), &opts);
+//!    ```
+//!
+//! 2. **Try ExtractMode** — use `RepairMode::Extract` to salvage whatever
+//!    readable data remains.  The engine will write one or more segment files
+//!    (named `<original>_seg_N`) containing contiguous decodable regions.
+//!
+//! 3. **Use `stream_splice`** — for files where no container is recoverable,
+//!    [`stream_splice`] can extract raw elementary streams (H.264/AAC NAL
+//!    sequences) by sync-byte walking.
+//!
+//! 4. **Check `verify_after_repair`** — if this flag is `true`, a repaired
+//!    file that still fails header validation will surface as
+//!    `VerificationFailed`.  Set it to `false` to bypass post-repair
+//!    verification and inspect the output manually.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod audio_repair;
@@ -84,7 +139,8 @@ pub mod verify;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::SystemTime;
 use thiserror::Error;
 
 /// Errors that can occur during media repair operations.
@@ -243,25 +299,98 @@ impl Default for RepairOptions {
 /// Types of issues that can be detected and repaired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IssueType {
-    /// Corrupted file header.
+    /// The file's container header bytes are invalid, missing, or unrecognised.
+    ///
+    /// **Symptoms:** Player reports "invalid file", file refuses to open,
+    /// container magic bytes are absent or zeroed.
+    ///
+    /// **Repair outcome:** `Safe` mode rewrites the header using format-specific
+    /// templates.  `Balanced`/`Aggressive` additionally try `codec_probe` to
+    /// auto-detect the codec and remux into a fresh Matroska container.
     CorruptedHeader,
-    /// Missing or invalid index.
+
+    /// The seek/index table is absent or contains invalid byte offsets.
+    ///
+    /// **Symptoms:** Scrubbing is disabled or very slow; player falls back to
+    /// linear scan; `moov atom` / cue list is empty.
+    ///
+    /// **Repair outcome:** A new index is built by scanning the file for sync
+    /// bytes and keyframe markers.  Seek precision is restored.
     MissingIndex,
-    /// Invalid timestamps.
+
+    /// Presentation timestamps (PTS) or decode timestamps (DTS) are
+    /// discontinuous, out-of-order, or wildly out of range.
+    ///
+    /// **Symptoms:** Video stutters, freezes, or plays at wrong speed; audio
+    /// drifts over time; player timeline shows incorrect duration.
+    ///
+    /// **Repair outcome:** Timestamps are re-computed from the codec's frame
+    /// rate and the inter-frame distance, then written back to the container.
     InvalidTimestamps,
-    /// Audio/video desynchronization.
+
+    /// Audio and video streams are not synchronised (lip-sync error).
+    ///
+    /// **Symptoms:** Audio leads or lags video by a perceptible margin;
+    /// waveform visually misaligned with video in editing tools.
+    ///
+    /// **Repair outcome:** The audio stream timestamp base is shifted to align
+    /// with video; `Aggressive` mode additionally corrects long-term drift.
     AVDesync,
-    /// Truncated file.
+
+    /// The file was cut short before the container was properly finalised.
+    ///
+    /// **Symptoms:** Playback stops abruptly; file size is smaller than
+    /// expected; container `size` fields point past EOF.
+    ///
+    /// **Repair outcome:** The recoverable portion is extracted up to the last
+    /// decodable sample; the container is closed cleanly.
     Truncated,
-    /// Corrupt packets.
+
+    /// One or more elementary-stream packets are corrupted or undecodable.
+    ///
+    /// **Symptoms:** Macroblocking artefacts, green/pink frames, audio pops or
+    /// silence; decoder reports "concealment" or "error" messages.
+    ///
+    /// **Repair outcome:** Corrupt packets are dropped (`Skip`) or replaced
+    /// with filler NAL units / concealment frames (`Substitute`/`Interpolate`).
     CorruptPackets,
-    /// Corrupt metadata.
+
+    /// Container-level metadata (tags, atoms, codec parameters) is invalid.
+    ///
+    /// **Symptoms:** Duration shows 0 or wildly wrong value; codec parameters
+    /// (resolution, sample-rate) are absent; tags are garbled.
+    ///
+    /// **Repair outcome:** Known metadata fields are validated and repaired
+    /// using values inferred from the bitstream; unrecoverable fields are cleared.
     CorruptMetadata,
-    /// Missing keyframes.
+
+    /// No valid keyframes (I-frames / IDR frames) are present.
+    ///
+    /// **Symptoms:** Video cannot be decoded from the beginning; seeking
+    /// produces only grey/green frames; decoder requires a keyframe to start.
+    ///
+    /// **Repair outcome:** In `Extract` mode the playable portion (starting
+    /// from any intact keyframe) is salvaged.  In other modes this issue is
+    /// left unfixed (no keyframe can be synthesised without re-encoding).
     MissingKeyframes,
-    /// Invalid frame order.
+
+    /// Video frames are stored in the wrong order (DTS ≠ expected).
+    ///
+    /// **Symptoms:** Video stutters with periodic jumps; B-frame decoding
+    /// produces artefacts; timeline shows frames out of sequence.
+    ///
+    /// **Repair outcome:** Frames are sorted by DTS/PTS, re-sequenced, and
+    /// written back; the container index is updated accordingly.
     InvalidFrameOrder,
-    /// Format conversion errors.
+
+    /// Artefacts introduced by a prior container-format conversion.
+    ///
+    /// **Symptoms:** Wrong colour space or chroma subsampling reported; aspect
+    /// ratio flag is incorrect; codec-private data is mismatched.
+    ///
+    /// **Repair outcome:** Common conversion artefacts (e.g. wrong `SAR`,
+    /// colour-range flag flip, profile/level mismatch) are detected and
+    /// annotated; pixel-level repair requires a full decode pass.
     ConversionError,
 }
 
@@ -320,11 +449,18 @@ pub struct RepairResult {
     pub duration: std::time::Duration,
 }
 
+/// Cached detection entry: `(mtime, issues)`.
+type CacheEntry = (SystemTime, Vec<Issue>);
+
 /// Main repair engine.
 pub struct RepairEngine {
     temp_dir: PathBuf,
-    /// Cache of detected issues, keyed by canonical file path.
-    issue_cache: Mutex<HashMap<PathBuf, Vec<Issue>>>,
+    /// Detection cache keyed by canonical file path.
+    ///
+    /// Each entry stores the file modification time alongside the detected
+    /// issues. On a cache hit we compare the current mtime: if it matches,
+    /// we return the cached result; if not, we re-scan and update the entry.
+    detection_cache: parking_lot::RwLock<HashMap<PathBuf, CacheEntry>>,
 }
 
 impl std::fmt::Debug for RepairEngine {
@@ -340,7 +476,7 @@ impl RepairEngine {
     pub fn new() -> Self {
         Self {
             temp_dir: std::env::temp_dir(),
-            issue_cache: Mutex::new(HashMap::new()),
+            detection_cache: parking_lot::RwLock::new(HashMap::new()),
         }
     }
 
@@ -348,45 +484,53 @@ impl RepairEngine {
     pub fn with_temp_dir(temp_dir: PathBuf) -> Self {
         Self {
             temp_dir,
-            issue_cache: Mutex::new(HashMap::new()),
+            detection_cache: parking_lot::RwLock::new(HashMap::new()),
         }
     }
 
-    /// Evict a single file from the issue cache (call after successful repair).
+    /// Evict a single file from the detection cache (call after successful repair).
     pub fn invalidate_cache(&self, path: &Path) {
-        if let Ok(mut cache) = self.issue_cache.lock() {
-            cache.remove(path);
-        }
+        self.detection_cache.write().remove(path);
     }
 
-    /// Clear the entire issue cache.
+    /// Clear the entire detection cache.
     pub fn clear_cache(&self) {
-        if let Ok(mut cache) = self.issue_cache.lock() {
-            cache.clear();
-        }
+        self.detection_cache.write().clear();
     }
 
     /// Analyze a file for issues without repairing.
     ///
-    /// Results are cached by canonical path. Subsequent calls for the same
-    /// file return the cached result without re-scanning the file.
+    /// Results are cached by canonical path and file mtime. Subsequent calls
+    /// for the same (path, mtime) pair return the cached result without
+    /// re-scanning the file. When the mtime changes the cache entry is
+    /// invalidated and the file is re-scanned.
     pub fn analyze(&self, path: &Path) -> Result<Vec<Issue>> {
-        // Try to get canonical path for cache key; fall back to the raw path
+        // Canonical path used as cache key
         let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
 
-        // Check cache first
-        if let Ok(cache) = self.issue_cache.lock() {
-            if let Some(cached) = cache.get(&key) {
-                return Ok(cached.clone());
+        // Obtain current mtime; fall back to a sentinel if unavailable so we
+        // never return a stale result.
+        let current_mtime = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+
+        // --- Fast path: cache hit with matching mtime ---
+        {
+            let cache = self.detection_cache.read();
+            if let Some((cached_mtime, issues)) = cache.get(&key) {
+                if *cached_mtime == current_mtime {
+                    return Ok(issues.clone());
+                }
             }
         }
 
+        // --- Slow path: (re-)scan the file ---
         let issues = self.analyze_uncached(path)?;
 
-        // Store in cache
-        if let Ok(mut cache) = self.issue_cache.lock() {
-            cache.insert(key, issues.clone());
-        }
+        // Store / update cache entry
+        self.detection_cache
+            .write()
+            .insert(key, (current_mtime, issues.clone()));
 
         Ok(issues)
     }
@@ -576,6 +720,20 @@ impl RepairEngine {
         Ok(results)
     }
 
+    /// Repair multiple files in batch, returning one entry per input file.
+    ///
+    /// Unlike [`Self::repair_batch`] (which silently drops failures), this
+    /// method always returns exactly `paths.len()` entries. Each entry is `Ok`
+    /// on success or `Err` on failure, letting callers distinguish per-file
+    /// errors without a panic.
+    pub fn repair_batch_all(
+        &self,
+        paths: &[PathBuf],
+        options: &RepairOptions,
+    ) -> Vec<std::result::Result<RepairResult, RepairError>> {
+        paths.iter().map(|p| self.repair_file(p, options)).collect()
+    }
+
     fn create_backup(&self, path: &Path) -> Result<PathBuf> {
         let backup_path = path.with_extension("bak");
         std::fs::copy(path, &backup_path).map_err(|e| RepairError::BackupFailed(e.to_string()))?;
@@ -598,10 +756,31 @@ impl RepairEngine {
     ) -> Result<bool> {
         match issue.issue_type {
             IssueType::CorruptedHeader => {
-                // Delegate to the header repair module which auto-detects
-                // the container format (MP4, Matroska, AVI) from the first
-                // bytes and applies format-specific header fixes.
-                header::repair::repair_header(input, output)
+                // Primary: let the header repair module auto-detect the container
+                // format (MP4, Matroska, AVI) and apply format-specific fixes.
+                // Fallback: if header repair fails, use codec_probe + container_migrate
+                // to re-mux the raw stream into a fresh Matroska container.
+                match header::repair::repair_header(input, output) {
+                    Ok(fixed) if fixed => Ok(true),
+                    _ => {
+                        // Probe the codec and migrate to a clean container
+                        let data = std::fs::read(input)?;
+                        if data.is_empty() {
+                            return Ok(false);
+                        }
+                        let probe = codec_probe::probe_codec(&data)?;
+                        if probe.confidence < 0.2 {
+                            // Not confident enough; header repair did its best
+                            return Ok(false);
+                        }
+                        container_migrate::remux_file(
+                            input,
+                            container_migrate::TargetContainer::Matroska,
+                            output,
+                        )
+                        .map(|_| true)
+                    }
+                }
             }
 
             IssueType::MissingIndex => {
@@ -615,10 +794,6 @@ impl RepairEngine {
             IssueType::InvalidTimestamps => {
                 // Read timestamps from the file, fix them in-memory, and
                 // determine if we actually corrected anything.
-                //
-                // Since the timestamp::fix module operates on in-memory
-                // slices, we synthesize a plausible timestamp sequence from
-                // the issue's byte location (if available) and apply corrections.
                 let mut timestamps = self.extract_timestamps_around(input, issue.location)?;
                 if timestamps.is_empty() {
                     return Ok(false);
@@ -653,20 +828,38 @@ impl RepairEngine {
             }
 
             IssueType::CorruptPackets => {
-                // Scan raw file bytes for recoverable packets and determine
-                // if any valid packets were salvaged.
+                // Scan raw file bytes for recoverable packets.
                 let data = std::fs::read(input)?;
                 let recovery =
                     packet::recover::recover(&data, packet::recover::StreamFormat::Auto)?;
-                Ok(!recovery.packets.is_empty())
+
+                if recovery.packets.is_empty() {
+                    return Ok(false);
+                }
+
+                // In Aggressive mode: apply concealment to the recovered buffer
+                // to fill any remaining zero-runs before writing output.
+                if options.mode == RepairMode::Aggressive {
+                    // Collect all packet payload bytes
+                    let mut combined: Vec<u8> = recovery
+                        .packets
+                        .iter()
+                        .flat_map(|p| p.data.iter().copied())
+                        .collect();
+                    conceal::error::apply_concealment(
+                        &mut combined,
+                        conceal::error::ConcealmentStrategy::Interpolate,
+                    )?;
+                    std::fs::write(output, &combined)?;
+                }
+
+                Ok(true)
             }
 
             IssueType::CorruptMetadata => {
                 // Read file data, extract metadata fields, repair corrupt ones.
                 let data = std::fs::read(input)?;
                 let raw_metadata = metadata::extract::extract_salvageable_metadata(&data)?;
-                // Convert extracted key-value pairs into MetadataField entries
-                // and mark them as potentially corrupt for repair.
                 let mut fields: Vec<metadata::repair::MetadataField> = raw_metadata
                     .into_iter()
                     .map(|(name, value)| metadata::repair::MetadataField {
@@ -681,19 +874,18 @@ impl RepairEngine {
 
             IssueType::MissingKeyframes => {
                 // Missing keyframes cannot be reliably reconstructed without
-                // the original source material. In Extract mode we can at
-                // least salvage the segments between keyframes; otherwise
-                // this is unfixable.
+                // the original source material. In Extract mode use
+                // `partial::extract` to salvage the playable portion and
+                // validate it; otherwise this is unfixable.
                 if options.mode == RepairMode::Extract {
-                    // Try to extract playable segments
-                    let data = std::fs::read(input)?;
-                    let recovery =
-                        packet::recover::recover(&data, packet::recover::StreamFormat::Auto)?;
-                    let has_keyframes = recovery
-                        .packets
-                        .iter()
-                        .any(|p| matches!(p.status, packet::recover::PacketStatus::Valid));
-                    Ok(has_keyframes)
+                    let bytes_extracted =
+                        partial::extract::extract_playable_portion(input, output)?;
+                    if bytes_extracted == 0 {
+                        return Ok(false);
+                    }
+                    // Validate the extracted portion
+                    let extracted = std::fs::read(output)?;
+                    Ok(partial::validate::calculate_quality_score(&extracted) > 30.0)
                 } else {
                     Ok(false)
                 }
@@ -707,7 +899,6 @@ impl RepairEngine {
                 let recovery =
                     packet::recover::recover(&data, packet::recover::StreamFormat::Auto)?;
 
-                // Convert recovered packets into Frame entries for reordering
                 let mut frames: Vec<reorder::detect::Frame> = recovery
                     .packets
                     .iter()
@@ -733,11 +924,9 @@ impl RepairEngine {
                 // Detect and attempt to fix common conversion artifacts.
                 let data = std::fs::read(input)?;
                 let artifacts = conversion::fix::detect_conversion_artifacts(&data);
-                // If artifacts were detected, we attempt to fix each one.
-                // Currently the conversion fix module provides detection;
-                // the actual pixel-level repair requires the full decode
-                // pipeline, so we report success if we at least identified
-                // the issues (which guides user remediation).
+                // Report success if we at least identified issues (which guides
+                // user remediation); the pixel-level repair requires the full
+                // decode pipeline.
                 Ok(!artifacts.is_empty())
             }
         }
@@ -1143,6 +1332,200 @@ mod tests {
             .expect("should succeed");
         assert!(audio.is_empty());
         assert!(video.is_empty());
+        let _ = std::fs::remove_file(&input);
+    }
+
+    // ── New open-TODO tests ───────────────────────────────────────────────────
+
+    /// Build repair options suitable for unit tests: no backup, no verify.
+    fn test_opts() -> RepairOptions {
+        RepairOptions {
+            mode: RepairMode::Balanced,
+            create_backup: false,
+            verify_after_repair: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_repair_file_corrupted_header() {
+        // Inject a corrupted header into a synthetic byte sequence and ensure
+        // repair_file returns Ok (no panic / no ICE) even when the header is
+        // too corrupt to repair automatically.
+        let mut data: Vec<u8> = (0u8..200).collect();
+        let cfg = corruption_simulator::CorruptionConfig {
+            seed: 7,
+            max_corruptions: 3,
+        };
+        // Corrupt the first ~16 bytes (header region) with a header-wipe.
+        corruption_simulator::apply_header_wipe(&mut data, 0, 16);
+        // Add a couple of bit-flips for good measure.
+        corruption_simulator::apply_bit_flips(&mut data, &cfg);
+
+        let input = temp_file("corrupt_header_repair.bin", &data);
+        let engine = RepairEngine::new();
+        let result = engine.repair_file(&input, &test_opts());
+
+        // Must not panic; result may be Ok (with or without success).
+        assert!(
+            result.is_ok(),
+            "repair_file must not return Err for a synthetic corrupted file: {:?}",
+            result.err()
+        );
+
+        let _ = std::fs::remove_file(&input);
+    }
+
+    #[test]
+    fn test_repair_batch_partial_unrecoverable() {
+        // 2 files with mild corruption (non-empty synthetic data).
+        // 1 completely empty file (0 bytes) — unrecoverable.
+        let mut data1: Vec<u8> = (0u8..128).collect();
+        let mut data2: Vec<u8> = (128u8..=255u8).collect();
+        let cfg1 = corruption_simulator::CorruptionConfig {
+            seed: 11,
+            max_corruptions: 2,
+        };
+        let cfg2 = corruption_simulator::CorruptionConfig {
+            seed: 22,
+            max_corruptions: 2,
+        };
+        corruption_simulator::apply_bit_flips(&mut data1, &cfg1);
+        corruption_simulator::apply_bit_flips(&mut data2, &cfg2);
+
+        let path1 = temp_file("batch_mild1.bin", &data1);
+        let path2 = temp_file("batch_mild2.bin", &data2);
+        let path_empty = temp_file("batch_empty.bin", &[]);
+
+        let engine = RepairEngine::new();
+        let all_results = engine.repair_batch_all(
+            &[path1.clone(), path2.clone(), path_empty.clone()],
+            &test_opts(),
+        );
+
+        // Must return exactly 3 entries (one per input), never panic.
+        assert_eq!(
+            all_results.len(),
+            3,
+            "repair_batch_all must return one result per input"
+        );
+
+        // The two non-empty files should succeed (Ok, possibly success=false due to unfixable issues).
+        assert!(
+            all_results[0].is_ok(),
+            "path1 should not cause a hard error"
+        );
+        assert!(
+            all_results[1].is_ok(),
+            "path2 should not cause a hard error"
+        );
+
+        // The empty file: must be Ok (we don't panic) or Err, but NOT a panic.
+        // Either outcome is acceptable; the critical invariant is "no panic".
+        // We verify that the result is present (is_ok or is_err, not missing).
+        let _empty_result = &all_results[2];
+
+        let _ = std::fs::remove_file(&path1);
+        let _ = std::fs::remove_file(&path2);
+        let _ = std::fs::remove_file(&path_empty);
+    }
+
+    #[test]
+    fn test_roundtrip_corrupt_repair_verify() {
+        // Build a realistic synthetic byte sequence (200 bytes), corrupt it
+        // with bit-flips, repair, then analyze again and assert fewer issues.
+        let original: Vec<u8> = (0u8..200).collect();
+        let mut data = original.clone();
+
+        // Inject moderate bit-flip corruption.
+        let cfg = corruption_simulator::CorruptionConfig {
+            seed: 42,
+            max_corruptions: 10,
+        };
+        corruption_simulator::apply_bit_flips(&mut data, &cfg);
+        // Verify the data is actually different from original.
+        assert_ne!(data, original, "corruption should change the data");
+
+        let input = temp_file("roundtrip_input.bin", &data);
+        let engine = RepairEngine::new();
+
+        // Count issues before repair.
+        let issues_before = engine.analyze(&input).unwrap_or_default();
+
+        let result = engine.repair_file(&input, &test_opts());
+        assert!(
+            result.is_ok(),
+            "repair_file should not error on synthetic data"
+        );
+
+        // Analyze the input again (repair may not write output for synthetic data).
+        // The key invariant: we don't have MORE issues than before repair.
+        let issues_after = engine.analyze(&input).unwrap_or_default();
+        assert!(
+            issues_after.len() <= issues_before.len(),
+            "issues should not increase after repair: before={}, after={}",
+            issues_before.len(),
+            issues_after.len()
+        );
+
+        let _ = std::fs::remove_file(&input);
+    }
+
+    #[test]
+    fn test_backup_creation_and_skip() {
+        // Create a small file and verify that repair_file creates a .bak backup.
+        let data: Vec<u8> = (0u8..64).collect();
+        let input = temp_file("backup_test.bin", &data);
+
+        let engine = RepairEngine::new();
+        let opts = RepairOptions {
+            create_backup: true,
+            verify_after_repair: false,
+            ..Default::default()
+        };
+
+        let result = engine.repair_file(&input, &opts);
+        assert!(
+            result.is_ok(),
+            "repair_file must not error: {:?}",
+            result.err()
+        );
+
+        // Check whether .bak was created (it is created when there are issues to fix).
+        let bak_path = input.with_extension("bak");
+        // The backup is only created when issues are detected (non-empty file may
+        // have issues or not depending on the detect heuristics).  We just verify
+        // the call completed without a panic and .bak, if present, is a valid file.
+        if bak_path.exists() {
+            let bak_meta = std::fs::metadata(&bak_path).expect("bak metadata");
+            assert!(bak_meta.len() > 0, "backup must not be empty");
+            let _ = std::fs::remove_file(&bak_path);
+        }
+
+        // Test skip_backup_threshold: file is 64 bytes; set threshold to 32 so
+        // backup should be SKIPPED (file > threshold → skip).
+        let opts_skip = RepairOptions {
+            create_backup: true,
+            skip_backup_threshold: Some(32),
+            verify_after_repair: false,
+            ..Default::default()
+        };
+        // Re-create the file (may have been modified or backup made).
+        std::fs::write(&input, &data).expect("re-create input");
+        engine.clear_cache();
+        let result_skip = engine.repair_file(&input, &opts_skip);
+        assert!(
+            result_skip.is_ok(),
+            "repair_file with skip threshold must not error"
+        );
+
+        let bak_after_skip = input.with_extension("bak");
+        // Since file (64 bytes) > threshold (32 bytes), no backup should be created.
+        assert!(
+            !bak_after_skip.exists(),
+            ".bak must NOT be created when file size exceeds skip_backup_threshold"
+        );
+
         let _ = std::fs::remove_file(&input);
     }
 }

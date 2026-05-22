@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 #![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_possible_truncation)]
 
 use std::fmt;
 
@@ -197,14 +199,18 @@ impl ImageWithProfile {
     }
 
     /// Replace the current profile with `new_profile`, performing a
-    /// colour-space compatibility check.
+    /// colour-space compatibility check and transforming pixel data as needed.
     ///
-    /// This does **not** actually transform pixel data; it only re-tags the
-    /// container.  A real implementation would invoke a CMM.
+    /// CMYK↔RGB conversion is performed in-place using component-based transform:
+    /// - CMYK→RGB: R = 255*(1-C)*(1-K), G = 255*(1-M)*(1-K), B = 255*(1-Y)*(1-K)
+    /// - RGB→CMYK: K = 1 - max(R,G,B); C,M,Y derived from GCR
+    ///
+    /// Grayscale↔CMYK conversion is not supported and returns [`IccEmbedError::IncompatibleSpaces`].
     ///
     /// # Errors
     ///
     /// Returns [`IccEmbedError::NoProfilePresent`] if no source profile exists.
+    /// Returns [`IccEmbedError::IncompatibleSpaces`] for unsupported space pairs.
     pub fn convert_on_embed(
         &mut self,
         new_profile: IccProfile,
@@ -215,22 +221,101 @@ impl ImageWithProfile {
             .map(|p| p.color_space)
             .ok_or(IccEmbedError::NoProfilePresent)?;
 
-        // CMYK ↔ RGB is not supported in this stub.
-        if matches!(
-            (old_cs, new_profile.color_space),
-            (IccColorSpace::Cmyk, _) | (_, IccColorSpace::Cmyk)
-        ) && old_cs != new_profile.color_space
-        {
-            return Err(IccEmbedError::IncompatibleSpaces(
-                old_cs,
-                new_profile.color_space,
-            ));
+        let new_cs = new_profile.color_space;
+
+        // Determine whether conversion involves CMYK
+        let old_is_cmyk = old_cs == IccColorSpace::Cmyk;
+        let new_is_cmyk = new_cs == IccColorSpace::Cmyk;
+        let old_is_rgb_family = is_rgb_family(old_cs);
+        let new_is_rgb_family = is_rgb_family(new_cs);
+
+        match (old_is_cmyk, new_is_cmyk) {
+            (true, false) => {
+                // CMYK → RGB family
+                if !new_is_rgb_family {
+                    return Err(IccEmbedError::IncompatibleSpaces(old_cs, new_cs));
+                }
+                cmyk_to_rgb(&mut self.pixels);
+            }
+            (false, true) => {
+                // RGB family → CMYK
+                if !old_is_rgb_family {
+                    return Err(IccEmbedError::IncompatibleSpaces(old_cs, new_cs));
+                }
+                rgb_to_cmyk(&mut self.pixels);
+            }
+            _ => {
+                // Same family (CMYK→CMYK or RGB→RGB): no pixel transform needed
+            }
         }
 
-        let new_cs = new_profile.color_space;
         self.profile = Some(new_profile);
         Ok(new_cs)
     }
+}
+
+// ── Colour-space helpers ──────────────────────────────────────────────────────
+
+/// Returns `true` for any RGB-family colour space.
+fn is_rgb_family(cs: IccColorSpace) -> bool {
+    matches!(
+        cs,
+        IccColorSpace::Srgb
+            | IccColorSpace::LinearSrgb
+            | IccColorSpace::AdobeRgb
+            | IccColorSpace::DisplayP3
+            | IccColorSpace::DciP3
+            | IccColorSpace::Rec2020
+            | IccColorSpace::ProPhotoRgb
+    )
+}
+
+/// Convert CMYK pixel buffer (4 bytes/pixel) to RGB (3 bytes/pixel) in-place.
+///
+/// Formula: R = 255*(1-C/255)*(1-K/255), G = 255*(1-M/255)*(1-K/255),
+///          B = 255*(1-Y/255)*(1-K/255)
+fn cmyk_to_rgb(pixels: &mut Vec<u8>) {
+    let n = pixels.len() / 4;
+    let mut out = Vec::with_capacity(n * 3);
+    for chunk in pixels.chunks_exact(4) {
+        let c = chunk[0] as f32 / 255.0;
+        let m = chunk[1] as f32 / 255.0;
+        let y = chunk[2] as f32 / 255.0;
+        let k = chunk[3] as f32 / 255.0;
+        out.push(((1.0 - c) * (1.0 - k) * 255.0).round().clamp(0.0, 255.0) as u8);
+        out.push(((1.0 - m) * (1.0 - k) * 255.0).round().clamp(0.0, 255.0) as u8);
+        out.push(((1.0 - y) * (1.0 - k) * 255.0).round().clamp(0.0, 255.0) as u8);
+    }
+    *pixels = out;
+}
+
+/// Convert RGB pixel buffer (3 bytes/pixel) to CMYK (4 bytes/pixel) in-place.
+///
+/// GCR (Grey Component Replacement): K = 1 - max(R/255, G/255, B/255).
+fn rgb_to_cmyk(pixels: &mut Vec<u8>) {
+    let n = pixels.len() / 3;
+    let mut out = Vec::with_capacity(n * 4);
+    for chunk in pixels.chunks_exact(3) {
+        let r = chunk[0] as f32 / 255.0;
+        let g = chunk[1] as f32 / 255.0;
+        let b = chunk[2] as f32 / 255.0;
+        let k = 1.0_f32 - r.max(g).max(b);
+        let denom = 1.0 - k;
+        let (c, m, y) = if denom < 1e-6 {
+            (0.0_f32, 0.0_f32, 0.0_f32)
+        } else {
+            (
+                (1.0 - r - k) / denom,
+                (1.0 - g - k) / denom,
+                (1.0 - b - k) / denom,
+            )
+        };
+        out.push((c * 255.0).round().clamp(0.0, 255.0) as u8);
+        out.push((m * 255.0).round().clamp(0.0, 255.0) as u8);
+        out.push((y * 255.0).round().clamp(0.0, 255.0) as u8);
+        out.push((k * 255.0).round().clamp(0.0, 255.0) as u8);
+    }
+    *pixels = out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -357,9 +442,18 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_on_embed_incompatible() {
-        let mut img = make_image();
-        img.embed_profile(IccProfile::stub_srgb())
+    fn test_convert_on_embed_incompatible_grayscale_to_cmyk() {
+        // Grayscale↔CMYK is explicitly unsupported.
+        let mut img = ImageWithProfile::new(2, 2, vec![128u8; 4]);
+
+        let mut gray_data = vec![0u8; 128];
+        gray_data[16..20].copy_from_slice(b"GRAY");
+        let gray_profile = IccProfile {
+            data: gray_data,
+            color_space: IccColorSpace::Grayscale,
+            description: None,
+        };
+        img.embed_profile(gray_profile)
             .expect("should succeed in test");
 
         let mut cmyk_data = vec![0u8; 128];
@@ -375,5 +469,104 @@ mod tests {
             result,
             Err(IccEmbedError::IncompatibleSpaces(_, _))
         ));
+    }
+
+    fn stub_cmyk_profile() -> IccProfile {
+        let mut data = vec![0u8; 128];
+        data[16..20].copy_from_slice(b"CMYK");
+        IccProfile {
+            data,
+            color_space: IccColorSpace::Cmyk,
+            description: Some("Test CMYK".into()),
+        }
+    }
+
+    #[test]
+    fn test_convert_cmyk_to_rgb_black_pixel() {
+        // CMYK (0,0,0,255) = pure black → RGB (0,0,0)
+        let mut img = ImageWithProfile::new(1, 1, vec![0u8, 0u8, 0u8, 255u8]);
+        img.embed_profile(stub_cmyk_profile())
+            .expect("should succeed in test");
+        let new_cs = img
+            .convert_on_embed(IccProfile::stub_srgb())
+            .expect("conversion should succeed");
+        assert_eq!(new_cs, IccColorSpace::Srgb);
+        assert_eq!(img.pixels.len(), 3);
+        assert_eq!(img.pixels, vec![0u8, 0u8, 0u8]);
+    }
+
+    #[test]
+    fn test_convert_cmyk_to_rgb_white_pixel() {
+        // CMYK (0,0,0,0) = pure white → RGB (255,255,255)
+        let mut img = ImageWithProfile::new(1, 1, vec![0u8, 0u8, 0u8, 0u8]);
+        img.embed_profile(stub_cmyk_profile())
+            .expect("should succeed in test");
+        img.convert_on_embed(IccProfile::stub_srgb())
+            .expect("conversion should succeed");
+        assert_eq!(img.pixels, vec![255u8, 255u8, 255u8]);
+    }
+
+    #[test]
+    fn test_convert_rgb_to_cmyk_white_pixel() {
+        // RGB (255,255,255) → CMYK (0,0,0,0)
+        let mut img = make_image();
+        img.pixels = vec![255u8, 255u8, 255u8];
+        img.embed_profile(IccProfile::stub_srgb())
+            .expect("should succeed in test");
+        img.convert_on_embed(stub_cmyk_profile())
+            .expect("conversion should succeed");
+        assert_eq!(img.pixels.len(), 4);
+        assert_eq!(img.pixels, vec![0u8, 0u8, 0u8, 0u8]);
+    }
+
+    #[test]
+    fn test_convert_rgb_to_cmyk_black_pixel() {
+        // RGB (0,0,0) → CMYK (0,0,0,255)
+        let mut img = make_image();
+        img.pixels = vec![0u8, 0u8, 0u8];
+        img.embed_profile(IccProfile::stub_srgb())
+            .expect("should succeed in test");
+        img.convert_on_embed(stub_cmyk_profile())
+            .expect("conversion should succeed");
+        assert_eq!(img.pixels.len(), 4);
+        assert_eq!(img.pixels, vec![0u8, 0u8, 0u8, 255u8]);
+    }
+
+    #[test]
+    fn test_convert_cmyk_to_rgb_multi_pixel() {
+        // 2 pixels: (0,0,0,0) white and (0,0,0,255) black
+        let pixels = vec![0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 255u8];
+        let mut img = ImageWithProfile::new(2, 1, pixels);
+        img.embed_profile(stub_cmyk_profile())
+            .expect("should succeed in test");
+        img.convert_on_embed(IccProfile::stub_srgb())
+            .expect("conversion should succeed");
+        assert_eq!(img.pixels.len(), 6);
+        // First pixel: white
+        assert_eq!(&img.pixels[0..3], &[255u8, 255u8, 255u8]);
+        // Second pixel: black
+        assert_eq!(&img.pixels[3..6], &[0u8, 0u8, 0u8]);
+    }
+
+    #[test]
+    fn test_cmyk_round_trip_approximate() {
+        // Round-trip RGB→CMYK→RGB should be close (within ±2 due to float rounding)
+        let original = vec![128u8, 64u8, 200u8];
+        let mut img = ImageWithProfile::new(1, 1, original.clone());
+        img.embed_profile(IccProfile::stub_srgb())
+            .expect("should succeed in test");
+        img.convert_on_embed(stub_cmyk_profile())
+            .expect("rgb->cmyk should succeed");
+        assert_eq!(img.pixels.len(), 4);
+        img.convert_on_embed(IccProfile::stub_srgb())
+            .expect("cmyk->rgb should succeed");
+        assert_eq!(img.pixels.len(), 3);
+        for (orig, result) in original.iter().zip(img.pixels.iter()) {
+            let diff = (*orig as i32 - *result as i32).unsigned_abs();
+            assert!(
+                diff <= 2,
+                "Channel differs by {diff} (orig={orig}, result={result})"
+            );
+        }
     }
 }

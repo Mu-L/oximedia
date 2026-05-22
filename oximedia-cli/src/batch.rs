@@ -6,7 +6,7 @@
 //! - TOML configuration file parsing
 //! - Error recovery and reporting
 
-use crate::progress::BatchProgress;
+use crate::progress::{BatchProgress, ProgressFormat};
 use crate::transcode::{self, TranscodeOptions};
 use anyhow::{Context, Result};
 use colored::Colorize;
@@ -26,6 +26,8 @@ pub struct BatchOptions {
     pub jobs: usize,
     pub continue_on_error: bool,
     pub dry_run: bool,
+    /// Progress output format (plain bar or streaming JSON to stderr).
+    pub progress_format: ProgressFormat,
 }
 
 /// Batch configuration from TOML file.
@@ -158,7 +160,7 @@ pub async fn batch_process(options: BatchOptions) -> Result<()> {
     }
 
     // Execute jobs
-    let results = execute_jobs(jobs, &options).await?;
+    let results = execute_jobs(jobs, &options, options.progress_format).await?;
 
     // Print summary
     print_batch_summary(&results);
@@ -324,6 +326,7 @@ fn create_job_queue(
             threads: config.threads,
             overwrite: config.overwrite,
             resume: false,
+            progress_format: ProgressFormat::Plain,
         };
 
         jobs.push(BatchJob {
@@ -373,59 +376,74 @@ fn print_dry_run(jobs: &[BatchJob]) {
     println!("Total: {} jobs", jobs.len());
 }
 
-/// Execute all jobs with parallel processing.
-async fn execute_jobs(jobs: Vec<BatchJob>, options: &BatchOptions) -> Result<Vec<JobResult>> {
+/// Execute all jobs with parallel processing via rayon inside `spawn_blocking`.
+///
+/// Using `spawn_blocking` prevents the rayon thread-pool from blocking a tokio
+/// worker thread.  Result ordering is preserved because `par_iter().map()` is
+/// order-preserving when collected into a `Vec`.
+async fn execute_jobs(
+    jobs: Vec<BatchJob>,
+    options: &BatchOptions,
+    progress_format: ProgressFormat,
+) -> Result<Vec<JobResult>> {
     let total_jobs = jobs.len();
-    let progress = Arc::new(Mutex::new(BatchProgress::new(total_jobs)));
-    let results = Arc::new(Mutex::new(Vec::new()));
 
-    // Determine number of parallel jobs
+    // Determine number of parallel threads: 0 means "all CPUs".
     let num_threads = if options.jobs == 0 {
-        rayon::current_num_threads()
+        num_cpus::get()
     } else {
         options.jobs
     };
 
     info!("Processing with {} parallel jobs", num_threads);
 
-    // Configure thread pool
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .build()
-        .context("Failed to build thread pool")?;
+    // Clone what we need to move into the blocking task.
+    let progress = Arc::new(Mutex::new({
+        let mut bp = BatchProgress::new(total_jobs);
+        bp.set_format(progress_format);
+        bp
+    }));
+    let progress_clone = Arc::clone(&progress);
 
-    // Process jobs in parallel
-    pool.install(|| {
-        jobs.par_iter().for_each(|job| {
-            let result = process_job(job);
+    // Offload rayon work onto a dedicated blocking thread so tokio workers stay
+    // free.  The thread pool is built fresh each call to avoid global-pool
+    // contention.
+    let results: Vec<JobResult> =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<JobResult>> {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build rayon thread pool: {e}"))?;
 
-            // Update progress
-            let mut progress_guard = progress.lock().unwrap_or_else(|e| e.into_inner());
-            match &result {
-                JobResult::Success { .. } => progress_guard.inc_success(),
-                JobResult::Failed { .. } => progress_guard.inc_failed(),
-                JobResult::Skipped { .. } => progress_guard.inc_success(),
-            }
-            drop(progress_guard);
+            // par_iter preserves ordering; each closure executes concurrently.
+            let job_results: Vec<JobResult> = pool.install(|| {
+                jobs.par_iter()
+                    .map(|job| {
+                        let result = process_job(job);
 
-            // Store result
-            results
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(result);
-        });
-    });
+                        // Update shared progress counter.
+                        let mut guard = progress_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        match &result {
+                            JobResult::Success { .. } | JobResult::Skipped { .. } => {
+                                guard.inc_success();
+                            }
+                            JobResult::Failed { .. } => guard.inc_failed(),
+                        }
 
-    // Finish progress display
+                        result
+                    })
+                    .collect()
+            });
+
+            Ok(job_results)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking join error: {e}"))??;
+
+    // Finish progress display.
     progress.lock().unwrap_or_else(|e| e.into_inner()).finish();
 
-    // Extract results
-    let final_results = Arc::try_unwrap(results)
-        .map_err(|_| anyhow::anyhow!("Failed to extract results"))?
-        .into_inner()
-        .map_err(|e| anyhow::anyhow!("Failed to unwrap results mutex: {e}"))?;
-
-    Ok(final_results)
+    Ok(results)
 }
 
 /// Process a single job.

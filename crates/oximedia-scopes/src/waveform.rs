@@ -14,6 +14,7 @@
 //! - **YCbCr**: Y, Cb, Cr displayed side-by-side
 
 use crate::render::{rgb_to_ycbcr, Canvas};
+use crate::simd_convert::convert_batch_bt601_simd;
 use crate::{ScopeConfig, ScopeData, ScopeType};
 use oximedia_core::OxiResult;
 use rayon::prelude::*;
@@ -358,6 +359,11 @@ pub fn generate_ycbcr_waveform(
 
     let mut canvas = Canvas::new(scope_width, scope_height);
 
+    // Pre-convert entire frame to BT.601 YCbCr using SIMD dispatch.
+    // This replaces the per-pixel `rgb_to_ycbcr` call in the hot loop with a
+    // single batch conversion, enabling AVX2/NEON throughput on supported CPUs.
+    let ycbcr_frame = convert_batch_bt601_simd(&frame[..(width * height * 3) as usize]);
+
     // Three accumulators for Y, Cb, Cr
     let mut accumulators = [
         vec![0u32; (section_width * scope_height) as usize],
@@ -365,16 +371,11 @@ pub fn generate_ycbcr_waveform(
         vec![0u32; (section_width * scope_height) as usize],
     ];
 
-    // Process frame
+    // Process pre-converted frame
     for y in 0..height {
         for x in 0..width {
-            let pixel_idx = ((y * width + x) * 3) as usize;
-            let r = frame[pixel_idx];
-            let g = frame[pixel_idx + 1];
-            let b = frame[pixel_idx + 2];
-
-            let (luma, cb, cr) = rgb_to_ycbcr(r, g, b);
-            let ycbcr = [luma, cb, cr];
+            let pixel_idx = (y * width + x) as usize;
+            let ycbcr = ycbcr_frame[pixel_idx];
 
             let scope_x = (x * section_width) / width;
 

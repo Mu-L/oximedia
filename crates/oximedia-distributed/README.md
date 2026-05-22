@@ -1,13 +1,13 @@
 # oximedia-distributed
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.6](https://img.shields.io/badge/version-0.1.6-blue)
+![Version: 0.1.7](https://img.shields.io/badge/version-0.1.7-blue)
 
 Production-grade distributed video encoding coordinator for OxiMedia, providing horizontally scalable job distribution across worker nodes with fault tolerance and load balancing.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.6 — 2026-04-26 — 658 tests
+Version: 0.1.7 — 2026-05-16 — 658 tests
 
 ## Overview
 
@@ -48,7 +48,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-distributed = "0.1.6"
+oximedia-distributed = "0.1.7"
 ```
 
 ```rust

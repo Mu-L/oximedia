@@ -17,7 +17,7 @@
 - [x] Extend `codec_negotiation.rs` with automatic format negotiation between encoder and decoder
 - [x] Improve `error_context.rs` with structured error context chain (file, function, line info)
 - [x] Add `ChannelLayout` presets for Atmos and surround configurations in `channel_layout.rs`
-- [ ] Extend `buffer_pool.rs` with memory pressure callbacks and automatic pool shrinking
+- [ ] Extend `buffer_pool.rs` with memory pressure callbacks and automatic pool shrinking (verified-open 2026-05-16: no memory_pressure/auto_shrink in buffer_pool.rs)
 - [x] Add `CodecId` variants for all supported codecs (currently missing some like WebP, GIF, JPEG-XL)
 
 ## Wave 3 Progress (2026-04-17)
@@ -32,21 +32,21 @@
 - [x] pixfmt-color-meta: ColorPrimaries, TransferCharacteristics, MatrixCoefficients enums + ColorSpace integration — Wave 4 Slice C
 
 ## New Features
-- [ ] Implement zero-copy frame sharing between crates using `resource_handle.rs` with ref-counted buffers
-- [ ] Add media duration/bitrate estimation utilities in `media_time.rs`
+- [x] Implement zero-copy frame sharing between crates using `resource_handle.rs` with ref-counted buffers (verified 2026-05-16; src/resource_handle.rs:92 ref_count field, acquire/release semantics)
+- [ ] Add media duration/bitrate estimation utilities in `media_time.rs` (verified-open 2026-05-16: no estimate_bitrate/estimate_duration found in media_time.rs)
 - [x] Implement typed FourCC constants for all supported codecs in `fourcc.rs`
-- [ ] Add `sync.rs` inter-thread synchronization primitives optimized for media pipelines (bounded channel with backpressure)
-- [ ] Implement frame pool with configurable pre-allocation for low-latency pipelines in `alloc/`
-- [ ] Add color primaries and matrix coefficients to `PixelFormat` metadata
-- [ ] Implement WASM-compatible async runtime abstraction in `wasm.rs` for cross-platform pipelines
+- [x] Add `sync.rs` inter-thread synchronization primitives optimized for media pipelines (bounded channel with backpressure) (verified 2026-05-16; src/sync.rs:508 BoundedChannel with backpressure, SpscRingBuffer:327)
+- [x] Implement frame pool with configurable pre-allocation for low-latency pipelines in `alloc/` (verified 2026-05-16; src/frame_pool.rs FramePool, FramePoolConfig pre_alloc field:25)
+- [x] Add color primaries and matrix coefficients to `PixelFormat` metadata (verified 2026-05-16; src/types/color_meta.rs:9 ColorPrimaries enum, MatrixCoefficients, src/pixel_format_color.rs)
+- [ ] Implement WASM-compatible async runtime abstraction in `wasm.rs` for cross-platform pipelines (verified-open 2026-05-16: not yet implemented)
 
 ## Performance
-- [ ] Optimize `Rational` arithmetic in `types/rational.rs` with GCD reduction on construction
-- [ ] Add SIMD-accelerated pixel format conversion helpers in `convert/pixel.rs`
-- [ ] Implement lock-free ring buffer variant in `ring_buffer.rs` for single-producer/single-consumer
-- [ ] Optimize `work_queue.rs` with work-stealing scheduler for multi-threaded pipelines
-- [ ] Add cache-line-aligned buffer allocation in `alloc/mod.rs` for SIMD-friendly access
-- [ ] Profile and optimize `event_queue.rs` for high-throughput event processing (>1M events/sec)
+- [ ] Optimize `Rational` arithmetic in `types/rational.rs` with GCD reduction on construction (verified-open 2026-05-16: not yet implemented)
+- [ ] Add SIMD-accelerated pixel format conversion helpers in `convert/pixel.rs` (verified-open 2026-05-16: not yet implemented)
+- [x] Implement lock-free ring buffer variant in `ring_buffer.rs` for single-producer/single-consumer (verified 2026-05-16; src/ring_buffer.rs:327 SpscRingBuffer lock-free SPSC)
+- [ ] Optimize `work_queue.rs` with work-stealing scheduler for multi-threaded pipelines (verified-open 2026-05-16: not yet implemented)
+- [ ] Add cache-line-aligned buffer allocation in `alloc/mod.rs` for SIMD-friendly access (verified-open 2026-05-16: not yet implemented)
+- [ ] Profile and optimize `event_queue.rs` for high-throughput event processing (>1M events/sec) (verified-open 2026-05-16: not yet implemented)
 
 ## Testing
 - [ ] Add property-based tests for `Rational` arithmetic (commutativity, associativity, overflow)

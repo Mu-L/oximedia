@@ -7,7 +7,7 @@
 //! - Multi-pass encoding
 //! - Resume capability
 
-use crate::progress::TranscodeProgress;
+use crate::progress::{ProgressFormat, TranscodeProgress};
 use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
 use std::fs;
@@ -44,6 +44,9 @@ pub struct TranscodeOptions {
     pub overwrite: bool,
     #[allow(dead_code)]
     pub resume: bool,
+    /// Progress output format for this transcode operation.
+    #[allow(dead_code)]
+    pub progress_format: ProgressFormat,
 }
 
 /// Supported video codecs (patent-free only).
@@ -553,7 +556,7 @@ async fn transcode_single_pass(
         .context("Failed to build transcode pipeline")?;
 
     // Show a simple progress indicator while the pipeline runs.
-    let progress = TranscodeProgress::new(0);
+    let progress = TranscodeProgress::new_with_format(0, options.progress_format);
 
     let result = pipeline.execute().await;
 
@@ -629,7 +632,7 @@ async fn transcode_two_pass(
         .build()
         .context("Failed to build two-pass transcode pipeline")?;
 
-    let progress = TranscodeProgress::new(0);
+    let progress = TranscodeProgress::new_with_format(0, options.progress_format);
     let result = pipeline.execute().await;
     progress.finish();
 

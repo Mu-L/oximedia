@@ -89,13 +89,16 @@ pub fn gaussian_blur(
     };
     let sy = if sigma_y == 0.0 { sx } else { sigma_y };
 
-    let kx = gaussian_kernel_1d(kw, sx);
-    let ky = gaussian_kernel_1d(kh, sy);
-
-    let mut tmp = vec![0u8; h * w * ch];
-    apply_1d_horizontal(&data, &mut tmp, h, w, ch, &kx);
-    let mut out = vec![0u8; h * w * ch];
-    apply_1d_vertical(&tmp, &mut out, h, w, ch, &ky);
+    // Release GIL for the separable convolution passes (CPU-heavy for large images)
+    let out = py.detach(move || {
+        let kx = gaussian_kernel_1d(kw, sx);
+        let ky = gaussian_kernel_1d(kh, sy);
+        let mut tmp = vec![0u8; h * w * ch];
+        apply_1d_horizontal(&data, &mut tmp, h, w, ch, &kx);
+        let mut out = vec![0u8; h * w * ch];
+        apply_1d_vertical(&tmp, &mut out, h, w, ch, &ky);
+        out
+    });
 
     make_image_output(py, out, h, w, ch)
 }
@@ -115,25 +118,28 @@ pub fn median_blur(py: Python<'_>, src: Py<PyAny>, ksize: usize) -> PyResult<Py<
         ));
     }
 
-    let half = (ksize / 2) as i64;
-    let mut out = vec![0u8; h * w * ch];
-
-    for row in 0..h {
-        for col in 0..w {
-            for c in 0..ch {
-                let mut neighbors: Vec<u8> = Vec::with_capacity(ksize * ksize);
-                for dr in -half..=half {
-                    for dc in -half..=half {
-                        let r = (row as i64 + dr).clamp(0, h as i64 - 1) as usize;
-                        let cc = (col as i64 + dc).clamp(0, w as i64 - 1) as usize;
-                        neighbors.push(data[(r * w + cc) * ch + c]);
+    // Release GIL for the sort-based median computation (O(n*k^2 log k^2))
+    let out = py.detach(move || {
+        let half = (ksize / 2) as i64;
+        let mut out = vec![0u8; h * w * ch];
+        for row in 0..h {
+            for col in 0..w {
+                for c in 0..ch {
+                    let mut neighbors: Vec<u8> = Vec::with_capacity(ksize * ksize);
+                    for dr in -half..=half {
+                        for dc in -half..=half {
+                            let r = (row as i64 + dr).clamp(0, h as i64 - 1) as usize;
+                            let cc = (col as i64 + dc).clamp(0, w as i64 - 1) as usize;
+                            neighbors.push(data[(r * w + cc) * ch + c]);
+                        }
                     }
+                    neighbors.sort_unstable();
+                    out[(row * w + col) * ch + c] = neighbors[neighbors.len() / 2];
                 }
-                neighbors.sort_unstable();
-                out[(row * w + col) * ch + c] = neighbors[neighbors.len() / 2];
             }
         }
-    }
+        out
+    });
 
     make_image_output(py, out, h, w, ch)
 }
@@ -157,60 +163,65 @@ pub fn bilateral_filter(
 ) -> PyResult<Py<PyAny>> {
     let (data, h, w, ch) = extract_img(py, &src)?;
 
-    let radius = if d <= 0 {
-        (sigma_spatial * 2.0).ceil() as i64
-    } else {
-        d as i64 / 2
-    };
+    // Release GIL for the O(H*W*radius^2) bilateral filter computation
+    let out = py.detach(move || {
+        let radius = if d <= 0 {
+            (sigma_spatial * 2.0).ceil() as i64
+        } else {
+            d as i64 / 2
+        };
 
-    let two_sc2 = 2.0 * sigma_color * sigma_color;
-    let two_ss2 = 2.0 * sigma_spatial * sigma_spatial;
+        let two_sc2 = 2.0 * sigma_color * sigma_color;
+        let two_ss2 = 2.0 * sigma_spatial * sigma_spatial;
 
-    let mut out = vec![0u8; h * w * ch];
+        let mut out = vec![0u8; h * w * ch];
 
-    for row in 0..h {
-        for col in 0..w {
-            let center_off = (row * w + col) * ch;
-            let mut weighted_sum = vec![0.0f64; ch];
-            let mut weight_total = 0.0f64;
+        for row in 0..h {
+            for col in 0..w {
+                let center_off = (row * w + col) * ch;
+                let mut weighted_sum = vec![0.0f64; ch];
+                let mut weight_total = 0.0f64;
 
-            for dr in -radius..=radius {
-                for dc in -radius..=radius {
-                    let r = (row as i64 + dr).clamp(0, h as i64 - 1) as usize;
-                    let cc = (col as i64 + dc).clamp(0, w as i64 - 1) as usize;
-                    let nb_off = (r * w + cc) * ch;
+                for dr in -radius..=radius {
+                    for dc in -radius..=radius {
+                        let r = (row as i64 + dr).clamp(0, h as i64 - 1) as usize;
+                        let cc = (col as i64 + dc).clamp(0, w as i64 - 1) as usize;
+                        let nb_off = (r * w + cc) * ch;
 
-                    let dist2 = (dr * dr + dc * dc) as f64;
-                    let spatial_w = (-dist2 / two_ss2).exp();
+                        let dist2 = (dr * dr + dc * dc) as f64;
+                        let spatial_w = (-dist2 / two_ss2).exp();
 
-                    let color_diff2: f64 = (0..ch)
-                        .map(|c| {
-                            let diff = data[center_off + c] as f64 - data[nb_off + c] as f64;
-                            diff * diff
-                        })
-                        .sum();
-                    let color_w = (-color_diff2 / two_sc2).exp();
+                        let color_diff2: f64 = (0..ch)
+                            .map(|c| {
+                                let diff = data[center_off + c] as f64 - data[nb_off + c] as f64;
+                                diff * diff
+                            })
+                            .sum();
+                        let color_w = (-color_diff2 / two_sc2).exp();
 
-                    let w_combined = spatial_w * color_w;
-                    weight_total += w_combined;
+                        let w_combined = spatial_w * color_w;
+                        weight_total += w_combined;
 
-                    for c in 0..ch {
-                        weighted_sum[c] += data[nb_off + c] as f64 * w_combined;
+                        for c in 0..ch {
+                            weighted_sum[c] += data[nb_off + c] as f64 * w_combined;
+                        }
                     }
                 }
-            }
 
-            let out_off = (row * w + col) * ch;
-            for c in 0..ch {
-                let v = if weight_total > 0.0 {
-                    weighted_sum[c] / weight_total
-                } else {
-                    data[center_off + c] as f64
-                };
-                out[out_off + c] = v.clamp(0.0, 255.0) as u8;
+                let out_off = (row * w + col) * ch;
+                for c in 0..ch {
+                    let v = if weight_total > 0.0 {
+                        weighted_sum[c] / weight_total
+                    } else {
+                        data[center_off + c] as f64
+                    };
+                    out[out_off + c] = v.clamp(0.0, 255.0) as u8;
+                }
             }
         }
-    }
+
+        out
+    });
 
     make_image_output(py, out, h, w, ch)
 }
@@ -231,7 +242,7 @@ pub fn filter_2d(
     let _ = ddepth;
     let (data, h, w, ch) = extract_img(py, &src)?;
 
-    // Parse 2-D kernel from Python list of lists
+    // Parse 2-D kernel from Python list of lists (requires GIL)
     let kernel_bound = kernel.bind(py);
     let kernel_list = kernel_bound.cast::<PyList>().map_err(|_| {
         pyo3::exceptions::PyTypeError::new_err("filter2D: kernel must be a list of lists")
@@ -260,27 +271,30 @@ pub fn filter_2d(
         }
     }
 
-    let half_h = (kh_size / 2) as i64;
-    let half_w = (kw_size / 2) as i64;
-    let mut out = vec![0u8; h * w * ch];
-
-    for row in 0..h {
-        for col in 0..w {
-            for c in 0..ch {
-                let mut acc = 0.0f64;
-                for (ki, row_kernels) in flat_kernel.chunks(kw_size).enumerate() {
-                    for (kj, &kv) in row_kernels.iter().enumerate() {
-                        let src_r =
-                            (row as i64 + ki as i64 - half_h).clamp(0, h as i64 - 1) as usize;
-                        let src_c =
-                            (col as i64 + kj as i64 - half_w).clamp(0, w as i64 - 1) as usize;
-                        acc += data[(src_r * w + src_c) * ch + c] as f64 * kv;
+    // Release GIL for the 2D convolution loop
+    let out = py.detach(move || {
+        let half_h = (kh_size / 2) as i64;
+        let half_w = (kw_size / 2) as i64;
+        let mut out = vec![0u8; h * w * ch];
+        for row in 0..h {
+            for col in 0..w {
+                for c in 0..ch {
+                    let mut acc = 0.0f64;
+                    for (ki, row_kernels) in flat_kernel.chunks(kw_size).enumerate() {
+                        for (kj, &kv) in row_kernels.iter().enumerate() {
+                            let src_r =
+                                (row as i64 + ki as i64 - half_h).clamp(0, h as i64 - 1) as usize;
+                            let src_c =
+                                (col as i64 + kj as i64 - half_w).clamp(0, w as i64 - 1) as usize;
+                            acc += data[(src_r * w + src_c) * ch + c] as f64 * kv;
+                        }
                     }
+                    out[(row * w + col) * ch + c] = acc.clamp(0.0, 255.0) as u8;
                 }
-                out[(row * w + col) * ch + c] = acc.clamp(0.0, 255.0) as u8;
             }
         }
-    }
+        out
+    });
 
     make_image_output(py, out, h, w, ch)
 }
@@ -309,27 +323,29 @@ pub fn box_filter(
         ));
     }
 
-    let half_h = (kh / 2) as i64;
-    let half_w = (kw / 2) as i64;
-    let divisor = if normalize { (kw * kh) as f64 } else { 1.0 };
-
-    let mut out = vec![0u8; h * w * ch];
-
-    for row in 0..h {
-        for col in 0..w {
-            for c in 0..ch {
-                let mut acc = 0.0f64;
-                for dr in -half_h..=half_h {
-                    for dc in -half_w..=half_w {
-                        let r = (row as i64 + dr).clamp(0, h as i64 - 1) as usize;
-                        let cc = (col as i64 + dc).clamp(0, w as i64 - 1) as usize;
-                        acc += data[(r * w + cc) * ch + c] as f64;
+    // Release GIL for the box filter accumulation loop
+    let out = py.detach(move || {
+        let half_h = (kh / 2) as i64;
+        let half_w = (kw / 2) as i64;
+        let divisor = if normalize { (kw * kh) as f64 } else { 1.0 };
+        let mut out = vec![0u8; h * w * ch];
+        for row in 0..h {
+            for col in 0..w {
+                for c in 0..ch {
+                    let mut acc = 0.0f64;
+                    for dr in -half_h..=half_h {
+                        for dc in -half_w..=half_w {
+                            let r = (row as i64 + dr).clamp(0, h as i64 - 1) as usize;
+                            let cc = (col as i64 + dc).clamp(0, w as i64 - 1) as usize;
+                            acc += data[(r * w + cc) * ch + c] as f64;
+                        }
                     }
+                    out[(row * w + col) * ch + c] = (acc / divisor).clamp(0.0, 255.0) as u8;
                 }
-                out[(row * w + col) * ch + c] = (acc / divisor).clamp(0.0, 255.0) as u8;
             }
         }
-    }
+        out
+    });
 
     make_image_output(py, out, h, w, ch)
 }

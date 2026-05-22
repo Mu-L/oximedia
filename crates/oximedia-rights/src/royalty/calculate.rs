@@ -5,7 +5,7 @@
 
 #![allow(clippy::cast_precision_loss)]
 
-use crate::{database::RightsDatabase, usage::UsageLog, Result};
+use crate::{database::RightsDatabase, rights::RightsGrant, usage::UsageLog, Result};
 use chrono::{DateTime, Utc};
 
 // ── Tier definition ──────────────────────────────────────────────────────────
@@ -83,24 +83,52 @@ impl RoyaltyCalculator {
 
     /// Calculate royalties for a period (async, database-backed).
     ///
-    /// Currently returns the base method result; a production implementation
-    /// would query usage logs from `_db` for the given grant and period.
+    /// Loads the grant identified by `grant_id`, fetches usage logs for the
+    /// grant's asset, filters them to entries that fall in `[start, end]` and
+    /// belong to this grant, then delegates to [`Self::calculate_from_usage`].
+    ///
+    /// Notes on tiered methods:
+    ///
+    /// * `TieredPerPlay` is computed using the per-play rates in each tier.
+    /// * `TieredPercentage` requires per-use revenue which is not part of the
+    ///   database-backed signature; the return therefore reflects a zero
+    ///   revenue assumption and callers needing per-use revenue must use
+    ///   [`Self::calculate_from_usage`] directly with their revenue figure.
+    ///
+    /// If the grant does not exist, `0.0` is returned (no plays, no royalty).
     pub async fn calculate(
         &self,
-        _db: &RightsDatabase,
-        _grant_id: &str,
-        _start: DateTime<Utc>,
-        _end: DateTime<Utc>,
+        db: &RightsDatabase,
+        grant_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
     ) -> Result<f64> {
-        match &self.method {
-            RoyaltyMethod::PerUse(amount) => Ok(*amount),
-            RoyaltyMethod::Percentage(pct) => Ok(*pct),
-            RoyaltyMethod::FlatFee(fee) => Ok(*fee),
-            RoyaltyMethod::TieredPerPlay(_) | RoyaltyMethod::TieredPercentage(_) => {
-                // Without usage data from DB, return 0
-                Ok(0.0)
-            }
+        // Flat fee is independent of usage – return immediately.
+        if let RoyaltyMethod::FlatFee(fee) = &self.method {
+            return Ok(*fee);
         }
+
+        // Resolve the grant to find its asset.  An unknown grant yields 0.
+        let asset_id = match RightsGrant::load(db, grant_id).await? {
+            Some(g) => g.asset_id,
+            None => return Ok(0.0),
+        };
+
+        // Query all usage for the asset, then keep only logs that belong to
+        // this grant and fall within the period.
+        let logs: Vec<UsageLog> = UsageLog::list_for_asset(db, &asset_id)
+            .await?
+            .into_iter()
+            .filter(|log| {
+                log.usage_date >= start
+                    && log.usage_date <= end
+                    && log.grant_id.as_deref() == Some(grant_id)
+            })
+            .collect();
+
+        // Per-use and per-play methods do not consume revenue; tiered-percent
+        // needs revenue which the DB-backed API does not have.
+        Ok(self.calculate_from_usage(&logs, None))
     }
 
     /// Calculate from usage logs

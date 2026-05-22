@@ -469,4 +469,170 @@ mod tests {
             );
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 4. Tensor shape mismatch error tests
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // All tensor operations that require compatible shapes must return `Err`
+    // (never panic) when given incompatible shapes.
+
+    /// `matmul` with incompatible inner dimensions must return an error.
+    #[test]
+    fn test_tensor_shape_mismatch_matmul() {
+        // [2,3] × [4,5] → inner dims 3 ≠ 4, must fail.
+        let a = Tensor::from_data(vec![1.0_f32; 6], vec![2, 3]).expect("a");
+        let b = Tensor::from_data(vec![1.0_f32; 20], vec![4, 5]).expect("b");
+        assert!(
+            crate::tensor::matmul(&a, &b).is_err(),
+            "matmul([2,3], [4,5]) must return Err (inner dims 3 ≠ 4)"
+        );
+    }
+
+    /// Element-wise `add` with mismatched shapes must return an error.
+    #[test]
+    fn test_tensor_shape_mismatch_add() {
+        let a = Tensor::from_data(vec![1.0_f32; 3], vec![3]).expect("a");
+        let b = Tensor::from_data(vec![1.0_f32; 4], vec![4]).expect("b");
+        assert!(
+            crate::tensor::add(&a, &b).is_err(),
+            "add([3], [4]) must return Err (shape mismatch)"
+        );
+    }
+
+    /// `SceneClassifier::classify` with wrong feature length must return an error.
+    #[test]
+    fn test_scene_classifier_wrong_feature_len_error() {
+        use crate::media_models::SceneClassifier;
+        let clf = SceneClassifier::new().expect("new");
+        // Feed 64 features to a 128-dim classifier — must be Err, never panic.
+        let short_features = vec![0.5_f32; 64];
+        assert!(
+            clf.classify(&short_features).is_err(),
+            "classify with wrong feature length must return Err"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 5. SceneClassifier synthetic pattern tests
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // Feed controlled synthetic feature vectors through `SceneClassifier::classify`
+    // and verify that the returned (class_index, confidence) pair is valid without
+    // panicking.  This confirms the full softmax→argmax pipeline is correct.
+
+    /// Uniform and gradient feature vectors must produce valid, reproducible output.
+    #[test]
+    fn test_scene_classifier_synthetic_patterns() {
+        use crate::media_models::SceneClassifier;
+        let clf = SceneClassifier::new().expect("new");
+
+        // Uniform "sky" feature vector — all values equal 0.7.
+        let uniform = vec![0.7_f32; SceneClassifier::INPUT_DIM];
+        let (idx_u, conf_u) = clf.classify(&uniform).expect("uniform classify");
+        assert!(
+            idx_u < SceneClassifier::NUM_CLASSES,
+            "uniform: class index {idx_u} out of range (max {})",
+            SceneClassifier::NUM_CLASSES - 1
+        );
+        assert!(
+            conf_u.is_finite() && (0.0_f32..=1.0_f32).contains(&conf_u),
+            "uniform: confidence {conf_u} must be finite and in [0, 1]"
+        );
+
+        // Gradient "landscape" feature vector — values ramp linearly from 0 to 1.
+        let gradient: Vec<f32> = (0..SceneClassifier::INPUT_DIM)
+            .map(|i| i as f32 / SceneClassifier::INPUT_DIM as f32)
+            .collect();
+        let (idx_g, conf_g) = clf.classify(&gradient).expect("gradient classify");
+        assert!(
+            idx_g < SceneClassifier::NUM_CLASSES,
+            "gradient: class index {idx_g} out of range (max {})",
+            SceneClassifier::NUM_CLASSES - 1
+        );
+        assert!(
+            conf_g.is_finite() && (0.0_f32..=1.0_f32).contains(&conf_g),
+            "gradient: confidence {conf_g} must be finite and in [0, 1]"
+        );
+
+        // Both calls must be deterministic (second run equals first).
+        let (idx_u2, conf_u2) = clf.classify(&uniform).expect("uniform 2nd");
+        assert_eq!(idx_u, idx_u2, "uniform: class index must be deterministic");
+        assert_eq!(
+            conf_u.to_bits(),
+            conf_u2.to_bits(),
+            "uniform: confidence must be bitwise stable across calls"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // 6. Inference latency budget tests
+    // ─────────────────────────────────────────────────────────────────────────
+    //
+    // These tests run each operation many times and assert the total wall-clock
+    // time stays under a generous budget.  The budget is intentionally large
+    // (10 s for sub-millisecond operations) so tests never produce false
+    // failures on CI, while still catching catastrophic regressions.
+
+    /// Repeated relu_inplace on a 3×224×224 tensor must finish well under 10 s.
+    #[test]
+    fn test_relu_latency_budget() {
+        use crate::tensor::relu_inplace;
+        use std::time::Instant;
+
+        let mut t =
+            Tensor::from_data(vec![-1.0_f32; 3 * 224 * 224], vec![3, 224, 224]).expect("tensor");
+
+        let start = Instant::now();
+        for _ in 0..10 {
+            relu_inplace(&mut t);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs() < 10,
+            "10× relu_inplace on [3,224,224] took {:?} — budget is 10 s",
+            elapsed
+        );
+    }
+
+    /// Repeated SceneClassifier inference must finish well under 10 s.
+    #[test]
+    fn test_scene_classifier_latency_budget() {
+        use crate::media_models::SceneClassifier;
+        use std::time::Instant;
+
+        let clf = SceneClassifier::new().expect("new");
+        let features = vec![0.5_f32; SceneClassifier::INPUT_DIM];
+
+        let start = Instant::now();
+        for _ in 0..100 {
+            clf.classify(&features).expect("classify");
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs() < 10,
+            "100× SceneClassifier::classify took {:?} — budget is 10 s",
+            elapsed
+        );
+    }
+
+    /// Repeated LinearLayer(256→128) forward passes must finish well under 10 s.
+    #[test]
+    fn test_linear_layer_latency_budget() {
+        use std::time::Instant;
+
+        let layer = LinearLayer::new(256, 128).expect("create");
+        let input = Tensor::from_data(vec![0.1_f32; 256], vec![256]).expect("input");
+
+        let start = Instant::now();
+        for _ in 0..1000 {
+            layer.forward(&input).expect("forward");
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs() < 10,
+            "1000× LinearLayer(256→128) forward took {:?} — budget is 10 s",
+            elapsed
+        );
+    }
 }

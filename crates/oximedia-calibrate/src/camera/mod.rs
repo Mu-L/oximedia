@@ -5,8 +5,10 @@
 
 pub mod calibrate;
 pub mod colorchecker;
+pub mod dng;
 pub mod profile;
 
 pub use calibrate::CameraCalibrator;
 pub use colorchecker::{ColorChecker, ColorCheckerType, PatchColor};
+pub use dng::{DngColorProfile, DualIlluminantCalibration};
 pub use profile::{CameraProfile, ProfileQuality};

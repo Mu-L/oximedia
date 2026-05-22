@@ -34,17 +34,22 @@ shot-boundary = []
 aesthetic-score = ["onnx"]
 object-detector = ["onnx"]
 face-embedder = ["onnx"]
+auto-caption = ["onnx"]
 all-pipelines = [
     "scene-classifier",
     "shot-boundary",
     "aesthetic-score",
     "object-detector",
     "face-embedder",
+    "auto-caption",
 ]
 
 [dependencies]
 thiserror.workspace = true
 serde = { workspace = true, optional = true }
+
+# Audio feature extraction (compute_log_mel_spectrogram)
+oximedia-audio.workspace = true
 
 # Pure-Rust OxiONNX (feature-gated so the default build is symbol-free)
 oxionnx = { workspace = true, optional = true }

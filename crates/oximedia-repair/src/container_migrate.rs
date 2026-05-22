@@ -10,8 +10,6 @@
 //! - MPEG-TS passthrough — wraps PES payloads in 188-byte TS packets
 //! - Raw elementary stream — strips all container and writes bare codec data
 
-#![allow(dead_code)]
-
 use crate::{RepairError, Result};
 use std::io::Write;
 use std::path::Path;

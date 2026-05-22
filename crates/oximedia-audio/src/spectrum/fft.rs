@@ -546,3 +546,146 @@ impl OverlapAdd {
         self.buffer.len()
     }
 }
+
+/// Compute a log-mel spectrogram from raw PCM f32 samples.
+///
+/// Returns a row-major `Vec<f32>` of shape `n_frames × n_mels`.  Frames are
+/// extracted with centre padding (half a window of zeros prepended and
+/// appended to `samples`) so that every sample participates in at least one
+/// frame.  This matches the Whisper-compatible convention when called with
+/// `n_fft = 400`, `hop_length = 160`, and `n_mels = 80`.
+///
+/// The function is intentionally self-contained: it uses the existing
+/// [`FftProcessor`] (backed by `oxifft`) for the windowed power spectrum and
+/// [`MelScale`] for the triangular filterbank.  No additional crate
+/// dependencies are needed.
+///
+/// # Arguments
+///
+/// * `samples`     – mono PCM samples in the range `[-1.0, 1.0]`.
+/// * `sample_rate` – sample rate in Hz; used to calibrate filterbank frequencies.
+/// * `n_mels`      – number of mel filterbank channels (e.g. 80 for Whisper).
+/// * `n_fft`       – FFT window size in samples (e.g. 400 for Whisper).
+/// * `hop_length`  – hop between consecutive frames in samples (e.g. 160 for Whisper).
+///
+/// # Examples
+///
+/// ```rust
+/// use oximedia_audio::spectrum::fft::compute_log_mel_spectrogram;
+/// let samples: Vec<f32> = (0..16000)
+///     .map(|i| (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / 16000.0).sin())
+///     .collect();
+/// let log_mel = compute_log_mel_spectrogram(&samples, 16000, 80, 400, 160);
+/// assert_eq!(log_mel.len(), 101 * 80);
+/// ```
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn compute_log_mel_spectrogram(
+    samples: &[f32],
+    sample_rate: u32,
+    n_mels: usize,
+    n_fft: usize,
+    hop_length: usize,
+) -> Vec<f32> {
+    if samples.is_empty() || n_fft == 0 || hop_length == 0 || n_mels == 0 {
+        return Vec::new();
+    }
+
+    // --- Centre-pad the signal: prepend and append n_fft/2 zeros --------
+    let pad = n_fft / 2;
+    let padded_len = samples.len() + 2 * pad;
+    let mut padded = vec![0.0_f64; padded_len];
+    for (i, &s) in samples.iter().enumerate() {
+        padded[pad + i] = f64::from(s);
+    }
+
+    // --- Compute number of frames ----------------------------------------
+    // n_frames = (padded_len - n_fft) / hop_length + 1
+    let n_frames = if padded_len >= n_fft {
+        (padded_len - n_fft) / hop_length + 1
+    } else {
+        return Vec::new();
+    };
+
+    // --- Build FftProcessor (Hann window applied internally) -------------
+    let mut processor = FftProcessor::new(n_fft, WindowFunction::Hann);
+
+    // --- Build mel filterbank once ----------------------------------------
+    let sr_f64 = f64::from(sample_rate);
+    let filterbank = MelScale::create_filterbank(n_mels, n_fft, sr_f64, 0.0, sr_f64 / 2.0);
+
+    // --- Compute log-mel frame by frame -----------------------------------
+    let mut output: Vec<f32> = Vec::with_capacity(n_frames * n_mels);
+
+    for frame_idx in 0..n_frames {
+        let start = frame_idx * hop_length;
+        let end = (start + n_fft).min(padded_len);
+        let frame_slice = &padded[start..end];
+
+        // power_spectrum returns |X[k]|² for k in 0..n_fft (full spectrum).
+        // Only the positive-frequency half (0..n_fft/2+1) is used; the
+        // filterbank was built with exactly n_fft/2+1 bins.
+        let power = processor.power_spectrum(frame_slice);
+        let pos_power = &power[..n_fft / 2 + 1];
+
+        // Apply mel filterbank.
+        let mel_energies = MelScale::apply_filterbank(pos_power, &filterbank);
+
+        // Log-compress: ln(energy + 1e-10).
+        for energy in mel_energies {
+            output.push((energy + 1e-10).ln() as f32);
+        }
+    }
+
+    output
+}
+
+#[cfg(test)]
+mod spectrogram_tests {
+    use super::compute_log_mel_spectrogram;
+    use std::f32::consts::PI;
+
+    /// Basic smoke test: 1 second of 1 kHz sine at 16 kHz sample rate.
+    ///
+    /// With centre padding:
+    ///   padded_len = 16000 + 2*(400/2) = 16400
+    ///   n_frames   = (16400 - 400) / 160 + 1 = 16000/160 + 1 = 100 + 1 = 101
+    ///   output.len() = 101 * 80 = 8080
+    #[test]
+    fn sine_1khz_produces_expected_shape() {
+        let samples: Vec<f32> = (0..16000)
+            .map(|i| (2.0 * PI * 1000.0 * i as f32 / 16000.0).sin())
+            .collect();
+
+        let log_mel = compute_log_mel_spectrogram(&samples, 16000, 80, 400, 160);
+
+        // Shape check.
+        assert_eq!(
+            log_mel.len(),
+            101 * 80,
+            "expected 101 frames × 80 mels = 8080 elements, got {}",
+            log_mel.len()
+        );
+
+        // Non-trivial signal: the maximum log-mel value must be above ln(0.01).
+        let max_val = log_mel.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let threshold = (0.01_f32).ln();
+        assert!(
+            max_val > threshold,
+            "max log-mel value {max_val:.4} is not above ln(0.01) = {threshold:.4}; signal may be lost"
+        );
+    }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        let out = compute_log_mel_spectrogram(&[], 16000, 80, 400, 160);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn zero_n_fft_returns_empty() {
+        let samples = vec![0.0f32; 1000];
+        let out = compute_log_mel_spectrogram(&samples, 16000, 80, 0, 160);
+        assert!(out.is_empty());
+    }
+}

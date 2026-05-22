@@ -2,7 +2,7 @@
 //!
 //! Encodes raw video frames into FFV1 lossless bitstreams as specified
 //! in RFC 9043. Supports version 3 with range coder and CRC-32 error
-//! detection.
+//! detection. Supports 8/10/12-bit depth.
 
 use crate::error::{CodecError, CodecResult};
 use crate::frame::VideoFrame;
@@ -19,7 +19,7 @@ use super::types::{
 /// FFV1 encoder.
 ///
 /// Implements the `VideoEncoder` trait for encoding raw video frames
-/// into FFV1 lossless bitstreams.
+/// into FFV1 lossless bitstreams. Supports 8/10/12-bit depths.
 ///
 /// # Usage
 ///
@@ -50,7 +50,7 @@ pub struct Ffv1Encoder {
 }
 
 impl Ffv1Encoder {
-    /// Create a new FFV1 encoder with default FFV1 settings.
+    /// Create a new FFV1 encoder with default FFV1 settings (8-bit, 4:2:0).
     pub fn new(config: EncoderConfig) -> CodecResult<Self> {
         let ffv1_config = Ffv1Config {
             version: Ffv1Version::V3,
@@ -96,6 +96,27 @@ impl Ffv1Encoder {
         })
     }
 
+    /// Create an FFV1 encoder with explicit bit-depth and default 4:2:0 chroma.
+    ///
+    /// Validates that `bits` is one of {8, 10, 12, 16}. Frame dimensions are
+    /// taken from `config.width` / `config.height`.
+    pub fn new_with_bit_depth(config: EncoderConfig, bits: u8) -> CodecResult<Self> {
+        let ffv1_config = Ffv1Config {
+            version: Ffv1Version::V3,
+            width: config.width,
+            height: config.height,
+            colorspace: Ffv1Colorspace::YCbCr,
+            chroma_type: Ffv1ChromaType::Chroma420,
+            bits_per_raw_sample: bits,
+            num_h_slices: 1,
+            num_v_slices: 1,
+            ec: true,
+            range_coder_mode: true,
+            state_transition_delta: Vec::new(),
+        };
+        Self::with_ffv1_config(config, ffv1_config)
+    }
+
     /// Reset all context states (done at keyframes).
     fn reset_states(&mut self) {
         for states in &mut self.plane_states {
@@ -126,6 +147,40 @@ impl Ffv1Encoder {
         data
     }
 
+    /// Read a single sample from a plane's byte buffer, respecting bit depth.
+    ///
+    /// For 8-bit: reads one byte at `[y * stride + x]`.
+    /// For >8-bit: reads two bytes (little-endian) at `[y * stride_bytes + x * 2]`.
+    /// `stride` here is the stride in *bytes* (as stored in `Plane::stride`).
+    fn read_sample(
+        plane_data: &[u8],
+        stride: usize,
+        y: usize,
+        x: usize,
+        bps: u8,
+    ) -> CodecResult<i32> {
+        if bps <= 8 {
+            let idx = y * stride + x;
+            if idx >= plane_data.len() {
+                return Err(CodecError::InvalidBitstream(
+                    "plane data too short for 8-bit sample".to_string(),
+                ));
+            }
+            Ok(i32::from(plane_data[idx]))
+        } else {
+            // stride is in bytes; each sample occupies 2 bytes
+            let base = y * stride + x * 2;
+            if base + 1 >= plane_data.len() {
+                return Err(CodecError::InvalidBitstream(
+                    "plane data too short for 16-bit sample".to_string(),
+                ));
+            }
+            let lo = plane_data[base] as i32;
+            let hi = plane_data[base + 1] as i32;
+            Ok(lo | (hi << 8))
+        }
+    }
+
     /// Encode a single frame into a compressed bitstream.
     fn encode_frame(&mut self, frame: &VideoFrame) -> CodecResult<Vec<u8>> {
         // Extract all needed config values upfront to avoid borrow conflicts.
@@ -134,6 +189,7 @@ impl Ffv1Encoder {
         let cfg_height = self.ffv1_config.height;
         let ec = self.ffv1_config.ec;
         let version = self.ffv1_config.version;
+        let bps = self.ffv1_config.bits_per_raw_sample;
         let is_keyframe = self.frame_count % u64::from(self.config.keyint) == 0;
 
         // Collect plane dimensions
@@ -161,33 +217,34 @@ impl Ffv1Encoder {
             )));
         }
 
-        // Encode all planes into a single range-coded bitstream
+        // Encode all planes into a single range-coded bitstream.
         let mut encoder = SimpleRangeEncoder::new();
 
         for plane_idx in 0..plane_count {
             let (pw, ph) = plane_dims[plane_idx];
             let plane = &frame.planes[plane_idx];
+            let stride = plane.stride; // bytes
 
             let states = &mut self.plane_states[plane_idx];
             let mut prev_line = vec![0i32; pw as usize];
 
             for y in 0..ph as usize {
                 for x in 0..pw as usize {
-                    // Get sample from plane data
+                    // Read current sample
                     let sample = if y < plane.height as usize && x < plane.width as usize {
-                        i32::from(plane.data[y * plane.stride + x])
+                        Self::read_sample(&plane.data, stride, y, x, bps)?
                     } else {
                         0
                     };
 
-                    // Compute prediction
-                    let left = if x > 0 {
-                        // Use the actual sample we just encoded for the left neighbor
-                        // (we need to track the reconstructed line)
-                        i32::from(plane.data[y * plane.stride + x - 1])
+                    // Read left neighbor for prediction
+                    let left = if x > 0 && y < plane.height as usize && x - 1 < plane.width as usize
+                    {
+                        Self::read_sample(&plane.data, stride, y, x - 1, bps)?
                     } else {
                         0
                     };
+
                     let top = prev_line[x];
                     let top_left = if x > 0 { prev_line[x - 1] } else { 0 };
 
@@ -195,17 +252,12 @@ impl Ffv1Encoder {
                     let residual = sample - pred;
 
                     encoder.put_symbol(states, residual);
-
-                    // Update prev_line with actual sample for next row's prediction
-                    if x == 0 && y > 0 {
-                        // Fill prev_line from the previous row
-                    }
                 }
 
-                // Update prev_line with the current row's actual samples
+                // Update prev_line with actual samples for next row's prediction
                 for x in 0..pw as usize {
                     prev_line[x] = if y < plane.height as usize && x < plane.width as usize {
-                        i32::from(plane.data[y * plane.stride + x])
+                        Self::read_sample(&plane.data, stride, y, x, bps).unwrap_or_default()
                     } else {
                         0
                     };

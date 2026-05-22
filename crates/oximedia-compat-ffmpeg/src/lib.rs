@@ -197,6 +197,94 @@
 //! let phase2 = parse_pass(&args2).expect("no parse error").expect("phase present");
 //! assert!(matches!(phase2, PassPhase::Second { .. }));
 //! ```
+//!
+//! ## Codec and format mapping reference
+//!
+//! OxiMedia enforces a **patent-free-only** codec policy.  All patent-encumbered
+//! codecs are automatically substituted with an equivalent royalty-free codec.
+//! The table below lists the full mapping used by [`codec_map::CodecMap`].
+//!
+//! ### Video codecs
+//!
+//! | FFmpeg input name(s)                             | OxiMedia codec | Patent status        |
+//! |--------------------------------------------------|----------------|----------------------|
+//! | `av1`, `libaom-av1`, `libsvtav1`                | `av1`          | Royalty-free (direct)|
+//! | `vp9`, `libvpx-vp9`                             | `vp9`          | Royalty-free (direct)|
+//! | `vp8`, `libvpx`                                 | `vp8`          | Royalty-free (direct)|
+//! | `ffv1`                                          | `ffv1`         | Royalty-free (direct)|
+//! | `apv`, `apv1`                                   | `apv`          | Royalty-free (direct)|
+//! | `mjpeg`, `mjpegb`                               | `mjpeg`        | Royalty-free (direct)|
+//! | `libx264`, `h264`, `avc`                        | `av1`          | **Substituted** (H.264 → AV1)  |
+//! | `libx265`, `hevc`, `h265`                       | `av1`          | **Substituted** (HEVC → AV1)   |
+//! | `mpeg4`, `libxvid`, `xvid`                      | `av1`          | **Substituted** (MPEG-4 → AV1) |
+//! | `mpeg2video`                                    | `av1`          | **Substituted** (MPEG-2 → AV1) |
+//! | `wmv1`, `wmv2`, `wmv3`                          | `vp9`          | **Substituted** (WMV → VP9)    |
+//! | `theora`, `libtheora`                           | `vp9`          | **Substituted** (Theora → VP9) |
+//!
+//! ### Audio codecs
+//!
+//! | FFmpeg input name(s)                             | OxiMedia codec | Patent status        |
+//! |--------------------------------------------------|----------------|----------------------|
+//! | `opus`, `libopus`                               | `opus`         | Royalty-free (direct)|
+//! | `vorbis`, `libvorbis`                           | `vorbis`       | Royalty-free (direct)|
+//! | `flac`                                          | `flac`         | Royalty-free (direct)|
+//! | `pcm_s16le`, `pcm_s24le`, `pcm_f32le`, …       | `pcm`          | Royalty-free (direct)|
+//! | `aac`, `libfaac`, `libfdk_aac`                  | `opus`         | **Substituted** (AAC → Opus)   |
+//! | `mp3`, `libmp3lame`                             | `opus`         | **Substituted** (MP3 → Opus)   |
+//! | `ac3`, `eac3`                                   | `flac`         | **Substituted** (AC-3 → FLAC)  |
+//! | `dts`, `dtshd`                                  | `flac`         | **Substituted** (DTS → FLAC)   |
+//! | `amr_nb`, `amr_wb`                              | `opus`         | **Substituted** (AMR → Opus)   |
+//! | `wma`, `wmav2`                                  | `vorbis`       | **Substituted** (WMA → Vorbis) |
+//!
+//! ### Container / format mappings
+//!
+//! The `-f FORMAT` flag is passed through; OxiMedia uses the output file extension
+//! as the primary muxer selector. The following aliases are normalised:
+//!
+//! | FFmpeg `-f` value            | OxiMedia container | Notes                           |
+//! |------------------------------|--------------------|---------------------------------|
+//! | `matroska`, `mkv`            | Matroska (`.mkv`)  | Primary AV1/VP9 container       |
+//! | `webm`                       | WebM (`.webm`)     | VP8/VP9/AV1 + Opus/Vorbis       |
+//! | `mp4`, `mov`, `m4v`          | MP4 (`.mp4`)       | MPEG-4 container (patent-free codecs only) |
+//! | `ogg`, `oga`, `ogv`          | Ogg (`.ogg`)       | Ogg bitstream container         |
+//! | `flac`                       | FLAC (`.flac`)     | Raw FLAC bitstream              |
+//! | `wav`                        | WAVE (`.wav`)      | Uncompressed PCM                |
+//! | `avi`                        | AVI (`.avi`)       | Legacy; VP8/VP9 supported       |
+//!
+//! ## Hardware acceleration (`-hwaccel`) — `hwaccel_compat`
+//!
+//! The [`hwaccel_compat`] module maps FFmpeg hardware backend names to OxiMedia's
+//! `HwAccelConfig`. Since OxiMedia's GPU pipeline is software-first, hardware
+//! acceleration is recorded but gracefully falls back to software when the
+//! requested backend is unavailable.
+//!
+//! | FFmpeg `-hwaccel` value | [`HwBackend`] variant | Platform          |
+//! |-------------------------|-----------------------|-------------------|
+//! | `cuda`, `nvenc`, `cuvid`| `Cuda`                | NVIDIA            |
+//! | `vaapi`                 | `Vaapi`               | Linux (VA-API)    |
+//! | `qsv`                   | `QuickSync`           | Intel             |
+//! | `amf`                   | `Amf`                 | AMD               |
+//! | `videotoolbox`          | `VideoToolbox`        | macOS             |
+//! | `vulkan`                | `Vulkan`              | Cross-platform    |
+//! | `opencl`                | `OpenCl`              | Cross-platform    |
+//! | `auto`                  | `Auto`                | Runtime detection |
+//! | `none`, `software`      | `Software`            | No GPU            |
+//!
+//! ## Metadata mapping (`-metadata`, `-map_metadata`) — `metadata_compat`
+//!
+//! The [`metadata_compat`] module normalises FFmpeg tag keys to OxiMedia's
+//! canonical lowercase key names. The `-map_metadata` flag is parsed into
+//! [`MapMetadataDirective`] values that describe which input's tags to copy.
+//!
+//! | FFmpeg key(s)          | OxiMedia canonical key |
+//! |------------------------|------------------------|
+//! | `title`                | `title`                |
+//! | `artist`, `author`     | `artist`               |
+//! | `album`                | `album`                |
+//! | `year`, `date`         | `year`                 |
+//! | `track`, `tracknumber` | `tracknumber`          |
+//! | `genre`                | `genre`                |
+//! | `language`, `lang`     | `language`             |
 
 pub mod arg_parser;
 pub mod argument_builder;
@@ -210,6 +298,8 @@ pub mod filter_complex;
 pub mod filter_graph;
 pub mod filter_lex;
 pub mod filter_shorthand;
+pub mod hwaccel_compat;
+pub mod metadata_compat;
 pub mod pass;
 pub mod real_world_tests;
 pub mod seek;
@@ -236,11 +326,19 @@ pub use filter_lex::{
     parse_filter_graph, parse_filter_string, parse_filters, FilterGraph, FilterNode, ParsedFilter,
 };
 pub use filter_shorthand::{parse_af, parse_vf};
+pub use hwaccel_compat::{
+    build_hw_accel_summary, parse_hwaccel_method, translate_hw_codec, translate_hwaccel,
+    HwAccelConfig, HwAccelError, HwAccelSummary, HwBackend, HwCodecHint, HwCodecRole,
+};
+pub use metadata_compat::{
+    extract_metadata_from_args, parse_metadata_arg, MetadataError, MetadataMap, MetadataScope,
+};
 pub use pass::{parse_pass, PassPhase};
 pub use seek::{check_seek_args, parse_duration, SeekError};
 pub use stream_spec::{
     StreamIndex, StreamSelector, StreamSpec, StreamSpecError, StreamType as SpecStreamType,
 };
 pub use translator::{
-    parse_and_translate, MuxerAction, MuxerOption, TranscodeJob, TranslateResult,
+    parse_and_translate, MapMetadataDirective, MuxerAction, MuxerOption, TranscodeJob,
+    TranslateResult,
 };

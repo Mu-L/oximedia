@@ -923,6 +923,36 @@ impl CloudStorage for GcsStorage {
     ) -> Result<String> {
         self.get_signed_upload_url(key, None, expiration_secs).await
     }
+
+    async fn update_metadata(
+        &self,
+        key: &str,
+        tags: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        debug!("Updating metadata for object: {}", key);
+
+        let dest_object = model::Object::new()
+            .set_name(key)
+            .set_bucket(self.bucket_path())
+            .set_metadata(tags);
+
+        let update_mask = wkt::FieldMask::default().set_paths(["metadata"]);
+
+        self.control
+            .update_object()
+            .set_object(dest_object)
+            .set_update_mask(update_mask)
+            .send()
+            .await
+            .map_err(|e| {
+                StorageError::ProviderError(format!(
+                    "Failed to update metadata for object {key}: {e}"
+                ))
+            })?;
+
+        info!("Updated metadata for object: {}", key);
+        Ok(())
+    }
 }
 
 /// ACL entry

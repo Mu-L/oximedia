@@ -8,4 +8,6 @@ pub mod parse;
 
 pub use apply::IccProfileApplicator;
 pub use generate::IccProfileGenerator;
-pub use parse::{IccProfile, IccProfileVersion};
+pub use parse::{
+    parse_iccmax, IccMaxProfile, IccMaxTag, IccProfile, IccProfileVersion, SpectralData,
+};

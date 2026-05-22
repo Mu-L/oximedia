@@ -45,4 +45,6 @@ pub use simple::{
     AudioCodecInfo, FourCC, Mp4Sample, Mp4TrackWriter, SimpleMp4Config, SimpleMp4Error,
     SimpleMp4Muxer, TrackCodec, VideoCodecInfo,
 };
-pub use writer::{Mp4Config, Mp4FragmentMode, Mp4Mode, Mp4Muxer, Mp4SampleEntry, Mp4TrackState};
+pub use writer::{
+    build_sidx, Mp4Config, Mp4FragmentMode, Mp4Mode, Mp4Muxer, Mp4SampleEntry, Mp4TrackState,
+};

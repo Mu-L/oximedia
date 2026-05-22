@@ -11,27 +11,27 @@
 - 271+ tests passing (160 unit + 33 fuzz_manifest + 9 hot_reload + 16 integration + 37 sandbox + 13 version_graph + 3 doc)
 
 ## Enhancements
-- [ ] Add plugin priority/ordering in `PluginRegistry` for codec conflict resolution (multiple plugins for same codec)
-- [ ] Implement plugin health checks in `hot_reload::HotReloadManager` (periodic liveness probe)
-- [ ] Extend `sandbox::PermissionSet` with fine-grained filesystem path restrictions (not just PERM_FILESYSTEM)
-- [ ] Add plugin resource usage tracking (memory, CPU time) in `SandboxContext`
-- [ ] Implement plugin dependency conflict detection in `version_resolver` (diamond dependency problem)
-- [ ] Add graceful degradation in `GracefulReload` — serve from old plugin during new plugin initialization
-- [ ] Extend `PluginManifest` with minimum OxiMedia version requirement field
+- [x] Add plugin priority/ordering in `PluginRegistry` for codec conflict resolution (multiple plugins for same codec) (verified 2026-05-16; src/priority.rs:47 PluginPriority(u32), lower value = higher precedence:35)
+- [x] Implement plugin health checks in `hot_reload::HotReloadManager` (periodic liveness probe) (verified 2026-05-16; src/health_monitor.rs PluginHealthMonitor, src/health_check.rs periodic liveness probes)
+- [x] Extend `sandbox::PermissionSet` with fine-grained filesystem path restrictions (not just PERM_FILESYSTEM) (verified 2026-05-16; src/sandbox.rs:57 path allow-list, add_path:119, is_path_permitted:148)
+- [x] Add plugin resource usage tracking (memory, CPU time) in `SandboxContext` (verified 2026-05-16; src/resources.rs:31 ResourceUsage cpu_time_ms:35, ResourceTracker, ResourceLimit)
+- [ ] Implement plugin dependency conflict detection in `version_resolver` (diamond dependency problem) (verified-open 2026-05-16: version_resolver.rs handles circular deps but not diamond/multi-provider conflicts)
+- [x] Add graceful degradation in `GracefulReload` — serve from old plugin during new plugin initialization (verified 2026-05-16; src/graceful_reload.rs:80 serves old plugin during init, InProgress state:35)
+- [x] Extend `PluginManifest` with minimum OxiMedia version requirement field (verified 2026-05-16; src/manifest.rs:399 min_host_version: Option<String>)
 
 ## New Features
-- [ ] Add WASM plugin support — load plugins compiled to WebAssembly via wasmtime/wasmer
-- [ ] Implement plugin marketplace protocol — discovery, download, and verification of remote plugins
-- [ ] Add plugin configuration persistence — save/load plugin settings between sessions
-- [ ] Implement plugin telemetry collection — anonymous usage stats for plugin authors
-- [ ] Add plugin test harness — standardized testing framework for plugin developers
-- [ ] Implement plugin isolation via process sandboxing (run plugin in subprocess with IPC)
-- [ ] Add filter/transform plugin type alongside codec plugins (video/audio filter plugins)
+- [ ] Add WASM plugin support — load plugins compiled to WebAssembly via wasmtime/wasmer (verified-open 2026-05-16: no wasmtime/wasmer in plugin crate)
+- [ ] Implement plugin marketplace protocol — discovery, download, and verification of remote plugins (verified-open 2026-05-16: no marketplace/remote discovery module)
+- [x] Add plugin configuration persistence — save/load plugin settings between sessions (verified 2026-05-16; src/config_persistence.rs:598 PluginConfigStore JSON-backed key-value store)
+- [x] Implement plugin telemetry collection — anonymous usage stats for plugin authors (verified 2026-05-16; src/plugin_telemetry.rs:747 lines PluginTelemetry)
+- [x] Add plugin test harness — standardized testing framework for plugin developers (verified 2026-05-16; src/harness.rs:589 lines plugin test harness)
+- [ ] Implement plugin isolation via process sandboxing (run plugin in subprocess with IPC) (verified-open 2026-05-16: sandbox.rs uses bitmask/path restrictions, not subprocess IPC isolation)
+- [x] Add filter/transform plugin type alongside codec plugins (video/audio filter plugins) (verified 2026-05-16; src/filter_plugin.rs:442 FilterPlugin trait, FilterRegistry)
 
 ## Performance
-- [ ] Cache plugin capability lookups in `PluginRegistry` with invalidation on register/unregister
-- [ ] Implement lazy plugin initialization — defer codec creation until first use
-- [ ] Add plugin instance pooling for codecs that are expensive to initialize
+- [ ] Cache plugin capability lookups in `PluginRegistry` with invalidation on register/unregister (verified-open 2026-05-16: no capability cache in registry.rs or capability.rs)
+- [x] Implement lazy plugin initialization — defer codec creation until first use (verified 2026-05-16; src/lazy_init.rs:320 lazy plugin init, src/lazy.rs lazy loading)
+- [x] Add plugin instance pooling for codecs that are expensive to initialize (verified 2026-05-16; src/pool.rs:378 plugin instance pool)
 - [x] Optimize `compute_hash` in hot_reload to use memory-mapped I/O for large plugin files — `compute_hash_mmap` with `MMAP_THRESHOLD_BYTES` (4 MiB) page-streaming strategy; 9 new tests
 
 ## Testing

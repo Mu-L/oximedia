@@ -2,10 +2,16 @@
 //!
 //! Provides helpers for extracting raw RGB24 frames from video files.
 //! Y4M (YUV4MPEG2) is supported natively via [`oximedia_container`].
-//! Other formats produce a descriptive error asking the user to convert first.
+//! Other container formats (MP4, MKV, WebM, MPEG-TS) are supported via
+//! the async demuxer + codec pipeline.
 
 use anyhow::{bail, Context, Result};
+use oximedia_codec::{Av1Decoder, DecoderConfig, VideoDecoder, VideoFrame, Vp8Decoder, Vp9Decoder};
 use oximedia_container::demux::y4m::{Y4mChroma, Y4mDemuxer};
+use oximedia_container::demux::{MatroskaDemuxer, Mp4Demuxer, MpegTsDemuxer};
+use oximedia_container::Demuxer;
+use oximedia_core::{CodecId, PixelFormat};
+use oximedia_io::FileSource;
 use std::io::Cursor;
 use std::path::Path;
 
@@ -19,15 +25,17 @@ use std::path::Path;
 ///
 /// # Format support
 ///
-/// - **Y4M (YUV4MPEG2)**: supported for all standard chroma modes.
-/// - **All other formats**: returns an error directing the user to convert to
-///   Y4M first with `oximedia convert`.
+/// - **Y4M (YUV4MPEG2)**: supported for all standard chroma modes (fast path).
+/// - **MP4 / MOV / M4V**: supported via Mp4Demuxer + AV1/VP9 decoder.
+/// - **MKV / WebM**: supported via MatroskaDemuxer + AV1/VP9/VP8 decoder.
+/// - **MPEG-TS / M2TS / MTS**: supported via MpegTsDemuxer + AV1/VP9/VP8 decoder.
+/// - **All other formats**: returns a descriptive error.
 ///
 /// # Errors
 ///
-/// Returns an error if the file does not exist, is not a recognised Y4M file,
+/// Returns an error if the file does not exist, is not a recognised format,
 /// does not contain enough frames, or is corrupted.
-pub fn extract_video_frame_rgb(input: &Path, frame_num: u64) -> Result<(Vec<u8>, u32, u32)> {
+pub async fn extract_video_frame_rgb(input: &Path, frame_num: u64) -> Result<(Vec<u8>, u32, u32)> {
     if !input.exists() {
         bail!("Input file not found: {}", input.display());
     }
@@ -35,14 +43,11 @@ pub fn extract_video_frame_rgb(input: &Path, frame_num: u64) -> Result<(Vec<u8>,
     // Peek at the first 9 bytes to detect Y4M magic.
     let magic = read_magic(input)?;
     if magic.starts_with(b"YUV4MPEG2") {
-        extract_y4m_frame_rgb(input, frame_num)
-    } else {
-        bail!(
-            "Frame extraction for this format is not yet supported. \
-             Convert to Y4M first: oximedia convert --input {} --output /tmp/out.y4m",
-            input.display()
-        )
+        return extract_y4m_frame_rgb(input, frame_num);
     }
+
+    // Non-Y4M: use the async container/codec pipeline.
+    decode_nth_frame_rgb(input, frame_num).await
 }
 
 /// Extract multiple frames from `input` in a single pass.
@@ -56,7 +61,7 @@ pub fn extract_video_frame_rgb(input: &Path, frame_num: u64) -> Result<(Vec<u8>,
 /// # Errors
 ///
 /// See [`extract_video_frame_rgb`].
-pub fn extract_video_frames_rgb(
+pub async fn extract_video_frames_rgb(
     input: &Path,
     frame_indices: &[u64],
 ) -> Result<Vec<(Vec<u8>, u32, u32)>> {
@@ -69,15 +74,12 @@ pub fn extract_video_frames_rgb(
     }
 
     let magic = read_magic(input)?;
-    if !magic.starts_with(b"YUV4MPEG2") {
-        bail!(
-            "Frame extraction for this format is not yet supported. \
-             Convert to Y4M first: oximedia convert --input {} --output /tmp/out.y4m",
-            input.display()
-        )
+    if magic.starts_with(b"YUV4MPEG2") {
+        return extract_y4m_frames_rgb(input, frame_indices);
     }
 
-    extract_y4m_frames_rgb(input, frame_indices)
+    // Non-Y4M: use the async container/codec pipeline.
+    decode_frames_rgb(input, frame_indices).await
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +161,329 @@ fn extract_y4m_frames_rgb(input: &Path, frame_indices: &[u64]) -> Result<Vec<(Ve
     }
 
     Ok(results)
+}
+
+// ---------------------------------------------------------------------------
+// Internal: container dispatch — detect extension and open demuxer
+// ---------------------------------------------------------------------------
+
+async fn decode_nth_frame_rgb(input: &Path, frame_num: u64) -> Result<(Vec<u8>, u32, u32)> {
+    let ext = input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "mp4" | "m4v" | "mov" => {
+            let source = FileSource::open(input)
+                .await
+                .with_context(|| format!("Cannot open {}", input.display()))?;
+            let demuxer = Mp4Demuxer::new(source);
+            let frames = decode_via_demuxer(demuxer, &[frame_num]).await?;
+            frames.into_iter().next().ok_or_else(|| {
+                anyhow::anyhow!("Frame {} not found in {}", frame_num, input.display())
+            })
+        }
+        "mkv" | "webm" => {
+            let source = FileSource::open(input)
+                .await
+                .with_context(|| format!("Cannot open {}", input.display()))?;
+            let demuxer = MatroskaDemuxer::new(source);
+            let frames = decode_via_demuxer(demuxer, &[frame_num]).await?;
+            frames.into_iter().next().ok_or_else(|| {
+                anyhow::anyhow!("Frame {} not found in {}", frame_num, input.display())
+            })
+        }
+        "ts" | "mts" | "m2ts" => {
+            let source = FileSource::open(input)
+                .await
+                .with_context(|| format!("Cannot open {}", input.display()))?;
+            let demuxer = MpegTsDemuxer::new(source);
+            let frames = decode_via_demuxer(demuxer, &[frame_num]).await?;
+            frames.into_iter().next().ok_or_else(|| {
+                anyhow::anyhow!("Frame {} not found in {}", frame_num, input.display())
+            })
+        }
+        _ => bail!(
+            "Unsupported container extension '{}'; convert to Y4M or use MP4/MKV/WebM/TS. \
+             Example: oximedia convert --input {} --output {}.y4m",
+            ext,
+            input.display(),
+            input.file_stem().and_then(|s| s.to_str()).unwrap_or("out")
+        ),
+    }
+}
+
+async fn decode_frames_rgb(
+    input: &Path,
+    frame_indices: &[u64],
+) -> Result<Vec<(Vec<u8>, u32, u32)>> {
+    if frame_indices.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ext = input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    match ext.as_str() {
+        "mp4" | "m4v" | "mov" => {
+            let source = FileSource::open(input)
+                .await
+                .with_context(|| format!("Cannot open {}", input.display()))?;
+            let demuxer = Mp4Demuxer::new(source);
+            decode_via_demuxer(demuxer, frame_indices).await
+        }
+        "mkv" | "webm" => {
+            let source = FileSource::open(input)
+                .await
+                .with_context(|| format!("Cannot open {}", input.display()))?;
+            let demuxer = MatroskaDemuxer::new(source);
+            decode_via_demuxer(demuxer, frame_indices).await
+        }
+        "ts" | "mts" | "m2ts" => {
+            let source = FileSource::open(input)
+                .await
+                .with_context(|| format!("Cannot open {}", input.display()))?;
+            let demuxer = MpegTsDemuxer::new(source);
+            decode_via_demuxer(demuxer, frame_indices).await
+        }
+        _ => bail!(
+            "Unsupported container extension '{}'; convert to Y4M or use MP4/MKV/WebM/TS. \
+             Example: oximedia convert --input {} --output {}.y4m",
+            ext,
+            input.display(),
+            input.file_stem().and_then(|s| s.to_str()).unwrap_or("out")
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Internal: generic async demux+decode loop
+// ---------------------------------------------------------------------------
+
+/// Drive a concrete demuxer to extract the requested `frame_indices` as RGB24.
+///
+/// Frame indices must be sorted ascending. Frames past the end of file are
+/// silently omitted from the result (same contract as the Y4M multi-frame path).
+async fn decode_via_demuxer<D: Demuxer>(
+    mut demuxer: D,
+    frame_indices: &[u64],
+) -> Result<Vec<(Vec<u8>, u32, u32)>> {
+    demuxer.probe().await.context("Container probe failed")?;
+
+    // Find first video stream.
+    let (video_stream_idx, codec_id) = {
+        let streams = demuxer.streams();
+        streams
+            .iter()
+            .find(|s| s.is_video())
+            .map(|s| (s.index, s.codec))
+            .ok_or_else(|| anyhow::anyhow!("No video stream found in container"))?
+    };
+
+    // Create the appropriate decoder for the codec.
+    let mut decoder: Box<dyn VideoDecoder + Send> = match codec_id {
+        CodecId::Av1 => {
+            let cfg = DecoderConfig {
+                codec: CodecId::Av1,
+                ..DecoderConfig::default()
+            };
+            Box::new(Av1Decoder::new(cfg).context("Failed to create AV1 decoder")?)
+        }
+        CodecId::Vp9 => {
+            let cfg = DecoderConfig {
+                codec: CodecId::Vp9,
+                ..DecoderConfig::default()
+            };
+            Box::new(Vp9Decoder::new(cfg).context("Failed to create VP9 decoder")?)
+        }
+        CodecId::Vp8 => {
+            let cfg = DecoderConfig {
+                codec: CodecId::Vp8,
+                ..DecoderConfig::default()
+            };
+            Box::new(Vp8Decoder::new(cfg).context("Failed to create VP8 decoder")?)
+        }
+        other => bail!(
+            "Video codec {:?} is not yet wired for scopes/thumbnail extraction. \
+             Convert to AV1/VP9/VP8 or use Y4M. \
+             Example: oximedia convert --input <file> --output out.y4m",
+            other
+        ),
+    };
+
+    let mut results: Vec<(Vec<u8>, u32, u32)> = Vec::with_capacity(frame_indices.len());
+    let mut idx_iter = frame_indices.iter().peekable();
+    let mut frame_counter: u64 = 0;
+
+    // Packet-read loop.
+    loop {
+        // If all wanted frames are collected, stop early.
+        if idx_iter.peek().is_none() {
+            break;
+        }
+
+        let packet = match demuxer.read_packet().await {
+            Ok(p) => p,
+            Err(e) if e.is_eof() => break,
+            Err(e) => return Err(anyhow::anyhow!("Demuxer read error: {e}")),
+        };
+
+        // Skip packets from other streams.
+        if packet.stream_index != video_stream_idx {
+            continue;
+        }
+
+        let pts = packet.timestamp.pts;
+        decoder
+            .send_packet(&packet.data, pts)
+            .context("Decoder send_packet failed")?;
+
+        // Drain all frames the decoder is ready to yield.
+        loop {
+            match decoder.receive_frame() {
+                Ok(Some(frame)) => {
+                    if let Some(&&next_wanted) = idx_iter.peek() {
+                        if frame_counter == next_wanted {
+                            let rgb = video_frame_to_rgb24(&frame)?;
+                            results.push((rgb, frame.width, frame.height));
+                            idx_iter.next();
+                        }
+                    }
+                    frame_counter += 1;
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Decode error on frame {frame_counter}: {e}"
+                    ))
+                }
+            }
+        }
+    }
+
+    // Flush decoder for any trailing frames.
+    decoder.flush().context("Decoder flush failed")?;
+    loop {
+        if idx_iter.peek().is_none() {
+            break;
+        }
+        match decoder.receive_frame() {
+            Ok(Some(frame)) => {
+                if let Some(&&next_wanted) = idx_iter.peek() {
+                    if frame_counter == next_wanted {
+                        let rgb = video_frame_to_rgb24(&frame)?;
+                        results.push((rgb, frame.width, frame.height));
+                        idx_iter.next();
+                    }
+                }
+                frame_counter += 1;
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Decode flush error on frame {frame_counter}: {e}"
+                ))
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+// ---------------------------------------------------------------------------
+// Internal: VideoFrame → packed RGB24
+// ---------------------------------------------------------------------------
+
+/// Convert a decoded `VideoFrame` to packed RGB24.
+///
+/// Handles stride-aware plane repacking before conversion. Only 8-bit
+/// YUV420p, YUV422p, and YUV444p are supported; other formats return
+/// a descriptive error directing the user to re-encode to 8-bit first.
+fn video_frame_to_rgb24(frame: &VideoFrame) -> Result<Vec<u8>> {
+    let w = frame.width;
+    let h = frame.height;
+
+    match frame.format {
+        PixelFormat::Yuv420p => {
+            if frame.planes.len() < 3 {
+                bail!("YUV420p frame has fewer than 3 planes");
+            }
+            let y = repack_plane(&frame.planes[0]);
+            let u = repack_plane(&frame.planes[1]);
+            let v = repack_plane(&frame.planes[2]);
+            let mut packed = Vec::with_capacity(y.len() + u.len() + v.len());
+            packed.extend_from_slice(&y);
+            packed.extend_from_slice(&u);
+            packed.extend_from_slice(&v);
+            Ok(yuv420_to_rgb24(&packed, w, h))
+        }
+        PixelFormat::Yuv422p => {
+            if frame.planes.len() < 3 {
+                bail!("YUV422p frame has fewer than 3 planes");
+            }
+            let y = repack_plane(&frame.planes[0]);
+            let u = repack_plane(&frame.planes[1]);
+            let v = repack_plane(&frame.planes[2]);
+            let mut packed = Vec::with_capacity(y.len() + u.len() + v.len());
+            packed.extend_from_slice(&y);
+            packed.extend_from_slice(&u);
+            packed.extend_from_slice(&v);
+            Ok(yuv422_to_rgb24(&packed, w, h))
+        }
+        PixelFormat::Yuv444p => {
+            if frame.planes.len() < 3 {
+                bail!("YUV444p frame has fewer than 3 planes");
+            }
+            let y = repack_plane(&frame.planes[0]);
+            let u = repack_plane(&frame.planes[1]);
+            let v = repack_plane(&frame.planes[2]);
+            let mut packed = Vec::with_capacity(y.len() + u.len() + v.len());
+            packed.extend_from_slice(&y);
+            packed.extend_from_slice(&u);
+            packed.extend_from_slice(&v);
+            Ok(yuv444_to_rgb24(&packed, w, h))
+        }
+        other => bail!(
+            "Pixel format {:?} is not supported for RGB extraction. \
+             Only 8-bit YUV (420p/422p/444p) is supported. \
+             Re-encode to 8-bit AV1/VP9 or use Y4M.",
+            other
+        ),
+    }
+}
+
+/// Repack a plane that may have row-stride padding into a tightly-packed buffer.
+///
+/// If `stride == width`, this is a simple slice copy; otherwise only `width`
+/// bytes per row are copied, discarding any row-end padding.
+fn repack_plane(plane: &oximedia_codec::Plane) -> Vec<u8> {
+    let width = plane.width as usize;
+    let height = plane.height as usize;
+    let stride = plane.stride;
+
+    if stride == width {
+        plane.data[..width * height].to_vec()
+    } else {
+        let mut out = Vec::with_capacity(width * height);
+        for row in 0..height {
+            let start = row * stride;
+            let end = start + width;
+            if end <= plane.data.len() {
+                out.extend_from_slice(&plane.data[start..end]);
+            } else {
+                // Partial / corrupt row — copy what we have and pad with zeros.
+                let available = plane.data.len().saturating_sub(start);
+                out.extend_from_slice(&plane.data[start..start + available]);
+                out.extend(std::iter::repeat(0).take(width - available));
+            }
+        }
+        out
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -330,22 +655,22 @@ mod tests {
         assert!((b as i32 - 128).abs() <= 2);
     }
 
-    #[test]
-    fn test_extract_nonexistent_file() {
-        let p = std::path::PathBuf::from("/tmp/oximedia_no_such_file_9999.y4m");
-        let result = extract_video_frame_rgb(&p, 0);
+    #[tokio::test]
+    async fn test_extract_nonexistent_file() {
+        let p = std::env::temp_dir().join("oximedia_no_such_file_9999.y4m");
+        let result = extract_video_frame_rgb(&p, 0).await;
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_extract_frame_from_y4m_file() {
+    #[tokio::test]
+    async fn test_extract_frame_from_y4m_file() {
         let tmp = std::env::temp_dir().join("oximedia_fe_test_single.y4m");
         let data = make_y4m(4, 4, 3);
-        std::fs::write(&tmp, &data).unwrap();
+        std::fs::write(&tmp, &data).expect("write test Y4M");
 
-        let result = extract_video_frame_rgb(&tmp, 0);
+        let result = extract_video_frame_rgb(&tmp, 0).await;
         assert!(result.is_ok(), "{:?}", result);
-        let (rgb, w, h) = result.unwrap();
+        let (rgb, w, h) = result.expect("frame extraction");
         assert_eq!(w, 4);
         assert_eq!(h, 4);
         assert_eq!(rgb.len(), 4 * 4 * 3);
@@ -353,28 +678,28 @@ mod tests {
         std::fs::remove_file(&tmp).ok();
     }
 
-    #[test]
-    fn test_extract_frame_out_of_range() {
+    #[tokio::test]
+    async fn test_extract_frame_out_of_range() {
         let tmp = std::env::temp_dir().join("oximedia_fe_test_oor.y4m");
         let data = make_y4m(4, 4, 2);
-        std::fs::write(&tmp, &data).unwrap();
+        std::fs::write(&tmp, &data).expect("write test Y4M");
 
-        let result = extract_video_frame_rgb(&tmp, 5);
+        let result = extract_video_frame_rgb(&tmp, 5).await;
         assert!(result.is_err());
 
         std::fs::remove_file(&tmp).ok();
     }
 
-    #[test]
-    fn test_extract_multiple_frames_single_pass() {
+    #[tokio::test]
+    async fn test_extract_multiple_frames_single_pass() {
         let tmp = std::env::temp_dir().join("oximedia_fe_test_multi.y4m");
         let data = make_y4m(4, 4, 10);
-        std::fs::write(&tmp, &data).unwrap();
+        std::fs::write(&tmp, &data).expect("write test Y4M");
 
         let indices = vec![0u64, 2, 5, 9];
-        let result = extract_video_frames_rgb(&tmp, &indices);
+        let result = extract_video_frames_rgb(&tmp, &indices).await;
         assert!(result.is_ok(), "{:?}", result);
-        let frames = result.unwrap();
+        let frames = result.expect("frame extraction");
         assert_eq!(frames.len(), 4);
         for (rgb, w, h) in &frames {
             assert_eq!(*w, 4);
@@ -395,17 +720,90 @@ mod tests {
         assert_eq!(rgb.len(), 7 * 7 * 3);
     }
 
-    #[test]
-    fn test_unsupported_format_error() {
-        let tmp = std::env::temp_dir().join("oximedia_fe_test_unsupported.mkv");
-        // Write a fake MKV magic
-        std::fs::write(&tmp, b"\x1a\x45\xdf\xa3not_real_mkv_data_here").unwrap();
+    #[tokio::test]
+    async fn test_unsupported_extension_returns_clean_error() {
+        let tmp = std::env::temp_dir().join("oximedia_fe_test_unsupported.avi");
+        // Write a fake AVI magic
+        std::fs::write(&tmp, b"RIFF\x00\x00\x00\x00AVI fake").expect("write test file");
 
-        let result = extract_video_frame_rgb(&tmp, 0);
+        let result = extract_video_frame_rgb(&tmp, 0).await;
         assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("not yet supported"), "unexpected error: {msg}");
+        let msg = result
+            .expect_err("expected error")
+            .to_string()
+            .to_lowercase();
+        assert!(
+            msg.contains("unsupported") || msg.contains("container") || msg.contains("extension"),
+            "unexpected error message: {msg}"
+        );
 
         std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_extension_multi_returns_clean_error() {
+        let tmp = std::env::temp_dir().join("oximedia_fe_test_unsup_multi.avi");
+        std::fs::write(&tmp, b"RIFF\x00\x00\x00\x00AVI fake").expect("write test file");
+
+        let result = extract_video_frames_rgb(&tmp, &[0, 1]).await;
+        assert!(result.is_err());
+        let msg = result
+            .expect_err("expected error")
+            .to_string()
+            .to_lowercase();
+        assert!(
+            msg.contains("unsupported") || msg.contains("container") || msg.contains("extension"),
+            "unexpected error message: {msg}"
+        );
+
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn y4m_fast_path_still_works() {
+        // Verify that a non-existent Y4M file returns Err cleanly (not a panic).
+        let result = extract_video_frame_rgb(Path::new("/nonexistent.y4m"), 0).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn y4m_returns_err_not_panic_on_missing_file() {
+        let result = extract_video_frames_rgb(Path::new("/nonexistent.y4m"), &[0, 1, 2]).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn unsupported_container_returns_clean_err() {
+        // .avi is not supported — either file-not-found or unsupported-extension, both are Err.
+        let path_buf = std::env::temp_dir().join("test_oximedia_unsup_check.avi");
+        let result = extract_video_frame_rgb(&path_buf, 0).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_repack_plane_no_stride_padding() {
+        use oximedia_codec::Plane;
+        let plane = Plane {
+            data: vec![1, 2, 3, 4, 5, 6],
+            stride: 3,
+            width: 3,
+            height: 2,
+        };
+        let repacked = repack_plane(&plane);
+        assert_eq!(repacked, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_repack_plane_with_stride_padding() {
+        use oximedia_codec::Plane;
+        // 3-wide, 2-tall, stride=4 (1 padding byte per row)
+        let plane = Plane {
+            data: vec![1, 2, 3, 0, 4, 5, 6, 0],
+            stride: 4,
+            width: 3,
+            height: 2,
+        };
+        let repacked = repack_plane(&plane);
+        assert_eq!(repacked, vec![1, 2, 3, 4, 5, 6]);
     }
 }

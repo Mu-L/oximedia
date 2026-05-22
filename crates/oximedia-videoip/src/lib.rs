@@ -82,6 +82,7 @@ pub mod bbr;
 pub mod bonding;
 pub mod codec;
 pub mod color_space_conv;
+pub mod color_space_simd;
 pub mod congestion;
 pub mod discovery;
 pub mod dtls_srtp;
@@ -91,6 +92,7 @@ pub mod fec;
 pub mod flow_monitor;
 pub mod flow_stats;
 pub mod frame_pacing;
+pub mod gf_simd;
 pub mod jitter;
 pub mod metadata;
 pub mod multicast;
@@ -103,13 +105,18 @@ pub mod ptp;
 pub mod ptp_boundary;
 pub mod ptz;
 pub mod quic_transport;
+/// Real QUIC transport backed by `quinn` (enabled by the `quic-quinn` feature).
+#[cfg(feature = "quic-quinn")]
+pub mod quic_transport_quinn;
 pub mod receiver;
 pub mod redundancy;
 pub mod rist;
+pub mod scatter_gather_io;
 pub mod sdp;
 pub mod sfp_monitor;
 pub mod smpte2110;
 pub mod source;
+pub mod spsc_ring;
 pub mod srt_config;
 pub mod st2110_20;
 pub mod stats;
@@ -120,7 +127,9 @@ pub mod stream_sync;
 pub mod tally;
 pub mod transport;
 pub mod types;
+pub mod udp_scatter_gather;
 pub mod utils;
+pub mod zero_copy_packet;
 
 // Re-export main types
 pub use error::{VideoIpError, VideoIpResult};

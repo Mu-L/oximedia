@@ -68,6 +68,20 @@ name = "dedup_hash"
 path = "dedup_hash.rs"
 harness = false
 
+# ── Legacy / reconciled benches ──────────────────────────────────────────────
+# These files existed as orphaned sources; registering them here activates them
+# as proper Criterion harnesses so contributors cannot accidentally edit dead code.
+
+[[bench]]
+name = "codec_encode_bench"
+path = "codec_benchmark.rs"
+harness = false
+
+[[bench]]
+name = "filter_bench"
+path = "filter_benchmark.rs"
+harness = false
+
 [dependencies]
 oximedia-core = { workspace = true }
 oximedia-io = { workspace = true }

@@ -1,7 +1,7 @@
 //! Report generation.
 
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Profiling report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +80,7 @@ impl ReportGenerator {
     pub fn generate(&self) -> Report {
         Report {
             title: self.title.clone(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: rfc3339_now(),
             duration: self.start_time.elapsed(),
             sections: self.sections.clone(),
         }
@@ -127,17 +127,42 @@ impl Default for ReportGenerator {
     }
 }
 
-// Stub for chrono compatibility
-mod chrono {
-    pub struct Utc;
-    impl Utc {
-        pub fn now() -> Self {
-            Self
-        }
-        pub fn to_rfc3339(&self) -> String {
-            "2024-01-01T00:00:00Z".to_string()
-        }
-    }
+/// Return the current UTC time formatted as RFC 3339 / ISO 8601 using only
+/// `std::time`. No external dependencies are required.
+fn rfc3339_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs();
+    unix_secs_to_rfc3339(secs)
+}
+
+/// Convert a Unix timestamp (seconds since epoch) to an RFC 3339 string.
+///
+/// The output format is `YYYY-MM-DDTHH:MM:SSZ` (UTC, second precision).
+fn unix_secs_to_rfc3339(secs: u64) -> String {
+    // Days since Unix epoch (1970-01-01) split into year/month/day.
+    let days = secs / 86_400;
+    let time = secs % 86_400;
+
+    let hh = time / 3_600;
+    let mm = (time % 3_600) / 60;
+    let ss = time % 60;
+
+    // Compute Gregorian calendar date from day count using the algorithm from
+    // "Calendrical Calculations" (Dershowitz & Reingold, public-domain variant).
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z % 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
 #[cfg(test)]
@@ -173,5 +198,29 @@ mod tests {
         let text = generator.generate_text();
         assert!(text.contains("Test"));
         assert!(text.contains("Test Section"));
+    }
+
+    #[test]
+    fn test_unix_secs_to_rfc3339_epoch() {
+        // Unix epoch = 1970-01-01T00:00:00Z
+        assert_eq!(unix_secs_to_rfc3339(0), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn test_unix_secs_to_rfc3339_known_date() {
+        // 2024-01-01T00:00:00Z = 1_704_067_200 seconds
+        assert_eq!(unix_secs_to_rfc3339(1_704_067_200), "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn test_rfc3339_now_has_correct_format() {
+        let ts = rfc3339_now();
+        // Format: YYYY-MM-DDTHH:MM:SSZ — 20 chars
+        assert_eq!(ts.len(), 20, "unexpected timestamp length: {ts}");
+        assert!(ts.ends_with('Z'), "timestamp should end with Z: {ts}");
+        assert_eq!(&ts[10..11], "T", "position 10 should be T: {ts}");
+        // Year should be reasonable (after 2020)
+        let year: u64 = ts[..4].parse().unwrap_or(0);
+        assert!(year >= 2020, "year should be >= 2020: {ts}");
     }
 }

@@ -96,7 +96,7 @@
 //! use oximedia_timesync::timecode::{TimecodeState, TimecodeSource};
 //! use oximedia_timecode::{Timecode, FrameRate};
 //!
-//! let mut state = TimecodeState::new(FrameRate::Fps25);
+//! let mut state = TimecodeState::new(FrameRate::Fps25).expect("valid frame rate");
 //! let tc = Timecode::new(1, 2, 3, 4, FrameRate::Fps25).expect("should succeed in test");
 //! state.update(tc, TimecodeSource::Ltc);
 //!

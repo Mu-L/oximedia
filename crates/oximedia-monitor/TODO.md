@@ -15,18 +15,18 @@
 - [x] Add metric batching in MetricsCollector to reduce SQLite write frequency under high load
 - [x] Implement alert deduplication in alerting_pipeline to suppress repeated firings within a cooldown window
 - [x] Add exponential backoff to webhook/email alert delivery failures in AlertManager
-- [ ] Extend anomaly detection with seasonal decomposition (detect hourly/daily patterns in encoding throughput)
+- [x] Extend anomaly detection with seasonal decomposition (detect hourly/daily patterns in encoding throughput) (verified 2026-05-16; src/seasonal_decomposition.rs:1387 lines, src/seasonal.rs)
 - [x] Add configurable metric aggregation granularity (1s, 10s, 1m, 5m) in metric_aggregation
-- [ ] Implement metric cardinality limits in metric_store to prevent unbounded label growth
+- [x] Implement metric cardinality limits in metric_store to prevent unbounded label growth (verified 2026-05-16; src/cardinality_limiter.rs:709 lines, src/cardinality.rs)
 
 ## New Features
-- [ ] Add OpenTelemetry (OTLP) export support alongside existing Prometheus format in metric_export
-- [ ] Implement distributed tracing with W3C Trace Context propagation (extend trace_span module)
-- [ ] Add StatsD ingestion endpoint to accept metrics from external processes
-- [ ] Implement metric recording/playback for debugging -- record live metrics, replay offline
-- [ ] Add GPU metrics collection for non-NVIDIA GPUs (Apple Metal via IOKit, AMD via sysfs on Linux)
-- [ ] Implement dashboard templating system with variable substitution in dashboard module
-- [ ] Add PagerDuty and OpsGenie integration to alerting channels
+- [x] Add OpenTelemetry (OTLP) export support alongside existing Prometheus format in metric_export (verified 2026-05-16; src/opentelemetry_export.rs:678 lines)
+- [ ] Implement distributed tracing with W3C Trace Context propagation (extend trace_span module) (verified-open 2026-05-16: no W3C Trace Context implementation found)
+- [x] Add StatsD ingestion endpoint to accept metrics from external processes (verified 2026-05-16; src/statsd_ingestion.rs:1195 lines, src/statsd_parser.rs)
+- [ ] Implement metric recording/playback for debugging -- record live metrics, replay offline (verified-open 2026-05-16: no metric_record/playback module found)
+- [ ] Add GPU metrics collection for non-NVIDIA GPUs (Apple Metal via IOKit, AMD via sysfs on Linux) (verified-open 2026-05-16: not yet implemented)
+- [x] Implement dashboard templating system with variable substitution in dashboard module (verified 2026-05-16; src/dashboard_template.rs:692 lines)
+- [x] Add PagerDuty and OpsGenie integration to alerting channels (verified 2026-05-16; src/pagerduty.rs:696 lines, src/opsgenie.rs:764 lines)
 
 ## Performance
 - [ ] Replace SQLite writes with batch INSERT using transactions (collect N samples, write once)

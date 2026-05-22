@@ -196,7 +196,9 @@ pub fn normalise_key_owned(key: &str) -> String {
 /// Returns [`MetadataError::MissingSeparator`] if `=` is absent, or
 /// [`MetadataError::EmptyKey`] if the key portion is empty.
 pub fn parse_metadata_arg(arg: &str) -> Result<(String, String), MetadataError> {
-    let sep = arg.find('=').ok_or_else(|| MetadataError::MissingSeparator(arg.to_string()))?;
+    let sep = arg
+        .find('=')
+        .ok_or_else(|| MetadataError::MissingSeparator(arg.to_string()))?;
     let raw_key = &arg[..sep];
     if raw_key.is_empty() {
         return Err(MetadataError::EmptyKey(arg.to_string()));
@@ -255,10 +257,7 @@ impl MetadataMap {
     }
 
     /// Build a [`MetadataMap`] from a slice of `KEY=VALUE` strings.
-    pub fn from_args(
-        args: &[String],
-        scope: MetadataScope,
-    ) -> Result<Self, MetadataError> {
+    pub fn from_args(args: &[String], scope: MetadataScope) -> Result<Self, MetadataError> {
         let inner = parse_metadata_args(args)?;
         Ok(Self { inner, scope })
     }
@@ -281,7 +280,9 @@ impl MetadataMap {
 
     /// Retrieve a tag by raw key (normalised before lookup).
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.inner.get(&normalise_key_owned(key)).map(|s| s.as_str())
+        self.inner
+            .get(&normalise_key_owned(key))
+            .map(|s| s.as_str())
     }
 
     /// Remove a tag. Returns the old value if present.
@@ -380,9 +381,7 @@ impl MetadataMap {
 /// - `-metadata TITLE=My Movie` — global scope
 /// - `-metadata:s:v:0 title=Chapter 1` — video stream 0
 /// - `-metadata:s:a:1 language=eng` — audio stream 1
-pub fn extract_metadata_from_args(
-    args: &[String],
-) -> Vec<(MetadataScope, String, String)> {
+pub fn extract_metadata_from_args(args: &[String]) -> Vec<(MetadataScope, String, String)> {
     let mut result = Vec::new();
     let mut it = args.iter().peekable();
 
@@ -396,8 +395,7 @@ pub fn extract_metadata_from_args(
             }
         } else if let Some(suffix) = arg.strip_prefix("-metadata:") {
             // Scoped metadata
-            let scope = MetadataScope::from_specifier(suffix)
-                .unwrap_or(MetadataScope::Global);
+            let scope = MetadataScope::from_specifier(suffix).unwrap_or(MetadataScope::Global);
             if let Some(val) = it.next() {
                 if let Ok((k, v)) = parse_metadata_arg(val) {
                     result.push((scope, k, v));
@@ -410,12 +408,10 @@ pub fn extract_metadata_from_args(
 }
 
 /// Build a [`MetadataMap`] from a raw `HashMap<String, String>` that came from
-/// an [`FfmpegArgs`] output specification's `.metadata` field.
+/// an `FfmpegArgs` output specification's `.metadata` field.
 ///
 /// Keys are normalised in the process.
-pub fn metadata_map_from_ffmpeg_output(
-    raw: &HashMap<String, String>,
-) -> MetadataMap {
+pub fn metadata_map_from_ffmpeg_output(raw: &HashMap<String, String>) -> MetadataMap {
     let inner: HashMap<String, String> = raw
         .iter()
         .map(|(k, v)| (normalise_key_owned(k), v.clone()))
@@ -571,10 +567,7 @@ mod tests {
 
     #[test]
     fn test_metadata_map_duplicate_key_last_wins() {
-        let args: Vec<String> = vec![
-            "title=First".into(),
-            "title=Second".into(),
-        ];
+        let args: Vec<String> = vec!["title=First".into(), "title=Second".into()];
         let map = MetadataMap::from_args(&args, MetadataScope::Global).expect("should succeed");
         assert_eq!(map.title(), Some("Second"), "last value should win");
     }
@@ -583,9 +576,18 @@ mod tests {
 
     #[test]
     fn test_metadata_scope_from_specifier_global() {
-        assert_eq!(MetadataScope::from_specifier("g"), Some(MetadataScope::Global));
-        assert_eq!(MetadataScope::from_specifier(""), Some(MetadataScope::Global));
-        assert_eq!(MetadataScope::from_specifier("global"), Some(MetadataScope::Global));
+        assert_eq!(
+            MetadataScope::from_specifier("g"),
+            Some(MetadataScope::Global)
+        );
+        assert_eq!(
+            MetadataScope::from_specifier(""),
+            Some(MetadataScope::Global)
+        );
+        assert_eq!(
+            MetadataScope::from_specifier("global"),
+            Some(MetadataScope::Global)
+        );
     }
 
     #[test]
@@ -629,9 +631,12 @@ mod tests {
     #[test]
     fn test_extract_metadata_from_args_global() {
         let args: Vec<String> = vec![
-            "-i".into(), "in.mp4".into(),
-            "-metadata".into(), "title=My Movie".into(),
-            "-metadata".into(), "artist=Director".into(),
+            "-i".into(),
+            "in.mp4".into(),
+            "-metadata".into(),
+            "title=My Movie".into(),
+            "-metadata".into(),
+            "artist=Director".into(),
             "out.mkv".into(),
         ];
         let extracted = extract_metadata_from_args(&args);
@@ -644,8 +649,10 @@ mod tests {
     #[test]
     fn test_extract_metadata_from_args_scoped() {
         let args: Vec<String> = vec![
-            "-i".into(), "in.mp4".into(),
-            "-metadata:s:a:0".into(), "language=eng".into(),
+            "-i".into(),
+            "in.mp4".into(),
+            "-metadata:s:a:0".into(),
+            "language=eng".into(),
             "out.mkv".into(),
         ];
         let extracted = extract_metadata_from_args(&args);
@@ -675,7 +682,11 @@ mod tests {
 
         let merged = merge_metadata(base, overlay);
         assert_eq!(merged.title(), Some("Override Title"), "overlay should win");
-        assert_eq!(merged.artist(), Some("Base Artist"), "base-only keys preserved");
+        assert_eq!(
+            merged.artist(),
+            Some("Base Artist"),
+            "base-only keys preserved"
+        );
         assert_eq!(merged.year(), Some("2026"), "overlay-only keys present");
     }
 
@@ -690,10 +701,7 @@ mod tests {
 
     #[test]
     fn test_metadata_map_iter() {
-        let args: Vec<String> = vec![
-            "title=T".into(),
-            "artist=A".into(),
-        ];
+        let args: Vec<String> = vec!["title=T".into(), "artist=A".into()];
         let map = MetadataMap::from_args(&args, MetadataScope::Global).expect("should succeed");
         let pairs: Vec<(&str, &str)> = map.iter().collect();
         assert_eq!(pairs.len(), 2);

@@ -282,15 +282,27 @@ impl PyDedupScanner {
 #[pyfunction]
 #[pyo3(signature = (paths, strategy="fast", threshold=0.90))]
 pub fn scan_duplicates(
+    py: Python<'_>,
     paths: Vec<String>,
     strategy: &str,
     threshold: f64,
 ) -> PyResult<PyDedupReport> {
-    let mut scanner = PyDedupScanner::new(strategy, threshold)?;
-    for path in &paths {
-        let _ = scanner.add_file(path);
+    if !(0.0..=1.0).contains(&threshold) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "Threshold must be between 0.0 and 1.0",
+        ));
     }
-    Ok(scanner.find_duplicates())
+    let strategy_owned = strategy.to_string();
+    // Release GIL for the I/O-bound file hashing across all paths
+    let result = py.detach(move || -> Result<PyDedupReport, String> {
+        let mut scanner =
+            PyDedupScanner::new(&strategy_owned, threshold).map_err(|e| e.to_string())?;
+        for path in &paths {
+            let _ = scanner.add_file(path);
+        }
+        Ok(scanner.find_duplicates())
+    });
+    result.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))
 }
 
 /// Compare two files and return their similarity score.

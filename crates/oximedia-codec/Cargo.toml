@@ -266,6 +266,7 @@ never_loop = "allow"
 [features]
 default = ["av1", "image-io", "ffv1", "jpegxl"]
 av1 = []
+alac = []
 vp9 = []
 vp8 = []
 theora = []
@@ -275,6 +276,12 @@ ffv1 = []
 jpegxl = []
 mjpeg = ["oximedia-image"]
 apv = []
+prores = []
+dnxhd = []
+jpeg2000 = []
+jpegxs = []
+jpegls = []
+mpeg2 = []
 image-io = ["png", "jpeg-decoder"]
 
 [dependencies]
@@ -290,8 +297,8 @@ oxiarc-deflate.workspace = true
 oximedia-image = { workspace = true, optional = true }
 
 # Image I/O support (patent-free codecs only)
-png = { version = "0.18", optional = true }
-jpeg-decoder = { version = "0.3", optional = true }
+png = { workspace = true, optional = true }
+jpeg-decoder = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

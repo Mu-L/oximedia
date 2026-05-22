@@ -222,19 +222,28 @@ impl TimeRange {
     /// Create a range starting at `from` with no upper bound.
     #[must_use]
     pub fn since(from: DateTime<Utc>) -> Self {
-        Self { from: Some(from), to: None }
+        Self {
+            from: Some(from),
+            to: None,
+        }
     }
 
     /// Create a range ending before `to` with no lower bound.
     #[must_use]
     pub fn before(to: DateTime<Utc>) -> Self {
-        Self { from: None, to: Some(to) }
+        Self {
+            from: None,
+            to: Some(to),
+        }
     }
 
     /// Create a bounded range `[from, to)`.
     #[must_use]
     pub fn between(from: DateTime<Utc>, to: DateTime<Utc>) -> Self {
-        Self { from: Some(from), to: Some(to) }
+        Self {
+            from: Some(from),
+            to: Some(to),
+        }
     }
 
     /// Returns `true` if `ts` falls within this range.
@@ -320,11 +329,7 @@ impl JobEventLog {
     }
 
     /// Record that a worker was assigned to the job.
-    pub fn record_worker_assigned(
-        &mut self,
-        job_id: Uuid,
-        worker_id: impl Into<String>,
-    ) -> usize {
+    pub fn record_worker_assigned(&mut self, job_id: Uuid, worker_id: impl Into<String>) -> usize {
         self.record(
             job_id,
             EventActor::System,
@@ -657,9 +662,6 @@ mod tests {
         );
         let events = log.events_for(job_id);
         assert_eq!(events[0].kind.category(), "priority");
-        assert_eq!(
-            events[0].message.as_deref(),
-            Some("SLA breach risk")
-        );
+        assert_eq!(events[0].message.as_deref(), Some("SLA breach risk"));
     }
 }

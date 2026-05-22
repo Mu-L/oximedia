@@ -1,6 +1,6 @@
 # oximedia-playlist
 
-**Status: [Stable]** | Version: 0.1.6 | Tests: 534 | Updated: 2026-04-26
+**Status: [Stable]** | Version: 0.1.7 | Tests: 534 | Updated: 2026-05-21
 
 Broadcast playlist and scheduling system for OxiMedia. Provides comprehensive broadcast automation including frame-accurate timing, scheduling, secondary events, live integration, failover, SCTE-35 markers, and EPG generation.
 
@@ -38,7 +38,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-playlist = "0.1.6"
+oximedia-playlist = "0.1.7"
 ```
 
 ```rust

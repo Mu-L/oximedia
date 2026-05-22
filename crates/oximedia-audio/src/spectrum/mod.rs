@@ -117,7 +117,7 @@ pub use features::{
     BandAnalyzer, BandEnergy, DynamicRangeMeter, FeatureExtractor, FrequencyBand, Harmonic,
     SpectralFeatures, TimeDomainFeatures,
 };
-pub use fft::{FftProcessor, MelScale, OverlapAdd, WindowFunction};
+pub use fft::{compute_log_mel_spectrogram, FftProcessor, MelScale, OverlapAdd, WindowFunction};
 pub use spectrogram::{
     ColorMap, RealtimeSpectrogram, SpectrogramConfig, SpectrogramGenerator, SpectrogramImage,
 };

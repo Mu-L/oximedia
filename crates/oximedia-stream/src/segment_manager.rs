@@ -730,4 +730,88 @@ mod tests {
         let depth = mgr.auto_adjust_prefetch(10_000.0, 2_000.0, 30.0, &cfg);
         assert_eq!(mgr.prefetch_count, depth);
     }
+
+    // ── Segment continuity tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_segment_continuity_across_playlist_updates() {
+        let mut mgr = SegmentManager::new(20, 3);
+        // Round 1: create 5 segments and mark them available
+        let ids: Vec<String> = (0u64..5)
+            .map(|i| {
+                let id = mgr.create_segment(i * 3000, 3000, 1024, "720p");
+                mgr.mark_downloading(&id);
+                id
+            })
+            .collect();
+        for id in &ids {
+            mgr.mark_available(id, 5000.0);
+        }
+        // Assert round 1 sequence numbers are 0..=4 in order
+        let seqs: Vec<u64> = mgr
+            .available_segments()
+            .iter()
+            .map(|s| s.sequence_number)
+            .collect();
+        assert_eq!(seqs, vec![0, 1, 2, 3, 4]);
+
+        // Round 2: create 5 more segments and mark them available
+        let ids2: Vec<String> = (0u64..5)
+            .map(|i| {
+                let id = mgr.create_segment(15000 + i * 3000, 3000, 1024, "720p");
+                mgr.mark_downloading(&id);
+                id
+            })
+            .collect();
+        for id in &ids2 {
+            mgr.mark_available(id, 5000.0);
+        }
+        // Combined available list must be strictly monotonically increasing
+        let all_seqs: Vec<u64> = mgr
+            .available_segments()
+            .iter()
+            .map(|s| s.sequence_number)
+            .collect();
+        assert!(
+            all_seqs.windows(2).all(|w| w[0] < w[1]),
+            "sequence numbers must be strictly monotonic: {:?}",
+            all_seqs
+        );
+        assert_eq!(all_seqs.first().copied(), Some(0));
+        assert_eq!(all_seqs.last().copied(), Some(9));
+    }
+
+    #[test]
+    fn test_segment_continuity_after_eviction() {
+        let mut mgr = SegmentManager::new(20, 3);
+        // Create and mark 5 segments available
+        for i in 0u64..5 {
+            let id = mgr.create_segment(i * 3000, 3000, 1024, "720p");
+            mgr.mark_downloading(&id);
+            mgr.mark_available(&id, 5000.0);
+        }
+        // Evict segments behind playhead sequence 3 (evict_behind=3 so only
+        // segments with seq < 3-3=0 are evicted; raise playhead to 6 to
+        // actually evict some)
+        mgr.evict_old(6);
+        // Create 5 more segments and mark available
+        for i in 0u64..5 {
+            let id = mgr.create_segment(15000 + i * 3000, 3000, 1024, "720p");
+            mgr.mark_downloading(&id);
+            mgr.mark_available(&id, 5000.0);
+        }
+        // Remaining available segments must still have strictly monotonic
+        // sequence numbers (no wrap-around or gaps introduced by eviction)
+        let seqs: Vec<u64> = mgr
+            .available_segments()
+            .iter()
+            .map(|s| s.sequence_number)
+            .collect();
+        assert!(
+            seqs.windows(2).all(|w| w[0] < w[1]),
+            "monotonic after eviction: {:?}",
+            seqs
+        );
+        assert!(!seqs.is_empty());
+    }
 }

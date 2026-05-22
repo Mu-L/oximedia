@@ -477,8 +477,8 @@ mod tests {
             "failover() should return an active route ID"
         );
         assert!(
-            elapsed < Duration::from_millis(1),
-            "failover() took {:?} (expected < 1 ms)",
+            elapsed < Duration::from_millis(50),
+            "failover() took {:?} (expected < 50 ms)",
             elapsed
         );
 

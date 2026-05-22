@@ -50,6 +50,18 @@ oxiarc-deflate = { workspace = true }
 crossbeam = "0.8"
 flume = "0.12"
 
+# Scatter/gather I/O — libc only used on Linux (cfg-gated in source)
+libc = { workspace = true }
+
+# QUIC transport (optional, feature-gated)
+# Note: quinn 0.11 requires ring or aws-lc-rs for crypto (C dependencies).
+# Per Pure Rust policy, these are acceptable only inside feature-gated code.
+# The quic-quinn feature enables this — default features remain 100% pure Rust.
+quinn = { workspace = true, features = ["rustls-ring"], optional = true }
+rcgen = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile.workspace = true
@@ -58,3 +70,5 @@ criterion = { workspace = true }
 [features]
 default = []
 hw-accel = []
+# Enable real QUIC transport via quinn (pure Rust, requires rustls-rustcrypto)
+quic-quinn = ["dep:quinn", "dep:rcgen", "dep:rustls", "dep:rustls-pemfile"]

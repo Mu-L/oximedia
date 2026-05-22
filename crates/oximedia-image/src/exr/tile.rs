@@ -4,7 +4,10 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_wrap)]
 
-use super::compress::{decompress_rle, decompress_zip};
+use super::compress::{
+    decompress_b44, decompress_b44a, decompress_dwaa, decompress_dwab, decompress_piz,
+    decompress_pxr24, decompress_rle, decompress_zip,
+};
 use super::types::{ExrCompression, ExrHeader};
 use crate::error::{ImageError, ImageResult};
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -78,16 +81,20 @@ pub(crate) fn read_tiled_data(
             let mut compressed = vec![0u8; pixel_data_size];
             file.read_exact(&mut compressed)?;
 
+            // Decompress the tile's pixel buffer. The compress.rs decompressors
+            // are block-size agnostic (DWAA/DWAB explicitly ignore the
+            // scanline/tile distinction), so the same dispatch used by the
+            // scanline path applies directly here.
             let tile_data = match header.compression {
                 ExrCompression::None => compressed,
                 ExrCompression::Rle => decompress_rle(&compressed)?,
                 ExrCompression::Zip | ExrCompression::Zips => decompress_zip(&compressed)?,
-                _ => {
-                    return Err(ImageError::unsupported(format!(
-                        "EXR tiled compression {:?} not yet implemented",
-                        header.compression
-                    )))
-                }
+                ExrCompression::Piz => decompress_piz(&compressed)?,
+                ExrCompression::Pxr24 => decompress_pxr24(&compressed)?,
+                ExrCompression::B44 => decompress_b44(&compressed)?,
+                ExrCompression::B44a => decompress_b44a(&compressed)?,
+                ExrCompression::Dwaa => decompress_dwaa(&compressed)?,
+                ExrCompression::Dwab => decompress_dwab(&compressed)?,
             };
 
             // Position of this tile in the full image

@@ -41,7 +41,7 @@ tower = "0.5"
 hyper = { workspace = true }
 
 # Service discovery
-hickory-resolver = "0.25"
+hickory-resolver = "0.26"
 
 # Time utilities
 chrono = { workspace = true }
@@ -49,11 +49,18 @@ chrono = { workspace = true }
 # Collections and utilities
 dashmap = { workspace = true }
 uuid = { workspace = true }
+reqwest = { workspace = true }
 
 # System information
 num_cpus = "1.17"
 hostname = "0.4"
 sys-info = "0.9"
+
+[features]
+## Enable S3/object-storage integration for distributed segment I/O.
+s3 = []
+## Enable Kubernetes HPA auto-scaling hooks.
+k8s = []
 
 [build-dependencies]
 tonic-build = "0.14"

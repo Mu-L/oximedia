@@ -66,6 +66,14 @@ pub fn probe_format(data: &[u8]) -> Result<ProbeResult, OxiError> {
         return Err(OxiError::UnknownFormat);
     }
 
+    // Check FLV: "FLV" + version byte = 1.
+    if data.len() >= 4 && &data[0..3] == b"FLV" && data[3] == 1 {
+        return Ok(ProbeResult {
+            format: ContainerFormat::Flv,
+            confidence: 0.99,
+        });
+    }
+
     // Check Matroska/WebM (EBML header)
     if data.starts_with(MATROSKA_MAGIC) {
         // WebM is detected by DocType, but for initial probe we return Matroska

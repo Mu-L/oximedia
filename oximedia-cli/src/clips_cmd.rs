@@ -762,10 +762,11 @@ mod tests {
 
     #[test]
     fn test_clip_record_serialization() {
+        let source_path = std::env::temp_dir().join("video.mov").display().to_string();
         let clip = ClipRecord {
             id: "clip-001".to_string(),
             name: "Take 1".to_string(),
-            source_path: "/tmp/video.mov".to_string(),
+            source_path,
             tc_in: Some("01:00:00:00".to_string()),
             tc_out: Some("01:00:30:00".to_string()),
             rating: 4,
@@ -784,12 +785,13 @@ mod tests {
 
     #[test]
     fn test_db_roundtrip() {
+        let source_path = std::env::temp_dir().join("a.mov").display().to_string();
         let db = ClipDb {
             version: 1,
             clips: vec![ClipRecord {
                 id: "c1".to_string(),
                 name: "Test".to_string(),
-                source_path: "/tmp/a.mov".to_string(),
+                source_path,
                 tc_in: None,
                 tc_out: None,
                 rating: 3,

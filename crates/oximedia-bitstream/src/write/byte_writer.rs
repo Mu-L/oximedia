@@ -79,7 +79,7 @@ pub trait ByteWrite {
     /// # Examples
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, ByteWriter, ByteWrite};
+    /// use oximedia_bitstream::{BigEndian, ByteWriter, ByteWrite};
     /// let mut writer = ByteWriter::endian(Vec::new(), BigEndian);
     /// writer.write(0b0000000011111111u16).unwrap();
     /// assert_eq!(writer.into_writer(), [0b00000000, 0b11111111]);
@@ -87,7 +87,7 @@ pub trait ByteWrite {
     ///
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{LittleEndian, ByteWriter, ByteWrite};
+    /// use oximedia_bitstream::{LittleEndian, ByteWriter, ByteWrite};
     /// let mut writer = ByteWriter::endian(Vec::new(), LittleEndian);
     /// writer.write(0b0000000011111111u16).unwrap();
     /// assert_eq!(writer.into_writer(), [0b11111111, 0b00000000]);
@@ -105,7 +105,7 @@ pub trait ByteWrite {
     /// # Examples
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, ByteWriter, ByteWrite, LittleEndian};
+    /// use oximedia_bitstream::{BigEndian, ByteWriter, ByteWrite, LittleEndian};
     /// let mut writer = ByteWriter::endian(Vec::new(), BigEndian);
     /// writer.write_as::<LittleEndian, u16>(0b0000000011111111).unwrap();
     /// assert_eq!(writer.into_writer(), [0b11111111, 0b00000000]);
@@ -113,7 +113,7 @@ pub trait ByteWrite {
     ///
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, ByteWriter, ByteWrite, LittleEndian};
+    /// use oximedia_bitstream::{BigEndian, ByteWriter, ByteWrite, LittleEndian};
     /// let mut writer = ByteWriter::endian(Vec::new(), LittleEndian);
     /// writer.write_as::<BigEndian, u16>(0b0000000011111111).unwrap();
     /// assert_eq!(writer.into_writer(), [0b00000000, 0b11111111]);

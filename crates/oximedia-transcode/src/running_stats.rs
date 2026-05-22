@@ -426,7 +426,7 @@ impl RollingWindow {
 
     /// Returns the population variance of the current window.
     ///
-    /// Uses the computational formula: σ² = E[X²] − (E[X])².
+    /// Uses the computational formula: `σ² = E[X²] − (E[X])²`.
     #[must_use]
     pub fn variance(&self) -> f64 {
         let n = self.buffer.len() as f64;
@@ -448,10 +448,7 @@ impl RollingWindow {
     /// Returns the minimum value in the current window, or `f64::INFINITY` if empty.
     #[must_use]
     pub fn min(&self) -> f64 {
-        self.buffer
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min)
+        self.buffer.iter().copied().fold(f64::INFINITY, f64::min)
     }
 
     /// Returns the maximum value in the current window, or `f64::NEG_INFINITY` if empty.
@@ -534,7 +531,8 @@ impl PercentileEstimator {
             self.bootstrap.push(x);
             if self.bootstrap.len() == 5 {
                 // Sort and initialise markers.
-                self.bootstrap.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                self.bootstrap
+                    .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 for i in 0..5 {
                     self.q[i] = self.bootstrap[i];
                 }
@@ -603,8 +601,7 @@ impl PercentileEstimator {
         let nm = self.n[i - 1] as f64;
         let np = self.n[i + 1] as f64;
         qi + d / (np - nm)
-            * ((ni - nm + d) * (qp - qi) / (np - ni)
-                + (np - ni - d) * (qi - qm) / (ni - nm))
+            * ((ni - nm + d) * (qp - qi) / (np - ni) + (np - ni - d) * (qi - qm) / (ni - nm))
     }
 
     /// Linear interpolation fallback.
@@ -993,10 +990,7 @@ mod tests {
         }
         let estimated = est.estimate().expect("should have estimate");
         // Allow ±10 tolerance for small samples.
-        assert!(
-            (estimated - 94.05).abs() < 15.0,
-            "p95 estimate {estimated}"
-        );
+        assert!((estimated - 94.05).abs() < 15.0, "p95 estimate {estimated}");
     }
 
     // ── BitrateRunningAnalyzer ────────────────────────────────────────────────

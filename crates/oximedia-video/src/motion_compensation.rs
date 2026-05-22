@@ -798,6 +798,60 @@ pub fn interpolate_bilinear(
     top * (1.0 - y_frac) + bot * y_frac
 }
 
+/// Bicubic (Catmull-Rom) interpolation at a fractional position in a luma plane.
+///
+/// `x_frac` and `y_frac` are in [0.0, 1.0) representing the fractional
+/// offset from the integer pixel at `(ix, iy)`.  Uses a 4 × 4 neighbourhood
+/// with the Catmull-Rom kernel:
+///
+/// ```text
+/// w(t) = 1.5|t|³ − 2.5|t|² + 1          for |t| ≤ 1
+/// w(t) = −0.5|t|³ + 2.5|t|² − 4|t| + 2  for 1 < |t| ≤ 2
+/// w(t) = 0                                otherwise
+/// ```
+pub fn interpolate_bicubic(
+    plane: &[u8],
+    width: u32,
+    height: u32,
+    ix: i32,
+    iy: i32,
+    x_frac: f64,
+    y_frac: f64,
+) -> f64 {
+    let w = width as i32;
+    let h = height as i32;
+    let mut result = 0.0f64;
+    for ky in -1i32..=2 {
+        let wy = bicubic_weight(y_frac - ky as f64);
+        if wy.abs() < 1e-10 {
+            continue;
+        }
+        for kx in -1i32..=2 {
+            let wx = bicubic_weight(x_frac - kx as f64);
+            if wx.abs() < 1e-10 {
+                continue;
+            }
+            let px = (ix + kx).clamp(0, w - 1) as usize;
+            let py = (iy + ky).clamp(0, h - 1) as usize;
+            let pix = plane.get(py * width as usize + px).copied().unwrap_or(0) as f64;
+            result += wx * wy * pix;
+        }
+    }
+    result.clamp(0.0, 255.0)
+}
+
+/// Catmull-Rom basis weight for bicubic interpolation.
+fn bicubic_weight(t: f64) -> f64 {
+    let t = t.abs();
+    if t <= 1.0 {
+        1.5 * t * t * t - 2.5 * t * t + 1.0
+    } else if t <= 2.0 {
+        -0.5 * t * t * t + 2.5 * t * t - 4.0 * t + 2.0
+    } else {
+        0.0
+    }
+}
+
 /// 6-tap filter interpolation at half-pel positions (H.264-style).
 ///
 /// Operates on a single row or column of the plane. The filter taps are:

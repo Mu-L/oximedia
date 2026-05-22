@@ -11,26 +11,26 @@
 
 ## Enhancements
 - [x] Add HTML tag stripping and formatting preservation in `parser::srt` for complex SRT files with `<b>`, `<i>`, `<font color>` tags
-- [ ] Extend `parser::webvtt` to support region definitions and vertical text cue settings
-- [ ] Improve `parser::ssa` to handle all ASS override tags including `\clip`, `\iclip`, `\org`, `\fad`, `\move`
-- [ ] Add fallback font chain support in `font::Font` for missing glyphs (CJK, Arabic, Devanagari)
-- [ ] Extend `burn_in` to support soft-shadow rendering with configurable blur radius
+- [x] Extend `parser::webvtt` to support region definitions and vertical text cue settings (verified 2026-05-16; src/parser/webvtt.rs:60 VttRegion struct, vertical text cue settings:94)
+- [ ] Improve `parser::ssa` to handle all ASS override tags including `\clip`, `\iclip`, `\org`, `\fad`, `\move` (verified-open 2026-05-16: not yet fully implemented)
+- [ ] Add fallback font chain support in `font::Font` for missing glyphs (CJK, Arabic, Devanagari) (verified-open 2026-05-16: not yet implemented)
+- [ ] Extend `burn_in` to support soft-shadow rendering with configurable blur radius (verified-open 2026-05-16: not yet implemented)
 - [x] Improve `reading_speed` module to account for word complexity (not just character count per second)
 - [x] Add `timing_adjuster` support for non-linear time remapping (speed ramp, variable frame rate)
-- [ ] Extend `subtitle_validator` to check for WCAG 2.1 AA contrast ratio compliance
+- [x] Extend `subtitle_validator` to check for WCAG 2.1 AA contrast ratio compliance (verified 2026-05-16; src/wcag_validator.rs:71 WcagValidator, WcagLevel:50)
 
 ## New Features
-- [ ] Implement `parser::eia608_realtime` module for live CEA-608 caption decoding from a byte stream
-- [ ] Add `karaoke_engine` module implementing full ASS karaoke timing with syllable-level highlighting
-- [ ] Implement `teletext` parser module for DVB Teletext subtitle extraction (ETS 300 706)
-- [ ] Add `subtitle_alignment` module for automatic timing alignment between two subtitle tracks (e.g., sync fansubs to official audio)
+- [x] Implement `parser::eia608_realtime` module for live CEA-608 caption decoding from a byte stream (verified 2026-05-16; src/eia608_realtime.rs:441 lines, src/parser/eia608_realtime.rs)
+- [x] Add `karaoke_engine` module implementing full ASS karaoke timing with syllable-level highlighting (verified 2026-05-16; src/karaoke_engine.rs:513 lines)
+- [x] Implement `teletext` parser module for DVB Teletext subtitle extraction (ETS 300 706) (verified 2026-05-16; src/teletext.rs:601 lines, src/teletext_subtitle.rs)
+- [x] Add `subtitle_alignment` module for automatic timing alignment between two subtitle tracks (e.g., sync fansubs to official audio) (verified 2026-05-16; src/subtitle_alignment.rs:598 lines)
 - [x] Implement `forced_subtitle` detection and flagging for narrative foreign-language subtitles
-- [ ] Add `sign_language` module for sign language overlay region management and picture-in-picture positioning
-- [ ] Implement `subtitle_ocr` module for extracting text from bitmap-based subtitle formats (PGS, VobSub) using pattern matching
-- [ ] Add `live_caption` module for real-time caption display with roll-up and paint-on modes
+- [x] Add `sign_language` module for sign language overlay region management and picture-in-picture positioning (verified 2026-05-16; src/sign_language.rs:817 lines)
+- [x] Implement `subtitle_ocr` module for extracting text from bitmap-based subtitle formats (PGS, VobSub) using pattern matching (verified 2026-05-16; src/subtitle_ocr.rs:795 lines)
+- [x] Add `live_caption` module for real-time caption display with roll-up and paint-on modes (verified 2026-05-16; src/live_caption.rs:549 lines)
 
 ## Performance
-- [ ] Implement glyph atlas caching in `font::GlyphCache` to batch render frequently used characters into a texture atlas
+- [x] Implement glyph atlas caching in `font::GlyphCache` to batch render frequently used characters into a texture atlas (verified 2026-05-16; src/glyph_atlas.rs:32 GlyphAtlas config, AtlasConfig, pixel_slice_mut:173)
 - [x] Use binary search in `subtitle_index` for O(log n) timestamp lookup instead of linear scan
 - [ ] Add parallel subtitle parsing in `format_converter` for batch conversion of large subtitle collections
 - [ ] Cache parsed ASS style lookups in `parser::ssa` to avoid re-parsing style definitions per dialogue line

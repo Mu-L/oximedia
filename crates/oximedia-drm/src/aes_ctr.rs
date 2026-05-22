@@ -1,300 +1,27 @@
-//! Pure-Rust AES-128-CTR and AES-256-CTR encryption.
+//! Pure-Rust AES-128-CTR and AES-256-CTR encryption backed by the `aes` crate.
 //!
-//! Implements the full AES block cipher from scratch (no external crypto crates).
-//! Supports 128-bit and 256-bit key sizes in CTR mode.
+//! The [`aes`] crate automatically selects AES-NI hardware acceleration at
+//! runtime on x86/x86_64 processors that support it (via `cpuid` detection),
+//! falling back to a fully constant-time software implementation otherwise.
+//! No feature flags or compile-time configuration are needed — the runtime
+//! dispatch is entirely transparent to the caller.
+//!
+//! # Hardware AES-NI Detection
+//!
+//! On x86/x86_64, `aes 0.8+` uses `std::arch` and `is_x86_feature_detected!`
+//! internally to select the AES-NI path at first use.  The `hardware-aes`
+//! feature flag in this crate documents this capability; enabling it does not
+//! add any extra dependencies because the `aes` crate already performs the
+//! dispatch unconditionally.
+//!
+//! # CTR Mode Construction
+//!
+//! The counter block is 128 bits wide: the upper 64 bits are the nonce
+//! (passed by the caller), and the lower 64 bits are a big-endian block
+//! counter starting at `counter_start` and incrementing by one per block.
 
-// ---------------------------------------------------------------------------
-// AES S-box and inverse S-box (NIST FIPS 197)
-// ---------------------------------------------------------------------------
-
-/// AES forward S-box (256-byte lookup table).
-static SBOX: [u8; 256] = [
-    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
-    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
-    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
-    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
-    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
-    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
-    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
-    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
-    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
-    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
-    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
-    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
-    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
-    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
-    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
-    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
-];
-
-/// AES inverse S-box (256-byte lookup table).
-#[cfg(test)]
-static INV_SBOX: [u8; 256] = [
-    0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
-    0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
-    0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42, 0xfa, 0xc3, 0x4e,
-    0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2, 0x76, 0x5b, 0xa2, 0x49, 0x6d, 0x8b, 0xd1, 0x25,
-    0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xd4, 0xa4, 0x5c, 0xcc, 0x5d, 0x65, 0xb6, 0x92,
-    0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda, 0x5e, 0x15, 0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84,
-    0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a, 0xf7, 0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06,
-    0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02, 0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b,
-    0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc, 0xea, 0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73,
-    0x96, 0xac, 0x74, 0x22, 0xe7, 0xad, 0x35, 0x85, 0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e,
-    0x47, 0xf1, 0x1a, 0x71, 0x1d, 0x29, 0xc5, 0x89, 0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b,
-    0xfc, 0x56, 0x3e, 0x4b, 0xc6, 0xd2, 0x79, 0x20, 0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4,
-    0x1f, 0xdd, 0xa8, 0x33, 0x88, 0x07, 0xc7, 0x31, 0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f,
-    0x60, 0x51, 0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d, 0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef,
-    0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
-    0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d,
-];
-
-// ---------------------------------------------------------------------------
-// AES round constants (Rcon)
-// ---------------------------------------------------------------------------
-
-/// AES round constants for key expansion.
-static RCON: [u32; 10] = [
-    0x01000000, 0x02000000, 0x04000000, 0x08000000, 0x10000000, 0x20000000, 0x40000000, 0x80000000,
-    0x1b000000, 0x36000000,
-];
-
-// ---------------------------------------------------------------------------
-// GF(2^8) multiply helper
-// ---------------------------------------------------------------------------
-
-/// Multiply two elements in GF(2^8) with the AES irreducible polynomial.
-#[inline]
-fn gf_mul(a: u8, b: u8) -> u8 {
-    let mut result = 0u8;
-    let mut aa = a;
-    let mut bb = b;
-    for _ in 0..8 {
-        if bb & 1 != 0 {
-            result ^= aa;
-        }
-        let hi = aa & 0x80;
-        aa <<= 1;
-        if hi != 0 {
-            aa ^= 0x1b; // x^8 + x^4 + x^3 + x + 1
-        }
-        bb >>= 1;
-    }
-    result
-}
-
-// ---------------------------------------------------------------------------
-// AES state manipulation functions
-// ---------------------------------------------------------------------------
-
-/// Extract byte i from a u32 word (big-endian).
-#[inline]
-fn word_byte(w: u32, i: usize) -> u8 {
-    ((w >> (24 - 8 * i)) & 0xff) as u8
-}
-
-/// Build a u32 from 4 bytes (big-endian).
-#[inline]
-fn bytes_to_word(b0: u8, b1: u8, b2: u8, b3: u8) -> u32 {
-    ((b0 as u32) << 24) | ((b1 as u32) << 16) | ((b2 as u32) << 8) | (b3 as u32)
-}
-
-/// Apply SubBytes to the 4x4 state (stored as 4 u32 words, each word = one column).
-pub fn sub_bytes(state: &mut [u32; 4]) {
-    for w in state.iter_mut() {
-        let b0 = SBOX[word_byte(*w, 0) as usize];
-        let b1 = SBOX[word_byte(*w, 1) as usize];
-        let b2 = SBOX[word_byte(*w, 2) as usize];
-        let b3 = SBOX[word_byte(*w, 3) as usize];
-        *w = bytes_to_word(b0, b1, b2, b3);
-    }
-}
-
-/// Apply ShiftRows to the 4x4 state.
-///
-/// The state is stored column-major: `state[col]` = (row0, row1, row2, row3).
-/// ShiftRows shifts row i left by i bytes across columns.
-pub fn shift_rows(state: &mut [u32; 4]) {
-    // Extract the 4x4 byte grid (row-major)
-    let mut grid = [[0u8; 4]; 4];
-    for col in 0..4 {
-        for row in 0..4 {
-            grid[row][col] = word_byte(state[col], row);
-        }
-    }
-
-    // Shift row i by i positions to the left
-    for row in 1..4 {
-        grid[row].rotate_left(row);
-    }
-
-    // Write back column-major
-    for col in 0..4 {
-        state[col] = bytes_to_word(grid[0][col], grid[1][col], grid[2][col], grid[3][col]);
-    }
-}
-
-/// Apply MixColumns to the 4x4 state (one column at a time).
-pub fn mix_columns(state: &mut [u32; 4]) {
-    for w in state.iter_mut() {
-        let s0 = word_byte(*w, 0);
-        let s1 = word_byte(*w, 1);
-        let s2 = word_byte(*w, 2);
-        let s3 = word_byte(*w, 3);
-
-        let r0 = gf_mul(0x02, s0) ^ gf_mul(0x03, s1) ^ s2 ^ s3;
-        let r1 = s0 ^ gf_mul(0x02, s1) ^ gf_mul(0x03, s2) ^ s3;
-        let r2 = s0 ^ s1 ^ gf_mul(0x02, s2) ^ gf_mul(0x03, s3);
-        let r3 = gf_mul(0x03, s0) ^ s1 ^ s2 ^ gf_mul(0x02, s3);
-
-        *w = bytes_to_word(r0, r1, r2, r3);
-    }
-}
-
-/// XOR the round key into the state.
-pub fn add_round_key(state: &mut [u32; 4], round_key: &[u32; 4]) {
-    for (s, k) in state.iter_mut().zip(round_key.iter()) {
-        *s ^= k;
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Key expansion
-// ---------------------------------------------------------------------------
-
-/// SubWord: apply S-box to each byte of a 32-bit word.
-#[inline]
-fn sub_word(w: u32) -> u32 {
-    bytes_to_word(
-        SBOX[word_byte(w, 0) as usize],
-        SBOX[word_byte(w, 1) as usize],
-        SBOX[word_byte(w, 2) as usize],
-        SBOX[word_byte(w, 3) as usize],
-    )
-}
-
-/// RotWord: rotate a 32-bit word left by 8 bits.
-#[inline]
-fn rot_word(w: u32) -> u32 {
-    w.rotate_left(8)
-}
-
-/// Expand a 128-bit key into 11 round keys (each is [u32; 4]).
-pub fn key_expand_128(key: &[u8; 16]) -> Vec<[u32; 4]> {
-    let nk = 4usize; // words in key
-    let nr = 10usize; // rounds
-    let total_words = 4 * (nr + 1);
-
-    let mut w = Vec::with_capacity(total_words);
-
-    // Load key words
-    for i in 0..nk {
-        w.push(bytes_to_word(
-            key[4 * i],
-            key[4 * i + 1],
-            key[4 * i + 2],
-            key[4 * i + 3],
-        ));
-    }
-
-    for i in nk..total_words {
-        let mut temp = w[i - 1];
-        if i % nk == 0 {
-            temp = sub_word(rot_word(temp)) ^ RCON[i / nk - 1];
-        }
-        w.push(w[i - nk] ^ temp);
-    }
-
-    // Group into 4-word round keys
-    let mut round_keys = Vec::with_capacity(nr + 1);
-    for r in 0..=(nr) {
-        round_keys.push([w[4 * r], w[4 * r + 1], w[4 * r + 2], w[4 * r + 3]]);
-    }
-    round_keys
-}
-
-/// Expand a 256-bit key into 15 round keys (each is [u32; 4]).
-pub fn key_expand_256(key: &[u8; 32]) -> Vec<[u32; 4]> {
-    let nk = 8usize; // words in key
-    let nr = 14usize; // rounds
-    let total_words = 4 * (nr + 1);
-
-    let mut w = Vec::with_capacity(total_words);
-
-    // Load key words
-    for i in 0..nk {
-        w.push(bytes_to_word(
-            key[4 * i],
-            key[4 * i + 1],
-            key[4 * i + 2],
-            key[4 * i + 3],
-        ));
-    }
-
-    for i in nk..total_words {
-        let mut temp = w[i - 1];
-        if i % nk == 0 {
-            temp = sub_word(rot_word(temp)) ^ RCON[i / nk - 1];
-        } else if i % nk == 4 {
-            temp = sub_word(temp);
-        }
-        w.push(w[i - nk] ^ temp);
-    }
-
-    // Group into 4-word round keys
-    let mut round_keys = Vec::with_capacity(nr + 1);
-    for r in 0..=(nr) {
-        round_keys.push([w[4 * r], w[4 * r + 1], w[4 * r + 2], w[4 * r + 3]]);
-    }
-    round_keys
-}
-
-// ---------------------------------------------------------------------------
-// AES block encryption
-// ---------------------------------------------------------------------------
-
-/// Encrypt a single 16-byte AES block using the provided key schedule.
-///
-/// Supports 128-bit (11 round keys) and 256-bit (15 round keys) key sizes.
-pub fn encrypt_block(key_schedule: &[[u32; 4]], plaintext: &[u8; 16]) -> [u8; 16] {
-    let nr = key_schedule.len() - 1; // 10 for AES-128, 14 for AES-256
-
-    // Load plaintext into state (column-major)
-    let mut state = [0u32; 4];
-    for col in 0..4 {
-        state[col] = bytes_to_word(
-            plaintext[col * 4],
-            plaintext[col * 4 + 1],
-            plaintext[col * 4 + 2],
-            plaintext[col * 4 + 3],
-        );
-    }
-
-    // Initial round key addition
-    add_round_key(&mut state, &key_schedule[0]);
-
-    // Main rounds
-    for round in 1..nr {
-        sub_bytes(&mut state);
-        shift_rows(&mut state);
-        mix_columns(&mut state);
-        add_round_key(&mut state, &key_schedule[round]);
-    }
-
-    // Final round (no MixColumns)
-    sub_bytes(&mut state);
-    shift_rows(&mut state);
-    add_round_key(&mut state, &key_schedule[nr]);
-
-    // Convert state back to bytes
-    let mut output = [0u8; 16];
-    for col in 0..4 {
-        output[col * 4] = word_byte(state[col], 0);
-        output[col * 4 + 1] = word_byte(state[col], 1);
-        output[col * 4 + 2] = word_byte(state[col], 2);
-        output[col * 4 + 3] = word_byte(state[col], 3);
-    }
-    output
-}
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
+use aes::{Aes128, Aes256};
 
 // ---------------------------------------------------------------------------
 // CTR mode state
@@ -327,32 +54,76 @@ impl CtrState {
 }
 
 // ---------------------------------------------------------------------------
+// Internal cipher enum
+// ---------------------------------------------------------------------------
+
+/// Unified wrapper around AES-128 and AES-256 ciphers.
+#[derive(Clone)]
+enum AesCipher {
+    Aes128(Aes128),
+    Aes256(Aes256),
+}
+
+impl AesCipher {
+    /// Encrypt a single 16-byte block in-place.
+    fn encrypt_block_inplace(&self, block: &mut [u8; 16]) {
+        match self {
+            AesCipher::Aes128(c) => {
+                let mut b = aes::Block::from(*block);
+                c.encrypt_block(&mut b);
+                block.copy_from_slice(b.as_slice());
+            }
+            AesCipher::Aes256(c) => {
+                let mut b = aes::Block::from(*block);
+                c.encrypt_block(&mut b);
+                block.copy_from_slice(b.as_slice());
+            }
+        }
+    }
+}
+
+impl std::fmt::Debug for AesCipher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AesCipher::Aes128(_) => write!(f, "AesCipher::Aes128"),
+            AesCipher::Aes256(_) => write!(f, "AesCipher::Aes256"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AesCtr structure
 // ---------------------------------------------------------------------------
 
 /// AES-CTR cipher for 128-bit or 256-bit keys.
+///
+/// Backed by the [`aes`] crate which transparently uses AES-NI hardware
+/// acceleration when available.
 #[derive(Debug, Clone)]
 pub struct AesCtr {
     /// Key size in bits: 128 or 256.
     pub key_size_bits: usize,
-    /// Expanded key schedule: 11 round keys for AES-128, 15 for AES-256.
-    round_keys: Vec<[u32; 4]>,
+    cipher: AesCipher,
 }
 
 impl AesCtr {
     /// Create a new AES-128-CTR cipher from a 16-byte key.
     pub fn new_128(key: &[u8; 16]) -> Self {
+        let cipher =
+            Aes128::new_from_slice(key).expect("AES-128 key is exactly 16 bytes; infallible");
         Self {
             key_size_bits: 128,
-            round_keys: key_expand_128(key),
+            cipher: AesCipher::Aes128(cipher),
         }
     }
 
     /// Create a new AES-256-CTR cipher from a 32-byte key.
     pub fn new_256(key: &[u8; 32]) -> Self {
+        let cipher =
+            Aes256::new_from_slice(key).expect("AES-256 key is exactly 32 bytes; infallible");
         Self {
             key_size_bits: 256,
-            round_keys: key_expand_256(key),
+            cipher: AesCipher::Aes256(cipher),
         }
     }
 
@@ -373,8 +144,8 @@ impl AesCtr {
     fn apply_keystream(&self, data: &[u8], nonce: &[u8; 8], counter_start: u64) -> Vec<u8> {
         let mut output = Vec::with_capacity(data.len());
         let mut counter = counter_start;
-
         let mut offset = 0;
+
         while offset < data.len() {
             // Build counter block: nonce (8 bytes) || counter (8 bytes big-endian)
             let mut block = [0u8; 16];
@@ -382,12 +153,12 @@ impl AesCtr {
             block[8..16].copy_from_slice(&counter.to_be_bytes());
 
             // Encrypt counter block to produce keystream block
-            let keystream = encrypt_block(&self.round_keys, &block);
+            self.cipher.encrypt_block_inplace(&mut block);
 
             // XOR keystream with plaintext/ciphertext
             let chunk_len = (data.len() - offset).min(16);
             for i in 0..chunk_len {
-                output.push(data[offset + i] ^ keystream[i]);
+                output.push(data[offset + i] ^ block[i]);
             }
 
             offset += chunk_len;
@@ -399,6 +170,49 @@ impl AesCtr {
 }
 
 // ---------------------------------------------------------------------------
+// Public block-level helpers (used by aes_cbc.rs)
+// ---------------------------------------------------------------------------
+
+/// Encrypt a single 16-byte AES-128 block.
+///
+/// This is a thin adapter that lets `aes_cbc.rs` share the same
+/// AES-NI-accelerated code path without duplicating cipher construction.
+pub(crate) fn encrypt_block_128(cipher: &Aes128, plaintext: &[u8; 16]) -> [u8; 16] {
+    let mut block = aes::Block::from(*plaintext);
+    cipher.encrypt_block(&mut block);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(block.as_slice());
+    out
+}
+
+/// Decrypt a single 16-byte AES-128 block.
+pub(crate) fn decrypt_block_128(cipher: &aes::Aes128Dec, plaintext: &[u8; 16]) -> [u8; 16] {
+    let mut block = aes::Block::from(*plaintext);
+    cipher.decrypt_block(&mut block);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(block.as_slice());
+    out
+}
+
+/// Encrypt a single 16-byte AES-256 block.
+pub(crate) fn encrypt_block_256(cipher: &Aes256, plaintext: &[u8; 16]) -> [u8; 16] {
+    let mut block = aes::Block::from(*plaintext);
+    cipher.encrypt_block(&mut block);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(block.as_slice());
+    out
+}
+
+/// Decrypt a single 16-byte AES-256 block.
+pub(crate) fn decrypt_block_256(cipher: &aes::Aes256Dec, plaintext: &[u8; 16]) -> [u8; 16] {
+    let mut block = aes::Block::from(*plaintext);
+    cipher.decrypt_block(&mut block);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(block.as_slice());
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -407,7 +221,7 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
-    // NIST FIPS 197 Appendix B test vector
+    // NIST FIPS 197 Appendix B test vector (AES-128 ECB)
     // Key:        2b 7e 15 16 28 ae d2 a6 ab f7 15 88 09 cf 4f 3c
     // Plaintext:  32 43 f6 a8 88 5a 30 8d 31 31 98 a2 e0 37 07 34
     // Ciphertext: 39 25 84 1d 02 dc 09 fb dc 11 85 97 19 6a 0b 32
@@ -415,6 +229,7 @@ mod tests {
 
     #[test]
     fn test_aes128_nist_fips197_appendix_b() {
+        use aes::cipher::KeyInit;
         let key: [u8; 16] = [
             0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
             0x4f, 0x3c,
@@ -427,8 +242,9 @@ mod tests {
             0x39, 0x25, 0x84, 0x1d, 0x02, 0xdc, 0x09, 0xfb, 0xdc, 0x11, 0x85, 0x97, 0x19, 0x6a,
             0x0b, 0x32,
         ];
-        let schedule = key_expand_128(&key);
-        let ciphertext = encrypt_block(&schedule, &plaintext);
+        let cipher =
+            Aes128::new_from_slice(&key).expect("16-byte key is valid for AES-128; infallible");
+        let ciphertext = encrypt_block_128(&cipher, &plaintext);
         assert_eq!(
             ciphertext, expected,
             "NIST FIPS 197 Appendix B test vector failed"
@@ -436,12 +252,12 @@ mod tests {
     }
 
     // NIST AES-256 test vector (ECB mode, from FIPS 197 Appendix B / NIST AESAVS)
-    // Key:        00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
-    //             10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
+    // Key:        00 01 02 03 .. 1e 1f
     // Plaintext:  00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff
     // Ciphertext: 8e a2 b7 ca 51 67 45 bf ea fc 49 90 4b 49 60 89
     #[test]
     fn test_aes256_nist_vector() {
+        use aes::cipher::KeyInit;
         let key: [u8; 32] = [
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
             0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
@@ -455,8 +271,9 @@ mod tests {
             0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67, 0x45, 0xbf, 0xea, 0xfc, 0x49, 0x90, 0x4b, 0x49,
             0x60, 0x89,
         ];
-        let schedule = key_expand_256(&key);
-        let ciphertext = encrypt_block(&schedule, &plaintext);
+        let cipher =
+            Aes256::new_from_slice(&key).expect("32-byte key is valid for AES-256; infallible");
+        let ciphertext = encrypt_block_256(&cipher, &plaintext);
         assert_eq!(ciphertext, expected, "AES-256 NIST vector failed");
     }
 
@@ -588,20 +405,6 @@ mod tests {
     }
 
     #[test]
-    fn test_aes128_key_schedule_length() {
-        let key = [0u8; 16];
-        let schedule = key_expand_128(&key);
-        assert_eq!(schedule.len(), 11, "AES-128 should have 11 round keys");
-    }
-
-    #[test]
-    fn test_aes256_key_schedule_length() {
-        let key = [0u8; 32];
-        let schedule = key_expand_256(&key);
-        assert_eq!(schedule.len(), 15, "AES-256 should have 15 round keys");
-    }
-
-    #[test]
     fn test_encrypt_decrypt_symmetry_256() {
         let key = [0xdeu8; 32];
         let nonce = [0xadu8; 8];
@@ -616,15 +419,24 @@ mod tests {
         assert_ne!(encrypted, original.to_vec());
     }
 
+    /// Verifies that the AES-NI path (if present) and the software path both
+    /// produce the same output.  Since the `aes` crate dispatches transparently,
+    /// we just confirm a stable encrypt→decrypt identity using both key sizes.
     #[test]
-    fn test_inv_sbox_is_inverse_of_sbox() {
-        // Verify that INV_SBOX[SBOX[i]] == i for all i
-        for i in 0..=255usize {
-            assert_eq!(
-                INV_SBOX[SBOX[i] as usize], i as u8,
-                "INV_SBOX should be the inverse of SBOX at index {}",
-                i
-            );
-        }
+    fn test_aes_ctr_hardware_path_matches_software() {
+        let key128 = [0xC0u8; 16];
+        let key256 = [0xFFu8; 32];
+        let nonce = [0xAAu8; 8];
+        let data: Vec<u8> = (0..256).map(|i| i as u8).collect();
+
+        let c128 = AesCtr::new_128(&key128);
+        let encrypted = c128.encrypt(&data, &nonce, 0);
+        let decrypted = c128.decrypt(&encrypted, &nonce, 0);
+        assert_eq!(decrypted, data, "AES-128-CTR identity failed");
+
+        let c256 = AesCtr::new_256(&key256);
+        let encrypted = c256.encrypt(&data, &nonce, 0);
+        let decrypted = c256.decrypt(&encrypted, &nonce, 0);
+        assert_eq!(decrypted, data, "AES-256-CTR identity failed");
     }
 }

@@ -1388,4 +1388,313 @@ mod tests {
             ScheduledCommand::BandwidthReservation
         );
     }
+
+    // ── SpliceInfoSection encode→parse roundtrip tests ────────────────────────
+
+    /// Build a complete section binary from a SpliceInsert, using
+    /// encode_splice_insert for command bytes and encode_section_from_command
+    /// for the outer wrapper.
+    fn make_insert_section(
+        insert: &SpliceInsert,
+        tier: u16,
+        descriptors: &[SpliceDescriptor],
+    ) -> Vec<u8> {
+        let command_bytes = encode_splice_insert(insert);
+        let desc_bytes: Vec<u8> = descriptors.iter().flat_map(|d| d.encode()).collect();
+        encode_section_from_command(
+            0,
+            false,
+            0,
+            tier,
+            SpliceCommandType::SpliceInsert as u8,
+            &command_bytes,
+            &desc_bytes,
+        )
+    }
+
+    /// Build TimeSignal command bytes: 1 flag byte (0xFF = time_specified) + 5 PTS bytes.
+    fn make_time_signal_command_bytes(pts: u64) -> Vec<u8> {
+        let mut bytes = vec![0xFF_u8]; // time_specified_flag = 1
+        bytes.extend_from_slice(&encode_pts_time(pts));
+        bytes
+    }
+
+    #[test]
+    fn test_splice_insert_section_roundtrip() {
+        // Build a SpliceInsert for an out-of-network avail with PTS and break duration.
+        let insert = SpliceInsert {
+            splice_event_id: 0xABCD_1234,
+            out_of_network_indicator: true,
+            program_splice_flag: true,
+            duration_flag: true,
+            splice_immediate_flag: false,
+            pts_time: Some(0x1_0000_0001), // exercises the 33rd PTS bit
+            break_duration: Some(BreakDuration {
+                auto_return: true,
+                duration_90k: 27_000_000, // 5 minutes at 90 kHz
+            }),
+        };
+        let encoded = make_insert_section(&insert, 0xFFF, &[]);
+        let section = parse_splice_info(&encoded)
+            .expect("parse_splice_info should succeed for a valid SpliceInsert section");
+
+        assert_eq!(section.protocol_version, 0);
+        assert!(!section.encrypted_packet);
+        assert_eq!(section.tier, 0xFFF);
+        assert!(section.descriptors.is_empty());
+
+        match section.splice_command {
+            SpliceCommand::Insert(ref parsed_insert) => {
+                assert_eq!(
+                    parsed_insert.splice_event_id, insert.splice_event_id,
+                    "splice_event_id must round-trip"
+                );
+                assert_eq!(
+                    parsed_insert.out_of_network_indicator,
+                    insert.out_of_network_indicator
+                );
+                assert_eq!(
+                    parsed_insert.program_splice_flag,
+                    insert.program_splice_flag
+                );
+                assert_eq!(parsed_insert.duration_flag, insert.duration_flag);
+                assert_eq!(
+                    parsed_insert.splice_immediate_flag,
+                    insert.splice_immediate_flag
+                );
+                assert_eq!(
+                    parsed_insert.pts_time, insert.pts_time,
+                    "PTS time must round-trip, including 33rd bit"
+                );
+                let bd = parsed_insert
+                    .break_duration
+                    .as_ref()
+                    .expect("break_duration must be present after roundtrip");
+                let orig_bd = insert
+                    .break_duration
+                    .as_ref()
+                    .expect("original has break_duration");
+                assert_eq!(bd.auto_return, orig_bd.auto_return);
+                assert_eq!(bd.duration_90k, orig_bd.duration_90k);
+            }
+            other => panic!("expected SpliceCommand::Insert, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_time_signal_section_roundtrip() {
+        // Build a TimeSignal with a segmentation descriptor.
+        let pts: u64 = 900_000_000;
+        let segmentation = SpliceDescriptor::SegmentationDescriptor {
+            event_id: 0x0000_0042,
+            type_id: 0x10, // program start
+            upid_type: 0x09,
+            upid: vec![0xDE, 0xAD, 0xBE, 0xEF],
+            duration_90k: Some(54_000_000), // 10 minutes
+        };
+
+        let command_bytes = make_time_signal_command_bytes(pts);
+        let desc_bytes = segmentation.encode();
+        let encoded = encode_section_from_command(
+            0,
+            false,
+            0,
+            0xABC,
+            SpliceCommandType::TimeSignal as u8,
+            &command_bytes,
+            &desc_bytes,
+        );
+
+        let section = parse_splice_info(&encoded)
+            .expect("parse_splice_info should succeed for a valid TimeSignal section");
+
+        assert_eq!(section.tier, 0xABC);
+
+        // Verify the command type
+        let parsed_pts = match &section.splice_command {
+            SpliceCommand::Signal(ts) => ts.pts_time,
+            other => panic!("expected SpliceCommand::Signal, got {other:?}"),
+        };
+        assert_eq!(parsed_pts, Some(pts), "TimeSignal PTS must round-trip");
+
+        // Descriptors live on the section, not inside the TimeSignal struct
+        assert_eq!(
+            section.descriptors.len(),
+            1,
+            "segmentation descriptor must be preserved on section"
+        );
+        match &section.descriptors[0] {
+            SpliceDescriptor::SegmentationDescriptor {
+                event_id,
+                type_id,
+                upid_type,
+                upid,
+                duration_90k,
+            } => {
+                assert_eq!(*event_id, 0x0000_0042);
+                assert_eq!(*type_id, 0x10);
+                assert_eq!(*upid_type, 0x09);
+                assert_eq!(upid, &vec![0xDE, 0xAD, 0xBE, 0xEF]);
+                assert_eq!(*duration_90k, Some(54_000_000));
+            }
+            other => panic!("expected SegmentationDescriptor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_multi_descriptor_section_roundtrip() {
+        // Section with both AvailDescriptor and SegmentationDescriptor.
+        // Assert descriptor count and order are preserved after parse.
+        let avail = SpliceDescriptor::AvailDescriptor {
+            provider_avail_id: 0x1234_5678,
+        };
+        let seg = SpliceDescriptor::SegmentationDescriptor {
+            event_id: 0xFFFF_0001,
+            type_id: 0x11, // program end
+            upid_type: 0x01,
+            upid: vec![0xAA, 0xBB],
+            duration_90k: None,
+        };
+
+        let mut desc_bytes: Vec<u8> = avail.encode();
+        desc_bytes.extend_from_slice(&seg.encode());
+
+        let encoded = encode_section_from_command(
+            0,
+            false,
+            0,
+            0x100,
+            SpliceCommandType::SpliceNull as u8,
+            &[],
+            &desc_bytes,
+        );
+
+        let section = parse_splice_info(&encoded)
+            .expect("parse_splice_info should succeed for multi-descriptor section");
+
+        assert_eq!(
+            section.descriptors.len(),
+            2,
+            "both descriptors must survive roundtrip"
+        );
+        // Verify first descriptor is AvailDescriptor (order preserved)
+        assert!(
+            matches!(
+                section.descriptors[0],
+                SpliceDescriptor::AvailDescriptor {
+                    provider_avail_id: 0x1234_5678
+                }
+            ),
+            "first descriptor must be AvailDescriptor with correct id"
+        );
+        // Verify second descriptor is SegmentationDescriptor
+        match &section.descriptors[1] {
+            SpliceDescriptor::SegmentationDescriptor {
+                event_id,
+                type_id,
+                duration_90k,
+                ..
+            } => {
+                assert_eq!(*event_id, 0xFFFF_0001);
+                assert_eq!(*type_id, 0x11);
+                assert_eq!(*duration_90k, None);
+            }
+            other => panic!("expected SegmentationDescriptor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_section_re_encode_byte_identical() {
+        // Encode a SpliceInsert section, parse it, then re-encode using the
+        // same parameters. Since the encoder is deterministic (no HashMap, fixed
+        // CRC placeholder [0,0,0,0]), the bytes must be identical.
+        let insert = SpliceInsert {
+            splice_event_id: 0x0000_0001,
+            out_of_network_indicator: true,
+            program_splice_flag: true,
+            duration_flag: false,
+            splice_immediate_flag: false,
+            pts_time: Some(450_000_000),
+            break_duration: None,
+        };
+        let first_encode = make_insert_section(&insert, 0xFFF, &[]);
+
+        let section = parse_splice_info(&first_encode).expect("first parse must succeed");
+
+        // Re-encode from the parsed command
+        let re_encoded = match &section.splice_command {
+            SpliceCommand::Insert(parsed_insert) => {
+                make_insert_section(parsed_insert, section.tier, &section.descriptors)
+            }
+            other => panic!("expected Insert command, got {other:?}"),
+        };
+
+        assert_eq!(
+            first_encode, re_encoded,
+            "re-encoded bytes must be identical to the original encoding"
+        );
+    }
+
+    #[test]
+    fn test_truncated_section_returns_err() {
+        // Encode a valid SpliceInsert section (~33 bytes), truncate to half,
+        // then assert parse returns Err (not panics).
+        let insert = SpliceInsert {
+            splice_event_id: 0xDEAD_BEEF,
+            out_of_network_indicator: false,
+            program_splice_flag: true,
+            duration_flag: false,
+            splice_immediate_flag: false,
+            pts_time: Some(180_000_000),
+            break_duration: None,
+        };
+        let full_bytes = make_insert_section(&insert, 0xFFF, &[]);
+        assert!(
+            full_bytes.len() > 10,
+            "encoded section should be longer than 11 bytes"
+        );
+        let half_len = full_bytes.len() / 2;
+        let truncated = &full_bytes[..half_len];
+        let result = parse_splice_info(truncated);
+        assert!(
+            result.is_err(),
+            "parsing a truncated section must return Err, got Ok"
+        );
+    }
+
+    #[test]
+    fn test_section_with_zero_descriptors_roundtrip() {
+        // Minimal SpliceInsert section with empty descriptor loop.
+        // Exercises the command-with-payload + empty-descriptor-loop combination.
+        let insert = SpliceInsert {
+            splice_event_id: 0x0000_0007,
+            out_of_network_indicator: true,
+            program_splice_flag: true,
+            duration_flag: false,
+            splice_immediate_flag: true, // immediate — no PTS field
+            pts_time: None,
+            break_duration: None,
+        };
+        let encoded = make_insert_section(&insert, 0x000, &[]);
+        let section = parse_splice_info(&encoded)
+            .expect("parse_splice_info must succeed for zero-descriptor section");
+
+        assert_eq!(
+            section.descriptors.len(),
+            0,
+            "descriptor count must be 0 after roundtrip"
+        );
+        match section.splice_command {
+            SpliceCommand::Insert(ref parsed) => {
+                assert_eq!(parsed.splice_event_id, insert.splice_event_id);
+                assert_eq!(parsed.splice_immediate_flag, insert.splice_immediate_flag);
+                assert_eq!(
+                    parsed.out_of_network_indicator,
+                    insert.out_of_network_indicator
+                );
+                assert_eq!(parsed.pts_time, None, "no PTS for immediate splice");
+            }
+            other => panic!("expected Insert command, got {other:?}"),
+        }
+    }
 }

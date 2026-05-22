@@ -598,6 +598,68 @@ fn write_output_frame(
     }
 }
 
+/// Convert an IEEE 754 half-precision bit pattern (`u16`) to `f32`.
+///
+/// Handles ±zero, subnormals, ±infinity, and NaN correctly without any
+/// external dependencies.
+fn f16_to_f32(half: u16) -> f32 {
+    let sign = ((half >> 15) as u32) << 31;
+    let exp = ((half >> 10) & 0x1F) as u32;
+    let mant = (half & 0x3FF) as u32;
+    let bits = if exp == 0 {
+        if mant == 0 {
+            sign // ±zero
+        } else {
+            // Subnormal: normalize by shifting mantissa until the implicit bit appears.
+            let mut m = mant;
+            let mut e = 0u32;
+            while (m & 0x400) == 0 {
+                m <<= 1;
+                e += 1;
+            }
+            sign | ((127u32 - 14 - e + 1) << 23) | ((m & 0x3FF) << 13)
+        }
+    } else if exp == 31 {
+        sign | (0xFF << 23) | (mant << 13) // ±infinity or NaN
+    } else {
+        sign | ((exp + 112) << 23) | (mant << 13)
+    };
+    f32::from_bits(bits)
+}
+
+/// Convert an `f32` to an IEEE 754 half-precision bit pattern (`u16`).
+///
+/// Overflows to ±infinity; underflows to zero or a subnormal half.
+fn f32_to_f16(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = (bits >> 31) as u16;
+    let exp = ((bits >> 23) & 0xFF) as i32;
+    let mant = bits & 0x7F_FFFF;
+
+    if exp == 255 {
+        // ±infinity or NaN
+        return (sign << 15) | 0x7C00 | if mant != 0 { 0x0200 } else { 0 };
+    }
+
+    let new_exp = exp - 127 + 15;
+    if new_exp >= 31 {
+        // Overflow → ±infinity
+        return (sign << 15) | 0x7C00;
+    }
+    if new_exp <= 0 {
+        if new_exp < -10 {
+            // Too small even for a subnormal half → zero
+            return sign << 15;
+        }
+        // Subnormal half
+        let m = (0x0080_0000 | mant) >> (1 - new_exp);
+        return (sign << 15) | ((m + 0x1000) >> 13) as u16;
+    }
+
+    let half_mant = ((mant + 0x1000) >> 13) as u16;
+    (sign << 15) | ((new_exp as u16) << 10) | (half_mant & 0x3FF)
+}
+
 fn convert_bit_depth(
     frame: oximedia_image::ImageFrame,
     target: oximedia_image::PixelType,
@@ -671,13 +733,355 @@ fn convert_bit_depth(
         // Same-to-same: identity copy (frame.pixel_type == target was checked above,
         // but this arm keeps the match exhaustive for any new variants).
         (src, dst) if src == dst => pixels.to_vec(),
-        _ => {
-            return Err(anyhow::anyhow!(
-                "Bit depth conversion from {}-bit to {}-bit is not yet implemented",
-                frame.pixel_type.bit_depth(),
-                target.bit_depth()
-            ));
+
+        // ── U10 conversions (stored as little-endian u16, values 0–1023) ──
+        (PixelType::U10, PixelType::U8) => {
+            let mut out = Vec::with_capacity(pixels.len() / 2);
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                out.push(((v as u32 * 255 + 511) / 1023) as u8);
+            }
+            out
         }
+        (PixelType::U10, PixelType::U16) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let expanded: u16 = (v << 6) | (v >> 4);
+                out.extend_from_slice(&expanded.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U10, PixelType::F32) => {
+            let mut out = Vec::with_capacity(pixels.len() * 2);
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f: f32 = v as f32 / 1023.0;
+                out.extend_from_slice(&f.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U8, PixelType::U10) => {
+            let mut out = Vec::with_capacity(pixels.len() * 2);
+            for &p in pixels {
+                let v: u16 = ((p as u32 * 1023 + 127) / 255) as u16;
+                out.extend_from_slice(&v.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U16, PixelType::U10) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let t: u16 = v >> 6;
+                out.extend_from_slice(&t.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::F32, PixelType::U10) => {
+            let mut out = Vec::with_capacity(pixels.len() / 2);
+            for chunk in pixels.chunks_exact(4) {
+                let v = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let q: u16 = (v.clamp(0.0, 1.0) * 1023.0 + 0.5) as u16;
+                out.extend_from_slice(&q.to_ne_bytes());
+            }
+            out
+        }
+
+        // ── U12 conversions (stored as little-endian u16, values 0–4095) ──
+        (PixelType::U12, PixelType::U8) => {
+            let mut out = Vec::with_capacity(pixels.len() / 2);
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                out.push(((v as u32 * 255 + 2047) / 4095) as u8);
+            }
+            out
+        }
+        (PixelType::U12, PixelType::U16) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let expanded: u16 = (v << 4) | (v >> 8);
+                out.extend_from_slice(&expanded.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U12, PixelType::F32) => {
+            let mut out = Vec::with_capacity(pixels.len() * 2);
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f: f32 = v as f32 / 4095.0;
+                out.extend_from_slice(&f.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U8, PixelType::U12) => {
+            let mut out = Vec::with_capacity(pixels.len() * 2);
+            for &p in pixels {
+                let v: u16 = ((p as u32 * 4095 + 127) / 255) as u16;
+                out.extend_from_slice(&v.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U16, PixelType::U12) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let t: u16 = v >> 4;
+                out.extend_from_slice(&t.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::F32, PixelType::U12) => {
+            let mut out = Vec::with_capacity(pixels.len() / 2);
+            for chunk in pixels.chunks_exact(4) {
+                let v = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let q: u16 = (v.clamp(0.0, 1.0) * 4095.0 + 0.5) as u16;
+                out.extend_from_slice(&q.to_ne_bytes());
+            }
+            out
+        }
+
+        // ── U32 conversions (32-bit integer per component) ─────────────────
+        (PixelType::U32, PixelType::U8) => {
+            let mut out = Vec::with_capacity(pixels.len() / 4);
+            for chunk in pixels.chunks_exact(4) {
+                let v = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                out.push((v >> 24) as u8);
+            }
+            out
+        }
+        (PixelType::U32, PixelType::U16) => {
+            let mut out = Vec::with_capacity(pixels.len() / 2);
+            for chunk in pixels.chunks_exact(4) {
+                let v = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let t: u16 = (v >> 16) as u16;
+                out.extend_from_slice(&t.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U32, PixelType::F32) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(4) {
+                let v = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let f = (v as f64 / u32::MAX as f64) as f32;
+                out.extend_from_slice(&f.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U8, PixelType::U32) => {
+            let mut out = Vec::with_capacity(pixels.len() * 4);
+            for &p in pixels {
+                // Replicate the byte across all four bytes: 0x01010101 * p
+                let v: u32 = p as u32 * 0x0101_0101;
+                out.extend_from_slice(&v.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U16, PixelType::U32) => {
+            let mut out = Vec::with_capacity(pixels.len() * 2);
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                // Replicate the u16 into the high and low words.
+                let t: u32 = ((v as u32) << 16) | v as u32;
+                out.extend_from_slice(&t.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::F32, PixelType::U32) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(4) {
+                let v = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let q: u32 = (v.clamp(0.0, 1.0) as f64 * u32::MAX as f64) as u32;
+                out.extend_from_slice(&q.to_ne_bytes());
+            }
+            out
+        }
+
+        // ── F16 conversions (IEEE 754 half-precision stored as u16 bit pattern) ─
+        (PixelType::F16, PixelType::F32) => {
+            let mut out = Vec::with_capacity(pixels.len() * 2);
+            for chunk in pixels.chunks_exact(2) {
+                let half = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f = f16_to_f32(half);
+                out.extend_from_slice(&f.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::F32, PixelType::F16) => {
+            let mut out = Vec::with_capacity(pixels.len() / 2);
+            for chunk in pixels.chunks_exact(4) {
+                let v = f32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let half = f32_to_f16(v);
+                out.extend_from_slice(&half.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::F16, PixelType::U8) => {
+            let mut out = Vec::with_capacity(pixels.len() / 2);
+            for chunk in pixels.chunks_exact(2) {
+                let half = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f = f16_to_f32(half);
+                out.push((f.clamp(0.0, 1.0) * 255.0) as u8);
+            }
+            out
+        }
+        (PixelType::F16, PixelType::U16) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(2) {
+                let half = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f = f16_to_f32(half);
+                let q: u16 = (f.clamp(0.0, 1.0) * 65535.0) as u16;
+                out.extend_from_slice(&q.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U8, PixelType::F16) => {
+            let mut out = Vec::with_capacity(pixels.len() * 2);
+            for &p in pixels {
+                let f = p as f32 / 255.0;
+                let half = f32_to_f16(f);
+                out.extend_from_slice(&half.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U16, PixelType::F16) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f = v as f32 / 65535.0;
+                let half = f32_to_f16(f);
+                out.extend_from_slice(&half.to_ne_bytes());
+            }
+            out
+        }
+
+        // ── Cross-pairs: U10 ↔ U12, U10 ↔ U32, U12 ↔ U32, F16 ↔ U10,
+        //    F16 ↔ U12, F16 ↔ U32 — convert via normalized f32 ─────────────
+        (PixelType::U10, PixelType::U12) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f = v as f32 / 1023.0;
+                let q: u16 = (f.clamp(0.0, 1.0) * 4095.0 + 0.5) as u16;
+                out.extend_from_slice(&q.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U12, PixelType::U10) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f = v as f32 / 4095.0;
+                let q: u16 = (f.clamp(0.0, 1.0) * 1023.0 + 0.5) as u16;
+                out.extend_from_slice(&q.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U10, PixelType::U32) => {
+            let mut out = Vec::with_capacity(pixels.len() * 2);
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f = v as f64 / 1023.0;
+                let q: u32 = (f.clamp(0.0, 1.0) * u32::MAX as f64) as u32;
+                out.extend_from_slice(&q.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U32, PixelType::U10) => {
+            let mut out = Vec::with_capacity(pixels.len() / 2);
+            for chunk in pixels.chunks_exact(4) {
+                let v = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let f = v as f64 / u32::MAX as f64;
+                let q: u16 = (f.clamp(0.0, 1.0) * 1023.0 + 0.5) as u16;
+                out.extend_from_slice(&q.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U12, PixelType::U32) => {
+            let mut out = Vec::with_capacity(pixels.len() * 2);
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f = v as f64 / 4095.0;
+                let q: u32 = (f.clamp(0.0, 1.0) * u32::MAX as f64) as u32;
+                out.extend_from_slice(&q.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U32, PixelType::U12) => {
+            let mut out = Vec::with_capacity(pixels.len() / 2);
+            for chunk in pixels.chunks_exact(4) {
+                let v = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let f = v as f64 / u32::MAX as f64;
+                let q: u16 = (f.clamp(0.0, 1.0) * 4095.0 + 0.5) as u16;
+                out.extend_from_slice(&q.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::F16, PixelType::U10) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(2) {
+                let half = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f = f16_to_f32(half);
+                let q: u16 = (f.clamp(0.0, 1.0) * 1023.0 + 0.5) as u16;
+                out.extend_from_slice(&q.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U10, PixelType::F16) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f = v as f32 / 1023.0;
+                let half = f32_to_f16(f);
+                out.extend_from_slice(&half.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::F16, PixelType::U12) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(2) {
+                let half = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f = f16_to_f32(half);
+                let q: u16 = (f.clamp(0.0, 1.0) * 4095.0 + 0.5) as u16;
+                out.extend_from_slice(&q.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U12, PixelType::F16) => {
+            let mut out = Vec::with_capacity(pixels.len());
+            for chunk in pixels.chunks_exact(2) {
+                let v = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f = v as f32 / 4095.0;
+                let half = f32_to_f16(f);
+                out.extend_from_slice(&half.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::F16, PixelType::U32) => {
+            let mut out = Vec::with_capacity(pixels.len() * 2);
+            for chunk in pixels.chunks_exact(2) {
+                let half = u16::from_ne_bytes([chunk[0], chunk[1]]);
+                let f = f16_to_f32(half);
+                let q: u32 = (f.clamp(0.0, 1.0) as f64 * u32::MAX as f64) as u32;
+                out.extend_from_slice(&q.to_ne_bytes());
+            }
+            out
+        }
+        (PixelType::U32, PixelType::F16) => {
+            let mut out = Vec::with_capacity(pixels.len() / 2);
+            for chunk in pixels.chunks_exact(4) {
+                let v = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                let f = (v as f64 / u32::MAX as f64) as f32;
+                let half = f32_to_f16(f);
+                out.extend_from_slice(&half.to_ne_bytes());
+            }
+            out
+        }
+        // Catch-all: same-type identity (unreachable in practice — early return
+        // above handles frame.pixel_type == target — but required for exhaustiveness
+        // since the guarded arm above cannot be statically proven exhaustive).
+        _ => pixels.to_vec(),
     };
 
     Ok(oximedia_image::ImageFrame::new(
@@ -1187,5 +1591,198 @@ mod tests {
         let out = convert_bit_depth(frame, PixelType::U8).expect("same-type should be identity");
         let raw = out.data.as_slice().expect("interleaved data");
         assert_eq!(raw, &[10, 20, 30]);
+    }
+
+    // ── U10 tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_convert_u10_to_u8_black_white() {
+        use oximedia_image::PixelType;
+        let mut data = Vec::new();
+        data.extend_from_slice(&0u16.to_ne_bytes());
+        data.extend_from_slice(&1023u16.to_ne_bytes());
+        let frame = make_frame(PixelType::U10, data);
+        let out = convert_bit_depth(frame, PixelType::U8).expect("U10→U8");
+        let raw = out.data.as_slice().expect("data");
+        assert_eq!(raw[0], 0);
+        assert_eq!(raw[1], 255);
+    }
+
+    /// U10 value 512 → U16: (512 << 6) | (512 >> 4) = 32768 | 32 = 32800
+    #[test]
+    fn test_convert_u10_to_u16() {
+        use oximedia_image::PixelType;
+        let v: u16 = 512;
+        let mut data = Vec::new();
+        data.extend_from_slice(&v.to_ne_bytes());
+        let frame = make_frame(PixelType::U10, data);
+        let out = convert_bit_depth(frame, PixelType::U16).expect("U10→U16");
+        let raw = out.data.as_slice().expect("data");
+        let result = u16::from_ne_bytes([raw[0], raw[1]]);
+        let expected: u16 = (512u16 << 6) | (512u16 >> 4);
+        assert_eq!(
+            result, expected,
+            "U10(512) → U16 should be {expected}, got {result}"
+        );
+    }
+
+    #[test]
+    fn test_convert_u10_to_f32_half() {
+        use oximedia_image::PixelType;
+        // 512/1023 ≈ 0.50049
+        let v: u16 = 512;
+        let mut data = Vec::new();
+        data.extend_from_slice(&v.to_ne_bytes());
+        let frame = make_frame(PixelType::U10, data);
+        let out = convert_bit_depth(frame, PixelType::F32).expect("U10→F32");
+        let raw = out.data.as_slice().expect("data");
+        let f = f32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]);
+        assert!((f - 512.0 / 1023.0).abs() < 1e-5, "got {f}");
+    }
+
+    #[test]
+    fn test_convert_u8_to_u10_black_white() {
+        use oximedia_image::PixelType;
+        let frame = make_frame(PixelType::U8, vec![0, 255]);
+        let out = convert_bit_depth(frame, PixelType::U10).expect("U8→U10");
+        let raw = out.data.as_slice().expect("data");
+        let v0 = u16::from_ne_bytes([raw[0], raw[1]]);
+        let v1 = u16::from_ne_bytes([raw[2], raw[3]]);
+        assert_eq!(v0, 0);
+        assert_eq!(v1, 1023);
+    }
+
+    #[test]
+    fn test_convert_f32_to_u10_clamp() {
+        use oximedia_image::PixelType;
+        let mut data = Vec::new();
+        for v in [0.0_f32, 1.0_f32] {
+            data.extend_from_slice(&v.to_ne_bytes());
+        }
+        let frame = make_frame(PixelType::F32, data);
+        let out = convert_bit_depth(frame, PixelType::U10).expect("F32→U10");
+        let raw = out.data.as_slice().expect("data");
+        let v0 = u16::from_ne_bytes([raw[0], raw[1]]);
+        let v1 = u16::from_ne_bytes([raw[2], raw[3]]);
+        assert_eq!(v0, 0);
+        assert_eq!(v1, 1023);
+    }
+
+    // ── U12 tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_convert_u12_to_u8_black_white() {
+        use oximedia_image::PixelType;
+        let mut data = Vec::new();
+        data.extend_from_slice(&0u16.to_ne_bytes());
+        data.extend_from_slice(&4095u16.to_ne_bytes());
+        let frame = make_frame(PixelType::U12, data);
+        let out = convert_bit_depth(frame, PixelType::U8).expect("U12→U8");
+        let raw = out.data.as_slice().expect("data");
+        assert_eq!(raw[0], 0);
+        assert_eq!(raw[1], 255);
+    }
+
+    #[test]
+    fn test_convert_u12_to_f32() {
+        use oximedia_image::PixelType;
+        let v: u16 = 4095;
+        let mut data = Vec::new();
+        data.extend_from_slice(&v.to_ne_bytes());
+        let frame = make_frame(PixelType::U12, data);
+        let out = convert_bit_depth(frame, PixelType::F32).expect("U12→F32");
+        let raw = out.data.as_slice().expect("data");
+        let f = f32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]);
+        assert!((f - 1.0).abs() < 1e-5, "got {f}");
+    }
+
+    // ── U32 tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_convert_u32_to_u8() {
+        use oximedia_image::PixelType;
+        let mut data = Vec::new();
+        data.extend_from_slice(&u32::MAX.to_ne_bytes());
+        data.extend_from_slice(&0u32.to_ne_bytes());
+        let frame = make_frame(PixelType::U32, data);
+        let out = convert_bit_depth(frame, PixelType::U8).expect("U32→U8");
+        let raw = out.data.as_slice().expect("data");
+        assert_eq!(raw[0], 255);
+        assert_eq!(raw[1], 0);
+    }
+
+    #[test]
+    fn test_convert_u32_to_u16() {
+        use oximedia_image::PixelType;
+        let v: u32 = u32::MAX;
+        let mut data = Vec::new();
+        data.extend_from_slice(&v.to_ne_bytes());
+        let frame = make_frame(PixelType::U32, data);
+        let out = convert_bit_depth(frame, PixelType::U16).expect("U32→U16");
+        let raw = out.data.as_slice().expect("data");
+        let t = u16::from_ne_bytes([raw[0], raw[1]]);
+        assert_eq!(t, u16::MAX);
+    }
+
+    #[test]
+    fn test_convert_u8_to_u32_replicate() {
+        use oximedia_image::PixelType;
+        // 255 → 0xFFFF_FFFF
+        let frame = make_frame(PixelType::U8, vec![255, 0]);
+        let out = convert_bit_depth(frame, PixelType::U32).expect("U8→U32");
+        let raw = out.data.as_slice().expect("data");
+        let v0 = u32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]);
+        let v1 = u32::from_ne_bytes([raw[4], raw[5], raw[6], raw[7]]);
+        assert_eq!(v0, u32::MAX);
+        assert_eq!(v1, 0);
+    }
+
+    // ── F16 tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_f16_to_f32_zero() {
+        assert_eq!(f16_to_f32(0x0000), 0.0_f32);
+    }
+
+    #[test]
+    fn test_f16_to_f32_one() {
+        // 1.0 in half precision = 0x3C00
+        let f = f16_to_f32(0x3C00);
+        assert!((f - 1.0_f32).abs() < 1e-5, "got {f}");
+    }
+
+    #[test]
+    fn test_f32_to_f16_zero_roundtrip() {
+        let half = f32_to_f16(0.0);
+        let back = f16_to_f32(half);
+        assert!((back - 0.0).abs() < 1e-6, "got {back}");
+    }
+
+    /// f32→f16→f32 for common values stays within 1e-3
+    #[test]
+    fn test_convert_f16_roundtrip() {
+        for &v in &[0.0_f32, 1.0_f32, 0.5_f32, 0.25_f32] {
+            let half = f32_to_f16(v);
+            let back = f16_to_f32(half);
+            assert!(
+                (back - v).abs() < 1e-3,
+                "f16 roundtrip: {} → {} → {} (error {})",
+                v,
+                half,
+                back,
+                (back - v).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn test_convert_u8_to_f16_and_back() {
+        use oximedia_image::PixelType;
+        let frame = make_frame(PixelType::U8, vec![0, 255]);
+        let f16_frame = convert_bit_depth(frame, PixelType::F16).expect("U8→F16");
+        let u8_frame = convert_bit_depth(f16_frame, PixelType::U8).expect("F16→U8");
+        let raw = u8_frame.data.as_slice().expect("data");
+        assert_eq!(raw[0], 0);
+        assert_eq!(raw[1], 255);
     }
 }

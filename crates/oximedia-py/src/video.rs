@@ -41,18 +41,20 @@ impl Av1Decoder {
     ///
     /// * `data` - Compressed packet data
     /// * `pts` - Presentation timestamp
-    fn send_packet(&mut self, data: &[u8], pts: i64) -> PyOxiResult<()> {
-        self.inner
-            .send_packet(data, pts)
+    fn send_packet(&mut self, py: Python<'_>, data: &[u8], pts: i64) -> PyOxiResult<()> {
+        // Copy packet bytes so the closure becomes Send + 'static-friendly.
+        let buf: Vec<u8> = data.to_vec();
+        let inner = &mut self.inner;
+        py.detach(move || inner.send_packet(&buf, pts))
             .map_err(crate::error::from_codec_error)
     }
 
     /// Receive a decoded frame.
     ///
     /// Returns `None` if more data is needed.
-    fn receive_frame(&mut self) -> PyOxiResult<Option<VideoFrame>> {
-        self.inner
-            .receive_frame()
+    fn receive_frame(&mut self, py: Python<'_>) -> PyOxiResult<Option<VideoFrame>> {
+        let inner = &mut self.inner;
+        py.detach(move || inner.receive_frame())
             .map(|opt| opt.map(VideoFrame::from_rust))
             .map_err(crate::error::from_codec_error)
     }
@@ -60,8 +62,10 @@ impl Av1Decoder {
     /// Flush the decoder.
     ///
     /// Call after all packets have been sent to retrieve remaining frames.
-    fn flush(&mut self) -> PyOxiResult<()> {
-        self.inner.flush().map_err(crate::error::from_codec_error)
+    fn flush(&mut self, py: Python<'_>) -> PyOxiResult<()> {
+        let inner = &mut self.inner;
+        py.detach(move || inner.flush())
+            .map_err(crate::error::from_codec_error)
     }
 
     /// Reset the decoder state.
@@ -83,11 +87,12 @@ impl Av1Decoder {
     #[pyo3(signature = (_exc_type, _exc_val, _exc_tb))]
     fn __exit__(
         &mut self,
+        py: Python<'_>,
         _exc_type: Option<Py<PyAny>>,
         _exc_val: Option<Py<PyAny>>,
         _exc_tb: Option<Py<PyAny>>,
     ) -> PyResult<bool> {
-        let _ = self.flush();
+        let _ = self.flush(py);
         self.reset();
         Ok(false)
     }
@@ -139,9 +144,10 @@ impl Av1Encoder {
     /// # Arguments
     ///
     /// * `frame` - Video frame to encode
-    fn send_frame(&mut self, frame: &VideoFrame) -> PyOxiResult<()> {
-        self.inner
-            .send_frame(frame.inner())
+    fn send_frame(&mut self, py: Python<'_>, frame: &VideoFrame) -> PyOxiResult<()> {
+        let frame_inner = frame.inner();
+        let inner = &mut self.inner;
+        py.detach(move || inner.send_frame(frame_inner))
             .map_err(crate::error::from_codec_error)
     }
 
@@ -156,9 +162,10 @@ impl Av1Encoder {
     /// - `keyframe`: bool - Is this a keyframe
     /// - `duration`: Optional[int] - Duration in timebase units
     fn receive_packet(&mut self, py: Python<'_>) -> PyOxiResult<Option<Py<PyAny>>> {
-        let packet = self
-            .inner
-            .receive_packet()
+        // Run the encode pull on a worker thread without holding the GIL.
+        let inner = &mut self.inner;
+        let packet = py
+            .detach(move || inner.receive_packet())
             .map_err(crate::error::from_codec_error)?;
 
         match packet {
@@ -178,8 +185,10 @@ impl Av1Encoder {
     /// Flush the encoder.
     ///
     /// Call after all frames have been sent to retrieve remaining packets.
-    fn flush(&mut self) -> PyOxiResult<()> {
-        self.inner.flush().map_err(crate::error::from_codec_error)
+    fn flush(&mut self, py: Python<'_>) -> PyOxiResult<()> {
+        let inner = &mut self.inner;
+        py.detach(move || inner.flush())
+            .map_err(crate::error::from_codec_error)
     }
 
     /// Context manager __enter__: return self.
@@ -191,11 +200,12 @@ impl Av1Encoder {
     #[pyo3(signature = (_exc_type, _exc_val, _exc_tb))]
     fn __exit__(
         &mut self,
+        py: Python<'_>,
         _exc_type: Option<Py<PyAny>>,
         _exc_val: Option<Py<PyAny>>,
         _exc_tb: Option<Py<PyAny>>,
     ) -> PyResult<bool> {
-        let _ = self.flush();
+        let _ = self.flush(py);
         Ok(false)
     }
 
@@ -242,18 +252,19 @@ impl Vp9Decoder {
     ///
     /// * `data` - Compressed packet data
     /// * `pts` - Presentation timestamp
-    fn send_packet(&mut self, data: &[u8], pts: i64) -> PyOxiResult<()> {
-        self.inner
-            .send_packet(data, pts)
+    fn send_packet(&mut self, py: Python<'_>, data: &[u8], pts: i64) -> PyOxiResult<()> {
+        let buf: Vec<u8> = data.to_vec();
+        let inner = &mut self.inner;
+        py.detach(move || inner.send_packet(&buf, pts))
             .map_err(crate::error::from_codec_error)
     }
 
     /// Receive a decoded frame.
     ///
     /// Returns `None` if more data is needed.
-    fn receive_frame(&mut self) -> PyOxiResult<Option<VideoFrame>> {
-        self.inner
-            .receive_frame()
+    fn receive_frame(&mut self, py: Python<'_>) -> PyOxiResult<Option<VideoFrame>> {
+        let inner = &mut self.inner;
+        py.detach(move || inner.receive_frame())
             .map(|opt| opt.map(VideoFrame::from_rust))
             .map_err(crate::error::from_codec_error)
     }
@@ -261,8 +272,10 @@ impl Vp9Decoder {
     /// Flush the decoder.
     ///
     /// Call after all packets have been sent to retrieve remaining frames.
-    fn flush(&mut self) -> PyOxiResult<()> {
-        self.inner.flush().map_err(crate::error::from_codec_error)
+    fn flush(&mut self, py: Python<'_>) -> PyOxiResult<()> {
+        let inner = &mut self.inner;
+        py.detach(move || inner.flush())
+            .map_err(crate::error::from_codec_error)
     }
 
     /// Reset the decoder state.
@@ -284,11 +297,12 @@ impl Vp9Decoder {
     #[pyo3(signature = (_exc_type, _exc_val, _exc_tb))]
     fn __exit__(
         &mut self,
+        py: Python<'_>,
         _exc_type: Option<Py<PyAny>>,
         _exc_val: Option<Py<PyAny>>,
         _exc_tb: Option<Py<PyAny>>,
     ) -> PyResult<bool> {
-        let _ = self.flush();
+        let _ = self.flush(py);
         self.reset();
         Ok(false)
     }
@@ -336,18 +350,19 @@ impl Vp8Decoder {
     ///
     /// * `data` - Compressed packet data
     /// * `pts` - Presentation timestamp
-    fn send_packet(&mut self, data: &[u8], pts: i64) -> PyOxiResult<()> {
-        self.inner
-            .send_packet(data, pts)
+    fn send_packet(&mut self, py: Python<'_>, data: &[u8], pts: i64) -> PyOxiResult<()> {
+        let buf: Vec<u8> = data.to_vec();
+        let inner = &mut self.inner;
+        py.detach(move || inner.send_packet(&buf, pts))
             .map_err(crate::error::from_codec_error)
     }
 
     /// Receive a decoded frame.
     ///
     /// Returns `None` if more data is needed.
-    fn receive_frame(&mut self) -> PyOxiResult<Option<VideoFrame>> {
-        self.inner
-            .receive_frame()
+    fn receive_frame(&mut self, py: Python<'_>) -> PyOxiResult<Option<VideoFrame>> {
+        let inner = &mut self.inner;
+        py.detach(move || inner.receive_frame())
             .map(|opt| opt.map(VideoFrame::from_rust))
             .map_err(crate::error::from_codec_error)
     }
@@ -355,8 +370,10 @@ impl Vp8Decoder {
     /// Flush the decoder.
     ///
     /// Call after all packets have been sent to retrieve remaining frames.
-    fn flush(&mut self) -> PyOxiResult<()> {
-        self.inner.flush().map_err(crate::error::from_codec_error)
+    fn flush(&mut self, py: Python<'_>) -> PyOxiResult<()> {
+        let inner = &mut self.inner;
+        py.detach(move || inner.flush())
+            .map_err(crate::error::from_codec_error)
     }
 
     /// Reset the decoder state.
@@ -378,11 +395,12 @@ impl Vp8Decoder {
     #[pyo3(signature = (_exc_type, _exc_val, _exc_tb))]
     fn __exit__(
         &mut self,
+        py: Python<'_>,
         _exc_type: Option<Py<PyAny>>,
         _exc_val: Option<Py<PyAny>>,
         _exc_tb: Option<Py<PyAny>>,
     ) -> PyResult<bool> {
-        let _ = self.flush();
+        let _ = self.flush(py);
         self.reset();
         Ok(false)
     }

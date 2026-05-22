@@ -1,8 +1,12 @@
-//! Bitstream packing for Vorbis encoding.
+//! Bitstream packing and reading for Vorbis encoding/decoding.
 //!
 //! Vorbis uses LSB-first bit packing for its bitstream format.
+//! Both [`BitPacker`] (encoder side) and [`BitReader`] (decoder side)
+//! follow the same LSB-first ordering defined in the Vorbis I spec §A.2.
 
 #![forbid(unsafe_code)]
+
+use crate::AudioError;
 
 /// Bitstream packer for Vorbis encoding.
 #[derive(Debug, Clone)]
@@ -110,6 +114,86 @@ impl Default for BitPacker {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────
+// BitReader — LSB-first decoder side (Vorbis spec §A.2)
+// ─────────────────────────────────────────────────────────────────
+
+/// Bitstream reader for Vorbis decoding (LSB-first, per Vorbis spec).
+///
+/// Bits are extracted least-significant-bit first within each byte,
+/// mirroring the ordering that [`BitPacker`] writes.
+#[derive(Debug, Clone)]
+pub struct BitReader<'a> {
+    /// Source bytes.
+    data: &'a [u8],
+    /// Current byte index.
+    byte_pos: usize,
+    /// Next bit index within the current byte (0 = LSB).
+    bit_pos: u8,
+}
+
+impl<'a> BitReader<'a> {
+    /// Create a new bit reader over `data`.
+    #[must_use]
+    pub const fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            byte_pos: 0,
+            bit_pos: 0,
+        }
+    }
+
+    /// Return the total number of bits already consumed.
+    #[must_use]
+    pub const fn position(&self) -> usize {
+        self.byte_pos * 8 + self.bit_pos as usize
+    }
+
+    /// Return `true` when every bit has been consumed.
+    #[must_use]
+    pub fn is_exhausted(&self) -> bool {
+        self.byte_pos >= self.data.len()
+    }
+
+    /// Read a single bit (LSB-first).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioError::Eof`] when no more bits are available.
+    pub fn read_bit(&mut self) -> Result<bool, AudioError> {
+        if self.byte_pos >= self.data.len() {
+            return Err(AudioError::Eof);
+        }
+        let bit = (self.data[self.byte_pos] >> self.bit_pos) & 1;
+        self.bit_pos += 1;
+        if self.bit_pos == 8 {
+            self.bit_pos = 0;
+            self.byte_pos += 1;
+        }
+        Ok(bit != 0)
+    }
+
+    /// Read up to 32 bits LSB-first and return them as a `u32`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AudioError::Eof`] when the stream is exhausted before `n` bits
+    /// are read, or [`AudioError::InvalidData`] if `n > 32`.
+    pub fn read_bits(&mut self, n: u8) -> Result<u32, AudioError> {
+        if n > 32 {
+            return Err(AudioError::InvalidData(
+                "Cannot read more than 32 bits at once".into(),
+            ));
+        }
+        let mut result = 0u32;
+        for i in 0..n {
+            let bit = self.read_bit()? as u32;
+            result |= bit << i; // LSB first
+        }
+        Ok(result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +297,63 @@ mod tests {
 
         let bytes = packer.finish();
         assert_eq!(bytes[0], 0xFF);
+    }
+
+    // ─── BitReader round-trip tests ────────────────────────────────
+
+    #[test]
+    fn test_bit_reader_single_bit() {
+        // byte 0x01 = 0b0000_0001: LSB is 1, rest 0
+        let data = [0x01u8];
+        let mut reader = BitReader::new(&data);
+        assert!(reader.read_bit().expect("read bit 0"));
+        assert!(!reader.read_bit().expect("read bit 1"));
+    }
+
+    #[test]
+    fn test_bit_reader_exhausted() {
+        let data = [0x00u8];
+        let mut reader = BitReader::new(&data);
+        // consume all 8 bits
+        for _ in 0..8 {
+            let _ = reader.read_bit();
+        }
+        assert!(reader.is_exhausted());
+        assert!(reader.read_bit().is_err());
+    }
+
+    #[test]
+    fn test_bit_reader_read_bits() {
+        // 0b1101 = 13 packed LSB-first in low nibble of 0x0D
+        let data = [0x0Du8];
+        let mut reader = BitReader::new(&data);
+        let val = reader.read_bits(4).expect("read 4 bits");
+        assert_eq!(val, 0b1101); // LSB-first: bit0=1, bit1=0, bit2=1, bit3=1
+    }
+
+    #[test]
+    fn test_packer_reader_round_trip() {
+        // Encode a sequence of known values then decode them back.
+        let mut packer = BitPacker::new();
+        packer.write_bits(0b1011, 4); // 4-bit value
+        packer.write_bits(0b00110, 5); // 5-bit value
+        let bytes = packer.finish();
+
+        let mut reader = BitReader::new(&bytes);
+        assert_eq!(reader.read_bits(4).expect("4 bits"), 0b1011);
+        assert_eq!(reader.read_bits(5).expect("5 bits"), 0b00110);
+    }
+
+    #[test]
+    fn test_bit_reader_position() {
+        let data = [0xFFu8, 0xFFu8];
+        let mut reader = BitReader::new(&data);
+        assert_eq!(reader.position(), 0);
+        let _ = reader.read_bits(3);
+        assert_eq!(reader.position(), 3);
+        let _ = reader.read_bits(5);
+        assert_eq!(reader.position(), 8);
+        let _ = reader.read_bits(4);
+        assert_eq!(reader.position(), 12);
     }
 }

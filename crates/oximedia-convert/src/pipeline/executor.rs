@@ -83,7 +83,6 @@ impl PipelineExecutor {
 
         let start_time = Instant::now();
 
-        // Simulate processing (TODO: implement actual conversion)
         let result = self.process_job(&job).await;
 
         let duration = start_time.elapsed();

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process;
 
 #[derive(Parser)]
-#[command(name = "oximedia-convert")]
+#[command(name = "oximedia-convert", version)]
 #[command(about = "Universal media format converter", long_about = None)]
 struct Cli {
     #[command(subcommand)]

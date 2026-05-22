@@ -199,13 +199,16 @@ pub fn compute_rgb_histogram_parallel(
     let pixels: Vec<[u8; 3]> = bytemuck_rgb(frame, width, height);
 
     // fold: each thread accumulates into its own [R, G, B] × 256 arrays.
+    // Accumulators are boxed so the 3072-byte slab lives on the heap rather
+    // than the rayon worker thread stack — prevents stack overflow in debug
+    // builds where the reduce tree can be ~17 levels deep for large frames.
     type Slab = [[u32; 256]; 3];
 
-    let merged: Slab = pixels
+    let merged: Box<Slab> = pixels
         .par_chunks(cfg.chunk_size.max(1))
         .fold(
-            || [[0u32; 256]; 3],
-            |mut slab: Slab, chunk| {
+            || Box::new([[0u32; 256]; 3]),
+            |mut slab: Box<Slab>, chunk| {
                 for px in chunk {
                     slab[0][px[0] as usize] += 1;
                     slab[1][px[1] as usize] += 1;
@@ -215,7 +218,7 @@ pub fn compute_rgb_histogram_parallel(
             },
         )
         .reduce(
-            || [[0u32; 256]; 3],
+            || Box::new([[0u32; 256]; 3]),
             |mut a, b| {
                 for ch in 0..3 {
                     for bin in 0..256 {
@@ -235,11 +238,7 @@ pub fn compute_rgb_histogram_parallel(
             apply_log(&merged[2]),
         )
     } else {
-        (
-            merged[0].to_vec(),
-            merged[1].to_vec(),
-            merged[2].to_vec(),
-        )
+        (merged[0].to_vec(), merged[1].to_vec(), merged[2].to_vec())
     };
 
     Ok(RgbHistogram {
@@ -268,10 +267,11 @@ pub fn compute_luma_histogram_parallel(
 
     let pixels: Vec<[u8; 3]> = bytemuck_rgb(frame, width, height);
 
-    let merged: [u32; 256] = pixels
+    // Box the accumulator to prevent rayon worker stack overflow on large frames.
+    let merged_box: Box<[u32; 256]> = pixels
         .par_chunks(cfg.chunk_size.max(1))
         .fold(
-            || [0u32; 256],
+            || Box::new([0u32; 256]),
             |mut slab, chunk| {
                 for px in chunk {
                     let luma = bt709_luma(px[0], px[1], px[2]);
@@ -281,7 +281,7 @@ pub fn compute_luma_histogram_parallel(
             },
         )
         .reduce(
-            || [0u32; 256],
+            || Box::new([0u32; 256]),
             |mut a, b| {
                 for bin in 0..256 {
                     a[bin] += b[bin];
@@ -291,9 +291,9 @@ pub fn compute_luma_histogram_parallel(
         );
 
     let bins = if cfg.log_scale {
-        apply_log(&merged)
+        apply_log(&*merged_box)
     } else {
-        merged.to_vec()
+        merged_box.to_vec()
     };
 
     Ok(LumaHistogram {
@@ -379,8 +379,7 @@ mod tests {
     fn test_rgb_histogram_solid_grey() {
         let frame = solid_frame(64, 64, 128, 128, 128);
         let cfg = ParallelHistogramConfig::default();
-        let hist = compute_rgb_histogram_parallel(&frame, 64, 64, &cfg)
-            .expect("should succeed");
+        let hist = compute_rgb_histogram_parallel(&frame, 64, 64, &cfg).expect("should succeed");
         // Only bin 128 should be non-zero
         assert_eq!(hist.red[128], 64 * 64);
         assert_eq!(hist.green[128], 64 * 64);
@@ -394,8 +393,7 @@ mod tests {
     fn test_rgb_histogram_total_pixels() {
         let frame = solid_frame(100, 50, 10, 20, 30);
         let cfg = ParallelHistogramConfig::default();
-        let hist = compute_rgb_histogram_parallel(&frame, 100, 50, &cfg)
-            .expect("should succeed");
+        let hist = compute_rgb_histogram_parallel(&frame, 100, 50, &cfg).expect("should succeed");
         assert_eq!(hist.total_pixels, 100 * 50);
     }
 
@@ -403,8 +401,7 @@ mod tests {
     fn test_rgb_histogram_channel_mean() {
         let frame = solid_frame(10, 10, 200, 100, 50);
         let cfg = ParallelHistogramConfig::default();
-        let hist = compute_rgb_histogram_parallel(&frame, 10, 10, &cfg)
-            .expect("should succeed");
+        let hist = compute_rgb_histogram_parallel(&frame, 10, 10, &cfg).expect("should succeed");
         assert!((hist.channel_mean(0) - 200.0).abs() < 0.01);
         assert!((hist.channel_mean(1) - 100.0).abs() < 0.01);
         assert!((hist.channel_mean(2) - 50.0).abs() < 0.01);
@@ -414,8 +411,7 @@ mod tests {
     fn test_rgb_histogram_max_count() {
         let frame = solid_frame(8, 8, 255, 0, 0);
         let cfg = ParallelHistogramConfig::default();
-        let hist = compute_rgb_histogram_parallel(&frame, 8, 8, &cfg)
-            .expect("should succeed");
+        let hist = compute_rgb_histogram_parallel(&frame, 8, 8, &cfg).expect("should succeed");
         assert_eq!(hist.max_count(), 64); // 8*8 all in bin 255 for red
     }
 
@@ -441,8 +437,7 @@ mod tests {
     fn test_luma_histogram_white_frame() {
         let frame = solid_frame(32, 32, 255, 255, 255);
         let cfg = ParallelHistogramConfig::default();
-        let hist = compute_luma_histogram_parallel(&frame, 32, 32, &cfg)
-            .expect("should succeed");
+        let hist = compute_luma_histogram_parallel(&frame, 32, 32, &cfg).expect("should succeed");
         // All pixels should land in one high-luma bin (254 or 255 depending on
         // fixed-point rounding); the total must equal the pixel count.
         let total_pixels = 32u32 * 32;
@@ -463,8 +458,7 @@ mod tests {
     fn test_luma_histogram_mean_black() {
         let frame = solid_frame(16, 16, 0, 0, 0);
         let cfg = ParallelHistogramConfig::default();
-        let hist = compute_luma_histogram_parallel(&frame, 16, 16, &cfg)
-            .expect("should succeed");
+        let hist = compute_luma_histogram_parallel(&frame, 16, 16, &cfg).expect("should succeed");
         assert!((hist.mean() - 0.0).abs() < 0.01);
     }
 
@@ -481,8 +475,7 @@ mod tests {
             px[2] = 255;
         }
         let cfg = ParallelHistogramConfig::default();
-        let hist = compute_luma_histogram_parallel(&frame, 32, 32, &cfg)
-            .expect("should succeed");
+        let hist = compute_luma_histogram_parallel(&frame, 32, 32, &cfg).expect("should succeed");
         // p50 should be at or near 0 (first bin with cumulative >= 50%)
         let p50 = hist.percentile(50.0);
         assert!(p50 <= 128.0, "p50={p50}");
@@ -495,8 +488,7 @@ mod tests {
             log_scale: true,
             ..Default::default()
         };
-        let hist = compute_luma_histogram_parallel(&frame, 16, 16, &cfg)
-            .expect("should succeed");
+        let hist = compute_luma_histogram_parallel(&frame, 16, 16, &cfg).expect("should succeed");
         // The bin corresponding to Y=128 should be non-zero
         assert!(hist.bins.iter().any(|&c| c > 0));
     }

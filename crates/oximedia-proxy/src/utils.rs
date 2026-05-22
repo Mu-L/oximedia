@@ -7,15 +7,34 @@ use std::path::{Path, PathBuf};
 pub struct FileUtils;
 
 impl FileUtils {
-    /// Calculate file hash for verification.
+    /// Calculate the SHA-256 hash of a file for verification.
+    ///
+    /// Reads the file in 8 KiB chunks so that arbitrarily large files can be
+    /// hashed without loading them entirely into memory. The result is the
+    /// lowercase hex encoding of the 32-byte digest.
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be read.
+    /// Returns an error if the file cannot be opened or read.
     pub fn calculate_hash(path: &Path) -> Result<String> {
-        // Placeholder: would calculate MD5 or SHA256 hash
-        let _path = path;
-        Ok("placeholder_hash".to_string())
+        use sha2::{Digest, Sha256};
+        use std::io::{BufReader, Read};
+
+        let file = std::fs::File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 8192];
+
+        loop {
+            let read = reader.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+
+        let digest = hasher.finalize();
+        Ok(StringUtils::bytes_to_hex(digest.as_slice()))
     }
 
     /// Get file size in human-readable format.
@@ -458,5 +477,61 @@ mod tests {
     fn test_current_timestamp() {
         let ts = TimeUtils::current_timestamp();
         assert!(ts > 0);
+    }
+
+    #[test]
+    fn test_calculate_hash_known_digest() {
+        use std::io::Write;
+
+        // SHA-256("abc") per FIPS 180-4 test vector.
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+        let mut file_path = std::env::temp_dir();
+        file_path.push(format!(
+            "oximedia_proxy_calculate_hash_{}.bin",
+            StringUtils::generate_id()
+        ));
+
+        {
+            let mut file = std::fs::File::create(&file_path).expect("create temp file");
+            file.write_all(b"abc").expect("write temp file");
+        }
+
+        let hash = FileUtils::calculate_hash(&file_path).expect("hash temp file");
+        let _ = std::fs::remove_file(&file_path);
+
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn test_calculate_hash_empty_file() {
+        // SHA-256 of zero-length input.
+        let expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+        let mut file_path = std::env::temp_dir();
+        file_path.push(format!(
+            "oximedia_proxy_calculate_hash_empty_{}.bin",
+            StringUtils::generate_id()
+        ));
+
+        {
+            let _file = std::fs::File::create(&file_path).expect("create temp file");
+        }
+
+        let hash = FileUtils::calculate_hash(&file_path).expect("hash empty file");
+        let _ = std::fs::remove_file(&file_path);
+
+        assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn test_calculate_hash_missing_file() {
+        let mut file_path = std::env::temp_dir();
+        file_path.push(format!(
+            "oximedia_proxy_calculate_hash_missing_{}.bin",
+            StringUtils::generate_id()
+        ));
+
+        assert!(FileUtils::calculate_hash(&file_path).is_err());
     }
 }

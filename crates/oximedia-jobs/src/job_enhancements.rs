@@ -61,12 +61,7 @@ impl JobDag {
     ///
     /// `job_id` will only become ready when `depends_on` has completed and
     /// its outcome satisfies `condition`.
-    pub fn add_dependency(
-        &mut self,
-        job_id: u64,
-        depends_on: u64,
-        condition: DependencyCondition,
-    ) {
+    pub fn add_dependency(&mut self, job_id: u64, depends_on: u64, condition: DependencyCondition) {
         self.edges
             .entry(job_id)
             .or_default()
@@ -159,7 +154,9 @@ impl CancellationToken {
 pub fn new_cancellation_pair() -> (CancellationToken, CancellationHandle) {
     let flag = Arc::new(AtomicBool::new(false));
     (
-        CancellationToken { flag: Arc::clone(&flag) },
+        CancellationToken {
+            flag: Arc::clone(&flag),
+        },
         CancellationHandle { flag },
     )
 }
@@ -567,9 +564,8 @@ impl<T> EnhancedPriorityQueue<T> {
             seq,
         });
         // Keep sorted: highest priority first, then lowest seq first.
-        self.items.sort_unstable_by(|a, b| {
-            b.priority.cmp(&a.priority).then_with(|| a.seq.cmp(&b.seq))
-        });
+        self.items
+            .sort_unstable_by(|a, b| b.priority.cmp(&a.priority).then_with(|| a.seq.cmp(&b.seq)));
     }
 
     /// Pop the highest-priority item (FIFO within same priority).
@@ -657,7 +653,10 @@ mod tests {
         completed.insert(1u64, JobStatus::Failed);
 
         let ready = dag.get_ready_jobs(&completed);
-        assert!(ready.is_empty(), "OnSuccess should not fire when dep failed");
+        assert!(
+            ready.is_empty(),
+            "OnSuccess should not fire when dep failed"
+        );
     }
 
     #[test]
@@ -749,8 +748,8 @@ mod tests {
     #[test]
     fn test_retry_policy_should_retry() {
         let policy = RetryPolicy::new(3, 50); // max 3 attempts: 0, 1, 2
-        assert!(policy.should_retry(0));  // after 1st failure, can retry
-        assert!(policy.should_retry(1));  // after 2nd failure, can retry
+        assert!(policy.should_retry(0)); // after 1st failure, can retry
+        assert!(policy.should_retry(1)); // after 2nd failure, can retry
         assert!(!policy.should_retry(2)); // after 3rd failure, max reached
     }
 
@@ -806,9 +805,9 @@ mod tests {
     #[test]
     fn test_health_monitor_detects_stale_worker() {
         let monitor = WorkerHealthMonitor::new();
-        monitor.record_heartbeat(1, 100);   // last heartbeat at 100ms
-        monitor.record_heartbeat(2, 5000);  // last heartbeat at 5000ms
-        // now=6000, stale_ms=2000 → cutoff=4000 → worker 1 (100 < 4000) is stale
+        monitor.record_heartbeat(1, 100); // last heartbeat at 100ms
+        monitor.record_heartbeat(2, 5000); // last heartbeat at 5000ms
+                                           // now=6000, stale_ms=2000 → cutoff=4000 → worker 1 (100 < 4000) is stale
         let mut stale = monitor.get_stale_workers(2000, 6000);
         stale.sort();
         assert_eq!(stale, vec![1]);
@@ -857,10 +856,7 @@ mod tests {
     #[test]
     fn test_batch_submit_and_poll() {
         let proc = BatchJobProcessor::new();
-        let jobs = vec![
-            Job::new(1, "encode", 1),
-            Job::new(2, "thumbnail", 0),
-        ];
+        let jobs = vec![Job::new(1, "encode", 1), Job::new(2, "thumbnail", 0)];
         let bid = proc.submit_batch(jobs);
         assert_eq!(proc.poll_batch(bid), Some(BatchStatus::Pending));
     }
@@ -868,7 +864,11 @@ mod tests {
     #[test]
     fn test_batch_job_count() {
         let proc = BatchJobProcessor::new();
-        let jobs = vec![Job::new(1, "a", 0), Job::new(2, "b", 0), Job::new(3, "c", 0)];
+        let jobs = vec![
+            Job::new(1, "a", 0),
+            Job::new(2, "b", 0),
+            Job::new(3, "c", 0),
+        ];
         let bid = proc.submit_batch(jobs);
         assert_eq!(proc.batch_job_count(bid), 3);
     }

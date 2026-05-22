@@ -8,6 +8,7 @@
 //! - MP4 (.mp4) - AV1/VP9 only
 //! - MPEG-TS (.ts, .m2ts) - AV1/VP9/VP8/Opus/FLAC only
 //! - YUV4MPEG2 (.y4m) - Raw uncompressed video
+//! - FLV (.flv) - Adobe Flash Video muxer (MP3/PCM audio, H.263 video)
 //!
 //! # Overview
 //!
@@ -224,7 +225,10 @@ pub mod track_info;
 pub mod tracks;
 
 // Re-export main types at crate root
-pub use container_probe::{DetailedContainerInfo, DetailedStreamInfo, MultiFormatProber};
+pub use container_probe::{
+    percentile, probe_detailed, DetailedContainerInfo, DetailedStreamInfo, DetailedStreamStats,
+    MultiFormatProber,
+};
 pub use dash::{
     emit_mpd, DashAdaptationSet, DashManifestConfig, DashRepresentation, DashSegmentTemplate,
     DashSegmentTimeline, DashSegmentTimelineEntry,

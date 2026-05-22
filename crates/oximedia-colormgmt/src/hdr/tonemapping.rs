@@ -162,6 +162,108 @@ fn apply_linear(rgb: [f64; 3]) -> [f64; 3] {
     ]
 }
 
+// ── f32 lightweight tone curve API ────────────────────────────────────────────
+
+/// Lightweight f32-based tone-mapping curve selection.
+///
+/// Unlike [`ToneMapper`] (which wraps nit-based normalization and f64 math),
+/// `ToneCurve` operates directly on linear-light f32 scene values in [0, ∞)
+/// and returns display-referred values in [0, 1].  It is the preferred choice
+/// when you already have a normalised [0, ∞) input and want a compact, branch-
+/// free per-pixel operator.
+///
+/// # Variants
+///
+/// * `ReinhardSimple` — classic per-channel `x / (1 + x)`.
+/// * `ReinhardExtended { l_white }` — luminance-preserving extended Reinhard
+///   that maps `l_white` exactly to 1.0:
+///   `x * (1 + x / l_white²) / (1 + x)`.
+/// * `FilmicHable` — Hable/Uncharted-2 filmic curve (A=0.15, B=0.50, C=0.10,
+///   D=0.20, E=0.02, F=0.30, W=11.2) **without** exposure bias.
+/// * `AcesFitted` — Narkowicz ACES fitted rational (a=2.51, b=0.03, c=2.43,
+///   d=0.59, e=0.14), output clamped to [0, 1].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ToneCurve {
+    /// Simple Reinhard: `x / (1 + x)` per channel.
+    ReinhardSimple,
+    /// Extended Reinhard with explicit white point.
+    ///
+    /// At `x = l_white` the operator outputs exactly 1.0.
+    ReinhardExtended {
+        /// White point luminance (must be > 0).
+        l_white: f32,
+    },
+    /// Hable/Uncharted-2 filmic curve (no exposure bias, W=11.2).
+    FilmicHable,
+    /// Narkowicz ACES-fitted rational approximation.
+    AcesFitted,
+}
+
+impl ToneCurve {
+    /// Maps a linear-light RGB triple through the selected tone curve.
+    ///
+    /// Input values are per-channel scene-linear in [0, ∞).  Output values
+    /// are display-referred in [0, 1].
+    ///
+    /// # Arguments
+    ///
+    /// * `rgb` — linear-light scene values `[r, g, b]`.
+    ///
+    /// # Returns
+    ///
+    /// Display-referred `[r, g, b]` in [0, 1].
+    #[must_use]
+    pub fn map(&self, rgb: [f32; 3]) -> [f32; 3] {
+        match self {
+            Self::ReinhardSimple => rgb.map(|c| c / (1.0 + c)),
+            Self::ReinhardExtended { l_white } => {
+                let l_white = *l_white;
+                let white_sq = l_white * l_white;
+                rgb.map(|c| c * (1.0 + c / white_sq) / (1.0 + c))
+            }
+            Self::FilmicHable => {
+                const W: f32 = 11.2;
+                let denom = tone_curve_hable_partial(W);
+                rgb.map(|c| tone_curve_hable_partial(c) / denom)
+            }
+            Self::AcesFitted => rgb.map(tone_curve_aces_fitted),
+        }
+    }
+}
+
+/// Hable/Uncharted-2 partial function (internal, no exposure bias).
+///
+/// Parameters: A=0.15, B=0.50, C=0.10, D=0.20, E=0.02, F=0.30.
+#[must_use]
+#[inline]
+fn tone_curve_hable_partial(x: f32) -> f32 {
+    const A: f32 = 0.15;
+    const B: f32 = 0.50;
+    const C: f32 = 0.10;
+    const D: f32 = 0.20;
+    const E: f32 = 0.02;
+    const F: f32 = 0.30;
+    ((x * (A * x + C * B) + D * E) / (x * (A * x + B) + D * F)) - E / F
+}
+
+/// Narkowicz ACES-fitted rational approximation.
+///
+/// Parameters: a=2.51, b=0.03, c=2.43, d=0.59, e=0.14.  Output clamped to
+/// [0, 1] to handle negative values near zero.
+#[must_use]
+#[inline]
+fn tone_curve_aces_fitted(x: f32) -> f32 {
+    const A: f32 = 2.51;
+    const B: f32 = 0.03;
+    const C: f32 = 2.43;
+    const D: f32 = 0.59;
+    const E: f32 = 0.14;
+    let v = (x * (A * x + B)) / (x * (C * x + D) + E);
+    v.clamp(0.0, 1.0)
+}
+
+// ── soft-knee utility ──────────────────────────────────────────────────────────
+
 /// Applies a smooth knee function for soft clipping.
 ///
 /// This is useful for highlight protection and smooth rolloff.
@@ -250,5 +352,114 @@ mod tests {
         let result = apply_linear(rgb);
 
         assert_eq!(result, [0.5, 1.0, 0.0]);
+    }
+
+    // ── ToneCurve tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn tone_curve_reinhard_simple_identity_points() {
+        let tc = ToneCurve::ReinhardSimple;
+        let out = tc.map([1.0, 0.0, 10.0]);
+        assert!(
+            (out[0] - 0.5).abs() < 1e-5,
+            "input 1.0 → 0.5, got {}",
+            out[0]
+        );
+        assert!(
+            (out[1] - 0.0).abs() < 1e-5,
+            "input 0.0 → 0.0, got {}",
+            out[1]
+        );
+        assert!(
+            out[2] > 0.9 && out[2] < 1.0,
+            "large input → near 1, got {}",
+            out[2]
+        );
+    }
+
+    #[test]
+    fn tone_curve_reinhard_extended_white_point() {
+        // At x = l_white: x * (1 + x / l_white²) / (1 + x)
+        // = 4 * (1 + 4/16) / (1 + 4) = 4 * 1.25 / 5 = 1.0
+        let tc = ToneCurve::ReinhardExtended { l_white: 4.0 };
+        let out = tc.map([4.0, 4.0, 4.0]);
+        for c in out {
+            assert!((c - 1.0).abs() < 1e-4, "input l_white → 1.0, got {}", c);
+        }
+    }
+
+    #[test]
+    fn tone_curve_filmic_hable_monotone() {
+        let tc = ToneCurve::FilmicHable;
+        let vals: Vec<f32> = (0..100).map(|i| i as f32 * 0.12).collect();
+        for window in vals.windows(2) {
+            let a = tc.map([window[0]; 3])[0];
+            let b = tc.map([window[1]; 3])[0];
+            assert!(
+                b >= a - 1e-5,
+                "FilmicHable not monotone at {}: {} > {}",
+                window[0],
+                a,
+                b
+            );
+        }
+    }
+
+    #[test]
+    fn tone_curve_aces_fitted_known_point() {
+        let tc = ToneCurve::AcesFitted;
+        let out = tc.map([1.0, 1.0, 1.0]);
+        // Narkowicz ACES(1.0) = (2.51 + 0.03) / (2.43 + 0.59 + 0.14) ≈ 0.8038
+        for c in out {
+            assert!((c - 0.803).abs() < 0.01, "ACES(1.0) ≈ 0.803, got {}", c);
+        }
+    }
+
+    #[test]
+    fn tone_curve_all_operators_monotone_property() {
+        let operators = [
+            ToneCurve::ReinhardSimple,
+            ToneCurve::ReinhardExtended { l_white: 10.0 },
+            ToneCurve::FilmicHable,
+            ToneCurve::AcesFitted,
+        ];
+        let inputs: Vec<f32> = (0..1600).map(|i| i as f32 * 0.01).collect();
+        for op in &operators {
+            for w in inputs.windows(2) {
+                let a = op.map([w[0]; 3])[0];
+                let b = op.map([w[1]; 3])[0];
+                assert!(
+                    b >= a - 1e-5,
+                    "{op:?} not monotone at {}: {} > {}",
+                    w[0],
+                    a,
+                    b
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tone_curve_reinhard_simple_zero_preserving() {
+        let tc = ToneCurve::ReinhardSimple;
+        let out = tc.map([0.0, 0.0, 0.0]);
+        for c in out {
+            assert!((c - 0.0).abs() < 1e-7, "0 → 0, got {}", c);
+        }
+    }
+
+    #[test]
+    fn tone_curve_aces_output_range() {
+        let tc = ToneCurve::AcesFitted;
+        let test_vals = [0.0f32, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0];
+        for &v in &test_vals {
+            let out = tc.map([v; 3]);
+            for c in out {
+                assert!(
+                    c >= 0.0 && c <= 1.0,
+                    "ACES output {c} out of [0,1] for input {v}"
+                );
+            }
+        }
     }
 }

@@ -3,11 +3,12 @@
 //! The timeline is a multi-track structure containing video, audio, and subtitle clips.
 
 use oximedia_core::Rational;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::clip::{Clip, ClipId, ClipSelection, ClipType};
 use crate::error::{EditError, EditResult};
 use crate::group::{GroupManager, LinkManager};
+use crate::magnetic_snap::{MagneticSnapConfig, MagneticSnapEngine};
 use crate::marker::{InOutPoints, MarkerManager, RegionManager};
 use crate::transition::TransitionManager;
 
@@ -42,6 +43,8 @@ pub struct Timeline {
     pub next_clip_id: u64,
     /// Clip lookup by ID.
     pub clip_map: HashMap<ClipId, (usize, usize)>, // (track_index, clip_index)
+    /// Optional magnetic snap engine.
+    pub snap_engine: Option<MagneticSnapEngine>,
 }
 
 impl Timeline {
@@ -63,7 +66,15 @@ impl Timeline {
             links: LinkManager::new(),
             next_clip_id: 1,
             clip_map: HashMap::new(),
+            snap_engine: None,
         }
+    }
+
+    /// Enable magnetic snapping with the given configuration.
+    #[must_use]
+    pub fn with_magnetic_snap(mut self, config: MagneticSnapConfig) -> Self {
+        self.snap_engine = Some(MagneticSnapEngine::new(config));
+        self
     }
 
     /// Create a timeline with default settings (1ms timebase, 30fps).
@@ -116,9 +127,21 @@ impl Timeline {
     }
 
     /// Add a clip to a track.
+    ///
+    /// Returns [`EditError::TrackTypeMismatch`] when the clip's type does not
+    /// match the track type (e.g., adding an audio clip to a video track).
     pub fn add_clip(&mut self, track_index: usize, mut clip: Clip) -> EditResult<ClipId> {
         if track_index >= self.tracks.len() {
             return Err(EditError::InvalidTrackIndex(track_index, self.tracks.len()));
+        }
+
+        // Enforce clip type matches track type.
+        let track_type = self.tracks[track_index].track_type;
+        if !track_type.matches_clip(clip.clip_type) {
+            return Err(EditError::TrackTypeMismatch {
+                expected: track_type.expected_clip_type(),
+                got: clip.clip_type,
+            });
         }
 
         // Assign clip ID
@@ -136,7 +159,6 @@ impl Timeline {
 
         // Add clip to track
         let track = &mut self.tracks[track_index];
-        let _clip_index = track.clips.len();
         track.clips.push(clip);
         track.sort_clips();
 
@@ -145,7 +167,9 @@ impl Timeline {
             .clips
             .iter()
             .position(|c| c.id == clip_id)
-            .expect("clip was just inserted into this track");
+            .ok_or_else(|| {
+                EditError::InvalidEdit("clip was just inserted but not found".to_string())
+            })?;
         self.clip_map.insert(clip_id, (track_index, clip_index));
 
         // Update timeline duration
@@ -155,6 +179,10 @@ impl Timeline {
     }
 
     /// Remove a clip by ID.
+    ///
+    /// **Link policy:** linked clips are preserved on delete; only the link
+    /// association is removed.  The linked clip remains in its track at its
+    /// current position.
     pub fn remove_clip(&mut self, clip_id: ClipId) -> EditResult<Clip> {
         let (track_index, _) = self
             .clip_map
@@ -171,6 +199,11 @@ impl Timeline {
 
         let clip = track.clips.remove(clip_index);
         self.clip_map.remove(&clip_id);
+
+        // Remove link associations for the deleted clip without cascading the
+        // delete to linked clips.
+        self.links.remove_clip_links(clip_id);
+
         self.rebuild_clip_map();
         self.update_duration();
 
@@ -191,41 +224,135 @@ impl Timeline {
     }
 
     /// Move a clip to a new position on the timeline.
-    pub fn move_clip(&mut self, clip_id: ClipId, new_start: i64) -> EditResult<()> {
-        let clip = self
-            .get_clip_mut(clip_id)
-            .ok_or(EditError::ClipNotFound(clip_id))?;
+    ///
+    /// If magnetic snapping is enabled, the requested position is adjusted to
+    /// the nearest snap target before the move is applied.
+    ///
+    /// All clips linked to `clip_id` are moved by the same delta (cascade).
+    ///
+    /// The operation is **atomic**: if any clip in the cascade would overlap an
+    /// existing clip, the entire batch is rolled back and an error is returned.
+    pub fn move_clip(&mut self, clip_id: ClipId, requested_start: i64) -> EditResult<()> {
+        // --- 1. Verify primary clip exists and record old position. ---
+        let old_start = self
+            .get_clip(clip_id)
+            .ok_or(EditError::ClipNotFound(clip_id))?
+            .timeline_start;
 
-        let duration = clip.timeline_duration;
-        clip.timeline_start = new_start;
+        // --- 2. Apply magnetic snap (primary clip excluded from its own snap targets). ---
+        let snapped_start = if let Some(ref engine) = self.snap_engine {
+            // Build a temporary engine whose config excludes the moving clip so it
+            // doesn't snap to its own edges.
+            let mut cfg = engine.config.clone();
+            if !cfg.excluded_clips.contains(&clip_id) {
+                cfg.excluded_clips.push(clip_id);
+            }
+            let transient = MagneticSnapEngine::new(cfg);
+            let result = transient.snap_on_timeline(requested_start, self);
+            if result.snapped {
+                result.position
+            } else {
+                requested_start
+            }
+        } else {
+            requested_start
+        };
 
-        // Re-sort the track
-        let (track_index, _) = self
-            .clip_map
-            .get(&clip_id)
-            .copied()
-            .expect("clip_id confirmed present via get_clip_mut check above");
-        self.tracks[track_index].sort_clips();
-        self.rebuild_clip_map();
+        let delta = snapped_start - old_start;
+        if delta == 0 {
+            return Ok(());
+        }
 
-        // Check for overlaps
-        let track = &self.tracks[track_index];
-        for (i, clip) in track.clips.iter().enumerate() {
-            if clip.id == clip_id {
-                // Check against previous clip
-                if i > 0 && track.clips[i - 1].timeline_end() > new_start {
-                    return Err(EditError::ClipOverlap(new_start, track_index));
+        // --- 3. Collect all clips in the linked cascade (BFS, cycle-safe). ---
+        // Each entry: (clip_id, old_start, new_start).
+        let mut pending: Vec<(ClipId, i64, i64)> = Vec::new();
+        let mut visited: HashSet<ClipId> = HashSet::new();
+        let mut queue: Vec<ClipId> = vec![clip_id];
+        visited.insert(clip_id);
+
+        while let Some(id) = queue.pop() {
+            let this_old = if id == clip_id {
+                old_start
+            } else {
+                // Must exist (we only enqueue from known links).
+                match self.get_clip(id) {
+                    Some(c) => c.timeline_start,
+                    None => continue,
                 }
-                // Check against next clip
-                if i < track.clips.len() - 1
-                    && track.clips[i + 1].timeline_start < new_start + duration
-                {
-                    return Err(EditError::ClipOverlap(new_start, track_index));
+            };
+            pending.push((id, this_old, this_old + delta));
+
+            // Traverse active links (all types).
+            let linked: Vec<ClipId> = self
+                .links
+                .get_clip_links(id)
+                .into_iter()
+                .filter(|l| l.active)
+                .filter_map(|l| l.other_clip(id))
+                .collect();
+            for linked_id in linked {
+                if visited.insert(linked_id) {
+                    queue.push(linked_id);
                 }
             }
         }
 
+        // --- 4. Validate: check that no proposed move produces an overlap. ---
+        // Build a map of new positions for in-batch clips so we can treat them
+        // at their destination when checking against one another.
+        let batch_new: HashMap<ClipId, i64> = pending.iter().map(|&(id, _, ns)| (id, ns)).collect();
+
+        for &(moving_id, _, new_s) in &pending {
+            let (track_idx, dur) = {
+                let (ti, _) = self
+                    .clip_map
+                    .get(&moving_id)
+                    .copied()
+                    .ok_or(EditError::ClipNotFound(moving_id))?;
+                let dur = self.tracks[ti]
+                    .clips
+                    .iter()
+                    .find(|c| c.id == moving_id)
+                    .map(|c| c.timeline_duration)
+                    .ok_or(EditError::ClipNotFound(moving_id))?;
+                (ti, dur)
+            };
+            let new_end = new_s + dur;
+
+            for existing in &self.tracks[track_idx].clips {
+                if existing.id == moving_id {
+                    continue;
+                }
+                // Use the batch-new position for in-batch clips.
+                let ex_start = batch_new
+                    .get(&existing.id)
+                    .copied()
+                    .unwrap_or(existing.timeline_start);
+                let ex_end = ex_start + existing.timeline_duration;
+                // Overlap when intervals are not disjoint.
+                if !(new_end <= ex_start || new_s >= ex_end) {
+                    return Err(EditError::ClipOverlap(new_s, track_idx));
+                }
+            }
+        }
+
+        // --- 5. Apply all moves (no rollback needed; validation already passed). ---
+        for &(id, _, new_s) in &pending {
+            if let Some(clip) = self.get_clip_mut(id) {
+                clip.timeline_start = new_s;
+            }
+        }
+        // Re-sort all affected tracks and rebuild the clip map once.
+        let affected_tracks: HashSet<usize> = pending
+            .iter()
+            .filter_map(|&(id, _, _)| self.clip_map.get(&id).map(|&(ti, _)| ti))
+            .collect();
+        for ti in affected_tracks {
+            self.tracks[ti].sort_clips();
+        }
+        self.rebuild_clip_map();
         self.update_duration();
+
         Ok(())
     }
 
@@ -496,6 +623,16 @@ impl TrackType {
                 | (Self::Audio, ClipType::Audio)
                 | (Self::Subtitle, ClipType::Subtitle)
         )
+    }
+
+    /// Return the clip type that this track type accepts.
+    #[must_use]
+    pub fn expected_clip_type(&self) -> ClipType {
+        match self {
+            Self::Video => ClipType::Video,
+            Self::Audio => ClipType::Audio,
+            Self::Subtitle => ClipType::Subtitle,
+        }
     }
 }
 

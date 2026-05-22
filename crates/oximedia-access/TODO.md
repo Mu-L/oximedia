@@ -11,27 +11,27 @@
 - Dependencies: oximedia-core, oximedia-audio, oximedia-subtitle, oximedia-graph
 
 ## Enhancements
-- [ ] Add real-time caption synchronization adjustment in `caption/sync` (user-adjustable offset)
-- [ ] Implement multi-speaker differentiation in `caption/generate` with speaker labels and color coding
-- [ ] Add emoji and symbol descriptions in `audio_desc/generator` for screen reader contexts
-- [ ] Implement adaptive font sizing in `caption/style` based on display resolution/distance
-- [ ] Add caption region collision avoidance in `caption/position` (prevent overlap with burned-in text)
+- [x] Add real-time caption synchronization adjustment in `caption/sync` (user-adjustable offset) (verified 2026-05-16; src/caption/sync.rs:21 offset_ms, SyncAdjustment:18, with_offset:45)
+- [x] Implement multi-speaker differentiation in `caption/generate` with speaker labels and color coding (verified 2026-05-16; src/caption/generate.rs:28 identify_speakers, SpeakerColor:35, SpeakerLabel:41)
+- [x] Add emoji and symbol descriptions in `audio_desc/generator` for screen reader contexts (verified 2026-05-16; src/audio_desc/generator.rs:105 expand_emoji_and_symbols, EMOJI_TABLE:103, 188 fn body)
+- [x] Implement adaptive font sizing in `caption/style` based on display resolution/distance (verified 2026-05-16; src/adaptive_font.rs:45 FontSizePolicy, measure_line:102, font size from resolution)
+- [x] Add caption region collision avoidance in `caption/position` (prevent overlap with burned-in text) (verified 2026-05-16; src/caption_collision.rs:46 spatial_overlap_area, temporal_overlap_ms:57, collision detection)
 - [x] Implement progressive enhancement in `visual/contrast` (multiple enhancement levels)
-- [ ] Add customizable color blind simulation modes in `color_blind` (protanopia, deuteranopia, tritanopia preview)
+- [x] Add customizable color blind simulation modes in `color_blind` (protanopia, deuteranopia, tritanopia preview) (verified 2026-05-16; src/color_blind_sim.rs:169 protanopia/deuteranopia/tritanopia matrices, SimulationConfig:227)
 - [x] Implement SSML prosody control in `tts/prosody` for emphasis and pacing
-- [ ] Add confidence scores to `stt/transcribe` output for quality assessment
-- [ ] Improve `compliance/wcag` checker to cover WCAG 2.2 criteria (focus appearance, dragging alternatives)
+- [x] Add confidence scores to `stt/transcribe` output for quality assessment (verified 2026-05-16; src/stt/transcribe.rs:13 WordConfidence.confidence:21, quality assessment:46, is_uncertain:35)
+- [x] Improve `compliance/wcag` checker to cover WCAG 2.2 criteria (focus appearance, dragging alternatives) (verified 2026-05-16; src/wcag_checker.rs:200 WCAG 2.1/2.2 checker, includes 2.2 criteria per module doc)
 
 ## New Features
 - [x] Add live captioning pipeline: STT -> caption generation -> rendering in real-time
-- [ ] Implement automatic audio description from scene analysis (integrate with oximedia-analysis)
-- [ ] Add haptic feedback description generation for touch-enabled devices
+- [ ] Implement automatic audio description from scene analysis (integrate with oximedia-analysis) (verified-open 2026-05-16: audio_desc/generator.rs has scripting/template but no scene analysis integration with oximedia-analysis)
+- [x] Add haptic feedback description generation for touch-enabled devices (verified 2026-05-16; src/haptic.rs 553 lines)
 - [x] Implement reading level assessment in `transcript` for plain language compliance
-- [ ] Add ASL/BSL/JSL-specific sign language grammar rules in `sign` module
-- [ ] Implement audio spatializer for accessibility (directional cues for visually impaired users)
+- [x] Add ASL/BSL/JSL-specific sign language grammar rules in `sign` module (verified 2026-05-16; src/sign/grammar.rs:1 ASL/BSL/JSL grammar rules, 497 lines)
+- [x] Implement audio spatializer for accessibility (directional cues for visually impaired users) (verified 2026-05-16; src/spatial_accessibility.rs 637 lines)
 - [x] Add cognitive load assessment for media content complexity
-- [ ] Implement auto-generated image alt-text from visual features in `media_alt_text`
-- [ ] Add braille display output format support in `screen_reader`
+- [x] Implement auto-generated image alt-text from visual features in `media_alt_text` (verified 2026-05-16; src/auto_alt_text.rs 748 lines)
+- [ ] Add braille display output format support in `screen_reader` (verified-open 2026-05-16: no braille*.rs module in access sources; screen_reader has no braille output)
 
 ## Performance
 - [ ] Cache TTS synthesis results in `tts/synthesize` for repeated text segments

@@ -41,6 +41,11 @@ pub mod object_detector;
 #[cfg(feature = "face-embedder")]
 pub mod face_embedder;
 
+pub mod auto_caption;
+
+#[cfg(feature = "auto-caption")]
+pub use auto_caption::{AutoCaptionConfig, AutoCaptionPipeline};
+
 #[cfg(feature = "scene-classifier")]
 pub use scene_classifier::{
     SceneClassification, SceneClassifier, SceneClassifierConfig, SceneImage,

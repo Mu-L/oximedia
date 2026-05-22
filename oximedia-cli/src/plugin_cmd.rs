@@ -1,6 +1,50 @@
-//! Plugin management CLI commands.
+//! OxiMedia plugin management subcommand.
 //!
-//! Provides commands for listing, inspecting, and validating plugins.
+//! Provides commands for listing, inspecting, validating, and querying plugins
+//! and their capabilities.
+//!
+//! ## Plugin Search Paths
+//!
+//! OxiMedia locates plugins by searching the following directories in order.
+//! The search is performed by [`oximedia_plugin::PluginRegistry::default_search_paths`].
+//!
+//! 1. **`$OXIMEDIA_PLUGIN_PATH`** — Colon-separated list of directories (semicolon on
+//!    Windows). Each directory in the list is searched in order. If set, these paths
+//!    are prepended to the default list.
+//! 2. **`~/.oximedia/plugins/`** — Per-user plugin directory in the user's home folder.
+//! 3. **`/usr/lib/oximedia/plugins/`** — System-wide plugin directory (Unix only).
+//! 4. **`/usr/local/lib/oximedia/plugins/`** — Local system plugin directory (Unix only).
+//!
+//! ## Plugin Feature Gate
+//!
+//! Dynamic plugin loading (`.so` / `.dylib` / `.dll`) requires the `dynamic-loading`
+//! Cargo feature to be enabled at compile time:
+//!
+//! ```notrust
+//! [dependencies]
+//! oximedia-plugin = { version = "...", features = ["dynamic-loading"] }
+//! ```
+//!
+//! Without this feature, only static (compiled-in) plugins are available.
+//!
+//! ## Preset System
+//!
+//! Encoding presets are compiled into the binary via the `presets` module. They are
+//! not loaded from disk at runtime. The preset categories are:
+//! - **Web** — Web-optimised presets (browsers, platforms)
+//! - **Device** — Mobile, smart TV, and embedded target presets
+//! - **Streaming** — Platform-specific ABR presets (YouTube, Twitch, etc.)
+//! - **Archival** — Long-term preservation with FFV1 + FLAC
+//! - **Custom** — User-created presets loaded from explicit TOML file paths
+//!
+//! ## Plugin Subcommands
+//!
+//! - `oximedia plugin list` — List all registered plugins with name, version, author,
+//!   and license.
+//! - `oximedia plugin info <name>` — Show detailed metadata for a specific plugin.
+//! - `oximedia plugin codecs` — Show all codecs provided by loaded plugins.
+//! - `oximedia plugin validate <path>` — Validate a plugin manifest JSON file.
+//! - `oximedia plugin paths` — Show the resolved plugin search path list.
 
 use anyhow::{Context, Result};
 use clap::Subcommand;

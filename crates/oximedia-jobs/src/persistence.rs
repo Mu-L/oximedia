@@ -231,6 +231,77 @@ impl JobPersistence {
         Ok(())
     }
 
+    /// Save a batch of jobs atomically in a single transaction.
+    ///
+    /// All jobs are written in one `BEGIN`/`COMMIT` pair via `prepare_cached`,
+    /// reducing per-job SQLite transaction overhead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any serialization or database operation fails. The
+    /// entire batch is rolled back on the first error.
+    pub fn save_jobs_batch(&self, jobs: &[Job]) -> Result<()> {
+        if jobs.is_empty() {
+            return Ok(());
+        }
+
+        let conn = self.pool.get()?;
+        let tx = conn.unchecked_transaction()?;
+
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR REPLACE INTO jobs (
+                    id, name, priority, status, payload_type, payload_data,
+                    retry_policy, resource_quota, condition_type, condition_data,
+                    dependencies, tags, created_at, scheduled_at, started_at,
+                    completed_at, deadline, attempts, error, progress, worker_id, next_jobs
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                    ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                )",
+            )?;
+
+            for job in jobs {
+                let payload_type = job.payload.job_type();
+                let payload_data = serde_json::to_string(&job.payload)?;
+                let retry_policy = serde_json::to_string(&job.retry_policy)?;
+                let resource_quota = serde_json::to_string(&job.resource_quota)?;
+                let condition_data = serde_json::to_string(&job.condition)?;
+                let dependencies = serde_json::to_string(&job.dependencies)?;
+                let tags = serde_json::to_string(&job.tags)?;
+                let next_jobs = serde_json::to_string(&job.next_jobs)?;
+
+                stmt.execute(params![
+                    job.id.to_string(),
+                    job.name,
+                    job.priority as i32,
+                    job.status.to_string(),
+                    payload_type,
+                    payload_data,
+                    retry_policy,
+                    resource_quota,
+                    "condition",
+                    condition_data,
+                    dependencies,
+                    tags,
+                    job.created_at.to_rfc3339(),
+                    job.scheduled_at.map(|dt| dt.to_rfc3339()),
+                    job.started_at.map(|dt| dt.to_rfc3339()),
+                    job.completed_at.map(|dt| dt.to_rfc3339()),
+                    job.deadline.map(|dt| dt.to_rfc3339()),
+                    job.attempts,
+                    &job.error,
+                    job.progress,
+                    &job.worker_id,
+                    next_jobs,
+                ])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Get jobs by status
     ///
     /// # Errors
@@ -239,7 +310,7 @@ impl JobPersistence {
     pub fn get_jobs_by_status(&self, status: JobStatus) -> Result<Vec<Job>> {
         let conn = self.pool.get()?;
 
-        let mut stmt = conn.prepare("SELECT * FROM jobs WHERE status = ?1")?;
+        let mut stmt = conn.prepare_cached("SELECT * FROM jobs WHERE status = ?1")?;
         let jobs = stmt
             .query_map(params![status.to_string()], Self::row_to_job)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -255,7 +326,7 @@ impl JobPersistence {
     pub fn get_pending_jobs(&self) -> Result<Vec<Job>> {
         let conn = self.pool.get()?;
 
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT * FROM jobs
              WHERE status = 'pending'
              ORDER BY priority DESC, created_at ASC",
@@ -277,7 +348,7 @@ impl JobPersistence {
         let conn = self.pool.get()?;
         let now = Utc::now().to_rfc3339();
 
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT * FROM jobs
              WHERE status = 'scheduled' AND scheduled_at <= ?1
              ORDER BY priority DESC, scheduled_at ASC",
@@ -299,7 +370,7 @@ impl JobPersistence {
         let conn = self.pool.get()?;
         let now = Utc::now().to_rfc3339();
 
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT * FROM jobs
              WHERE deadline IS NOT NULL AND deadline < ?1
              AND status NOT IN ('completed', 'failed', 'cancelled')",
@@ -320,7 +391,7 @@ impl JobPersistence {
     pub fn get_all_jobs(&self) -> Result<Vec<Job>> {
         let conn = self.pool.get()?;
 
-        let mut stmt = conn.prepare("SELECT * FROM jobs ORDER BY created_at DESC")?;
+        let mut stmt = conn.prepare_cached("SELECT * FROM jobs ORDER BY created_at DESC")?;
         let jobs = stmt
             .query_map([], Self::row_to_job)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -336,7 +407,7 @@ impl JobPersistence {
     pub fn get_jobs_by_tag(&self, tag: &str) -> Result<Vec<Job>> {
         let conn = self.pool.get()?;
 
-        let mut stmt = conn.prepare("SELECT * FROM jobs WHERE tags LIKE ?1")?;
+        let mut stmt = conn.prepare_cached("SELECT * FROM jobs WHERE tags LIKE ?1")?;
         let pattern = format!("%\"{tag}\" %");
         let jobs = stmt
             .query_map(params![pattern], Self::row_to_job)?
@@ -353,10 +424,8 @@ impl JobPersistence {
     pub fn update_job_status(&self, id: Uuid, status: JobStatus) -> Result<()> {
         let conn = self.pool.get()?;
 
-        conn.execute(
-            "UPDATE jobs SET status = ?1 WHERE id = ?2",
-            params![status.to_string(), id.to_string()],
-        )?;
+        conn.prepare_cached("UPDATE jobs SET status = ?1 WHERE id = ?2")?
+            .execute(params![status.to_string(), id.to_string()])?;
 
         Ok(())
     }
@@ -369,10 +438,8 @@ impl JobPersistence {
     pub fn update_job_progress(&self, id: Uuid, progress: u8) -> Result<()> {
         let conn = self.pool.get()?;
 
-        conn.execute(
-            "UPDATE jobs SET progress = ?1 WHERE id = ?2",
-            params![progress, id.to_string()],
-        )?;
+        conn.prepare_cached("UPDATE jobs SET progress = ?1 WHERE id = ?2")?
+            .execute(params![progress, id.to_string()])?;
 
         Ok(())
     }
@@ -385,11 +452,9 @@ impl JobPersistence {
     pub fn count_jobs_by_status(&self, status: JobStatus) -> Result<usize> {
         let conn = self.pool.get()?;
 
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM jobs WHERE status = ?1",
-            params![status.to_string()],
-            |row| row.get(0),
-        )?;
+        let count: i64 = conn
+            .prepare_cached("SELECT COUNT(*) FROM jobs WHERE status = ?1")?
+            .query_row(params![status.to_string()], |row| row.get(0))?;
 
         Ok(count as usize)
     }

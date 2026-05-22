@@ -13,19 +13,19 @@
 - [x] Consolidate `live_caption` and `live_captions` into a single module (redundant naming)
 - [x] Consolidate `speaker_diarization` and `speaker_diarize` into a single module (redundant naming)
 - [x] Add IMSC 1.1 (Internet Media Subtitles and Captions) profile validation in `imsc`
-- [ ] Extend `formats` with Netflix Timed Text (NFLX-TT) profile support
-- [ ] Improve `caption_sync` with audio waveform-based synchronization (match speech onset)
-- [ ] Add `caption_rate_control` adaptive rate limiting based on scene complexity
+- [x] Extend `formats` with Netflix Timed Text (NFLX-TT) profile support (verified 2026-05-16; src/formats/nflx_tt.rs:19 NflxTtEntry, NflxTtParser:363, NflxTtWriter:384, parse_nflx_tt:95, serialize_nflx_tt:253, 575 lines)
+- [ ] Improve `caption_sync` with audio waveform-based synchronization (match speech onset) (verified-open 2026-05-16: caption_sync.rs has offset/drift adjustment but no audio_waveform/speech_onset analysis)
+- [x] Add `caption_rate_control` adaptive rate limiting based on scene complexity (verified 2026-05-16; src/caption_rate_control.rs:85 RateControlConfig, analyse_rates:189, RateStats, 433 lines)
 - [x] Extend `caption_validator` with broadcast-specific checks (max lines, max chars, safe area)
 
 ## New Features
-- [ ] Add `ocr_subtitle` module for extracting text from bitmap-based subtitles (PGS, VobSub, DVB)
-- [ ] Implement `sdh_generator` module for Subtitles for Deaf and Hard-of-Hearing (sound descriptions)
-- [ ] Add `karaoke_timing` module for word-by-word highlight timing (WebVTT cue settings)
-- [ ] Implement `caption_localization` module managing multi-language caption sets per video
-- [ ] Add `teletext_page_editor` module for composing Teletext page layouts (Level 1.5 colors)
-- [ ] Implement `caption_versioning` module tracking revision history of caption edits
-- [ ] Add `smpte_2052` module for SMPTE ST 2052-1 TTML profile compliance
+- [x] Add `ocr_subtitle` module for extracting text from bitmap-based subtitles (PGS, VobSub, DVB) (verified 2026-05-16; src/ocr_subtitle.rs:26 BitmapSubtitleFormat PGS/VobSub/DVB, 781 lines)
+- [x] Implement `sdh_generator` module for Subtitles for Deaf and Hard-of-Hearing (sound descriptions) (verified 2026-05-16; src/sdh_generator.rs:265 SdhGenerator, SdhCaption:235, strip_sdh:345, 539 lines)
+- [x] Add `karaoke_timing` module for word-by-word highlight timing (WebVTT cue settings) (verified 2026-05-16; src/karaoke_timing.rs:128 KaraokeTrack, KaraokeAligner:301, WebVTT cue body:179, 619 lines)
+- [x] Implement `caption_localization` module managing multi-language caption sets per video (verified 2026-05-16; src/caption_localization.rs:164 LocalizationSet, LocalizedTrack:29, ManifestEntry:143, 497 lines)
+- [x] Add `teletext_page_editor` module for composing Teletext page layouts (Level 1.5 colors) (verified 2026-05-16; src/teletext_page_editor.rs:358 TeletextPageEditor, TeletextPage:218, TeletextPageHeader:180, 603 lines)
+- [x] Implement `caption_versioning` module tracking revision history of caption edits (verified 2026-05-16; src/caption_versioning.rs:81 CaptionRevisionHistory, CaptionRevision:33, revision:34, 286 lines)
+- [x] Add `smpte_2052` module for SMPTE ST 2052-1 TTML profile compliance (verified 2026-05-16; src/smpte_2052.rs:84 validate_smpte_tt, ST 2052-1:5, compliance issues:51, 292 lines)
 
 ## Performance
 - [ ] Optimize `formats` SRT parser using zero-copy `nom` combinators instead of string allocation

@@ -7,9 +7,9 @@
 //! [`validate_job_output`] which checks whether a completed job's output meets
 //! structural and timing requirements.
 //!
-//! The file-existence checks are **stub implementations** that always pass
-//! (the real filesystem is not accessible in unit tests).  Timing checks are
-//! always evaluated from the supplied metadata.
+//! File-existence checks use [`std::fs::metadata`] to probe for each required
+//! file under the given `output_path`.  Missing files are recorded as hard
+//! errors.  Timing checks are always evaluated from the supplied metadata.
 //!
 //! # Example
 //!
@@ -18,9 +18,10 @@
 //!     JobOutputValidator, validate_job_output,
 //! };
 //!
+//! // A validator with no required files always passes.
 //! let validator = JobOutputValidator {
-//!     required_files: vec!["output.mkv".to_owned()],
-//!     min_size_bytes: 1024,
+//!     required_files: vec![],
+//!     min_size_bytes: 0,
 //!     max_duration_ms: 60_000,
 //! };
 //!
@@ -38,8 +39,8 @@
 pub struct JobOutputValidator {
     /// Paths of files (relative to `output_path`) that must exist.
     ///
-    /// In the current stub implementation, their existence is always assumed;
-    /// integrate with a real filesystem probe for production use.
+    /// Each entry is joined with the `output_path` argument passed to
+    /// [`validate_job_output`] and probed via [`std::fs::metadata`].
     pub required_files: Vec<String>,
     /// Minimum combined output size in bytes.
     ///
@@ -132,16 +133,15 @@ impl ValidationResult {
 ///
 /// # Arguments
 ///
-/// * `output_path`   – Base directory or file path where output was written.
+/// * `output_path`   – Base directory where output files were written.
 /// * `validator`     – Acceptance criteria.
 /// * `actual_duration_ms` – Actual wall-clock render duration in milliseconds.
 ///
-/// # File existence (stub)
+/// # File existence
 ///
-/// Each entry in `validator.required_files` is noted in the result.  The
-/// current implementation always marks them as found to avoid filesystem
-/// access in tests.  Replace the stub body with a real `std::fs::metadata`
-/// call for production use.
+/// Each entry in `validator.required_files` is joined with `output_path` and
+/// probed via [`std::fs::metadata`].  If a required file is absent a hard error
+/// is added to the result.
 #[must_use]
 pub fn validate_job_output(
     output_path: &str,
@@ -150,13 +150,16 @@ pub fn validate_job_output(
 ) -> ValidationResult {
     let mut result = ValidationResult::ok();
 
-    // --- Required files (stub: always pass) ---
+    // --- Required files ---
+    let base = std::path::Path::new(output_path);
     for required in &validator.required_files {
-        // Stub: record that we checked the file but assume it exists.
-        // In production: check std::fs::metadata(format!("{}/{}", output_path, required))
-        let _ = output_path; // suppress unused warning in stub
-        let _ = required;
-        // result.add_error(format!("required file not found: {}/{}", output_path, required));
+        let full_path = base.join(required);
+        if std::fs::metadata(&full_path).is_err() {
+            result.add_error(format!(
+                "required output file not found: {}",
+                full_path.display()
+            ));
+        }
     }
 
     // --- Timing check ---
@@ -308,14 +311,37 @@ mod tests {
     }
 
     #[test]
-    fn validate_with_required_files_stub_passes() {
+    fn validate_with_required_files_present_passes() {
+        let dir = std::env::temp_dir().join("oximedia-renderfarm-job-out-render-job1");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        for name in &["output.mkv", "thumbnail.jpg"] {
+            std::fs::write(dir.join(name), b"placeholder").expect("write temp file");
+        }
         let v = JobOutputValidator {
             required_files: vec!["output.mkv".to_owned(), "thumbnail.jpg".to_owned()],
             max_duration_ms: 60_000,
             min_size_bytes: 0,
         };
-        let result = validate_job_output(&tmp_path("render-job1"), &v, 5_000);
-        assert!(result.passed, "stub always passes file checks");
+        let result = validate_job_output(dir.to_string_lossy().as_ref(), &v, 5_000);
+        assert!(result.passed, "all required files present should pass");
+    }
+
+    #[test]
+    fn validate_with_missing_required_file_fails() {
+        let dir = std::env::temp_dir().join("oximedia-renderfarm-job-out-render-job2");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        // Deliberately do NOT create "missing.mkv"
+        let v = JobOutputValidator {
+            required_files: vec!["missing.mkv".to_owned()],
+            max_duration_ms: 0,
+            min_size_bytes: 0,
+        };
+        let result = validate_job_output(dir.to_string_lossy().as_ref(), &v, 0);
+        assert!(!result.passed, "missing required file should fail");
+        assert!(
+            result.errors.iter().any(|e| e.contains("not found")),
+            "error message should mention missing file"
+        );
     }
 
     // --- validate_job_output_with_metadata ---

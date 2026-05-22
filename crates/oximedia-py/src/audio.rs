@@ -122,10 +122,11 @@ impl OpusDecoder {
     /// * `data` - Compressed Opus packet data
     ///
     /// Returns an `AudioFrame` containing decoded PCM samples.
-    fn decode_packet(&mut self, data: &[u8]) -> PyOxiResult<AudioFrame> {
-        let frame = self
-            .inner
-            .decode_packet(data)
+    fn decode_packet(&mut self, py: Python<'_>, data: &[u8]) -> PyOxiResult<AudioFrame> {
+        let buf: Vec<u8> = data.to_vec();
+        let inner = &mut self.inner;
+        let frame = py
+            .detach(move || inner.decode_packet(&buf))
             .map_err(crate::error::from_codec_error)?;
         Ok(AudioFrame::from_rust(frame))
     }
@@ -214,26 +215,29 @@ impl VorbisDecoder {
     ///
     /// * `data` - Compressed Vorbis packet bytes
     /// * `pts` - Presentation timestamp
-    fn send_packet(&mut self, data: &[u8], pts: i64) -> PyOxiResult<()> {
-        self.inner
-            .send_packet(data, pts)
+    fn send_packet(&mut self, py: Python<'_>, data: &[u8], pts: i64) -> PyOxiResult<()> {
+        let buf: Vec<u8> = data.to_vec();
+        let inner = &mut self.inner;
+        py.detach(move || inner.send_packet(&buf, pts))
             .map_err(crate::error::from_audio_error)
     }
 
     /// Receive a decoded audio frame.
     ///
     /// Returns `None` if no frame is available yet.
-    fn receive_frame(&mut self) -> PyOxiResult<Option<AudioFrame>> {
-        let opt = self
-            .inner
-            .receive_frame()
+    fn receive_frame(&mut self, py: Python<'_>) -> PyOxiResult<Option<AudioFrame>> {
+        let inner = &mut self.inner;
+        let opt = py
+            .detach(move || inner.receive_frame())
             .map_err(crate::error::from_audio_error)?;
         Ok(opt.map(audio_frame_to_py))
     }
 
     /// Flush the decoder, signalling end of stream.
-    fn flush(&mut self) -> PyOxiResult<()> {
-        self.inner.flush().map_err(crate::error::from_audio_error)
+    fn flush(&mut self, py: Python<'_>) -> PyOxiResult<()> {
+        let inner = &mut self.inner;
+        py.detach(move || inner.flush())
+            .map_err(crate::error::from_audio_error)
     }
 
     /// Get the configured sample rate.
@@ -321,26 +325,29 @@ impl FlacDecoder {
     ///
     /// * `data` - Compressed FLAC frame bytes
     /// * `pts` - Presentation timestamp
-    fn send_packet(&mut self, data: &[u8], pts: i64) -> PyOxiResult<()> {
-        self.inner
-            .send_packet(data, pts)
+    fn send_packet(&mut self, py: Python<'_>, data: &[u8], pts: i64) -> PyOxiResult<()> {
+        let buf: Vec<u8> = data.to_vec();
+        let inner = &mut self.inner;
+        py.detach(move || inner.send_packet(&buf, pts))
             .map_err(crate::error::from_audio_error)
     }
 
     /// Receive a decoded audio frame.
     ///
     /// Returns `None` if no frame is ready yet.
-    fn receive_frame(&mut self) -> PyOxiResult<Option<AudioFrame>> {
-        let opt = self
-            .inner
-            .receive_frame()
+    fn receive_frame(&mut self, py: Python<'_>) -> PyOxiResult<Option<AudioFrame>> {
+        let inner = &mut self.inner;
+        let opt = py
+            .detach(move || inner.receive_frame())
             .map_err(crate::error::from_audio_error)?;
         Ok(opt.map(audio_frame_to_py))
     }
 
     /// Flush the decoder, signalling end of stream.
-    fn flush(&mut self) -> PyOxiResult<()> {
-        self.inner.flush().map_err(crate::error::from_audio_error)
+    fn flush(&mut self, py: Python<'_>) -> PyOxiResult<()> {
+        let inner = &mut self.inner;
+        py.detach(move || inner.flush())
+            .map_err(crate::error::from_audio_error)
     }
 
     /// Get the configured sample rate.
@@ -521,11 +528,11 @@ impl OpusEncoder {
     /// # Arguments
     ///
     /// * `frame` - Audio frame to encode
-    fn send_frame(&mut self, frame: &AudioFrame) -> PyOxiResult<()> {
+    fn send_frame(&mut self, py: Python<'_>, frame: &AudioFrame) -> PyOxiResult<()> {
         // Convert Python AudioFrame (oximedia-codec) to oximedia-audio AudioFrame.
         let audio_frame = codec_frame_to_audio(frame)?;
-        self.inner
-            .send_frame(&audio_frame)
+        let inner = &mut self.inner;
+        py.detach(move || inner.send_frame(&audio_frame))
             .map_err(crate::error::from_audio_error)
     }
 
@@ -534,9 +541,9 @@ impl OpusEncoder {
     /// Returns a dict with keys `data` (bytes), `pts` (int), `duration` (int),
     /// or `None` if no packet is ready (need more frames).
     fn receive_packet<'py>(&mut self, py: Python<'py>) -> PyOxiResult<Option<Bound<'py, PyDict>>> {
-        let opt = self
-            .inner
-            .receive_packet()
+        let inner = &mut self.inner;
+        let opt = py
+            .detach(move || inner.receive_packet())
             .map_err(crate::error::from_audio_error)?;
         match opt {
             None => Ok(None),
@@ -551,8 +558,10 @@ impl OpusEncoder {
     }
 
     /// Flush the encoder, signalling end of stream.
-    fn flush(&mut self) -> PyOxiResult<()> {
-        self.inner.flush().map_err(crate::error::from_audio_error)
+    fn flush(&mut self, py: Python<'_>) -> PyOxiResult<()> {
+        let inner = &mut self.inner;
+        py.detach(move || inner.flush())
+            .map_err(crate::error::from_audio_error)
     }
 
     /// Get the configured bitrate.

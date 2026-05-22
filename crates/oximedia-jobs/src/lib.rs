@@ -5,6 +5,76 @@
 //!
 //! This crate provides a comprehensive job queue system with the following features:
 //!
+//! # Job Lifecycle
+//!
+//! Every job progresses through a well-defined state machine.  The allowed
+//! transitions are:
+//!
+//! ```text
+//!          ┌──────────┐
+//!          │  Pending │ ← initial state after submission
+//!          └────┬─────┘
+//!               │  worker picks up the job
+//!               ▼
+//!          ┌──────────┐      max retries exceeded
+//!          │  Running │ ──────────────────────────────► Failed (terminal)
+//!          └────┬─────┘
+//!          ╱         ╲
+//!   success            failure / transient error
+//!        ▼               ▼
+//!  ┌───────────┐    ┌──────────┐
+//!  │ Completed │    │ Retrying │ ──► Running (next attempt)
+//!  │ (terminal)│    └──────┬───┘
+//!  └───────────┘           │ max retries exceeded
+//!                          ▼
+//!                       Failed (terminal)
+//!
+//!  Pending / Running / Retrying  ──► Cancelled (terminal, by caller)
+//! ```
+//!
+//! **Pending** — the job has been submitted and is waiting for a free worker.
+//! **Running** — a worker has claimed the job and is executing it.
+//! **Completed** — the job finished successfully; no further transitions occur.
+//! **Failed** — the job exhausted all retry attempts or encountered a
+//!   non-retryable error; no further transitions occur.
+//! **Retrying** — the job failed transiently and is scheduled for another
+//!   attempt after the configured backoff delay.
+//! **Cancelled** — a caller explicitly cancelled the job before or during
+//!   execution; no further transitions occur.
+//!
+//! # Common Transcoding Pipeline
+//!
+//! Use [`job_template::JobTemplate`] to define reusable pipelines with named
+//! parameters, then instantiate them at runtime:
+//!
+//! ```rust,no_run
+//! use oximedia_jobs::job_template::{JobTemplate, TemplateParam};
+//! use std::collections::HashMap;
+//!
+//! // Define a 4-stage ingest → transcode → thumbnail → notify pipeline.
+//! let template = JobTemplate::new(
+//!     "transcode_pipeline",
+//!     "Ingest, transcode, generate thumbnails, then send a webhook notification",
+//!     concat!(
+//!         "oximedia ingest --input {{input}}; ",
+//!         "oximedia transcode --preset h264_1080p; ",
+//!         "oximedia thumbnail --count 10; ",
+//!         "oximedia notify --webhook {{webhook_url}}"
+//!     ),
+//! )
+//! .with_param(TemplateParam::required("input", "Path or URI to the source media file"))
+//! .with_param(TemplateParam::required("webhook_url", "HTTPS endpoint to POST completion events"))
+//! .with_max_retries(2)
+//! .with_timeout(3600);
+//!
+//! // Instantiate with concrete values.
+//! let mut params = HashMap::new();
+//! params.insert("input".to_string(), "s3://bucket/raw/video.mov".to_string());
+//! params.insert("webhook_url".to_string(), "https://api.example.com/events".to_string());
+//! let job = template.instantiate(&params).expect("instantiate");
+//! println!("Job body: {}", job.resolved_body);
+//! ```
+//!
 //! # Features
 //!
 //! - **Priority Queue**: Support for high, normal, and low priority jobs
@@ -86,40 +156,74 @@
 //! ```
 
 pub mod batch;
+/// Batch job submission with validation and dependency resolution.
+pub mod batch_submit;
 /// Cron-expression parser and scheduler for recurring job execution.
 pub mod cron_scheduler;
 /// Dead letter queue for jobs that permanently exceed their retry limit.
 pub mod dead_letter_queue;
 pub mod dependency;
 pub mod dependency_graph;
+/// Distributed locking for coordinating workers across multiple processes.
+pub mod distributed_lock;
 pub mod event_log;
 pub mod job;
 /// Worker affinity and anti-affinity rules for job placement.
 pub mod job_affinity;
+/// Job archiving with configurable retention and storage backends.
+pub mod job_archiver;
+/// Additional job lifecycle enhancements and extension traits.
+pub mod job_enhancements;
+/// Fine-grained per-job event logging with structured payloads.
+pub mod job_event_log;
+/// Job filter predicates for querying and routing.
+pub mod job_filter;
 pub mod job_graph_viz;
 pub mod job_history;
 /// Per-job metrics collection — outcomes, efficiency, and aggregate statistics.
 pub mod job_metrics;
+/// Job migration utilities for moving jobs between queue instances.
+pub mod job_migration;
+/// Notification channels for job status changes (email, SMS, push).
+pub mod job_notification;
 /// Dynamic priority boosting based on wait time, deadlines, and starvation prevention.
 pub mod job_priority_boost;
+/// REST API layer (axum) for remote job submission and monitoring.
+pub mod job_queue_api;
+/// Job replay — re-run failed jobs with modified parameters.
+pub mod job_replay;
+/// Persistent job result storage with configurable retention periods.
+pub mod job_result_store;
 pub mod job_tags;
 /// Reusable, parameterised job templates with placeholder substitution and a template registry.
 pub mod job_template;
 /// Job timeout management with deadline tracking, escalation policies, and grace periods.
 pub mod job_timeout;
+/// Lazy deserialization of `JobPayload` to avoid parsing unused job parameters.
+pub mod lazy_payload;
 pub mod metrics;
+/// Per-user and per-tag rate limiting on top of the global rate limiter.
+pub mod per_key_rate_limiter;
 pub mod persistence;
 /// Low-level pipeline stage status tracking.
 pub mod pipeline;
 pub mod priority;
+/// Configurable time-based priority decay for queued jobs.
+pub mod priority_decay;
+/// Historical-duration-based progress estimation for running jobs.
+pub mod progress_tracker;
 pub mod queue;
 pub mod quota;
 /// Rate limiting — token bucket and fixed-window algorithms for controlling job throughput.
 pub mod rate_limiter;
+/// Recurring job scheduling with count / interval / cron support.
+pub mod recurring_job;
 pub mod registry;
 pub mod resource_claim;
 pub mod resource_estimate;
 pub mod resource_limits;
+/// GPU/hardware resource allocation and sharing across workers.
+pub mod resource_pool;
 pub mod retry;
 /// Retry policy configuration with backoff strategies, circuit breakers, and per-error-class behavior.
 pub mod retry_policy;
@@ -135,9 +239,13 @@ pub mod throughput_tracker;
 pub mod wal;
 /// Webhook notifier — POST job completion/failure events to registered HTTP endpoints.
 pub mod webhook_notifier;
+/// Work-stealing scheduler for cross-worker job redistribution.
+pub mod work_stealing;
 pub mod worker;
 /// Worker pool management — worker state, utilization tracking, and job assignment.
 pub mod worker_pool;
+/// Declarative workflow DSL for defining complex job pipelines in YAML/JSON.
+pub mod workflow_dsl;
 
 pub use job::{
     AnalysisParams, AnalysisType, BatchParams, Condition, Job, JobBuilder, JobPayload, JobStatus,

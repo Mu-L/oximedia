@@ -427,14 +427,11 @@ fn aces_tone_curve(x: f64) -> f64 {
     }
 }
 
-// ============================================================================
-// Electro-Optical Transfer Functions (OETF)
-// ============================================================================
-
-/// ITU-R BT.709 OETF.
+/// ITU-R BT.709 / BT.601 OETF (piecewise gamma).
 ///
-/// Piecewise: linear below 0.018, `1.099·L^0.45 − 0.099` above.
-/// Note: negative inputs clamp to 0 via `max`.
+/// Applies the BT.709 electro-optical transfer function:
+/// `f(x) = 4.5x` for `x < 0.018`, `1.099 * x^0.45 - 0.099` otherwise.
+/// Negative inputs are clamped to 0.
 #[must_use]
 fn rec709_oetf(linear: f64) -> f64 {
     if linear <= 0.0 {

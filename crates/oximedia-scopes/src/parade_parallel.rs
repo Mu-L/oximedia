@@ -117,9 +117,8 @@ pub fn generate_rgb_parade_parallel(
 
     // Build three-channel per-column histograms in parallel.
     // Layout: histograms[channel][col_idx][bin]  (3 × section_w × 256)
-    let histograms: Vec<Vec<[u32; 256]>> = (0..3_usize)
-        .map(|_| vec![[0u32; 256]; section_w])
-        .collect();
+    let histograms: Vec<Vec<[u32; 256]>> =
+        (0..3_usize).map(|_| vec![[0u32; 256]; section_w]).collect();
 
     // Accumulate row-by-row in parallel using rayon.
     // Each rayon task owns a per-row local accumulator (section_w × 3 × 256).
@@ -130,9 +129,8 @@ pub fn generate_rgb_parade_parallel(
         .par_chunks(par.chunk_size.max(1))
         .map(|row_chunk| {
             // local_h[channel][col][bin]
-            let mut local_h: Vec<Vec<[u32; 256]>> = (0..3)
-                .map(|_| vec![[0u32; 256]; section_w])
-                .collect();
+            let mut local_h: Vec<Vec<[u32; 256]>> =
+                (0..3).map(|_| vec![[0u32; 256]; section_w]).collect();
 
             for &row in row_chunk {
                 let row_start = row * width as usize * 3;
@@ -142,8 +140,7 @@ pub fn generate_rgb_parade_parallel(
                     let g = frame[px + 1];
                     let b = frame[px + 2];
 
-                    let scope_col =
-                        ((col * section_w) / width as usize).min(section_w - 1);
+                    let scope_col = ((col * section_w) / width as usize).min(section_w - 1);
 
                     if par.ycbcr_mode {
                         let (y_val, cb, cr) = rgb_to_ycbcr(r, g, b);
@@ -199,11 +196,9 @@ pub fn generate_rgb_parade_parallel(
                 if count == 0 {
                     continue;
                 }
-                let mapped =
-                    ((bin as u32 * scope_h) / 255).min(scope_h - 1);
+                let mapped = ((bin as u32 * scope_h) / 255).min(scope_h - 1);
                 let scope_y = scope_h - 1 - mapped;
-                let brightness =
-                    ((count as f32 / max_val as f32).sqrt() * 255.0) as u8;
+                let brightness = ((count as f32 / max_val as f32).sqrt() * 255.0) as u8;
 
                 let color = [
                     ((u16::from(base_color[0]) * u16::from(brightness)) / 255) as u8,
@@ -283,9 +278,7 @@ mod tests {
     use crate::ScopeConfig;
 
     fn flat_rgb_frame(w: u32, h: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
-        (0..w * h)
-            .flat_map(|_| [r, g, b])
-            .collect()
+        (0..w * h).flat_map(|_| [r, g, b]).collect()
     }
 
     #[test]
@@ -306,8 +299,8 @@ mod tests {
         let config = ScopeConfig::default();
         let par = ParallelParadeConfig::default();
         let frame = flat_rgb_frame(64, 64, 200, 100, 50);
-        let scope = generate_rgb_parade_parallel(&frame, 64, 64, &config, &par)
-            .expect("should succeed");
+        let scope =
+            generate_rgb_parade_parallel(&frame, 64, 64, &config, &par).expect("should succeed");
         assert_eq!(scope.scope_type, ScopeType::ParadeRgb);
     }
 
@@ -319,8 +312,8 @@ mod tests {
             ..Default::default()
         };
         let frame = flat_rgb_frame(64, 64, 100, 150, 200);
-        let scope = generate_rgb_parade_parallel(&frame, 64, 64, &config, &par)
-            .expect("should succeed");
+        let scope =
+            generate_rgb_parade_parallel(&frame, 64, 64, &config, &par).expect("should succeed");
         assert_eq!(scope.scope_type, ScopeType::ParadeYcbcr);
     }
 
@@ -364,8 +357,8 @@ mod tests {
         let par = ParallelParadeConfig::default();
         // Pure red frame — only the R section should have non-black pixels
         let frame = flat_rgb_frame(64, 64, 255, 0, 0);
-        let scope = generate_rgb_parade_parallel(&frame, 64, 64, &config, &par)
-            .expect("should succeed");
+        let scope =
+            generate_rgb_parade_parallel(&frame, 64, 64, &config, &par).expect("should succeed");
         // At minimum, some pixels should be non-zero
         assert!(scope.data.iter().any(|&v| v > 0));
     }
@@ -375,8 +368,8 @@ mod tests {
         let config = ScopeConfig::default();
         let par = ParallelParadeConfig::default();
         let frame = flat_rgb_frame(32, 32, 0, 0, 0);
-        let scope = generate_rgb_parade_parallel(&frame, 32, 32, &config, &par)
-            .expect("should succeed");
+        let scope =
+            generate_rgb_parade_parallel(&frame, 32, 32, &config, &par).expect("should succeed");
         assert_eq!(scope.width, config.width);
     }
 

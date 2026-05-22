@@ -49,6 +49,7 @@
 //!   scoring.
 
 pub mod alignment;
+pub mod auto_pipeline;
 pub mod autopunct;
 pub mod burn_in;
 pub mod caption_diff;
@@ -79,14 +80,18 @@ pub use alignment::{
     align_to_frames, build_caption_blocks, merge_short_segments, split_long_segments,
     AlignmentError, CaptionBlock, CaptionPosition, TranscriptSegment, WordTimestamp,
 };
+pub use auto_pipeline::{
+    AsrEngine, AutoCaptionPipeline, CaptionTrack, DiarizationEngine, LineBreakStrategy,
+    PipelineConfig,
+};
 pub use diarization::{
     assign_speakers_to_blocks, dominant_speaker, format_speaker_label, merge_consecutive_turns,
     speaker_stats, voice_activity_ratio, CrosstalkDetector, DiarizationResult, Speaker,
     SpeakerGender, SpeakerStats, SpeakerTurn,
 };
 pub use line_breaking::{
-    compute_cps, greedy_break, optimal_break, reading_speed_ok, rebalance_lines, LineBalance,
-    LineBreakAlgorithm, LineBreakConfig,
+    compute_cps, greedy_break, optimal_break, optimal_break_smawk, reading_speed_ok,
+    rebalance_lines, LineBalance, LineBreakAlgorithm, LineBreakConfig,
 };
 pub use wcag::{
     check_caption_coverage, check_cps, check_live_latency, check_min_duration, check_sign_language,

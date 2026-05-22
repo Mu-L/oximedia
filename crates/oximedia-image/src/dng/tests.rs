@@ -659,3 +659,378 @@ fn test_default_metadata() {
     assert_eq!(meta.white_balance.as_shot_neutral, [1.0, 1.0, 1.0]);
     assert_eq!(meta.color_calibration.illuminant_1, 21);
 }
+
+// ==========================================
+// Compressed-DNG decode tests (LosslessJpeg / LossyDng)
+// ==========================================
+
+/// MSB-first bit writer for synthesising lossless-JPEG entropy data.
+struct LjBitWriter {
+    bytes: Vec<u8>,
+    current: u8,
+    filled: u8,
+}
+
+impl LjBitWriter {
+    fn new() -> Self {
+        LjBitWriter {
+            bytes: Vec::new(),
+            current: 0,
+            filled: 0,
+        }
+    }
+
+    fn write_bit(&mut self, bit: u8) {
+        self.current = (self.current << 1) | (bit & 1);
+        self.filled += 1;
+        if self.filled == 8 {
+            self.bytes.push(self.current);
+            if self.current == 0xFF {
+                self.bytes.push(0x00); // JPEG byte stuffing
+            }
+            self.current = 0;
+            self.filled = 0;
+        }
+    }
+
+    fn write_bits(&mut self, value: u32, n: u8) {
+        for i in (0..n).rev() {
+            self.write_bit(((value >> i) & 1) as u8);
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        while self.filled != 0 {
+            self.write_bit(1);
+        }
+        self.bytes
+    }
+}
+
+/// Magnitude category of a signed difference.
+fn lj_category(diff: i32) -> u8 {
+    let mut magnitude = diff.unsigned_abs();
+    let mut bits = 0u8;
+    while magnitude != 0 {
+        magnitude >>= 1;
+        bits += 1;
+    }
+    bits
+}
+
+/// Mantissa bits of a signed difference for the given category.
+fn lj_mantissa(diff: i32, ssss: u8) -> u32 {
+    if ssss == 0 {
+        0
+    } else if diff >= 0 {
+        diff as u32
+    } else {
+        (diff - 1 + (1 << ssss)) as u32
+    }
+}
+
+/// Lossless-JPEG predictor 1 (left); start-of-line uses the sample above,
+/// start-of-image uses the default `2^(P-1)`.
+fn lj_predict_p1(
+    samples: &[u16],
+    width: usize,
+    n_comp: usize,
+    x: usize,
+    y: usize,
+    c: usize,
+) -> i32 {
+    let at = |sx: usize, sy: usize| i32::from(samples[(sy * width + sx) * n_comp + c]);
+    if x == 0 && y == 0 {
+        1 << 15
+    } else if x == 0 {
+        at(0, y - 1)
+    } else {
+        at(x - 1, y)
+    }
+}
+
+/// Build a complete lossless-JPEG (SOF3, predictor 1) datastream.
+///
+/// Uses a flat 17-symbol DC Huffman table (all 5-bit codes), so the canonical
+/// code of category `s` is simply `s`.
+fn build_lossless_jpeg_stream(width: u16, height: u16, components: u8, samples: &[u16]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&[0xFF, 0xD8]); // SOI
+
+    // SOF3
+    let mut sof = Vec::new();
+    sof.push(16u8); // precision
+    sof.extend_from_slice(&height.to_be_bytes());
+    sof.extend_from_slice(&width.to_be_bytes());
+    sof.push(components);
+    for c in 0..components {
+        sof.push(c + 1);
+        sof.push(0x11);
+        sof.push(0x00);
+    }
+    out.extend_from_slice(&[0xFF, 0xC3]);
+    out.extend_from_slice(&((sof.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&sof);
+
+    // DHT: flat DC table — 17 codes of length 5.
+    let mut dht = vec![0x00u8]; // Tc=0, Th=0
+    let mut counts = [0u8; 16];
+    counts[4] = 17;
+    dht.extend_from_slice(&counts);
+    dht.extend((0u8..=16).collect::<Vec<u8>>());
+    out.extend_from_slice(&[0xFF, 0xC4]);
+    out.extend_from_slice(&((dht.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&dht);
+
+    // SOS
+    let mut sos = Vec::new();
+    sos.push(components);
+    for c in 0..components {
+        sos.push(c + 1);
+        sos.push(0x00);
+    }
+    sos.push(0x01); // predictor 1
+    sos.push(0x00); // Se
+    sos.push(0x00); // Ah/Al
+    out.extend_from_slice(&[0xFF, 0xDA]);
+    out.extend_from_slice(&((sos.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&sos);
+
+    // Entropy data.
+    let w = width as usize;
+    let h = height as usize;
+    let n = components as usize;
+    let mut writer = LjBitWriter::new();
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..n {
+                let actual = i32::from(samples[(y * w + x) * n + c]);
+                let px = lj_predict_p1(samples, w, n, x, y, c);
+                let diff = ((actual - px) & 0xFFFF) as i16 as i32;
+                let ssss = lj_category(diff);
+                writer.write_bits(u32::from(ssss), 5);
+                if ssss > 0 {
+                    writer.write_bits(lj_mantissa(diff, ssss), ssss);
+                }
+            }
+        }
+    }
+    out.extend_from_slice(&writer.finish());
+    out.extend_from_slice(&[0xFF, 0xD9]); // EOI
+    out
+}
+
+/// Build a DNG file whose single strip carries the given pre-compressed bytes.
+fn build_compressed_dng(
+    width: u32,
+    height: u32,
+    compression: u16,
+    strip_bytes: &[u8],
+    pattern: CfaPattern,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&[0x49, 0x49]); // little-endian
+    buf.extend_from_slice(&42u16.to_le_bytes());
+    let ifd_offset_pos = buf.len();
+    buf.extend_from_slice(&0u32.to_le_bytes());
+
+    // Strip data immediately after the header.
+    let data_offset = buf.len() as u32;
+    buf.extend_from_slice(strip_bytes);
+    if buf.len() % 2 != 0 {
+        buf.push(0);
+    }
+
+    let ifd_offset = buf.len() as u32;
+    buf[ifd_offset_pos..ifd_offset_pos + 4].copy_from_slice(&ifd_offset.to_le_bytes());
+
+    let mut tags: Vec<(u16, u16, u32, u32)> = vec![
+        (TAG_IMAGE_WIDTH, 4, 1, width),
+        (TAG_IMAGE_LENGTH, 4, 1, height),
+        (TAG_BITS_PER_SAMPLE, 3, 1, 16),
+        (TAG_COMPRESSION, 3, 1, u32::from(compression)),
+        (TAG_PHOTOMETRIC_INTERPRETATION, 3, 1, 32803),
+        (TAG_STRIP_OFFSETS, 4, 1, data_offset),
+        (TAG_SAMPLES_PER_PIXEL, 3, 1, 1),
+        (TAG_ROWS_PER_STRIP, 4, 1, height),
+        (TAG_STRIP_BYTE_COUNTS, 4, 1, strip_bytes.len() as u32),
+        (
+            TAG_CFA_PATTERN,
+            1,
+            4,
+            u32::from_le_bytes(pattern.as_bytes()),
+        ),
+        (TAG_DNG_VERSION, 1, 4, u32::from_le_bytes([1, 4, 0, 0])),
+    ];
+    tags.sort_by_key(|t| t.0);
+
+    buf.extend_from_slice(&(tags.len() as u16).to_le_bytes());
+    for &(tag, dtype, count, value) in &tags {
+        buf.extend_from_slice(&tag.to_le_bytes());
+        buf.extend_from_slice(&dtype.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+    buf.extend_from_slice(&0u32.to_le_bytes()); // next IFD
+    buf
+}
+
+#[test]
+fn test_dng_lossless_jpeg_single_component() {
+    // 8x6 CFA stored as a single-component lossless JPEG.
+    let width = 8u32;
+    let height = 6u32;
+    let samples: Vec<u16> = (0..(width * height))
+        .map(|i| (i as u16).wrapping_mul(173).wrapping_add(500))
+        .collect();
+    let jpeg = build_lossless_jpeg_stream(width as u16, height as u16, 1, &samples);
+    let dng = build_compressed_dng(width, height, 7, &jpeg, CfaPattern::Rggb);
+
+    assert!(DngReader::is_dng(&dng));
+    let image = DngReader::read(&dng).expect("decode lossless-JPEG DNG");
+    assert_eq!(image.width, width);
+    assert_eq!(image.height, height);
+    assert_eq!(image.raw_data.len(), (width * height) as usize);
+    // Lossless: the raw data must match the originals exactly.
+    assert_eq!(image.raw_data, samples);
+}
+
+#[test]
+fn test_dng_lossless_jpeg_two_component_cfa() {
+    // DNG-style 2-component packing: a 12x4 CFA is stored as a 6x4x2 JPEG.
+    let cfa_width = 12u32;
+    let cfa_height = 4u32;
+    let jpeg_w = (cfa_width / 2) as u16;
+    let components = 2u8;
+    // Component-interleaved samples [c0,c1, c0,c1, ...].
+    let jpeg_samples: Vec<u16> = (0..(jpeg_w as u32 * cfa_height * 2))
+        .map(|i| (i as u16).wrapping_mul(91).wrapping_add(2000))
+        .collect();
+    let jpeg = build_lossless_jpeg_stream(jpeg_w, cfa_height as u16, components, &jpeg_samples);
+    let dng = build_compressed_dng(cfa_width, cfa_height, 7, &jpeg, CfaPattern::Rggb);
+
+    let image = DngReader::read(&dng).expect("decode 2-component lossless-JPEG DNG");
+    assert_eq!(image.width, cfa_width);
+    assert_eq!(image.height, cfa_height);
+    assert_eq!(image.raw_data.len(), (cfa_width * cfa_height) as usize);
+
+    // CFA column cx is component cx%2 of JPEG column cx/2.
+    for y in 0..cfa_height as usize {
+        for cx in 0..cfa_width as usize {
+            let comp = cx % 2;
+            let jx = cx / 2;
+            let expected = jpeg_samples[(y * jpeg_w as usize + jx) * 2 + comp];
+            assert_eq!(
+                image.raw_data[y * cfa_width as usize + cx],
+                expected,
+                "CFA mismatch at ({cx},{y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_dng_lossless_jpeg_roundtrip_via_tempfile() {
+    // Exercise the file-backed path using std::env::temp_dir().
+    let width = 6u32;
+    let height = 6u32;
+    let samples: Vec<u16> = (0..(width * height))
+        .map(|i| 8000u16.wrapping_add((i as u16).wrapping_mul(257)))
+        .collect();
+    let jpeg = build_lossless_jpeg_stream(width as u16, height as u16, 1, &samples);
+    let dng = build_compressed_dng(width, height, 7, &jpeg, CfaPattern::Grbg);
+
+    let mut path = std::env::temp_dir();
+    path.push(format!("oximedia_dng_lossless_{}.dng", std::process::id()));
+    std::fs::write(&path, &dng).expect("write temp DNG");
+    let read_bytes = std::fs::read(&path).expect("read temp DNG");
+    let _ = std::fs::remove_file(&path);
+
+    let image = DngReader::read(&read_bytes).expect("decode lossless-JPEG DNG from file");
+    assert_eq!(image.raw_data, samples);
+    assert_eq!(image.metadata.cfa_pattern, CfaPattern::Grbg);
+}
+
+#[test]
+fn test_dng_lossy_dng_baseline_jpeg() {
+    // Lossy DNG: raw mosaic stored as a baseline 8-bit DCT JPEG.
+    let width = 16u32;
+    let height = 16u32;
+    // A smooth gamma-encoded-style ramp survives DCT compression well.
+    let pixels: Vec<u8> = (0..(width * height))
+        .map(|i| {
+            let x = i % width;
+            let y = i / width;
+            ((x * 8 + y * 6) % 230 + 12) as u8
+        })
+        .collect();
+
+    let frame = ImageFrame::new(
+        0,
+        width,
+        height,
+        PixelType::U8,
+        1,
+        ColorSpace::Luma,
+        ImageData::interleaved(pixels.clone()),
+    );
+    let encoder = crate::jpeg::JpegEncoder::new(crate::jpeg::JpegQuality::high());
+    let jpeg = encoder.encode(&frame).expect("encode baseline JPEG");
+    let dng = build_compressed_dng(width, height, 34892, &jpeg, CfaPattern::Rggb);
+
+    assert!(DngReader::is_dng(&dng));
+    let image = DngReader::read(&dng).expect("decode lossy DNG");
+    assert_eq!(image.width, width);
+    assert_eq!(image.height, height);
+    assert_eq!(image.raw_data.len(), (width * height) as usize);
+
+    // Lossy: values are widened from 8-bit; allow DCT round-trip error.
+    let mut max_err = 0i32;
+    for (decoded, original) in image.raw_data.iter().zip(pixels.iter()) {
+        max_err = max_err.max((i32::from(*decoded) - i32::from(*original)).abs());
+        // The decoded samples are 8-bit-derived, so they fit in a byte.
+        assert!(*decoded <= 255, "lossy DNG sample exceeds 8-bit range");
+    }
+    assert!(
+        max_err < 45,
+        "lossy DNG round-trip error too large: {max_err}"
+    );
+}
+
+#[test]
+fn test_dng_lossy_dng_via_tempfile() {
+    let width = 16u32;
+    let height = 8u32;
+    let pixels: Vec<u8> = (0..(width * height))
+        .map(|i| ((i * 5) % 200 + 20) as u8)
+        .collect();
+    let frame = ImageFrame::new(
+        0,
+        width,
+        height,
+        PixelType::U8,
+        1,
+        ColorSpace::Luma,
+        ImageData::interleaved(pixels),
+    );
+    let encoder = crate::jpeg::JpegEncoder::new(crate::jpeg::JpegQuality::high());
+    let jpeg = encoder.encode(&frame).expect("encode");
+    let dng = build_compressed_dng(width, height, 34892, &jpeg, CfaPattern::Bggr);
+
+    let mut path = std::env::temp_dir();
+    path.push(format!("oximedia_dng_lossy_{}.dng", std::process::id()));
+    std::fs::write(&path, &dng).expect("write temp DNG");
+    let read_bytes = std::fs::read(&path).expect("read temp DNG");
+    let _ = std::fs::remove_file(&path);
+
+    let image = DngReader::read(&read_bytes).expect("decode lossy DNG from file");
+    assert_eq!(image.width, width);
+    assert_eq!(image.height, height);
+}
+
+#[test]
+fn test_dng_lossless_jpeg_rejects_corrupt_strip() {
+    // A strip that is not a JPEG at all must surface a decode error.
+    let dng = build_compressed_dng(4, 4, 7, &[0x00, 0x11, 0x22, 0x33], CfaPattern::Rggb);
+    assert!(DngReader::read(&dng).is_err());
+}

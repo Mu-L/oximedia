@@ -16,10 +16,10 @@ workspace = true
 
 [dependencies]
 tokio = { workspace = true }
-yrs = "0.25"
+yrs = "0.26"
 serde = { workspace = true }
 serde_json = { workspace = true }
-oxicode = { version = "0.2", features = ["serde"] }
+oxicode = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 async-trait = { workspace = true }

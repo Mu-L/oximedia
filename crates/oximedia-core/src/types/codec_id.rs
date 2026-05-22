@@ -64,6 +64,7 @@ impl std::fmt::Display for MediaType {
 /// - [`Opus`](Self::Opus) - Opus (IETF/Xiph.org)
 /// - [`Vorbis`](Self::Vorbis) - Vorbis (Xiph.org)
 /// - [`Flac`](Self::Flac) - FLAC (Xiph.org)
+/// - [`Alac`](Self::Alac) - ALAC (Apple Lossless, Apache-2.0, patent-free)
 /// - [`Mp3`](Self::Mp3) - MP3 (MPEG-1/2 Layer III, patents expired 2017)
 /// - [`Pcm`](Self::Pcm) - Uncompressed PCM
 ///
@@ -105,10 +106,36 @@ pub enum CodecId {
     /// Advanced Professional Video (APV).
     /// ISO/IEC 23009-13. Royalty-free intra-frame professional codec.
     Apv,
+    /// Apple ProRes 422 / 4444 intra-frame professional codec.
+    /// SMPTE RDD 36-2015. Decoding is patent-unencumbered; encoding support is
+    /// included here under the patent-exhaustion doctrine for post-production
+    /// intermediate use. Only 4:2:2 10-bit progressive profiles are implemented.
+    ProRes,
+    /// Avid DNxHD / VC-3 intra-frame professional codec.
+    /// SMPTE ST 2019-1. Decoding is patent-unencumbered (same posture as ProRes:
+    /// SMPTE public spec, only encoding requires an Avid licence). Supports
+    /// DNxHD 145/220 (8-bit 4:2:2) and DNxHD 145x/220x (10-bit 4:2:2).
+    Dnxhd,
+    /// MPEG-2 video (ISO/IEC 13818-2 / ITU-T H.262).
+    /// The core MPEG-2 video patents expired in February 2023, so it is now
+    /// patent-free. The OxiMedia decoder is intra-only (I-frame, 4:2:0).
+    Mpeg2,
 
     // Image codecs (Green List)
     /// JPEG-XL image codec (ISO/IEC 18181, royalty-free).
     JpegXl,
+    /// JPEG XS (ISO/IEC 21122-1:2019). Low-latency intra-frame codec for broadcast/ST 2110.
+    /// Patent-free.
+    JpegXs,
+    /// JPEG 2000 image codec (ISO/IEC 15444-1).
+    /// All relevant patents expired by 2010. Royalty-free. Used in cinema (DCP) and
+    /// professional archiving. Lossless (5-3 reversible wavelet) and lossy (9-7 wavelet).
+    Jpeg2000,
+    /// JPEG-LS lossless/near-lossless image codec (ISO 14495-1).
+    /// Implements LOCO-I (Low COmplexity LOssless COmpression for Images) with
+    /// Golomb-Rice entropy coding. Patents US6195465 and US6094511 (HP) expired 2017–2019.
+    /// Widely used in medical imaging (DICOM). Lossless by default (NEAR=0).
+    JpegLs,
     /// DNG (Digital Negative) RAW image format (Adobe open standard, royalty-free).
     Dng,
     /// FFV1 lossless video codec (RFC 9043 / ISO/IEC 24114).
@@ -131,6 +158,9 @@ pub enum CodecId {
     Vorbis,
     /// FLAC lossless audio codec (Xiph.org).
     Flac,
+    /// ALAC (Apple Lossless) audio codec. Apple's reference is Apache-2.0;
+    /// the format is royalty-free and patent-free.
+    Alac,
     /// MP3 audio codec (MPEG-1/2 Layer III, patents expired 2017).
     Mp3,
     /// Uncompressed PCM audio.
@@ -170,7 +200,13 @@ impl CodecId {
             | Self::RawVideo
             | Self::Mjpeg
             | Self::Apv
+            | Self::ProRes
+            | Self::Dnxhd
+            | Self::Mpeg2
             | Self::JpegXl
+            | Self::JpegXs
+            | Self::Jpeg2000
+            | Self::JpegLs
             | Self::Dng
             | Self::Ffv1
             | Self::WebP
@@ -178,7 +214,9 @@ impl CodecId {
             | Self::Png
             | Self::Tiff
             | Self::OpenExr => MediaType::Video,
-            Self::Opus | Self::Vorbis | Self::Flac | Self::Mp3 | Self::Pcm => MediaType::Audio,
+            Self::Opus | Self::Vorbis | Self::Flac | Self::Alac | Self::Mp3 | Self::Pcm => {
+                MediaType::Audio
+            }
             Self::WebVtt | Self::Ass | Self::Ssa | Self::Srt => MediaType::Subtitle,
         }
     }
@@ -249,7 +287,13 @@ impl CodecId {
             Self::RawVideo => "rawvideo",
             Self::Mjpeg => "mjpeg",
             Self::Apv => "apv",
+            Self::ProRes => "prores",
+            Self::Dnxhd => "dnxhd",
+            Self::Mpeg2 => "mpeg2",
             Self::JpegXl => "jpegxl",
+            Self::JpegXs => "jpegxs",
+            Self::Jpeg2000 => "jpeg2000",
+            Self::JpegLs => "jpegls",
             Self::Dng => "dng",
             Self::Ffv1 => "ffv1",
             Self::WebP => "webp",
@@ -260,6 +304,7 @@ impl CodecId {
             Self::Opus => "opus",
             Self::Vorbis => "vorbis",
             Self::Flac => "flac",
+            Self::Alac => "alac",
             Self::Mp3 => "mp3",
             Self::Pcm => "pcm",
             Self::WebVtt => "webvtt",
@@ -285,9 +330,12 @@ impl CodecId {
         matches!(
             self,
             Self::Flac
+                | Self::Alac
                 | Self::Pcm
                 | Self::RawVideo
                 | Self::JpegXl
+                | Self::Jpeg2000
+                | Self::JpegLs
                 | Self::Dng
                 | Self::Ffv1
                 | Self::Png
@@ -352,8 +400,14 @@ impl std::str::FromStr for CodecId {
             "rawvideo" | "raw" | "yuv4mpeg" | "y4m" => Ok(Self::RawVideo),
             "mjpeg" | "mjpg" | "motion_jpeg" | "motionjpeg" => Ok(Self::Mjpeg),
             "apv" => Ok(Self::Apv),
+            "prores" | "prores422" | "prores_422" | "prores_std" => Ok(Self::ProRes),
+            "dnxhd" | "vc3" | "vc-3" | "dnxhr" => Ok(Self::Dnxhd),
+            "mpeg2" | "mpeg-2" | "m2v" | "h262" => Ok(Self::Mpeg2),
             // Image codecs
             "jpegxl" | "jpeg-xl" | "jxl" | "jxl " => Ok(Self::JpegXl),
+            "jpegxs" | "jpeg-xs" | "jxs" => Ok(Self::JpegXs),
+            "jpeg2000" | "j2k" | "jp2" | "jpeg_2000" => Ok(Self::Jpeg2000),
+            "jpegls" | "jpeg-ls" | "jls" => Ok(Self::JpegLs),
             "dng" => Ok(Self::Dng),
             "ffv1" => Ok(Self::Ffv1),
             "webp" => Ok(Self::WebP),
@@ -365,6 +419,7 @@ impl std::str::FromStr for CodecId {
             "opus" => Ok(Self::Opus),
             "vorbis" => Ok(Self::Vorbis),
             "flac" => Ok(Self::Flac),
+            "alac" | "m4a-alac" => Ok(Self::Alac),
             "mp3" | "mpeg1audio" | "mpeg1_audio" => Ok(Self::Mp3),
             "pcm" | "raw_audio" | "rawaudio" => Ok(Self::Pcm),
             // Subtitle formats
@@ -393,6 +448,7 @@ mod tests {
         assert_eq!(CodecId::Opus.media_type(), MediaType::Audio);
         assert_eq!(CodecId::Vorbis.media_type(), MediaType::Audio);
         assert_eq!(CodecId::Flac.media_type(), MediaType::Audio);
+        assert_eq!(CodecId::Alac.media_type(), MediaType::Audio);
         assert_eq!(CodecId::Mp3.media_type(), MediaType::Audio);
         assert_eq!(CodecId::Pcm.media_type(), MediaType::Audio);
 
@@ -414,6 +470,7 @@ mod tests {
     fn test_is_audio() {
         assert!(CodecId::Opus.is_audio());
         assert!(CodecId::Flac.is_audio());
+        assert!(CodecId::Alac.is_audio());
         assert!(!CodecId::Av1.is_audio());
         assert!(!CodecId::Srt.is_audio());
     }
@@ -436,6 +493,7 @@ mod tests {
     #[test]
     fn test_is_lossless() {
         assert!(CodecId::Flac.is_lossless());
+        assert!(CodecId::Alac.is_lossless());
         assert!(CodecId::Pcm.is_lossless());
         assert!(CodecId::Png.is_lossless());
         assert!(CodecId::Tiff.is_lossless());
@@ -514,7 +572,11 @@ mod tests {
             CodecId::RawVideo,
             CodecId::Mjpeg,
             CodecId::Apv,
+            CodecId::ProRes,
+            CodecId::Dnxhd,
+            CodecId::Mpeg2,
             CodecId::JpegXl,
+            CodecId::JpegLs,
             CodecId::Dng,
             CodecId::Ffv1,
             CodecId::WebP,
@@ -525,6 +587,7 @@ mod tests {
             CodecId::Opus,
             CodecId::Vorbis,
             CodecId::Flac,
+            CodecId::Alac,
             CodecId::Mp3,
             CodecId::Pcm,
             CodecId::WebVtt,
@@ -585,6 +648,8 @@ mod tests {
         assert_eq!("opus".parse::<CodecId>().expect("parse"), CodecId::Opus);
         assert_eq!("vorbis".parse::<CodecId>().expect("parse"), CodecId::Vorbis);
         assert_eq!("flac".parse::<CodecId>().expect("parse"), CodecId::Flac);
+        assert_eq!("alac".parse::<CodecId>().expect("parse"), CodecId::Alac);
+        assert_eq!("m4a-alac".parse::<CodecId>().expect("parse"), CodecId::Alac);
         assert_eq!("mp3".parse::<CodecId>().expect("parse"), CodecId::Mp3);
         assert_eq!("pcm".parse::<CodecId>().expect("parse"), CodecId::Pcm);
     }
@@ -651,7 +716,11 @@ mod tests {
             CodecId::RawVideo,
             CodecId::Mjpeg,
             CodecId::Apv,
+            CodecId::ProRes,
+            CodecId::Dnxhd,
+            CodecId::Mpeg2,
             CodecId::JpegXl,
+            CodecId::JpegLs,
             CodecId::Dng,
             CodecId::Ffv1,
             CodecId::WebP,
@@ -662,6 +731,7 @@ mod tests {
             CodecId::Opus,
             CodecId::Vorbis,
             CodecId::Flac,
+            CodecId::Alac,
             CodecId::Mp3,
             CodecId::Pcm,
             CodecId::WebVtt,
@@ -676,5 +746,45 @@ mod tests {
                 .unwrap_or_else(|_| panic!("{name} should round-trip via FromStr"));
             assert_eq!(*codec, parsed, "Round-trip failed for {name}");
         }
+    }
+
+    #[test]
+    fn test_dnxhd_codec_properties() {
+        assert_eq!(CodecId::Dnxhd.media_type(), MediaType::Video);
+        assert!(CodecId::Dnxhd.is_video());
+        assert!(!CodecId::Dnxhd.is_audio());
+        assert!(!CodecId::Dnxhd.is_subtitle());
+        assert_eq!(CodecId::Dnxhd.name(), "dnxhd");
+        assert!(!CodecId::Dnxhd.is_lossless());
+    }
+
+    #[test]
+    fn test_dnxhd_from_str_aliases() {
+        assert_eq!("dnxhd".parse::<CodecId>().expect("parse"), CodecId::Dnxhd);
+        assert_eq!("vc3".parse::<CodecId>().expect("parse"), CodecId::Dnxhd);
+        assert_eq!("vc-3".parse::<CodecId>().expect("parse"), CodecId::Dnxhd);
+        assert_eq!("dnxhr".parse::<CodecId>().expect("parse"), CodecId::Dnxhd);
+        assert_eq!("DNXHD".parse::<CodecId>().expect("parse"), CodecId::Dnxhd);
+        assert_eq!("VC3".parse::<CodecId>().expect("parse"), CodecId::Dnxhd);
+    }
+
+    #[test]
+    fn test_mpeg2_codec_properties() {
+        assert_eq!(CodecId::Mpeg2.media_type(), MediaType::Video);
+        assert!(CodecId::Mpeg2.is_video());
+        assert!(!CodecId::Mpeg2.is_audio());
+        assert!(!CodecId::Mpeg2.is_subtitle());
+        assert_eq!(CodecId::Mpeg2.name(), "mpeg2");
+        assert!(!CodecId::Mpeg2.is_lossless());
+    }
+
+    #[test]
+    fn test_mpeg2_from_str_aliases() {
+        assert_eq!("mpeg2".parse::<CodecId>().expect("parse"), CodecId::Mpeg2);
+        assert_eq!("mpeg-2".parse::<CodecId>().expect("parse"), CodecId::Mpeg2);
+        assert_eq!("m2v".parse::<CodecId>().expect("parse"), CodecId::Mpeg2);
+        assert_eq!("h262".parse::<CodecId>().expect("parse"), CodecId::Mpeg2);
+        assert_eq!("MPEG2".parse::<CodecId>().expect("parse"), CodecId::Mpeg2);
+        assert_eq!("H262".parse::<CodecId>().expect("parse"), CodecId::Mpeg2);
     }
 }

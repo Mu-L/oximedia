@@ -7,12 +7,19 @@
 //! - [`SimpleConvolutionReverb`] — Direct convolution reverb that applies an
 //!   arbitrary impulse response using overlap-add in 512-sample blocks.
 
+use crate::utils::delay_line::DelayLine;
+
 /// Feedback comb filter with one-pole low-pass damping.
 ///
 /// Core building block of the Schroeder / Freeverb reverb algorithm.
+///
+/// Internally uses a pre-allocated [`DelayLine`] ring buffer rather than a
+/// raw `Vec<f32>` — no allocations occur during audio processing.
 struct CombFilter {
-    buffer: Vec<f32>,
-    write_pos: usize,
+    /// Circular delay line (size = comb delay + 1).
+    delay_line: DelayLine,
+    /// Delay length in samples.
+    delay: usize,
     feedback: f32,
     damp: f32,
     filter_store: f32,
@@ -22,8 +29,8 @@ impl CombFilter {
     fn new(delay_samples: usize) -> Self {
         let size = delay_samples.max(1);
         Self {
-            buffer: vec![0.0_f32; size],
-            write_pos: 0,
+            delay_line: DelayLine::new(size + 1),
+            delay: size,
             feedback: 0.84,
             damp: 0.2,
             filter_store: 0.0,
@@ -34,22 +41,22 @@ impl CombFilter {
     ///
     /// Algorithm (Freeverb):
     /// ```text
-    /// output       = buffer[pos]
+    /// output       = read(delay)
     /// filter_store = output*(1-damp) + filter_store*damp
-    /// buffer[pos]  = input + filter_store*feedback
+    /// write(input + filter_store*feedback)
     /// ```
+    #[inline]
     fn process(&mut self, input: f32) -> f32 {
-        let buf_len = self.buffer.len();
-        let output = self.buffer[self.write_pos];
+        // Read the sample written `delay` steps ago (oldest in the loop).
+        let output = self.delay_line.read(self.delay);
 
-        // One-pole low-pass (high-freq damping)
+        // One-pole low-pass damping on the feedback path.
         self.filter_store = output * (1.0 - self.damp) + self.filter_store * self.damp;
 
-        self.buffer[self.write_pos] = input + self.filter_store * self.feedback;
-        self.write_pos += 1;
-        if self.write_pos >= buf_len {
-            self.write_pos = 0;
-        }
+        // Write: input plus the filtered feedback.
+        self.delay_line
+            .write(input + self.filter_store * self.feedback);
+
         output
     }
 
@@ -62,18 +69,21 @@ impl CombFilter {
     }
 
     fn clear(&mut self) {
-        self.buffer.fill(0.0);
+        self.delay_line.clear();
         self.filter_store = 0.0;
-        self.write_pos = 0;
     }
 }
 
 /// Schroeder all-pass filter.
 ///
 /// Adds diffusion without changing the frequency spectrum.
+///
+/// Internally uses a pre-allocated [`DelayLine`] ring buffer.
 struct AllpassFilter {
-    buffer: Vec<f32>,
-    write_pos: usize,
+    /// Circular delay line (size = allpass delay + 1).
+    delay_line: DelayLine,
+    /// Delay length in samples.
+    delay: usize,
     feedback: f32,
 }
 
@@ -81,8 +91,8 @@ impl AllpassFilter {
     fn new(delay_samples: usize) -> Self {
         let size = delay_samples.max(1);
         Self {
-            buffer: vec![0.0_f32; size],
-            write_pos: 0,
+            delay_line: DelayLine::new(size + 1),
+            delay: size,
             feedback: 0.5,
         }
     }
@@ -91,24 +101,19 @@ impl AllpassFilter {
     ///
     /// Algorithm:
     /// ```text
-    /// buf_out      = buffer[pos]
-    /// buffer[pos]  = input + buf_out * feedback
-    /// output       = buf_out - input
+    /// buf_out = read(delay)
+    /// write(input + buf_out * feedback)
+    /// output  = buf_out - input
     /// ```
+    #[inline]
     fn process(&mut self, input: f32) -> f32 {
-        let buf_len = self.buffer.len();
-        let buf_out = self.buffer[self.write_pos];
-        self.buffer[self.write_pos] = input + buf_out * self.feedback;
-        self.write_pos += 1;
-        if self.write_pos >= buf_len {
-            self.write_pos = 0;
-        }
+        let buf_out = self.delay_line.read(self.delay);
+        self.delay_line.write(input + buf_out * self.feedback);
         buf_out - input
     }
 
     fn clear(&mut self) {
-        self.buffer.fill(0.0);
-        self.write_pos = 0;
+        self.delay_line.clear();
     }
 }
 
@@ -568,5 +573,51 @@ mod tests {
         for (i, &s) in out.iter().enumerate() {
             assert!(s.is_finite(), "out[{i}] not finite: {s}");
         }
+    }
+
+    /// Regression test for the `Vec<f32>` → [`DelayLine`] ring-buffer migration in
+    /// `CombFilter` and `AllpassFilter`.
+    ///
+    /// Verifies that:
+    /// 1. All output samples remain finite (no NaN / inf).
+    /// 2. The reverb tail carries non-zero energy (reverb is actually doing work).
+    /// 3. The total energy over a long tail window is finite (tail is not diverging).
+    #[test]
+    fn delay_line_migration_schroeder_bounded_and_decaying() {
+        let mut rv = SchroederReverb::new(48000);
+
+        // Feed a single impulse followed by a long silence.
+        let mut impulse = vec![0.0_f32; 4096];
+        impulse[0] = 1.0;
+
+        let (ol, or_) = rv.process_stereo(&impulse, &impulse);
+        for (i, (&l, &r)) in ol.iter().zip(or_.iter()).enumerate() {
+            assert!(l.is_finite(), "out_l[{i}] not finite after migration: {l}");
+            assert!(r.is_finite(), "out_r[{i}] not finite after migration: {r}");
+        }
+
+        // Drain a further 44100 samples (≈1 second) — all finite, finite total energy.
+        let silence = vec![0.0_f32; 4096];
+        let mut total_energy = 0.0_f32;
+        let mut chunks = 0usize;
+        while chunks * 4096 < 44_100 {
+            let (chunk_l, chunk_r) = rv.process_stereo(&silence, &silence);
+            for (i, (&l, &r)) in chunk_l.iter().zip(chunk_r.iter()).enumerate() {
+                assert!(l.is_finite(), "late out_l[{i}] not finite: {l}");
+                assert!(r.is_finite(), "late out_r[{i}] not finite: {r}");
+            }
+            let e: f32 = chunk_l.iter().chain(chunk_r.iter()).map(|s| s * s).sum();
+            total_energy += e;
+            chunks += 1;
+        }
+
+        assert!(
+            total_energy > 1e-6,
+            "Schroeder reverb tail should carry non-zero energy: {total_energy}"
+        );
+        assert!(
+            total_energy < 1.0e6,
+            "Schroeder reverb tail energy is diverging (migration bug?): {total_energy}"
+        );
     }
 }

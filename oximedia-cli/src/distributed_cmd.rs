@@ -281,7 +281,12 @@ async fn start_worker(
     let concurrent = max_concurrent.unwrap_or(4);
     let work_path = work_dir
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "/tmp/oximedia-worker".to_string());
+        .unwrap_or_else(|| {
+            std::env::temp_dir()
+                .join("oximedia-worker")
+                .display()
+                .to_string()
+        });
 
     let _config = oximedia_distributed::DistributedConfig {
         coordinator_addr: coordinator.to_string(),

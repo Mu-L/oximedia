@@ -13,7 +13,7 @@ use aws_sdk_s3::{
     types::{
         BucketLifecycleConfiguration, BucketVersioningStatus, CompletedMultipartUpload,
         CompletedPart, Delete, LifecycleRule, LifecycleRuleFilter, ObjectIdentifier,
-        ServerSideEncryption, StorageClass, Transition, TransitionStorageClass,
+        ServerSideEncryption, StorageClass, Tag, Tagging, Transition, TransitionStorageClass,
         VersioningConfiguration,
     },
     Client,
@@ -942,6 +942,46 @@ impl CloudStorage for S3Storage {
             })?;
 
         Ok(presigned_request.uri().to_string())
+    }
+
+    async fn update_metadata(
+        &self,
+        key: &str,
+        tags: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        debug!("Updating metadata (tags) for key: {}", key);
+
+        let tag_list: Vec<Tag> = tags
+            .into_iter()
+            .map(|(k, v)| {
+                Tag::builder()
+                    .key(k)
+                    .value(v)
+                    .build()
+                    .map_err(|e| StorageError::ProviderError(format!("Invalid tag: {e}")))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let tagging = Tagging::builder()
+            .set_tag_set(Some(tag_list))
+            .build()
+            .map_err(|e| StorageError::ProviderError(format!("Invalid tagging: {e}")))?;
+
+        self.client
+            .put_object_tagging()
+            .bucket(&self.bucket)
+            .key(key)
+            .tagging(tagging)
+            .send()
+            .await
+            .map_err(|e| {
+                StorageError::ProviderError(format!(
+                    "Failed to update metadata (tags) for key {key}: {e}"
+                ))
+            })?;
+
+        info!("Updated metadata (tags) for key: {}", key);
+        Ok(())
     }
 }
 

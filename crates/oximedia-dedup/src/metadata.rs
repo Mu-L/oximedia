@@ -19,6 +19,10 @@ pub struct MediaMetadata {
     /// File size in bytes
     pub size: u64,
 
+    /// Human-readable title (e.g., from ID3/MP4 title tag). Used for fuzzy
+    /// title matching in addition to filename comparison.
+    pub title: Option<String>,
+
     /// Duration in seconds (for audio/video)
     pub duration: Option<f64>,
 
@@ -63,6 +67,7 @@ impl MediaMetadata {
         Self {
             path,
             size,
+            title: None,
             duration: None,
             width: None,
             height: None,
@@ -132,8 +137,14 @@ impl MediaMetadata {
 /// Metadata similarity result.
 #[derive(Debug, Clone)]
 pub struct MetadataSimilarity {
-    /// Filename similarity (0.0-1.0)
+    /// Filename similarity (0.0-1.0): multi-signal comparison of the file stem
+    /// using edit distance, token Jaccard, and bigram Dice coefficient.
     pub filename_similarity: f64,
+
+    /// Title fuzzy score (0.0-1.0): similarity of the embedded media title tag
+    /// (if present) using the media-aware [`crate::fuzzy_match::FilenameMatcher`].
+    /// Falls back to 0.0 when either file lacks an embedded title.
+    pub title_fuzzy_score: f64,
 
     /// Duration match (0.0-1.0)
     pub duration_match: f64,
@@ -153,14 +164,32 @@ pub struct MetadataSimilarity {
 
 impl MetadataSimilarity {
     /// Calculate overall similarity score.
+    ///
+    /// Weights (sum to 1.0):
+    ///
+    /// | Signal               | Weight |
+    /// |----------------------|--------|
+    /// | name_score           |  0.30  |
+    /// | duration_match       |  0.20  |
+    /// | resolution_match     |  0.20  |
+    /// | codec_match          |  0.15  |
+    /// | size_similarity      |  0.10  |
+    /// | container_match      |  0.05  |
+    ///
+    /// `name_score` is the maximum of `filename_similarity` and
+    /// `title_fuzzy_score`. When both embedded title tags are present,
+    /// `title_fuzzy_score` can lift the name signal above what the filename
+    /// alone would contribute (e.g., `"Movie (1080p)"` vs `"Movie (720p)"`).
+    /// When `title_fuzzy_score` is 0.0 (no title tags), the formula is
+    /// identical to the original 6-signal formula.
     #[must_use]
     pub fn overall_score(&self) -> f64 {
-        // Weighted average
-        self.filename_similarity * 0.3
-            + self.duration_match * 0.2
-            + self.resolution_match * 0.2
+        let name_score = self.filename_similarity.max(self.title_fuzzy_score);
+        name_score * 0.30
+            + self.duration_match * 0.20
+            + self.resolution_match * 0.20
             + self.codec_match * 0.15
-            + self.size_similarity * 0.1
+            + self.size_similarity * 0.10
             + self.container_match * 0.05
     }
 
@@ -172,9 +201,15 @@ impl MetadataSimilarity {
 }
 
 /// Compare two metadata objects.
+///
+/// When both files carry an embedded `title` tag, the title similarity is
+/// computed with [`crate::fuzzy_match::FilenameMatcher`] (which strips codec /
+/// resolution noise tokens). Otherwise `title_fuzzy_score` is 0.0 and the
+/// overall score is identical to the pre-title-field formula.
 #[must_use]
 pub fn compare_metadata(meta1: &MediaMetadata, meta2: &MediaMetadata) -> MetadataSimilarity {
     let filename_similarity = compare_filenames(&meta1.filename(), &meta2.filename());
+    let title_fuzzy_score = compare_titles(meta1.title.as_deref(), meta2.title.as_deref());
     let duration_match = compare_durations(meta1.duration, meta2.duration);
     let resolution_match = compare_resolutions(meta1, meta2);
     let codec_match = compare_codecs(meta1, meta2);
@@ -183,11 +218,33 @@ pub fn compare_metadata(meta1: &MediaMetadata, meta2: &MediaMetadata) -> Metadat
 
     MetadataSimilarity {
         filename_similarity,
+        title_fuzzy_score,
         duration_match,
         resolution_match,
         codec_match,
         size_similarity,
         container_match,
+    }
+}
+
+/// Compare embedded media title tags using the media-aware `FilenameMatcher`.
+///
+/// Returns 0.0 when either title is absent (the caller decides how much weight
+/// to give this signal).  Returns a value in 0.0–1.0 when both titles are set.
+#[must_use]
+pub fn compare_titles(title1: Option<&str>, title2: Option<&str>) -> f64 {
+    match (title1, title2) {
+        (Some(t1), Some(t2)) => {
+            if t1.eq_ignore_ascii_case(t2) {
+                return 1.0;
+            }
+            // Media-aware comparison strips codec / resolution noise tokens so
+            // that "Movie (1080p)" and "Movie (720p)" both resolve to "Movie".
+            let matcher = crate::fuzzy_match::FilenameMatcher::new(0.0);
+            matcher.similarity(t1, t2).value()
+        }
+        // One or both titles absent — treat as unknown / neutral.
+        _ => 0.0,
     }
 }
 
@@ -1009,6 +1066,83 @@ mod tests {
             sim.filename_similarity > 0.7,
             "Media-aware filename comparison should score > 0.7, got {}",
             sim.filename_similarity
+        );
+    }
+
+    // ---- title_fuzzy_score tests ----
+
+    #[test]
+    fn test_metadata_fuzzy_similar_titles() {
+        let mut meta1 = create_test_metadata("video_a.mp4", 100.0, 1920, 1080);
+        meta1.title = Some("The Great Documentary 2024".to_string());
+
+        let mut meta2 = create_test_metadata("video_b.mp4", 100.0, 1920, 1080);
+        meta2.title = Some("the great documentary 2024".to_string());
+
+        let sim = compare_metadata(&meta1, &meta2);
+        // Identical-modulo-case titles should yield title_fuzzy_score == 1.0
+        assert!(
+            sim.title_fuzzy_score >= 0.9,
+            "Near-identical titles (case difference) should score >= 0.9, got {}",
+            sim.title_fuzzy_score
+        );
+        // And the overall_score uses the maximum of filename and title signals
+        assert!(
+            sim.overall_score() >= 0.5,
+            "Overall score should be raised by the high title signal, got {}",
+            sim.overall_score()
+        );
+    }
+
+    #[test]
+    fn test_metadata_fuzzy_different_titles() {
+        let mut meta1 = create_test_metadata("video_a.mp4", 100.0, 1920, 1080);
+        meta1.title = Some("Inception".to_string());
+
+        let mut meta2 = create_test_metadata("video_b.mp4", 100.0, 1920, 1080);
+        meta2.title = Some("Interstellar".to_string());
+
+        let sim = compare_metadata(&meta1, &meta2);
+        assert!(
+            sim.title_fuzzy_score < 0.7,
+            "Clearly different titles should score < 0.7, got {}",
+            sim.title_fuzzy_score
+        );
+    }
+
+    #[test]
+    fn test_metadata_no_title_title_score_is_zero() {
+        let meta1 = create_test_metadata("video_a.mp4", 100.0, 1920, 1080);
+        let meta2 = create_test_metadata("video_b.mp4", 100.0, 1920, 1080);
+        let sim = compare_metadata(&meta1, &meta2);
+        assert_eq!(
+            sim.title_fuzzy_score, 0.0,
+            "Missing title tags should produce title_fuzzy_score of 0.0"
+        );
+    }
+
+    #[test]
+    fn test_compare_titles_identical_case_insensitive() {
+        assert_eq!(
+            compare_titles(Some("Hello World"), Some("hello world")),
+            1.0
+        );
+    }
+
+    #[test]
+    fn test_compare_titles_none_returns_zero() {
+        assert_eq!(compare_titles(None, Some("title")), 0.0);
+        assert_eq!(compare_titles(Some("title"), None), 0.0);
+        assert_eq!(compare_titles(None, None), 0.0);
+    }
+
+    #[test]
+    fn test_compare_titles_similar_strips_noise() {
+        // "Movie 1080p" vs "Movie 720p" — differ only in resolution tag
+        let score = compare_titles(Some("The Movie 1080p"), Some("The Movie 720p"));
+        assert!(
+            score > 0.7,
+            "Title comparison should strip resolution noise, got {score}"
         );
     }
 }

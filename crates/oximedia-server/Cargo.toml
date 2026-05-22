@@ -17,9 +17,9 @@ workspace = true
 
 [features]
 default = []
-cdn-aws = ["aws-sdk-s3", "aws-config"]
-cdn-azure = ["azure_storage", "azure_storage_blobs"]
-cdn-gcs = ["google-cloud-storage"]
+cdn-aws = ["oximedia-storage/s3", "dep:aws-sdk-s3", "dep:aws-config"]
+cdn-azure = ["oximedia-storage/azure", "dep:azure_storage", "dep:azure_storage_blobs"]
+cdn-gcs = ["oximedia-storage/gcs", "dep:google-cloud-storage"]
 cdn-all = ["cdn-aws", "cdn-azure", "cdn-gcs"]
 
 [dependencies]
@@ -35,7 +35,7 @@ oximedia-transcode = { workspace = true }
 oximedia-packager = { workspace = true }
 oximedia-storage = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { version = "0.7", features = ["io"] }
+tokio-util = { workspace = true }
 thiserror = { workspace = true }
 bytes = { workspace = true }
 tracing = { workspace = true }
@@ -45,9 +45,9 @@ bitflags = { workspace = true }
 rayon = { workspace = true }
 
 # Web framework
-axum = { version = "0.8", features = ["multipart", "ws"] }
-tower = { version = "0.5", features = ["util", "timeout", "load-shed", "limit"] }
-tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
 hyper = { workspace = true }
 
 # Database
@@ -55,8 +55,8 @@ sqlx = { workspace = true, features = ["migrate", "macros", "chrono", "uuid"] }
 
 # Authentication
 jsonwebtoken = "10"
-argon2 = { version = "0.5", features = ["std"] }
-password-hash = { version = "0.6", features = ["getrandom"] }
+argon2 = { workspace = true }
+password-hash = { workspace = true }
 rand = { workspace = true }
 
 # Serialization
@@ -78,11 +78,11 @@ futures = "0.3"
 pin-project = "1"
 
 # CDN/Cloud storage (optional - require newer Rust versions)
-aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = ["rustls", "rt-tokio"] }
-aws-config = { version = "1", optional = true, default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }
-azure_storage = { version = "0.21", optional = true }
-azure_storage_blobs = { version = "0.21", optional = true }
-google-cloud-storage = { version = "1.10", optional = true }
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+azure_storage = { workspace = true, optional = true }
+azure_storage_blobs = { workspace = true, optional = true }
+google-cloud-storage = { workspace = true, optional = true }
 
 # Monitoring and metrics
 prometheus = { workspace = true }

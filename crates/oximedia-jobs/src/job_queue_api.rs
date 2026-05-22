@@ -258,10 +258,7 @@ impl InMemoryJobStore {
 
     /// Jobs filtered by status.
     pub fn by_status(&self, status: &JobStatus) -> Vec<&Job> {
-        self.jobs
-            .values()
-            .filter(|j| &j.status == status)
-            .collect()
+        self.jobs.values().filter(|j| &j.status == status).collect()
     }
 
     /// Queue statistics.
@@ -331,10 +328,7 @@ impl ApiHandler {
             Err(e) => return ApiResponse::internal_error(format!("Lock error: {e}")),
         };
         store.upsert(job);
-        ApiResponse::created(
-            "Job submitted",
-            Some(serde_json::json!({ "job_id": id })),
-        )
+        ApiResponse::created("Job submitted", Some(serde_json::json!({ "job_id": id })))
     }
 
     fn handle_cancel(&self, job_id: Uuid) -> ApiResponse {
@@ -345,13 +339,17 @@ impl ApiHandler {
         match store.get_mut(job_id) {
             None => ApiResponse::not_found(format!("Job {job_id} not found")),
             Some(job) => {
-                if matches!(job.status, JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled) {
-                    ApiResponse::bad_request(format!(
-                        "Job {job_id} is already in terminal state"
-                    ))
+                if matches!(
+                    job.status,
+                    JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+                ) {
+                    ApiResponse::bad_request(format!("Job {job_id} is already in terminal state"))
                 } else {
                     job.status = JobStatus::Cancelled;
-                    ApiResponse::ok("Job cancelled", Some(serde_json::json!({ "job_id": job_id })))
+                    ApiResponse::ok(
+                        "Job cancelled",
+                        Some(serde_json::json!({ "job_id": job_id })),
+                    )
                 }
             }
         }

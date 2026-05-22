@@ -871,4 +871,28 @@ mod tests {
         let result = reader.read_bit();
         assert!(result.is_err());
     }
+
+    /// Regression test for GitHub issue #15.
+    ///
+    /// The module-level doctest used to read the AVC SPS constraint field as
+    /// 6 bits, which mis-aligned the subsequent `level_idc` byte and yielded
+    /// 7 instead of the expected 31.  Per ITU-T H.264 §7.3.2.1.1 the
+    /// constraint field is a full 8-bit byte: `constraint_set0_flag` through
+    /// `constraint_set5_flag` followed by `reserved_zero_2bits`.  This test
+    /// pins the correct alignment so the doctest cannot drift again.
+    #[test]
+    fn test_issue_15_avc_sps_constraint_byte_alignment() {
+        // profile_idc (8) | constraint byte (6 flags + 2 reserved) | level_idc (8)
+        let sps_bytes = [0x64u8, 0x00, 0x1f];
+        let mut reader = BitReader::new(&sps_bytes);
+
+        let profile_idc = reader.read_bits(8).expect("profile_idc read failed");
+        assert_eq!(profile_idc, 100, "High Profile profile_idc should be 100");
+
+        let constraint = reader.read_bits(8).expect("constraint byte read failed");
+        assert_eq!(constraint, 0x00, "all constraint flags clear in fixture");
+
+        let level_idc = reader.read_bits(8).expect("level_idc read failed");
+        assert_eq!(level_idc, 31, "Level 3.1 level_idc should be 31");
+    }
 }

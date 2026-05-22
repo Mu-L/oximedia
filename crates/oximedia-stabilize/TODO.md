@@ -13,18 +13,18 @@
 - [x] Extend rolling shutter correction with per-row motion model in `per_row_rolling_shutter` — linear velocity interpolation per scanline with bilinear warp
 - [x] Add content-aware saliency-based cropping in `saliency_crop` module — center-surround saliency detection, salient region protection, temporal smoothing
 - [x] Improve gyro integration with EKF in `gyro_ekf` module — 6-state Extended Kalman Filter fusing gyroscope rates with visual motion estimates
-- [ ] Add `stabilize_report` generation with per-frame motion magnitude, crop area, and quality metrics
-- [ ] Extend `path_planner` to support user-defined motion constraints (e.g., lock pan but allow tilt stabilization)
+- [x] Add `stabilize_report` generation with per-frame motion magnitude, crop area, and quality metrics (verified 2026-05-16; src/stabilize_report.rs:162 StabilizeReport, generate_from_motion:273)
+- [x] Extend `path_planner` to support user-defined motion constraints (e.g., lock pan but allow tilt stabilization) (verified 2026-05-16; src/path_planner.rs:84 MotionConstraints, lock_pan:91, lock_tilt:94)
 
 ## New Features
-- [ ] Implement real-time single-pass stabilization mode with bounded look-ahead buffer for live streaming use cases
-- [ ] Add `lens_distortion` module for pre-correcting barrel/pincushion distortion before stabilization
-- [ ] Implement `tripod_mode` that detects static camera and applies stronger smoothing with minimal crop
-- [ ] Add `roi_stabilization` module for stabilizing a specific region of interest independently from global motion
-- [ ] Implement `stabilize_preview` that generates low-resolution stabilized preview before full-resolution processing
-- [ ] Add `motion_mask` module to exclude moving foreground objects from motion estimation (e.g., actors, vehicles)
-- [ ] Implement `stitching_stabilize` module for stabilizing 360-degree video with wrap-around boundary handling
-- [ ] Add export of stabilization data as motion vectors for use in compositing applications (Nuke, Fusion)
+- [ ] Implement real-time single-pass stabilization mode with bounded look-ahead buffer for live streaming use cases (verified-open 2026-05-16: no streaming single-pass mode found)
+- [x] Add `lens_distortion` module for pre-correcting barrel/pincushion distortion before stabilization (verified 2026-05-16; src/lens_distortion.rs:1076 lines)
+- [x] Implement `tripod_mode` that detects static camera and applies stronger smoothing with minimal crop (verified 2026-05-16; src/tripod_mode.rs:1093 lines)
+- [x] Add `roi_stabilization` module for stabilizing a specific region of interest independently from global motion (verified 2026-05-16; src/roi_stabilization.rs:574 lines)
+- [x] Implement `stabilize_preview` that generates low-resolution stabilized preview before full-resolution processing (verified 2026-05-16; src/stabilize_preview.rs:384 lines)
+- [x] Add `motion_mask` module to exclude moving foreground objects from motion estimation (e.g., actors, vehicles) (verified 2026-05-16; src/motion_mask.rs:584 lines)
+- [x] Implement `stitching_stabilize` module for stabilizing 360-degree video with wrap-around boundary handling (verified 2026-05-16; src/stitching_stabilize.rs:630 lines)
+- [x] Add export of stabilization data as motion vectors for use in compositing applications (Nuke, Fusion) (verified 2026-05-16; src/motion_vector_export.rs)
 
 ## Performance
 - [ ] Parallelize feature tracking across frame pairs using rayon in `motion::tracker::track`

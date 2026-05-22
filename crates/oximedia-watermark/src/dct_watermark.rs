@@ -1,5 +1,161 @@
 //! DCT-domain watermark embedding and extraction.
+//!
+//! The module exposes both the original fixed-position embedder ([`DctEmbedder`])
+//! and an adaptive variant ([`AdaptiveDctSelector`]) that selects coefficients
+//! based on local signal energy for more robust watermarking.
 #![allow(dead_code)]
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Standard JPEG zig-zag scan order for 8×8 blocks
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// JPEG standard zig-zag scan order for an 8×8 DCT block.
+///
+/// `ZIGZAG_ORDER[i]` is the flat (row-major) index of the coefficient at
+/// zig-zag position `i`.  Position 0 is the DC term; higher positions are
+/// progressively higher frequencies.
+const ZIGZAG_ORDER: [usize; 64] = [
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
+    13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
+    52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+];
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Adaptive DCT coefficient selector
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Selects the best DCT coefficients for watermark embedding by measuring
+/// local signal energy in the mid-frequency band.
+///
+/// **Mid-frequency band**: zig-zag positions 5 through 42 (inclusive).
+/// DC (position 0) and the very first low-frequency luma coefficients
+/// (positions 1–4) are excluded because they are perceptually visible.
+/// Positions 43–63 are excluded because high-frequency coefficients have low
+/// energy and are fragile under quantisation.
+///
+/// The selector ranks mid-frequency coefficients by their squared magnitude
+/// (energy) in descending order and returns the flat indices of the top
+/// `num_bits` coefficients.
+pub struct AdaptiveDctSelector;
+
+impl AdaptiveDctSelector {
+    /// Rank mid-frequency DCT coefficients by energy and return the flat
+    /// indices of the top `num_bits` most energetic ones.
+    ///
+    /// # Arguments
+    ///
+    /// * `block`    – A 64-element slice in row-major (natural) order, i.e.
+    ///                the same layout as [`DctBlock::coefficients`].
+    /// * `num_bits` – How many coefficient indices to return.  Clamped to the
+    ///                number of usable mid-frequency coefficients (38).
+    ///
+    /// # Returns
+    ///
+    /// A `Vec` of flat (row-major) coefficient indices, sorted by descending
+    /// energy.  The length is `min(num_bits, 38)`.
+    #[must_use]
+    pub fn select_coefficients(block: &[f64; 64], num_bits: usize) -> Vec<usize> {
+        // Mid-frequency zig-zag positions: 5 .. 43  (38 positions)
+        const ZZ_START: usize = 5;
+        const ZZ_END: usize = 43; // exclusive
+
+        let usable = ZZ_END - ZZ_START; // 38
+        let take = num_bits.min(usable);
+        if take == 0 {
+            return Vec::new();
+        }
+
+        // Collect (energy, flat_index) for each mid-frequency position.
+        let mut candidates: Vec<(f64, usize)> = (ZZ_START..ZZ_END)
+            .map(|zz_pos| {
+                let flat = ZIGZAG_ORDER[zz_pos];
+                let energy = block[flat] * block[flat];
+                (energy, flat)
+            })
+            .collect();
+
+        // Sort by energy descending (NaN-safe: treat NaN as zero energy).
+        candidates
+            .sort_by(|(ea, _), (eb, _)| eb.partial_cmp(ea).unwrap_or(std::cmp::Ordering::Equal));
+
+        candidates
+            .iter()
+            .take(take)
+            .map(|&(_, flat)| flat)
+            .collect()
+    }
+
+    /// Variant that works directly with a [`DctBlock`] (f32 coefficients).
+    ///
+    /// Converts the block coefficients to f64 internally, calls
+    /// [`select_coefficients`](Self::select_coefficients), and returns the
+    /// same flat indices.
+    #[must_use]
+    pub fn select_from_block(block: &DctBlock, num_bits: usize) -> Vec<usize> {
+        let mut arr = [0.0f64; 64];
+        for (i, &v) in block.coefficients.iter().enumerate() {
+            arr[i] = f64::from(v);
+        }
+        Self::select_coefficients(&arr, num_bits)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Adaptive embedder / extractor
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A DCT embedder that places watermark bits in adaptively selected
+/// mid-frequency coefficients rather than fixed positions.
+///
+/// Per-bit selection is performed independently for each block, so embedding
+/// strength is proportional to the local signal energy, making the watermark
+/// more robust in high-energy regions and less perceptible in quiet ones.
+#[derive(Debug, Clone)]
+pub struct AdaptiveDctEmbedder {
+    /// Embedding strength multiplier (applied on top of the coefficient magnitude).
+    pub alpha: f32,
+}
+
+impl AdaptiveDctEmbedder {
+    /// Create a new adaptive embedder with the given strength.
+    #[must_use]
+    pub fn new(alpha: f32) -> Self {
+        Self {
+            alpha: alpha.clamp(0.001, 1.0),
+        }
+    }
+
+    /// Embed a single watermark `bit` into `block` by modifying the single
+    /// highest-energy mid-frequency coefficient.
+    ///
+    /// Bit `true` adds `alpha × |coeff|`; bit `false` subtracts it.
+    pub fn embed_bit(&self, block: &mut DctBlock, bit: bool) {
+        let indices = AdaptiveDctSelector::select_from_block(block, 1);
+        let Some(&idx) = indices.first() else {
+            return; // degenerate all-zero block — nothing to embed
+        };
+        let magnitude = block.coefficients[idx].abs().max(1.0);
+        let delta = self.alpha * magnitude;
+        if bit {
+            block.coefficients[idx] += delta;
+        } else {
+            block.coefficients[idx] -= delta;
+        }
+    }
+
+    /// Extract the watermark bit embedded at the highest-energy mid-frequency
+    /// coefficient (same selection rule as [`embed_bit`](Self::embed_bit)).
+    ///
+    /// A positive coefficient value is interpreted as `true`; negative as `false`.
+    #[must_use]
+    pub fn extract_bit(&self, block: &DctBlock) -> bool {
+        let indices = AdaptiveDctSelector::select_from_block(block, 1);
+        match indices.first() {
+            Some(&idx) => block.coefficients[idx] > 0.0,
+            None => false,
+        }
+    }
+}
 
 /// An 8×8 DCT block represented as 64 coefficients in zig-zag order.
 #[derive(Debug, Clone)]
@@ -290,6 +446,76 @@ mod tests {
         let dc_before = block.dc();
         embedder.embed_in_block(&mut block, true);
         // DC (index 0) is outside the mid-freq range [10..26], must be unchanged.
+        assert_eq!(block.dc(), dc_before);
+    }
+
+    // ── Item 2: AdaptiveDctSelector ──────────────────────────────────────────
+
+    #[test]
+    fn test_adaptive_dct_selects_high_energy_coeffs() {
+        // Build a 64-element block where one mid-freq coefficient has
+        // dramatically higher energy than the rest.
+        let mut arr = [0.0f64; 64];
+        // zig-zag position 10 maps to flat index ZIGZAG_ORDER[10] = 32
+        arr[ZIGZAG_ORDER[10]] = 100.0; // very high energy
+        arr[ZIGZAG_ORDER[5]] = 1.0; // low energy
+        arr[ZIGZAG_ORDER[20]] = 2.0; // medium energy
+
+        let selected = AdaptiveDctSelector::select_coefficients(&arr, 3);
+        assert_eq!(selected.len(), 3);
+        // The highest-energy coefficient should be first.
+        assert_eq!(selected[0], ZIGZAG_ORDER[10]);
+    }
+
+    #[test]
+    fn test_adaptive_dct_selects_max_usable_when_more_requested() {
+        let arr = [1.0f64; 64];
+        // Requesting more than the 38 usable mid-freq positions.
+        let selected = AdaptiveDctSelector::select_coefficients(&arr, 100);
+        // Should be clamped to 38.
+        assert_eq!(selected.len(), 38);
+    }
+
+    #[test]
+    fn test_adaptive_dct_embedding_roundtrip() {
+        // Embed a sequence of bits via AdaptiveDctEmbedder and verify extraction.
+        // Use zero blocks so the sign of the embedded coefficient unambiguously
+        // reflects the embedded bit (same precondition as the fixed-position tests).
+        let bits = [true, false, true, false, true];
+        let embedder = AdaptiveDctEmbedder::new(0.5);
+
+        let mut blocks: Vec<DctBlock> = (0..bits.len())
+            .map(|_i| {
+                // Start from a zero block so the adaptive selector picks a
+                // coefficient with zero initial energy; ±delta from zero gives
+                // an unambiguous sign that reflects the embedded bit.
+                DctBlock::zero()
+            })
+            .collect();
+
+        for (block, &bit) in blocks.iter_mut().zip(bits.iter()) {
+            embedder.embed_bit(block, bit);
+        }
+
+        for (block, &original_bit) in blocks.iter().zip(bits.iter()) {
+            let extracted = embedder.extract_bit(block);
+            assert_eq!(
+                extracted, original_bit,
+                "adaptive embed/extract roundtrip failed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_adaptive_dct_dc_not_modified() {
+        let embedder = AdaptiveDctEmbedder::new(0.2);
+        let mut block = DctBlock::zero();
+        block.coefficients[0] = 99.0; // DC
+                                      // Give a mid-freq coeff some energy so selector has something to pick.
+        block.coefficients[ZIGZAG_ORDER[10]] = 5.0;
+        let dc_before = block.dc();
+        embedder.embed_bit(&mut block, true);
+        // DC must not be touched.
         assert_eq!(block.dc(), dc_before);
     }
 }

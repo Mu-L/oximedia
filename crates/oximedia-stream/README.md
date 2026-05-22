@@ -13,10 +13,11 @@ Part of the [OxiMedia](https://github.com/cool-japan/oximedia) sovereign media f
 - BOLA-inspired adaptive bitrate (ABR) pipeline with quality ladder management
 - Segment lifecycle state machine with prefetch scheduling and eviction policies
 - Quality-of-Experience (QoE) health scoring with issue detection
-- SCTE-35 splice information binary encoding, decoding, and PTS-based scheduling
+- SCTE-35 splice information binary encoding, decoding, and PTS-based scheduling (full roundtrip coverage: SpliceInsert, TimeSignal, multi-descriptor, byte-identical, truncated, zero-descriptor)
 - Multi-CDN failover routing with EWMA latency tracking and pluggable strategies
 - HLS master/media playlist and DASH MPD manifest generation (pure string-based, no XML crate)
 - Media segment packaging with keyframe-aligned splitting and file output
+- Zero-copy CMAF scatter-gather: `CmafChunk.data` is `bytes::Bytes`; `write_cmaf_segment` returns `Vec<Bytes>` for efficient scatter-gather I/O
 - `#![forbid(unsafe_code)]` -- fully safe Rust
 
 ## Quick Start
@@ -126,4 +127,4 @@ Licensed under the terms specified in the workspace root.
 
 Copyright (c) COOLJAPAN OU (Team Kitasan)
 
-Version: 0.1.6 — 2026-04-26 — 569 tests
+Version: 0.1.7 — 2026-05-16 — 579 tests

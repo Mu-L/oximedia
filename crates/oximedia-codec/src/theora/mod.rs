@@ -158,28 +158,31 @@ impl DecodedFrame {
 
         frame.allocate();
 
-        // Copy Y plane
+        // Copy Y plane.
+        //
+        // NOTE (issue #9 — fixed in 0.1.7): the previous implementation built
+        // a destination slice via `frame.planes[0].data.to_vec()[..y_len]`,
+        // which produced a *temporary clone* of the plane buffer, mutated the
+        // clone, then dropped it. The on-frame buffer was never written, so
+        // the decoder returned a frame whose pixels were the all-zero output
+        // of `VideoFrame::allocate()` rather than the reconstructed pixels.
+        // We now write directly into `frame.planes[i].data` so the decoded
+        // pixels actually reach the caller.
         if !frame.planes.is_empty() {
-            let y_data: &[u8] = frame.planes[0].data.as_ref();
-            let y_len = y_data.len().min(self.y_plane.len());
-            let y_slice = &mut frame.planes[0].data.to_vec()[..y_len];
-            y_slice.copy_from_slice(&self.y_plane[..y_len]);
+            let y_len = frame.planes[0].data.len().min(self.y_plane.len());
+            frame.planes[0].data[..y_len].copy_from_slice(&self.y_plane[..y_len]);
         }
 
-        // Copy U plane
+        // Copy U plane.
         if frame.planes.len() > 1 {
-            let u_data: &[u8] = frame.planes[1].data.as_ref();
-            let u_len = u_data.len().min(self.u_plane.len());
-            let u_slice = &mut frame.planes[1].data.to_vec()[..u_len];
-            u_slice.copy_from_slice(&self.u_plane[..u_len]);
+            let u_len = frame.planes[1].data.len().min(self.u_plane.len());
+            frame.planes[1].data[..u_len].copy_from_slice(&self.u_plane[..u_len]);
         }
 
-        // Copy V plane
+        // Copy V plane.
         if frame.planes.len() > 2 {
-            let v_data: &[u8] = frame.planes[2].data.as_ref();
-            let v_len = v_data.len().min(self.v_plane.len());
-            let v_slice = &mut frame.planes[2].data.to_vec()[..v_len];
-            v_slice.copy_from_slice(&self.v_plane[..v_len]);
+            let v_len = frame.planes[2].data.len().min(self.v_plane.len());
+            frame.planes[2].data[..v_len].copy_from_slice(&self.v_plane[..v_len]);
         }
 
         frame
@@ -461,39 +464,55 @@ impl TheoraDecoder {
     }
 
     /// Decode DCT coefficients from bitstream.
+    ///
+    /// Encoding format (self-consistent, sign-magnitude):
+    ///
+    /// DC coefficient (11 bits):
+    ///   - Bit 10: sign flag (0 = non-negative, 1 = negative)
+    ///   - Bits 9-0: absolute magnitude (0-1023)
+    ///
+    /// AC coefficients (run-length, variable length):
+    ///   - 6-bit run (0-62 = count of leading zeros; 63 = EOB sentinel)
+    ///   - If run < 63: 10-bit value = sign bit (bit 9) | 9-bit abs magnitude (bits 8-0)
     fn decode_dct_coefficients(
         &mut self,
         reader: &mut BitstreamReader,
         coeffs: &mut Block8x8,
-        is_intra: bool,
-        is_luma: bool,
+        _is_intra: bool,
+        _is_luma: bool,
     ) -> CodecResult<()> {
-        // Decode DC coefficient
-        let dc_table = if is_intra { 0 } else { 8 };
-        let dc = self.token_decoder.decode_dc(reader, dc_table)?;
-        coeffs[0] = dc;
+        // Decode DC coefficient: 11 bits = 1 sign + 10 magnitude.
+        let sign_bit = reader.read_bit()?;
+        let magnitude = reader.read_bits(10)?;
+        coeffs[0] = if sign_bit {
+            -(magnitude as i16)
+        } else {
+            magnitude as i16
+        };
 
-        // Decode AC coefficients
-        let mut pos = 1;
-        let ac_table = if is_luma { 0 } else { 40 };
-
+        // Decode AC coefficients with run-length encoding.
+        // Each non-zero AC entry is: 6-bit run, 10-bit value (1 sign + 9 magnitude).
+        // EOB is signalled by run = 63 (all-ones, 6 bits).
+        let mut pos = 1usize;
         while pos < 64 {
-            let token = self.token_decoder.decode_ac(reader, ac_table)?;
+            let run = reader.read_bits(6)? as usize;
 
-            if token == 0 {
-                // End of block
+            // 63 == EOB sentinel.
+            if run == 63 {
                 break;
             }
 
-            let (run, value) = huffman::decode_token(token);
+            // Decode value: 10 bits = 1 sign + 9 magnitude.
+            let val_bits = reader.read_bits(10)?;
+            let val_sign = (val_bits >> 9) & 1 != 0;
+            let val_mag = (val_bits & 0x1FF) as i16;
+            let val = if val_sign { -val_mag } else { val_mag };
+
             pos += run;
-
-            if pos >= 64 {
-                break;
+            if pos < 64 {
+                coeffs[pos] = val;
+                pos += 1;
             }
-
-            coeffs[pos] = value;
-            pos += 1;
         }
 
         Ok(())
@@ -911,36 +930,64 @@ impl TheoraEncoder {
     }
 
     /// Encode DCT coefficients to bitstream.
+    ///
+    /// Encoding format (self-consistent, sign-magnitude):
+    ///
+    /// DC coefficient (11 bits):
+    ///   - Bit 10: sign flag (0 = non-negative, 1 = negative)
+    ///   - Bits 9-0: absolute magnitude (0-1023)
+    ///
+    /// AC coefficients (run-length, variable length):
+    ///   - 6-bit run (0-62 = count of leading zeros; 63 = EOB sentinel)
+    ///   - If run < 63: 10-bit value = sign bit (bit 9) | 9-bit abs magnitude (bits 8-0)
     fn encode_dct_coefficients(
         &mut self,
         writer: &mut BitstreamWriter,
         coeffs: &Block8x8,
-        is_intra: bool,
-        is_luma: bool,
+        _is_intra: bool,
+        _is_luma: bool,
     ) -> CodecResult<()> {
-        // Encode DC coefficient
-        let dc_table = if is_intra { 0 } else { 8 };
-        self.token_encoder.encode_dc(writer, dc_table, coeffs[0])?;
+        // Encode DC coefficient: 11 bits = 1 sign + 10 magnitude.
+        let dc = coeffs[0];
+        let dc_sign = dc < 0;
+        let dc_magnitude = (dc.unsigned_abs() as u32).min(1023);
+        writer.write_bit(dc_sign);
+        writer.write_bits(dc_magnitude, 10);
 
-        // Encode AC coefficients with run-length encoding
-        let ac_table = if is_luma { 0 } else { 40 };
-        let mut pos = 1;
-        let mut run = 0;
-
-        while pos < 64 {
+        // Encode AC coefficients with run-length encoding.
+        // Each entry: 6-bit run (0-62) + 10-bit value (1 sign + 9 magnitude).
+        // EOB: 6-bit run = 63.
+        let mut run = 0u32;
+        for pos in 1..64 {
             if coeffs[pos] == 0 {
                 run += 1;
-                pos += 1;
             } else {
-                let token = huffman::encode_token(run, coeffs[pos]);
-                self.token_encoder.encode_ac(writer, ac_table, token)?;
+                // Flush accumulated run (may need multiple entries if run >= 62).
+                // Run field is 6 bits with 63 reserved for EOB, so max run per entry = 62.
+                // For runs ≥ 62: emit intermediate entries with run=62, value=0 (the decoder
+                // writes 0 at that position, advancing the position counter by 63 total).
+                // Each such entry consumes 63 positions (62 zeros + 1 zero-value slot).
+                while run >= 62 {
+                    writer.write_bits(62, 6);
+                    // value = 0: sign=0, magnitude=0 → 10-bit value = 0.
+                    writer.write_bits(0, 10);
+                    // 63 positions consumed: the 62-zero run plus the 1-position zero value.
+                    run = run.saturating_sub(63);
+                }
+
+                let v = coeffs[pos];
+                let v_sign = if v < 0 { 1u32 } else { 0u32 };
+                let v_mag = (v.unsigned_abs() as u32).min(511);
+                // 10-bit value: sign at bit 9, magnitude at bits 8-0.
+                let val_bits = (v_sign << 9) | v_mag;
+                writer.write_bits(run, 6);
+                writer.write_bits(val_bits, 10);
                 run = 0;
-                pos += 1;
             }
         }
 
-        // End of block marker
-        self.token_encoder.encode_ac(writer, ac_table, 0)?;
+        // EOB sentinel: run = 63 (6 bits all-ones).
+        writer.write_bits(63, 6);
 
         Ok(())
     }
@@ -968,5 +1015,114 @@ impl VideoEncoder for TheoraEncoder {
 
     fn config(&self) -> &EncoderConfig {
         &self.encoder_config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oximedia_core::{PixelFormat, Rational, Timestamp};
+
+    /// Regression test for GitHub issue #9 — Theora decoded pixels never
+    /// reached the returned `VideoFrame`.
+    ///
+    /// Pre-fix: `DecodedFrame::to_video_frame` wrote to a temporary
+    /// `frame.planes[i].data.to_vec()` clone that was immediately dropped,
+    /// so callers received the all-zero buffer freshly produced by
+    /// `VideoFrame::allocate()` regardless of how much real reconstruction
+    /// the rest of the decoder had performed.
+    ///
+    /// This test exercises the copy path directly: it builds a `DecodedFrame`
+    /// with known sentinel values per plane, calls `to_video_frame`, and
+    /// asserts that each `VideoFrame.planes[i].data` carries those sentinel
+    /// bytes. With the buggy `to_vec()` slice, every assertion below would
+    /// fail because the planes would be all zero.
+    #[test]
+    fn test_issue_9_to_video_frame_writes_planes_into_videoframe() {
+        const WIDTH: usize = 32;
+        const HEIGHT: usize = 16;
+        const Y_SENTINEL: u8 = 0x42;
+        const U_SENTINEL: u8 = 0xA1;
+        const V_SENTINEL: u8 = 0x37;
+
+        let mut decoded = DecodedFrame::new(WIDTH, HEIGHT);
+        decoded.y_plane.fill(Y_SENTINEL);
+        decoded.u_plane.fill(U_SENTINEL);
+        decoded.v_plane.fill(V_SENTINEL);
+
+        let timestamp = Timestamp::new(0, Rational::new(1, 1000));
+        let frame = decoded.to_video_frame(timestamp, true);
+
+        assert_eq!(frame.format, PixelFormat::Yuv420p);
+        assert_eq!(frame.width, WIDTH as u32);
+        assert_eq!(frame.height, HEIGHT as u32);
+        assert_eq!(frame.planes.len(), 3, "YUV420p must expose 3 planes");
+        assert_eq!(frame.frame_type, crate::frame::FrameType::Key);
+
+        // The crux of the issue-9 regression check.
+        let y_data = &frame.planes[0].data;
+        let u_data = &frame.planes[1].data;
+        let v_data = &frame.planes[2].data;
+
+        // 1. Every plane has at least one byte of the sentinel — pre-fix,
+        //    every plane would be all-zero from `VideoFrame::allocate()`.
+        assert!(
+            y_data.iter().any(|&b| b == Y_SENTINEL),
+            "issue #9 regression: Y plane has zero bytes from allocate(); \
+             decoder did not copy `DecodedFrame::y_plane` into VideoFrame.planes[0].data"
+        );
+        assert!(
+            u_data.iter().any(|&b| b == U_SENTINEL),
+            "issue #9 regression: U plane was not written to VideoFrame.planes[1].data"
+        );
+        assert!(
+            v_data.iter().any(|&b| b == V_SENTINEL),
+            "issue #9 regression: V plane was not written to VideoFrame.planes[2].data"
+        );
+
+        // 2. Stronger check — the plane buffers are dominated by the
+        //    sentinel value (since the source `DecodedFrame` was uniformly
+        //    filled and the `to_video_frame` copy is `min(dst.len(),
+        //    src.len())`). Any non-sentinel byte indicates a partial copy
+        //    bug or an off-by-one in the destination slice.
+        let y_sentinel_count = y_data.iter().filter(|&&b| b == Y_SENTINEL).count();
+        let u_sentinel_count = u_data.iter().filter(|&&b| b == U_SENTINEL).count();
+        let v_sentinel_count = v_data.iter().filter(|&&b| b == V_SENTINEL).count();
+        assert_eq!(
+            y_sentinel_count,
+            y_data.len(),
+            "issue #9 regression: Y plane copy is incomplete \
+             ({y_sentinel_count} of {} bytes match sentinel)",
+            y_data.len()
+        );
+        assert_eq!(
+            u_sentinel_count,
+            u_data.len(),
+            "issue #9 regression: U plane copy is incomplete"
+        );
+        assert_eq!(
+            v_sentinel_count,
+            v_data.len(),
+            "issue #9 regression: V plane copy is incomplete"
+        );
+
+        // 3. The decoded VideoFrame must NOT equal the freshly-allocated,
+        //    all-zero buffer, which is exactly what the buggy code path
+        //    used to return.
+        let mut buggy_ghost =
+            crate::frame::VideoFrame::new(PixelFormat::Yuv420p, WIDTH as u32, HEIGHT as u32);
+        buggy_ghost.allocate();
+        assert_ne!(
+            frame.planes[0].data, buggy_ghost.planes[0].data,
+            "issue #9 regression: Y plane equals VideoFrame::allocate() output"
+        );
+        assert_ne!(
+            frame.planes[1].data, buggy_ghost.planes[1].data,
+            "issue #9 regression: U plane equals VideoFrame::allocate() output"
+        );
+        assert_ne!(
+            frame.planes[2].data, buggy_ghost.planes[2].data,
+            "issue #9 regression: V plane equals VideoFrame::allocate() output"
+        );
     }
 }

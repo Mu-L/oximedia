@@ -75,14 +75,20 @@ pub fn erode(
     kernel: Py<PyAny>,
     iterations: i32,
 ) -> PyResult<Py<PyAny>> {
-    let (mut data, h, w, ch) = extract_img(py, &src)?;
+    let (data, h, w, ch) = extract_img(py, &src)?;
     let kern = extract_kernel_binary(py, &kernel)?;
 
-    for _ in 0..iterations.max(1) {
-        data = apply_erosion(&data, w, h, ch, &kern);
-    }
+    // Release GIL for the iterated erosion passes
+    let out = py.detach(move || {
+        let iters = iterations.max(1) as usize;
+        let mut data = data;
+        for _ in 0..iters {
+            data = apply_erosion(&data, w, h, ch, &kern);
+        }
+        data
+    });
 
-    make_image_output(py, data, h, w, ch)
+    make_image_output(py, out, h, w, ch)
 }
 
 /// Dilate an image using a structuring element.
@@ -96,14 +102,20 @@ pub fn dilate(
     kernel: Py<PyAny>,
     iterations: i32,
 ) -> PyResult<Py<PyAny>> {
-    let (mut data, h, w, ch) = extract_img(py, &src)?;
+    let (data, h, w, ch) = extract_img(py, &src)?;
     let kern = extract_kernel_binary(py, &kernel)?;
 
-    for _ in 0..iterations.max(1) {
-        data = apply_dilation(&data, w, h, ch, &kern);
-    }
+    // Release GIL for the iterated dilation passes
+    let out = py.detach(move || {
+        let iters = iterations.max(1) as usize;
+        let mut data = data;
+        for _ in 0..iters {
+            data = apply_dilation(&data, w, h, ch, &kern);
+        }
+        data
+    });
 
-    make_image_output(py, data, h, w, ch)
+    make_image_output(py, out, h, w, ch)
 }
 
 /// Apply a morphological operation to an image.
@@ -122,93 +134,98 @@ pub fn morphology_ex(
 ) -> PyResult<Py<PyAny>> {
     let (data, h, w, ch) = extract_img(py, &src)?;
     let kern = extract_kernel_binary(py, &kernel)?;
-    let iters = iterations.max(1);
 
-    let out = match op {
-        0 => {
-            // MORPH_ERODE
-            let mut d = data.clone();
-            for _ in 0..iters {
-                d = apply_erosion(&d, w, h, ch, &kern);
+    // Validate op before releasing GIL so error is raised with GIL held
+    if !matches!(op, 0..=6) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "morphologyEx: unsupported op {}",
+            op
+        )));
+    }
+
+    // Release GIL for the composite morphological operation
+    let out = py.detach(move || {
+        let iters = iterations.max(1) as usize;
+        match op {
+            0 => {
+                // MORPH_ERODE
+                let mut d = data.clone();
+                for _ in 0..iters {
+                    d = apply_erosion(&d, w, h, ch, &kern);
+                }
+                d
             }
-            d
+            1 => {
+                // MORPH_DILATE
+                let mut d = data.clone();
+                for _ in 0..iters {
+                    d = apply_dilation(&d, w, h, ch, &kern);
+                }
+                d
+            }
+            2 => {
+                // MORPH_OPEN: erode then dilate
+                let mut d = data.clone();
+                for _ in 0..iters {
+                    d = apply_erosion(&d, w, h, ch, &kern);
+                }
+                for _ in 0..iters {
+                    d = apply_dilation(&d, w, h, ch, &kern);
+                }
+                d
+            }
+            3 => {
+                // MORPH_CLOSE: dilate then erode
+                let mut d = data.clone();
+                for _ in 0..iters {
+                    d = apply_dilation(&d, w, h, ch, &kern);
+                }
+                for _ in 0..iters {
+                    d = apply_erosion(&d, w, h, ch, &kern);
+                }
+                d
+            }
+            4 => {
+                // MORPH_GRADIENT: dilate - erode
+                let eroded = apply_erosion(&data, w, h, ch, &kern);
+                let dilated = apply_dilation(&data, w, h, ch, &kern);
+                dilated
+                    .iter()
+                    .zip(eroded.iter())
+                    .map(|(&d, &e)| d.saturating_sub(e))
+                    .collect()
+            }
+            5 => {
+                // MORPH_TOPHAT: src - open(src)
+                let mut opened = data.clone();
+                for _ in 0..iters {
+                    opened = apply_erosion(&opened, w, h, ch, &kern);
+                }
+                for _ in 0..iters {
+                    opened = apply_dilation(&opened, w, h, ch, &kern);
+                }
+                data.iter()
+                    .zip(opened.iter())
+                    .map(|(&s, &o)| s.saturating_sub(o))
+                    .collect()
+            }
+            _ => {
+                // MORPH_BLACKHAT (op==6): close(src) - src
+                let mut closed = data.clone();
+                for _ in 0..iters {
+                    closed = apply_dilation(&closed, w, h, ch, &kern);
+                }
+                for _ in 0..iters {
+                    closed = apply_erosion(&closed, w, h, ch, &kern);
+                }
+                closed
+                    .iter()
+                    .zip(data.iter())
+                    .map(|(&c, &s)| c.saturating_sub(s))
+                    .collect()
+            }
         }
-        1 => {
-            // MORPH_DILATE
-            let mut d = data.clone();
-            for _ in 0..iters {
-                d = apply_dilation(&d, w, h, ch, &kern);
-            }
-            d
-        }
-        2 => {
-            // MORPH_OPEN: erode then dilate
-            let mut d = data.clone();
-            for _ in 0..iters {
-                d = apply_erosion(&d, w, h, ch, &kern);
-            }
-            for _ in 0..iters {
-                d = apply_dilation(&d, w, h, ch, &kern);
-            }
-            d
-        }
-        3 => {
-            // MORPH_CLOSE: dilate then erode
-            let mut d = data.clone();
-            for _ in 0..iters {
-                d = apply_dilation(&d, w, h, ch, &kern);
-            }
-            for _ in 0..iters {
-                d = apply_erosion(&d, w, h, ch, &kern);
-            }
-            d
-        }
-        4 => {
-            // MORPH_GRADIENT: dilate - erode
-            let eroded = apply_erosion(&data, w, h, ch, &kern);
-            let dilated = apply_dilation(&data, w, h, ch, &kern);
-            dilated
-                .iter()
-                .zip(eroded.iter())
-                .map(|(&d, &e)| d.saturating_sub(e))
-                .collect()
-        }
-        5 => {
-            // MORPH_TOPHAT: src - open(src)
-            let mut opened = data.clone();
-            for _ in 0..iters {
-                opened = apply_erosion(&opened, w, h, ch, &kern);
-            }
-            for _ in 0..iters {
-                opened = apply_dilation(&opened, w, h, ch, &kern);
-            }
-            data.iter()
-                .zip(opened.iter())
-                .map(|(&s, &o)| s.saturating_sub(o))
-                .collect()
-        }
-        6 => {
-            // MORPH_BLACKHAT: close(src) - src
-            let mut closed = data.clone();
-            for _ in 0..iters {
-                closed = apply_dilation(&closed, w, h, ch, &kern);
-            }
-            for _ in 0..iters {
-                closed = apply_erosion(&closed, w, h, ch, &kern);
-            }
-            closed
-                .iter()
-                .zip(data.iter())
-                .map(|(&c, &s)| c.saturating_sub(s))
-                .collect()
-        }
-        _ => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "morphologyEx: unsupported op {}",
-                op
-            )));
-        }
-    };
+    });
 
     make_image_output(py, out, h, w, ch)
 }

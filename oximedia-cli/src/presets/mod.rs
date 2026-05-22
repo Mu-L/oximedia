@@ -1,10 +1,30 @@
 //! Transcoding preset system for OxiMedia.
 //!
 //! Provides a comprehensive preset management system with:
-//! - Built-in presets for common use cases
-//! - Custom user presets via TOML files
-//! - Preset validation and listing
-//! - Organized by categories (Web, Devices, Quality, Archival, Streaming)
+//! - Built-in presets for common use cases (compiled into the binary)
+//! - Custom user presets loaded from explicit TOML file paths
+//! - Preset validation and structured listing
+//! - Organised by category (Web, Device, Streaming, Archival, Custom)
+//!
+//! # Preset Loading
+//!
+//! Presets are either built-in (compiled into the binary) or loaded from a
+//! TOML file path supplied at the CLI level. There is no runtime directory scan
+//! for presets — all built-in presets are registered via the sub-modules listed
+//! below.
+//!
+//! For plugin search paths and the `$OXIMEDIA_PLUGIN_PATH` environment variable,
+//! see the `plugin_cmd` module documentation.
+//!
+//! # Preset Categories
+//!
+//! - **Web** (`web`) — Browser-optimised presets: VP9/Opus for HTML5, AV1/Opus for
+//!   high-efficiency streaming
+//! - **Device** (`device`) — Mobile, smart TV, and embedded target presets
+//! - **Streaming** (`streaming`) — ABR ladder presets for YouTube, Twitch,
+//!   Netflix, and similar platforms
+//! - **Archival** (`archival`) — Long-term preservation with FFV1 + FLAC
+//! - **Custom** (`custom`) — User-created presets deserialized from TOML files
 //!
 //! # Examples
 //!

@@ -25,7 +25,7 @@ serde = { workspace = true, features = ["derive"] }
 rayon = { workspace = true }
 
 # Search engine
-tantivy = { version = "0.26", optional = true }
+tantivy = { workspace = true, optional = true }
 
 # Serialization
 serde_json = { workspace = true }

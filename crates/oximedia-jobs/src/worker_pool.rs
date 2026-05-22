@@ -237,6 +237,50 @@ impl WorkerPool {
     pub fn total_completed(&self) -> u64 {
         self.workers.values().map(|w| w.jobs_completed).sum()
     }
+
+    /// Work-stealing hint: identify the busiest and most-idle workers.
+    ///
+    /// Returns `(busiest_id, idle_id)` when a steal opportunity exists — i.e.
+    /// when the busiest worker's utilization exceeds the idle worker's by at
+    /// least `threshold` (e.g. `0.5` means 50 percentage points).
+    /// The caller should use [`crate::work_stealing::WorkStealingPool`] for
+    /// the actual dequeue/enqueue operations; this method only identifies the
+    /// candidate pair.
+    ///
+    /// Returns `None` when the pool is empty, has fewer than 2 workers, or is
+    /// already well-balanced.
+    pub fn steal_opportunity(&self, threshold: f64) -> Option<(String, String)> {
+        if self.workers.len() < 2 {
+            return None;
+        }
+
+        let busiest = self.workers.values().max_by(|a, b| {
+            a.utilization()
+                .partial_cmp(&b.utilization())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+
+        let idlest = self
+            .workers
+            .values()
+            .filter(|w| w.state.is_available())
+            .min_by(|a, b| {
+                a.utilization()
+                    .partial_cmp(&b.utilization())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })?;
+
+        if busiest.id == idlest.id {
+            return None;
+        }
+
+        let gap = busiest.utilization() - idlest.utilization();
+        if gap >= threshold {
+            Some((busiest.id.clone(), idlest.id.clone()))
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]

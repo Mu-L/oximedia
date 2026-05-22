@@ -557,4 +557,104 @@ mod tests {
         delay.set_wet_dry(1.5);
         assert!((delay.wet_dry() - 1.0).abs() < 1e-5);
     }
+
+    /// Verify that high feedback + high drive does not cause the signal to diverge.
+    ///
+    /// The tanh-based saturation in the feedback path bounds the **feedback**
+    /// component to `|tanh(x)| ≤ 1`.  The delay effect output also includes the
+    /// dry signal, so the total output can exceed 1.0 — but it must remain finite
+    /// and bounded even under worst-case sustained input.
+    ///
+    /// With `wet = 0.5`, `dry = 0.5`, and `feedback = 0.95`:
+    ///   - The written value = `input + tanh(delayed * drive) * feedback`
+    ///   - `tanh` bounds the feedback loop, preventing runaway divergence
+    ///   - At steady state the buffer settles at `tanh(x) * 0.95 + 1.0` which
+    ///     is bounded (tanh(x) < 1), so output ≤ dry + wet * (1+1) = 1.5 + margin
+    #[test]
+    fn delay_feedback_saturation_clips() {
+        let config = DelayConfig {
+            delay_ms: 10.0,
+            feedback: 0.95,
+            wet: 0.5,
+            dry: 0.5,
+            saturation: FeedbackSaturationMode::Tape,
+            saturation_drive: 4.0,
+            tone: 0.0,
+        };
+        let mut delay = MonoDelay::new(config, 48000.0);
+
+        for i in 0..10_000usize {
+            let out = delay.process_sample(1.0);
+            assert!(out.is_finite(), "signal diverged at sample {i}: {out}");
+            // The saturation prevents runaway: max steady-state output ≈
+            // dry*1.0 + wet*(tanh(buf)*feedback + ...) which is well below 4.0.
+            assert!(
+                out.abs() < 4.0,
+                "signal exceeded reasonable bound at sample {i}: {out}"
+            );
+        }
+    }
+
+    /// Verify that `MonoDelay` with no saturation produces the expected impulse
+    /// response: the first echo should appear at exactly `delay_ms` worth of
+    /// samples and be scaled by `wet`.
+    ///
+    /// This acts as a regression test: if the underlying `DelayLine` semantics
+    /// ever change (e.g. an off-by-one in read/write ordering), this test will
+    /// catch it.
+    #[test]
+    fn delay_output_matches_reference_after_migration() {
+        // Construct a 10-sample delay at 1000 Hz so delay_samples = 10.
+        // dry = 1.0, wet = 1.0, feedback = 0.0 → clean, no echo loop.
+        let config = DelayConfig {
+            delay_ms: 10.0, // 10 ms at 1 000 Hz → 10 samples
+            feedback: 0.0,
+            wet: 1.0,
+            dry: 1.0,
+            saturation: FeedbackSaturationMode::None,
+            saturation_drive: 1.0,
+            tone: 0.0,
+        };
+        let mut delay = MonoDelay::new(config, 1_000.0);
+
+        // Feed an impulse followed by silence.
+        let mut outputs = Vec::with_capacity(20);
+        outputs.push(delay.process_sample(1.0));
+        for _ in 0..19 {
+            outputs.push(delay.process_sample(0.0));
+        }
+
+        // Sample 0: dry copy of the impulse (wet component is zero because the
+        // delay line was empty → 0 wet output; dry = 1.0).
+        assert!(
+            (outputs[0] - 1.0).abs() < 0.01,
+            "sample 0 expected ~1.0, got {}",
+            outputs[0]
+        );
+
+        // Samples 1-9: silence (delay line still draining, impulse not yet reached).
+        for i in 1..10 {
+            assert!(
+                outputs[i].abs() < 0.01,
+                "sample {i} expected ~0.0, got {}",
+                outputs[i]
+            );
+        }
+
+        // Sample 10: the delayed impulse arrives at wet = 1.0.
+        assert!(
+            (outputs[10] - 1.0).abs() < 0.01,
+            "sample 10 expected ~1.0 (echo), got {}",
+            outputs[10]
+        );
+
+        // Samples 11-19: silence again.
+        for i in 11..20 {
+            assert!(
+                outputs[i].abs() < 0.01,
+                "sample {i} expected ~0.0, got {}",
+                outputs[i]
+            );
+        }
+    }
 }

@@ -258,7 +258,8 @@ fn base_codec_from_hw_name(codec_name: &str) -> (String, bool) {
         ("vp8".to_string(), false)
     } else if lower.starts_with("h264") || lower.starts_with("libx264") {
         ("av1".to_string(), true) // patent codec → AV1
-    } else if lower.starts_with("hevc") || lower.starts_with("h265") || lower.starts_with("libx265") {
+    } else if lower.starts_with("hevc") || lower.starts_with("h265") || lower.starts_with("libx265")
+    {
         ("av1".to_string(), true) // patent codec → AV1
     } else if lower.starts_with("mpeg2") || lower.starts_with("mpeg4") {
         ("av1".to_string(), true)
@@ -268,7 +269,10 @@ fn base_codec_from_hw_name(codec_name: &str) -> (String, bool) {
         ("opus".to_string(), true)
     } else {
         // Unknown base codec — return as-is without substitution.
-        (lower.split('_').next().unwrap_or(codec_name).to_string(), false)
+        (
+            lower.split('_').next().unwrap_or(codec_name).to_string(),
+            false,
+        )
     }
 }
 
@@ -607,8 +611,14 @@ mod tests {
     #[test]
     fn test_backend_from_codec_name_all_variants() {
         assert_eq!(backend_from_codec_name("h264_nvenc"), Some(HwBackend::Cuda));
-        assert_eq!(backend_from_codec_name("h264_vaapi"), Some(HwBackend::Vaapi));
-        assert_eq!(backend_from_codec_name("h264_qsv"), Some(HwBackend::QuickSync));
+        assert_eq!(
+            backend_from_codec_name("h264_vaapi"),
+            Some(HwBackend::Vaapi)
+        );
+        assert_eq!(
+            backend_from_codec_name("h264_qsv"),
+            Some(HwBackend::QuickSync)
+        );
         assert_eq!(backend_from_codec_name("h264_amf"), Some(HwBackend::Amf));
         assert_eq!(
             backend_from_codec_name("h264_videotoolbox"),

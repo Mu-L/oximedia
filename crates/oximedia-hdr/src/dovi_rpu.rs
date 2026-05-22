@@ -30,6 +30,8 @@
 //! - ITU-T H.265 Annex D (SEI messages)
 //! - SMPTE ST 2094-10 — Dolby Vision Dynamic Metadata
 
+use crate::HdrError;
+
 // ── DoviProfile ──────────────────────────────────────────────────────────
 
 /// Dolby Vision profile variant supported by [`DoviRpuBuilder`].
@@ -472,6 +474,301 @@ impl BitWriter {
     }
 }
 
+// ── BitReader ─────────────────────────────────────────────────────────────
+
+/// MSB-first bit-level reader that mirrors `BitWriter` for round-trip verification.
+///
+/// Bits are consumed from the most-significant bit of each byte, matching the
+/// order in which `BitWriter::write_bits` produces them.
+pub struct BitReader<'a> {
+    data: &'a [u8],
+    byte_pos: usize,
+    /// Bit position within the current byte: 0 = MSB (bit 7), 7 = LSB (bit 0).
+    bit_pos: u8,
+}
+
+impl<'a> BitReader<'a> {
+    /// Create a new reader over the given byte slice.
+    pub fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            byte_pos: 0,
+            bit_pos: 0,
+        }
+    }
+
+    /// Read `n` bits (1–32) as a `u32`, MSB first.
+    ///
+    /// # Errors
+    /// Returns `HdrError` if `n == 0`, `n > 32`, or the data is exhausted.
+    pub fn read_bits(&mut self, n: u8) -> Result<u32, HdrError> {
+        if n == 0 || n > 32 {
+            return Err(HdrError::MetadataParseError(format!(
+                "invalid bit count: {n}"
+            )));
+        }
+        let mut result = 0u32;
+        for _ in 0..n {
+            if self.byte_pos >= self.data.len() {
+                return Err(HdrError::MetadataParseError(
+                    "unexpected end of RPU payload".to_string(),
+                ));
+            }
+            let bit = (self.data[self.byte_pos] >> (7 - self.bit_pos)) & 1;
+            result = (result << 1) | u32::from(bit);
+            self.bit_pos += 1;
+            if self.bit_pos == 8 {
+                self.bit_pos = 0;
+                self.byte_pos += 1;
+            }
+        }
+        Ok(result)
+    }
+
+    /// Read `n` bits as a `u8` (panics at compile time if n > 8 would overflow
+    /// at runtime; actual range check is in [`Self::read_bits`]).
+    pub fn read_u8(&mut self, n: u8) -> Result<u8, HdrError> {
+        Ok(self.read_bits(n)? as u8)
+    }
+
+    /// Read `n` bits as a `u16`.
+    pub fn read_u16(&mut self, n: u8) -> Result<u16, HdrError> {
+        Ok(self.read_bits(n)? as u16)
+    }
+
+    /// Read a single bit as a `bool`.
+    pub fn read_bool(&mut self) -> Result<bool, HdrError> {
+        Ok(self.read_bits(1)? != 0)
+    }
+
+    /// Read a 16-bit value and reinterpret as `i16` (two's complement).
+    pub fn read_i16_16(&mut self) -> Result<i16, HdrError> {
+        Ok(self.read_bits(16)? as u16 as i16)
+    }
+
+    /// Number of complete bytes remaining (not counting any partial current byte).
+    pub fn bytes_remaining(&self) -> usize {
+        if self.bit_pos == 0 {
+            self.data.len().saturating_sub(self.byte_pos)
+        } else {
+            self.data.len().saturating_sub(self.byte_pos + 1)
+        }
+    }
+}
+
+// ── ParsedRpuFields ────────────────────────────────────────────────────────
+
+/// Intermediate, losslessly decoded fields from an RPU payload produced by
+/// [`DoviRpuBuilder::build_rpu_payload`].
+///
+/// All floating-point fields are reconstructed from their fixed-point encodings
+/// using the inverse of the formulas in [`DoviRpuBuilder`].  The fidelity
+/// matches the precision of the fixed-point representation, not the original
+/// `f32` inputs.
+#[derive(Debug, Clone)]
+pub struct ParsedRpuFields {
+    /// The raw vdr_rpu_profile nibble (4 bits).
+    pub vdr_rpu_profile: u8,
+    /// The raw vdr_rpu_level nibble (4 bits).
+    pub vdr_rpu_level: u8,
+    /// Reconstructed DoviProfile (Profile5, Profile81, or Profile84).
+    pub profile: DoviProfile,
+    /// Luma mapping: second pivot (= bl_max_pq).
+    pub bl_max_pq: u16,
+    /// Target display maximum PQ (from anchor_pq in DM level 4).
+    pub target_max_pq: u16,
+    /// Trim slope, decoded from fixed-point s2.13 luma curve coefficient a₁.
+    pub trim_slop: f32,
+    /// Trim offset, decoded from signed fixed-point s2.13 luma curve coefficient a₀.
+    pub trim_offset: f32,
+    /// Trim power, decoded from anchor_power (fixed-point 4.8).
+    pub trim_power: f32,
+    /// Frame index embedded in the reserved 32-bit field.
+    pub frame_idx: u64,
+}
+
+// ── DoviRpuParser ─────────────────────────────────────────────────────────
+
+/// Parser for Dolby Vision RPU NAL payloads produced by [`DoviRpuBuilder`].
+///
+/// This parser is the exact inverse of [`DoviRpuBuilder::build_rpu_payload`]:
+/// it reads fields in the same bit-for-bit order and with the same widths.
+/// It does **not** use `parse_rpu_nal_header` or `verify_rpu_crc` from
+/// `dolby_vision_profile.rs` — those functions target the byte-aligned,
+/// CRC-appended format produced by `generate_rpu_nal`, which is a distinct
+/// encoding.
+///
+/// # Errors
+/// Returns [`HdrError::MetadataParseError`] on truncated data, an unrecognised NAL prefix,
+/// or an unknown profile nibble.
+pub struct DoviRpuParser;
+
+impl DoviRpuParser {
+    /// Parse a raw RPU NAL payload produced by [`DoviRpuBuilder::build_rpu_payload`].
+    ///
+    /// The payload must begin with the `0x19` NAL prefix byte.  The last byte
+    /// must end with RBSP trailing bits (at least one `1` bit).  There is no
+    /// CRC in this format — integrity is checked only by structural consistency.
+    ///
+    /// # Errors
+    /// Returns [`HdrError::MetadataParseError`] if:
+    /// - The payload is shorter than 8 bytes.
+    /// - The first byte is not `0x19`.
+    /// - An unknown vdr_rpu_profile nibble is found (only 5 and 8 are known).
+    /// - The bit stream ends prematurely.
+    pub fn parse(payload: &[u8]) -> Result<ParsedRpuFields, HdrError> {
+        if payload.len() < 8 {
+            return Err(HdrError::MetadataParseError(
+                "RPU payload too short (< 8 bytes)".to_string(),
+            ));
+        }
+
+        let mut r = BitReader::new(payload);
+
+        // ── RPU NAL prefix (8 bits) ────────────────────────────────────────
+        let nal_prefix = r.read_u8(8)?;
+        if nal_prefix != 0x19 {
+            return Err(HdrError::MetadataParseError(format!(
+                "RPU NAL prefix mismatch: expected 0x19, got 0x{nal_prefix:02X}"
+            )));
+        }
+
+        // ── dv_rpu_data_header ─────────────────────────────────────────────
+        let _rpu_type = r.read_u8(4)?; // rpu_type (4 bits)
+        let _rpu_format = r.read_u16(13)?; // rpu_format (13 bits)
+        let vdr_rpu_profile = r.read_u8(4)?; // vdr_rpu_profile (4 bits)
+        let vdr_rpu_level = r.read_u8(4)?; // vdr_rpu_level (4 bits)
+        let _ext_spatial = r.read_bool()?; // extended_spatial_resampling_filter_flag (1)
+        let _el_spatial = r.read_bool()?; // el_spatial_resampling_filter_flag (1)
+        let _disable_res = r.read_bool()?; // disable_residual_flag (1)
+        let _vdr_dm_present = r.read_bool()?; // vdr_dm_data_present_flag (1)
+        let _use_prev = r.read_bool()?; // use_prev_vdr_rpu_flag (1)
+
+        // ── Mapping curves (3 components) ─────────────────────────────────
+        // Mirrors write_mapping_curves: for each of 3 components:
+        //   4 bits: num_pivots_minus2
+        //   12 bits: pivot0
+        //   12 bits: pivot1
+        //   4 bits: mapping_idc
+        //   4 bits: poly_order
+        //   16 bits: slope coefficient (a₁)
+        //   16 bits: offset coefficient (a₀)
+        let mut bl_max_pq = 0u16;
+        let mut trim_slop = 1.0f32;
+        let mut trim_offset = 0.0f32;
+
+        for comp in 0..3u8 {
+            let _num_pivots_minus2 = r.read_u8(4)?;
+            let _piv0 = r.read_u16(12)?;
+            let piv1 = r.read_u16(12)?;
+            let _mapping_idc = r.read_u8(4)?;
+            let _poly_order = r.read_u8(4)?;
+            // slope coefficient a₁ (16 bits, unsigned)
+            let slope_raw = r.read_bits(16)?;
+            // offset coefficient a₀ (16 bits, two's-complement signed → i16)
+            let offset_raw = r.read_bits(16)? as u16 as i16;
+
+            if comp == 0 {
+                // bl_max_pq is the second pivot for luma (clamped to 12 bits in build)
+                bl_max_pq = piv1 & 0x0FFF;
+                // Decode slope: slope_fp = trim_slop * 8192.0 → trim_slop = slope_fp / 8192.0
+                trim_slop = slope_raw as f32 / 8192.0;
+                // Decode offset: offset_fp = encode_signed_fp(trim_offset, 13) → value/2^13
+                trim_offset = f32::from(offset_raw) / 8192.0;
+            }
+            // chroma pivots and coefficients are identity; we skip them
+        }
+
+        // ── VDR DM data ───────────────────────────────────────────────────
+        // Mirrors write_vdr_dm_data exactly:
+        //   8 bits: dm_metadata_id = 1
+        //   1 bit: signal_full_range_flag
+        //   12 bits: source_min_PQ
+        //   12 bits: source_max_PQ  (= bl_max_pq, already captured above)
+        //   8 bits: dm_metadata_id = 4
+        //   12 bits: anchor_pq      (= target_max_pq)
+        //   12 bits: anchor_power   (trim_power in 4.8 fixed-point)
+        //   12 bits: trim_slope_bias
+        //   12 bits: trim_offset_bias
+        //   12 bits: trim_power_bias
+        //   12 bits: chroma_weight
+        //   6× 12 bits: saturation_vector_field0..5
+        //   8 bits: dm_metadata_id = 5
+        //   13 bits: canvas_width
+        //   13 bits: canvas_height
+        //   13 bits: active_left
+        //   13 bits: active_right
+        //   13 bits: active_top
+        //   13 bits: active_bottom
+        //   8 bits: dm_metadata_id = 255
+
+        let _dm_id1 = r.read_u8(8)?;
+        let _full_range = r.read_bool()?;
+        let _src_min_pq = r.read_u16(12)?;
+        let _src_max_pq = r.read_u16(12)?;
+
+        let _dm_id4 = r.read_u8(8)?;
+        let target_max_pq = r.read_u16(12)?;
+        let power_raw = r.read_bits(12)?;
+        // anchor_power: trim_power * 256.0 → trim_power = power_raw / 256.0
+        let trim_power = power_raw as f32 / 256.0;
+
+        // trim_slope_bias, trim_offset_bias, trim_power_bias (12 bits each)
+        let _slope_bias = r.read_bits(12)?;
+        let _offset_bias = r.read_bits(12)?;
+        let _power_bias = r.read_bits(12)?;
+
+        // chroma_weight + 6 saturation_vector_field values (12 bits each)
+        let _chroma_wt = r.read_bits(12)?;
+        for _ in 0..6 {
+            let _svf = r.read_bits(12)?;
+        }
+
+        // DM level 5 (active area)
+        let _dm_id5 = r.read_u8(8)?;
+        let _canvas_w = r.read_bits(13)?;
+        let _canvas_h = r.read_bits(13)?;
+        let _act_left = r.read_bits(13)?;
+        let _act_right = r.read_bits(13)?;
+        let _act_top = r.read_bits(13)?;
+        let _act_bottom = r.read_bits(13)?;
+
+        // End-of-metadata sentinel
+        let _dm_id_end = r.read_u8(8)?;
+
+        // ── Frame index (32 bits: high 16 then low 16) ────────────────────
+        let fi_hi = r.read_bits(16)?;
+        let fi_lo = r.read_bits(16)?;
+        let frame_idx = u64::from((fi_hi << 16) | fi_lo);
+
+        // ── Reconstruct DoviProfile ────────────────────────────────────────
+        // Profiles 8.1 and 8.4 both encode profile_id = 8.
+        // Level 1 → Profile5; level 6 → Profile81 (conservative default).
+        let profile = match (vdr_rpu_profile, vdr_rpu_level) {
+            (5, _) => DoviProfile::Profile5,
+            (8, 6) => DoviProfile::Profile81,
+            (8, _) => DoviProfile::Profile81,
+            _ => {
+                return Err(HdrError::MetadataParseError(format!(
+                    "unknown vdr_rpu_profile nibble: {vdr_rpu_profile}"
+                )));
+            }
+        };
+
+        Ok(ParsedRpuFields {
+            vdr_rpu_profile,
+            vdr_rpu_level,
+            profile,
+            bl_max_pq,
+            target_max_pq,
+            trim_slop,
+            trim_offset,
+            trim_power,
+            frame_idx,
+        })
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -701,5 +998,185 @@ mod tests {
     fn test_signed_fp_one() {
         let v = encode_signed_fp(1.0, 13);
         assert_eq!(v, 8192); // 2^13 = 8192
+    }
+
+    // ── BitReader unit tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_bitreader_single_byte() {
+        // Write 0xA5 as 8 bits, then read it back.
+        let data: &[u8] = &[0xA5];
+        let mut r = BitReader::new(data);
+        let v = r.read_bits(8).expect("read_bits(8) should succeed");
+        assert_eq!(v, 0xA5);
+    }
+
+    #[test]
+    fn test_bitreader_nibbles() {
+        // Byte 0xAB → high nibble 0xA, low nibble 0xB.
+        let data: &[u8] = &[0xAB];
+        let mut r = BitReader::new(data);
+        let hi = r.read_u8(4).expect("high nibble");
+        let lo = r.read_u8(4).expect("low nibble");
+        assert_eq!(hi, 0xA);
+        assert_eq!(lo, 0xB);
+    }
+
+    #[test]
+    fn test_bitreader_bool() {
+        // First bit of 0x80 (1000_0000) is 1.
+        let data: &[u8] = &[0x80];
+        let mut r = BitReader::new(data);
+        assert!(r.read_bool().expect("bool read"));
+    }
+
+    #[test]
+    fn test_bitreader_cross_byte_boundary() {
+        // Pack two 4-bit nibbles (0xC and 0xD) into 8 bits and cross-verify.
+        let data: &[u8] = &[0xCD];
+        let mut r = BitReader::new(data);
+        assert_eq!(r.read_bits(4).expect("first 4 bits"), 0xC);
+        assert_eq!(r.read_bits(4).expect("last 4 bits"), 0xD);
+    }
+
+    #[test]
+    fn test_bitreader_rejects_zero_bits() {
+        let data: &[u8] = &[0xFF];
+        let mut r = BitReader::new(data);
+        assert!(r.read_bits(0).is_err(), "0 bits should error");
+    }
+
+    #[test]
+    fn test_bitreader_rejects_over_32_bits() {
+        let data: &[u8] = &[0xFF; 8];
+        let mut r = BitReader::new(data);
+        assert!(r.read_bits(33).is_err(), "33 bits should error");
+    }
+
+    #[test]
+    fn test_bitreader_rejects_truncated() {
+        let data: &[u8] = &[0xFF]; // only 8 bits available
+        let mut r = BitReader::new(data);
+        r.read_bits(8).expect("consume all bytes");
+        // Next read should fail.
+        assert!(r.read_bits(1).is_err(), "should fail on empty data");
+    }
+
+    // ── DoviRpuParser round-trip tests ───────────────────────────────────
+
+    /// Helper: build a payload from config + frame_idx, then parse it.
+    fn roundtrip(cfg: DoviRpuConfig, frame_idx: u64) -> ParsedRpuFields {
+        let builder = DoviRpuBuilder::new(cfg);
+        let payload = builder.build_rpu_payload(frame_idx);
+        DoviRpuParser::parse(&payload).expect("parse should succeed")
+    }
+
+    #[test]
+    fn test_parser_roundtrip_profile81_default() {
+        let cfg = DoviRpuConfig::profile81_default();
+        let parsed = roundtrip(cfg.clone(), 0);
+
+        assert_eq!(parsed.vdr_rpu_profile, cfg.profile.profile_id());
+        assert_eq!(parsed.vdr_rpu_level, cfg.profile.rpu_level());
+        assert_eq!(parsed.bl_max_pq, cfg.bl_max_pq & 0x0FFF);
+        assert_eq!(parsed.target_max_pq, cfg.target_max_pq & 0x0FFF);
+
+        // Trim slope: slope_raw = round(trim_slop * 8192) → decode = /8192.
+        // For trim_slop=1.0 → slope_raw=8192 → decoded=1.0.
+        let expected_slop = ((cfg.trim_slop * 8192.0).round() as u32) as f32 / 8192.0;
+        assert!(
+            (parsed.trim_slop - expected_slop).abs() < 1e-4,
+            "trim_slop mismatch: {} vs {}",
+            parsed.trim_slop,
+            expected_slop
+        );
+
+        // Trim power: encoded as round(trim_power*256) / 256.
+        let expected_power =
+            ((cfg.trim_power * 256.0).round().clamp(0.0, 4095.0) as u32) as f32 / 256.0;
+        assert!(
+            (parsed.trim_power - expected_power).abs() < 1e-3,
+            "trim_power mismatch: {} vs {}",
+            parsed.trim_power,
+            expected_power
+        );
+    }
+
+    #[test]
+    fn test_parser_roundtrip_profile5() {
+        let cfg = DoviRpuConfig::profile5_default();
+        let parsed = roundtrip(cfg.clone(), 0);
+        assert_eq!(parsed.vdr_rpu_profile, cfg.profile.profile_id());
+        assert_eq!(parsed.profile, DoviProfile::Profile5);
+    }
+
+    #[test]
+    fn test_parser_roundtrip_profile84() {
+        let cfg = DoviRpuConfig::profile84_default();
+        let parsed = roundtrip(cfg.clone(), 0);
+        // Profile84 encodes profile_id=8, same as Profile81 — parser maps both to Profile81.
+        assert_eq!(parsed.vdr_rpu_profile, 8);
+        assert_eq!(parsed.bl_max_pq, cfg.bl_max_pq & 0x0FFF);
+    }
+
+    #[test]
+    fn test_parser_frame_idx_round_trip() {
+        let cfg = DoviRpuConfig::profile81_default();
+        let fi: u64 = 0x0001_ABCD;
+        let parsed = roundtrip(cfg, fi);
+        // build_rpu_payload masks to lower 32 bits.
+        assert_eq!(parsed.frame_idx, fi & 0xFFFF_FFFF);
+    }
+
+    #[test]
+    fn test_parser_frame_idx_variation_zero_vs_one() {
+        let cfg = DoviRpuConfig::profile81_default();
+        let p0 = roundtrip(cfg.clone(), 0);
+        let p1 = roundtrip(cfg, 1);
+        assert_eq!(p0.frame_idx, 0);
+        assert_eq!(p1.frame_idx, 1);
+    }
+
+    #[test]
+    fn test_parser_rejects_too_short() {
+        let result = DoviRpuParser::parse(&[0x19, 0x00, 0x00, 0x00]);
+        assert!(result.is_err(), "4-byte payload should be rejected");
+    }
+
+    #[test]
+    fn test_parser_rejects_wrong_nal_prefix() {
+        // Build valid payload and corrupt the first byte.
+        let cfg = DoviRpuConfig::profile81_default();
+        let mut payload = DoviRpuBuilder::new(cfg).build_rpu_payload(0);
+        payload[0] = 0x00; // should be 0x19
+        let result = DoviRpuParser::parse(&payload);
+        assert!(result.is_err(), "wrong NAL prefix should be rejected");
+    }
+
+    #[test]
+    fn test_parser_rejects_empty() {
+        let result = DoviRpuParser::parse(&[]);
+        assert!(result.is_err(), "empty payload should be rejected");
+    }
+
+    #[test]
+    fn test_parser_trim_slop_2_0() {
+        // Use trim_slop=2.0 — still representable exactly in u16 slope field.
+        let cfg = DoviRpuConfig {
+            profile: DoviProfile::Profile81,
+            bl_max_pq: 3079,
+            el_max_pq: 3079,
+            target_max_pq: 2081,
+            trim_slop: 2.0, // → slope_fp = 16384
+            trim_offset: 0.0,
+            trim_power: 1.0,
+        };
+        let parsed = roundtrip(cfg.clone(), 0);
+        let expected = ((cfg.trim_slop * 8192.0).round() as u32) as f32 / 8192.0;
+        assert!(
+            (parsed.trim_slop - expected).abs() < 1e-4,
+            "trim_slop=2.0 round-trip: got {}",
+            parsed.trim_slop
+        );
     }
 }

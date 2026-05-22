@@ -81,6 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vectorscope_gain: 1.0,
         highlight_gamut: false,
         gamut_colorspace: GamutColorspace::Rec709,
+        resolution: None,
     };
 
     let scopes = VideoScopes::new(config);

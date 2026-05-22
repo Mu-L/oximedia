@@ -12,8 +12,6 @@
 //! - Opus identification header
 //! - FLAC stream info block
 
-#![allow(dead_code)]
-
 use crate::Result;
 
 /// Identified codec from a raw bitstream probe.

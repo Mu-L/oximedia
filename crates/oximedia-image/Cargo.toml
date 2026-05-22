@@ -29,7 +29,8 @@ serde = { workspace = true }
 
 # Compression support
 oxiarc-deflate = { workspace = true }  # Pure Rust DEFLATE (COOLJAPAN Policy)
-weezl = "0.1"  # LZW compression
+oxiarc-lz4 = { workspace = true }     # Pure Rust LZ4 (COOLJAPAN Policy)
+weezl = "0.2"  # LZW compression
 
 [dev-dependencies]
 tempfile.workspace = true

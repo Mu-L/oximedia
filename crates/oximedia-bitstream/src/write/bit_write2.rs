@@ -25,8 +25,8 @@ use super::{
 ///
 /// # Example
 /// ```
-/// use bitstream_io::BitWrite2 as BitWrite;
-/// use bitstream_io::{BitWriter, BigEndian};
+/// use oximedia_bitstream::BitWrite2 as BitWrite;
+/// use oximedia_bitstream::{BitWriter, BigEndian};
 /// let mut byte = vec![];
 /// let mut writer = BitWriter::endian(byte, BigEndian);
 /// writer.write::<u8>(4, 0b1111).unwrap();
@@ -189,7 +189,7 @@ pub trait BitWrite2 {
     ///
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
     /// writer.write_var(8, 0x66u8).unwrap();
     /// writer.write_var(8, 0x6Fu8).unwrap();
@@ -252,7 +252,7 @@ pub trait BitWrite2 {
     /// # Example
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite};
     /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
     /// writer.write_var(1, 0u8).unwrap();
     /// writer.byte_align().unwrap();
@@ -276,8 +276,8 @@ pub trait BitWrite2 {
     /// # Example
     /// ```
     /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite2};
-    /// use bitstream_io::define_huffman_tree;
+    /// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite2};
+    /// use oximedia_bitstream::define_huffman_tree;
     /// define_huffman_tree!(TreeName : char = ['a', ['b', ['c', 'd']]]);
     /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
     /// writer.write_huffman::<TreeName>('b').unwrap();

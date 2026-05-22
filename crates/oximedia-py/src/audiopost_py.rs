@@ -3,6 +3,7 @@
 //! Provides `PyAdrSession`, `PyMixingConsole`, `PyStemExporter`,
 //! `PyDeliveryChecker`, `PyDeliveryReport`, and standalone functions.
 
+use oximedia_audiopost::noise_reduction_gate::{NoiseProfileLearner, NoiseReductionGate};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::collections::HashMap;
@@ -742,14 +743,47 @@ pub fn restore_audio(
         }
     }
 
-    // Denoise: simple spectral subtraction placeholder using windowed averaging
+    // Denoise: STFT-based spectral subtraction using NoiseReductionGate.
+    //
+    // The first 10 frames of the signal are fed into NoiseProfileLearner to
+    // estimate the stationary noise floor; the gate then processes all samples
+    // with overlap-add reconstruction.  Falls back to a simple EMA if the
+    // sample_rate is zero (should never happen in practice).
     if denoise {
-        // Simple exponential moving average for noise reduction
-        let alpha = 0.15_f32;
-        let mut prev = output.first().copied().unwrap_or(0.0);
-        for s in &mut output {
-            *s = alpha * *s + (1.0 - alpha) * prev;
-            prev = *s;
+        if sample_rate > 0 && output.len() >= 512 {
+            // Learn noise profile from the first portion of the signal.
+            let fft_size = 512usize;
+            let noise_region_len = (fft_size * 10).min(output.len());
+            let mut learner =
+                NoiseProfileLearner::new(sample_rate, fft_size).unwrap_or_else(|_| {
+                    // Infallible for valid sample_rate and power-of-two fft_size.
+                    // Create a learner with safe defaults.
+                    NoiseProfileLearner::new(48000, 512).expect("default learner creation")
+                });
+            learner.learn(&output[..noise_region_len]);
+
+            if let Ok(profile) = learner.finish() {
+                let mut gate = NoiseReductionGate::new(sample_rate).unwrap_or_else(|_| {
+                    NoiseReductionGate::new(48000).expect("default gate creation")
+                });
+                gate.set_profile(profile);
+                gate.set_gate_enabled(false); // pure spectral subtraction, no hard gate
+
+                let mut denoised = vec![0.0f32; output.len()];
+                if gate.process_block(&output, &mut denoised).is_ok() {
+                    output = denoised;
+                }
+                // If process_block fails, keep the pre-denoise output unchanged.
+            }
+            // If learner produced no frames, skip denoising silently.
+        } else {
+            // Fallback: EMA smoothing when audio is too short for spectral methods.
+            let alpha = 0.15_f32;
+            let mut prev = output.first().copied().unwrap_or(0.0);
+            for s in &mut output {
+                *s = alpha * *s + (1.0 - alpha) * prev;
+                prev = *s;
+            }
         }
     }
 
@@ -849,5 +883,30 @@ mod tests {
         let names = exporter.stem_names();
         assert_eq!(names[0], "Dialogue");
         assert_eq!(names[1], "Music");
+    }
+
+    #[test]
+    fn test_restore_audio_denoise_spectral() {
+        // Feed 48 000 samples (1 s at 48 kHz) of mild noise — enough for the
+        // spectral subtraction path (>=512 samples).  We only check that the
+        // function completes without error and returns the correct sample count.
+        let n = 48_000usize;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (i as f32 * 0.01).sin() * 0.1 + (i as f32 * 0.07).cos() * 0.05)
+            .collect();
+        let result = restore_audio(samples, 48_000, false, false, false, true);
+        assert!(result.is_ok(), "spectral denoise should not fail");
+        let out = result.expect("should succeed");
+        assert_eq!(out.len(), n, "output length must equal input length");
+    }
+
+    #[test]
+    fn test_restore_audio_denoise_short_fallback() {
+        // Fewer than 512 samples → EMA fallback path.
+        let samples = vec![0.2_f32; 100];
+        let result = restore_audio(samples, 48_000, false, false, false, true);
+        assert!(result.is_ok());
+        let out = result.expect("should succeed");
+        assert_eq!(out.len(), 100);
     }
 }

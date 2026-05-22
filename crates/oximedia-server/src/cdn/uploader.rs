@@ -50,6 +50,9 @@ pub struct CdnConfig {
 
     /// CDN domain.
     pub cdn_domain: Option<String>,
+
+    /// Google Cloud project ID (required by the GCS backend; ignored by S3/Azure).
+    pub project_id: Option<String>,
 }
 
 impl Default for CdnConfig {
@@ -64,6 +67,7 @@ impl Default for CdnConfig {
             public: true,
             enable_cdn: false,
             cdn_domain: None,
+            project_id: None,
         }
     }
 }

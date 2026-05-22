@@ -51,9 +51,9 @@ walkdir = "2.5"
 sha2 = { workspace = true }
 md5 = "0.8"
 hex = "0.4"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
+xxhash-rust = { workspace = true }
 strsim = "0.11"
-quick-xml = "0.39"
+quick-xml = { workspace = true }
 tracing = { workspace = true }
 num_cpus = "1.17"
 pathdiff = "0.2"

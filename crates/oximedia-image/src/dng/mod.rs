@@ -37,6 +37,8 @@
 pub mod constants;
 pub mod conversion;
 pub mod demosaic;
+pub mod jpeg_baseline;
+pub mod jpeg_lossless;
 pub(crate) mod parser;
 pub mod processing;
 pub mod reader;

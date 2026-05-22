@@ -6,23 +6,23 @@
 - Dependencies: axum, tokio, rusqlite, prometheus, sysinfo, blake3, zstd, lz4
 
 ## Enhancements
-- [ ] Add GPU resource tracking to `node_capability` (VRAM, CUDA/Vulkan compute units, GPU temperature)
-- [ ] Extend `cost_optimizer` with spot instance pricing models and preemption handling for cloud workers
-- [ ] Add weighted fair-share scheduling to `scheduler` alongside existing algorithms
-- [ ] Implement render job dependency DAG validation in `job_dependency_graph` (cycle detection, unreachable node warnings)
-- [ ] Add render progress ETA prediction in `progress` using historical completion rates per worker class
-- [ ] Extend `elastic_scaling` with scale-down cooldown timers and min/max node constraints
-- [ ] Add job preemption support in `render_job_queue` for higher-priority jobs arriving mid-render
-- [ ] Implement chunk-level retry in `failure_recovery` instead of full-frame retry on transient errors
+- [x] Add GPU resource tracking to `node_capability` (VRAM, CUDA/Vulkan compute units, GPU temperature) (verified 2026-05-16; src/node_capability.rs:92 vram_total_mib, compute_units:109)
+- [x] Extend `cost_optimizer` with spot instance pricing models and preemption handling for cloud workers (verified 2026-05-16; src/cost_optimizer.rs:18 AwsSpot/AzureSpot variants)
+- [x] Add weighted fair-share scheduling to `scheduler` alongside existing algorithms (verified 2026-05-16; src/scheduler.rs:25 WeightedFairShare variant)
+- [x] Implement render job dependency DAG validation in `job_dependency_graph` (cycle detection, unreachable node warnings) (verified 2026-05-16; src/job_dependency_graph.rs:61 acyclic flag, unreachable_nodes:68)
+- [ ] Add render progress ETA prediction in `progress` using historical completion rates per worker class (verified-open 2026-05-16: ETA fn exists but no per-worker-class historical rate prediction)
+- [x] Extend `elastic_scaling` with scale-down cooldown timers and min/max node constraints (verified 2026-05-16; src/elastic_scaling.rs:277 scale_down_cooldown_ms, min/max workers:551-562)
+- [x] Add job preemption support in `render_job_queue` for higher-priority jobs arriving mid-render (verified 2026-05-16; src/render_job_queue.rs:40 is_preemptive, JobUrgency::Critical)
+- [ ] Implement chunk-level retry in `failure_recovery` instead of full-frame retry on transient errors (verified-open 2026-05-16: transient flag in FailureAnalysis but no chunk-level retry granularity)
 
 ## New Features
 - [x] Add a `render_template` module for reusable render configuration presets (resolution, codec, quality, frame range)
 - [x] Add a `worker_benchmark` module to auto-profile worker performance and assign capability scores
-- [ ] Implement a `render_cache` module for caching intermediate render outputs (e.g., lighting passes) across jobs
+- [x] Implement a `render_cache` module for caching intermediate render outputs (e.g., lighting passes) across jobs (verified 2026-05-16; src/render_cache.rs:295 lines)
 - [x] Add an `alert_rule` module with configurable alert thresholds (queue depth, idle workers, budget overrun)
-- [ ] Implement a `resource_reservation` module for reserving worker capacity for scheduled high-priority jobs
-- [ ] Add a `render_artifact` module for managing output files (checksums, storage locations, lifecycle policies)
-- [ ] Implement `job_template` inheritance so child jobs inherit parent settings with overrides
+- [x] Implement a `resource_reservation` module for reserving worker capacity for scheduled high-priority jobs (verified 2026-05-16; src/resource_reservation.rs:334 lines)
+- [x] Add a `render_artifact` module for managing output files (checksums, storage locations, lifecycle policies) (verified 2026-05-16; src/render_artifact.rs:379 lines)
+- [x] Implement `job_template` inheritance so child jobs inherit parent settings with overrides (verified 2026-05-16; src/job_template.rs:216 job type inherited from template, 634 lines)
 
 ## Performance
 - [ ] Add connection pooling for the `api` axum handlers to reduce per-request overhead

@@ -7,9 +7,30 @@
 //! - PlayReady DRM
 //! - FairPlay Streaming
 //! - W3C Clear Key
+//!
+//! # DRM System Comparison
+//!
+//! | System    | UUID                                   | License Protocol         | Key Container     | Supported Schemes  | Platforms                   | Robustness Levels          | Library Status                  |
+//! |-----------|----------------------------------------|--------------------------|-------------------|--------------------|-----------------------------|----------------------------|---------------------------------|
+//! | Widevine  | edef8ba9-79d6-4ace-a3c8-27dcd51d21ed | Binary protobuf over HTTP| WidevineCdm keys  | cenc, cbcs         | Android, Chrome, Smart TVs  | L1 (TEE), L2 (SW+DRM), L3 | Full RPC + structural CDM       |
+//! | PlayReady | 9a04f079-9840-4286-ab92-e65be0885f95  | WS-Trust 1.3 SOAP/XML   | XMR license chain | cenc, cbcs, cbc1   | Windows, Xbox, Smart TVs    | SL150, SL2000, SL3000      | Full RPC + structural CDM       |
+//! | FairPlay  | 94ce86fb-07ff-4f43-adb8-93d2fa968ca2  | JSON/KSM over HTTPS      | CKC binary blob   | cbcs               | Apple (iOS/macOS/tvOS)      | HW-bound (Secure Enclave)  | Full RPC + structural CDM       |
+//! | ClearKey  | 1077efec-c0b2-4d02-ace3-3c1e52e2fb4b  | W3C JSON (EME)           | JSON key/ID pairs | cenc               | All browsers (testing only) | None (no-op)               | Full implementation             |
+//!
+//! ## Feature Flags
+//!
+//! - `widevine` — enables [`widevine`] module and HTTP license transport (`HyperPlainLicenseClient`).
+//! - `widevine-network` — extends `widevine` with pure-Rust TLS (`HyperRustlsLicenseClient`).
+//! - `playready` — enables [`playready`] module and SOAP license transport (`HyperPlainPlayReadyClient`).
+//! - `playready-network` — extends `playready` with pure-Rust TLS (`HyperRustlsPlayReadyClient`).
+//! - `fairplay` — enables [`fairplay`] module and JSON/KSM transport (`HyperPlainFairPlayClient`).
+//! - `fairplay-network` — extends `fairplay` with pure-Rust TLS (`HyperRustlsFairPlayClient`).
+//! - `clearkey` (default) — enables [`clearkey`] module with W3C ClearKey JSON format support.
+//! - `hardware-aes` — documents AES-NI runtime auto-detection (the `aes` crate handles dispatch transparently).
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::OnceLock;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -26,6 +47,43 @@ const FAIRPLAY_UUID: Uuid = Uuid::from_bytes([
 const CLEARKEY_UUID: Uuid = Uuid::from_bytes([
     0x10, 0x77, 0xef, 0xec, 0xc0, 0xb2, 0x4d, 0x02, 0xac, 0xe3, 0x3c, 0x1e, 0x52, 0xe2, 0xfb, 0x4b,
 ]);
+
+// ---------------------------------------------------------------------------
+// Cached UUID accessors (D4)
+// ---------------------------------------------------------------------------
+
+/// Returns a reference to the cached Widevine DRM system UUID.
+///
+/// The UUID `edef8ba9-79d6-4ace-a3c8-27dcd51d21ed` is initialized exactly once
+/// using [`OnceLock`] and reused on subsequent calls with zero parse overhead.
+pub fn widevine_uuid() -> &'static Uuid {
+    static CACHE: OnceLock<Uuid> = OnceLock::new();
+    CACHE.get_or_init(|| WIDEVINE_UUID)
+}
+
+/// Returns a reference to the cached PlayReady DRM system UUID.
+///
+/// The UUID `9a04f079-9840-4286-ab92-e65be0885f95` is initialized exactly once.
+pub fn playready_uuid() -> &'static Uuid {
+    static CACHE: OnceLock<Uuid> = OnceLock::new();
+    CACHE.get_or_init(|| PLAYREADY_UUID)
+}
+
+/// Returns a reference to the cached FairPlay DRM system UUID.
+///
+/// The UUID `94ce86fb-07ff-4f43-adb8-93d2fa968ca2` is initialized exactly once.
+pub fn fairplay_uuid() -> &'static Uuid {
+    static CACHE: OnceLock<Uuid> = OnceLock::new();
+    CACHE.get_or_init(|| FAIRPLAY_UUID)
+}
+
+/// Returns a reference to the cached W3C ClearKey DRM system UUID.
+///
+/// The UUID `1077efec-c0b2-4d02-ace3-3c1e52e2fb4b` is initialized exactly once.
+pub fn clearkey_uuid() -> &'static Uuid {
+    static CACHE: OnceLock<Uuid> = OnceLock::new();
+    CACHE.get_or_init(|| CLEARKEY_UUID)
+}
 
 pub mod access_grant;
 pub mod aes_cbc;
@@ -73,11 +131,38 @@ pub mod clearkey;
 #[cfg(feature = "widevine")]
 pub mod widevine;
 
+#[cfg(feature = "widevine")]
+pub mod widevine_rpc;
+
+#[cfg(feature = "widevine")]
+pub use widevine_rpc::{HyperPlainLicenseClient, LicenseClient};
+
+#[cfg(all(feature = "widevine", feature = "widevine-network"))]
+pub use widevine_rpc::HyperRustlsLicenseClient;
+
 #[cfg(feature = "playready")]
 pub mod playready;
 
+#[cfg(feature = "playready")]
+pub mod playready_rpc;
+
+#[cfg(feature = "playready")]
+pub use playready_rpc::{HyperPlainPlayReadyClient, PlayReadyLicenseClient};
+
+#[cfg(all(feature = "playready", feature = "playready-network"))]
+pub use playready_rpc::HyperRustlsPlayReadyClient;
+
 #[cfg(feature = "fairplay")]
 pub mod fairplay;
+
+#[cfg(feature = "fairplay")]
+pub mod fairplay_rpc;
+
+#[cfg(feature = "fairplay")]
+pub use fairplay_rpc::{FairPlayClientExt, FairPlayKeyClient, HyperPlainFairPlayClient};
+
+#[cfg(all(feature = "fairplay", feature = "fairplay-network"))]
+pub use fairplay_rpc::HyperRustlsFairPlayClient;
 
 /// DRM-related errors
 #[derive(Error, Debug)]
@@ -96,6 +181,12 @@ pub enum DrmError {
 
     #[error("License error: {0}")]
     LicenseError(String),
+
+    #[error("License denied by server (status {status}): {body}")]
+    LicenseDenied { status: u16, body: String },
+
+    #[error("Network error: {0}")]
+    NetworkError(String),
 
     #[error("PSSH parsing error: {0}")]
     PsshError(String),
@@ -325,6 +416,46 @@ mod tests {
         let unknown_uuid =
             Uuid::parse_str("00000000-0000-0000-0000-000000000000").expect("UUID should parse");
         assert_eq!(DrmSystem::from_uuid(&unknown_uuid), None);
+    }
+
+    /// Verifies that the cached UUID accessor functions return stable, correct values.
+    ///
+    /// Each accessor is called twice to exercise the `OnceLock` fast path, and the
+    /// results are compared against a byte-level round-trip through `DrmSystem::from_uuid`.
+    #[test]
+    fn test_drm_system_uuid_cached_values_match() {
+        // Call each accessor twice — second call exercises the OnceLock fast path.
+        let wv1 = widevine_uuid();
+        let wv2 = widevine_uuid();
+        assert_eq!(
+            wv1, wv2,
+            "widevine_uuid must return the same value on repeat calls"
+        );
+        assert_eq!(DrmSystem::from_uuid(wv1), Some(DrmSystem::Widevine));
+
+        let pr1 = playready_uuid();
+        let pr2 = playready_uuid();
+        assert_eq!(
+            pr1, pr2,
+            "playready_uuid must return the same value on repeat calls"
+        );
+        assert_eq!(DrmSystem::from_uuid(pr1), Some(DrmSystem::PlayReady));
+
+        let fp1 = fairplay_uuid();
+        let fp2 = fairplay_uuid();
+        assert_eq!(
+            fp1, fp2,
+            "fairplay_uuid must return the same value on repeat calls"
+        );
+        assert_eq!(DrmSystem::from_uuid(fp1), Some(DrmSystem::FairPlay));
+
+        let ck1 = clearkey_uuid();
+        let ck2 = clearkey_uuid();
+        assert_eq!(
+            ck1, ck2,
+            "clearkey_uuid must return the same value on repeat calls"
+        );
+        assert_eq!(DrmSystem::from_uuid(ck1), Some(DrmSystem::ClearKey));
     }
 
     #[test]

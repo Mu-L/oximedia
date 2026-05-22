@@ -283,8 +283,8 @@ pub async fn handle_scopes_command(command: ScopesCommand, json_output: bool) ->
 /// Delegates to [`crate::frame_extract::extract_video_frame_rgb`] which
 /// supports Y4M natively.  For other formats it returns a descriptive error
 /// directing the user to convert first.
-fn extract_frame_rgb(input: &std::path::Path, frame_num: u64) -> Result<(Vec<u8>, u32, u32)> {
-    crate::frame_extract::extract_video_frame_rgb(input, frame_num)
+async fn extract_frame_rgb(input: &std::path::Path, frame_num: u64) -> Result<(Vec<u8>, u32, u32)> {
+    crate::frame_extract::extract_video_frame_rgb(input, frame_num).await
 }
 
 // ---------------------------------------------------------------------------
@@ -366,9 +366,10 @@ async fn run_waveform(
         vectorscope_gain: 1.0,
         highlight_gamut: false,
         gamut_colorspace: oximedia_scopes::GamutColorspace::Rec709,
+        resolution: None,
     };
 
-    let (frame_data, fw, fh) = extract_frame_rgb(input, frame_num.unwrap_or(0))?;
+    let (frame_data, fw, fh) = extract_frame_rgb(input, frame_num.unwrap_or(0)).await?;
     let scopes = VideoScopes::new(config);
     let scope_data = scopes
         .analyze(&frame_data, fw, fh, scope_type)
@@ -417,9 +418,10 @@ async fn run_vectorscope(
         vectorscope_gain: gain as f32,
         highlight_gamut: false,
         gamut_colorspace: oximedia_scopes::GamutColorspace::Rec709,
+        resolution: None,
     };
 
-    let (frame_data, fw, fh) = extract_frame_rgb(input, frame_num.unwrap_or(0))?;
+    let (frame_data, fw, fh) = extract_frame_rgb(input, frame_num.unwrap_or(0)).await?;
     let scopes = VideoScopes::new(config);
     let scope_data = scopes
         .analyze(&frame_data, fw, fh, ScopeType::Vectorscope)
@@ -469,9 +471,10 @@ async fn run_histogram(
         vectorscope_gain: 1.0,
         highlight_gamut: false,
         gamut_colorspace: oximedia_scopes::GamutColorspace::Rec709,
+        resolution: None,
     };
 
-    let (frame_data, fw, fh) = extract_frame_rgb(input, frame_num.unwrap_or(0))?;
+    let (frame_data, fw, fh) = extract_frame_rgb(input, frame_num.unwrap_or(0)).await?;
     let scopes = VideoScopes::new(config);
     let scope_data = scopes
         .analyze(&frame_data, fw, fh, scope_type)
@@ -515,9 +518,10 @@ async fn run_parade(
         vectorscope_gain: 1.0,
         highlight_gamut: false,
         gamut_colorspace: oximedia_scopes::GamutColorspace::Rec709,
+        resolution: None,
     };
 
-    let (frame_data, fw, fh) = extract_frame_rgb(input, frame_num.unwrap_or(0))?;
+    let (frame_data, fw, fh) = extract_frame_rgb(input, frame_num.unwrap_or(0)).await?;
     let scopes = VideoScopes::new(config);
     let scope_data = scopes
         .analyze(&frame_data, fw, fh, scope_type)
@@ -540,7 +544,7 @@ async fn run_false_color(
     use oximedia_scopes::{ScopeConfig, ScopeType, VideoScopes};
 
     let config = ScopeConfig::default();
-    let (frame_data, fw, fh) = extract_frame_rgb(input, frame_num.unwrap_or(0))?;
+    let (frame_data, fw, fh) = extract_frame_rgb(input, frame_num.unwrap_or(0)).await?;
 
     let scopes = VideoScopes::new(config);
     let scope_data = scopes
@@ -643,7 +647,7 @@ async fn run_analyze(
         .with_context(|| format!("Cannot create output directory: {}", output_dir.display()))?;
 
     let frame = frame_num.unwrap_or(0);
-    let (frame_data, fw, fh) = extract_frame_rgb(input, frame)?;
+    let (frame_data, fw, fh) = extract_frame_rgb(input, frame).await?;
 
     let config = ScopeConfig {
         width: 512,
@@ -657,6 +661,7 @@ async fn run_analyze(
         vectorscope_gain: 1.0,
         highlight_gamut: false,
         gamut_colorspace: oximedia_scopes::GamutColorspace::Rec709,
+        resolution: None,
     };
 
     let scope_types: &[(&str, ScopeType)] = match scope {
@@ -750,7 +755,7 @@ async fn run_compliance(input: &std::path::Path, standard: &str, json_output: bo
         ..ScopeConfig::default()
     };
 
-    let (frame_data, fw, fh) = extract_frame_rgb(input, 0)?;
+    let (frame_data, fw, fh) = extract_frame_rgb(input, 0).await?;
     let scopes = VideoScopes::new(config);
     let scope_data = scopes
         .analyze(&frame_data, fw, fh, ScopeType::Vectorscope)
@@ -829,7 +834,7 @@ async fn run_stats(
     let mut sum_luma = 0.0_f64;
 
     for i in 0..count {
-        let (frame_data, fw, fh) = extract_frame_rgb(input, i)?;
+        let (frame_data, fw, fh) = extract_frame_rgb(input, i).await?;
         let scope_data = scopes
             .analyze(&frame_data, fw, fh, ScopeType::HistogramLuma)
             .map_err(|e| anyhow::anyhow!("Stats analysis failed on frame {i}: {e}"))?;
@@ -887,9 +892,31 @@ async fn run_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Per-process atomic counter for the scopes test temp input.
+    ///
+    /// Combined with the process id, thread id and a nanosecond timestamp this
+    /// guarantees a unique filename for every `temp_input()` invocation, even
+    /// when several test processes (e.g. nextest workers) execute in parallel
+    /// on the same machine.  See issue #16.
+    static TEMP_INPUT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_input() -> PathBuf {
-        let path = std::env::temp_dir().join("oximedia_scopes_test_input.y4m");
+        let pid = std::process::id();
+        let tid = format!("{:?}", std::thread::current().id());
+        // Strip non-alphanumeric characters from the Debug-formatted ThreadId
+        // so the resulting filename stays portable (Windows in particular
+        // dislikes parentheses and spaces in path components).
+        let tid_sanitised: String = tid.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        let counter = TEMP_INPUT_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let filename =
+            format!("oximedia_scopes_test_input_{pid}_{tid_sanitised}_{counter}_{nanos}.y4m");
+        let path = std::env::temp_dir().join(filename);
         // Minimal 64×64 YUV420 Y4M with three black frames (run_stats needs up to 3)
         let mut data = b"YUV4MPEG2 W64 H64 F25:1 Ip A0:0 C420\n".to_vec();
         for _ in 0..3 {
@@ -1084,5 +1111,78 @@ mod tests {
     async fn test_stats_missing_input() {
         let result = run_stats(std::path::Path::new("/nonexistent/video.mkv"), 0, false).await;
         assert!(result.is_err());
+    }
+
+    /// Regression test for https://github.com/cool-japan/oximedia/issues/16.
+    ///
+    /// Two consecutive `temp_input()` calls must yield distinct paths and both
+    /// must point at intact Y4M files (the magic bytes must survive). Before
+    /// the fix, `temp_input()` always returned the same path so parallel test
+    /// invocations truncated each other's data and the magic-byte check on
+    /// `extract_video_frame_rgb` failed.
+    #[test]
+    fn test_issue_16_temp_input_unique_per_call() {
+        let p1 = temp_input();
+        let p2 = temp_input();
+        assert_ne!(p1, p2, "temp_input() must yield distinct paths per call");
+        for p in [&p1, &p2] {
+            assert!(p.exists(), "temp file missing: {}", p.display());
+            let bytes = std::fs::read(p).expect("read temp Y4M");
+            assert!(
+                bytes.starts_with(b"YUV4MPEG2"),
+                "temp Y4M missing magic bytes (truncation race?): {}",
+                p.display()
+            );
+        }
+        let _ = std::fs::remove_file(&p1);
+        let _ = std::fs::remove_file(&p2);
+    }
+
+    /// Regression test for the parallel-collision aspect of issue #16.
+    ///
+    /// Spawn many threads that each call `temp_input()` concurrently and
+    /// assert (a) every returned path is unique and (b) every file contains
+    /// the full Y4M header. Before the fix this would race on the shared
+    /// `oximedia_scopes_test_input.y4m` filename.
+    #[test]
+    fn test_issue_16_temp_input_parallel_no_truncation() {
+        const THREADS: usize = 16;
+        let mut handles = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
+            handles.push(std::thread::spawn(temp_input));
+        }
+        let paths: Vec<PathBuf> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread panicked"))
+            .collect();
+
+        // (a) Every returned path is unique.
+        let mut sorted = paths.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            paths.len(),
+            "temp_input() returned duplicate paths under contention"
+        );
+
+        // (b) Every file is a complete Y4M (intact header + at least one FRAME).
+        for p in &paths {
+            let bytes = std::fs::read(p).expect("read temp Y4M");
+            assert!(
+                bytes.starts_with(b"YUV4MPEG2"),
+                "temp Y4M missing magic bytes (truncation race?): {}",
+                p.display()
+            );
+            assert!(
+                bytes.windows(6).any(|w| w == b"FRAME\n"),
+                "temp Y4M missing FRAME marker (partial write?): {}",
+                p.display()
+            );
+        }
+
+        for p in &paths {
+            let _ = std::fs::remove_file(p);
+        }
     }
 }

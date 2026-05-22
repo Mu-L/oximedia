@@ -353,6 +353,85 @@ pub struct Scene {
     pub frame_count: u32,
 }
 
+// ── MamEventBus: broadcast-channel pub/sub hub ──────────────────────────────
+
+use crate::event_bus::MamEvent;
+use tokio::sync::broadcast;
+
+/// Error returned when broadcasting an event fails.
+///
+/// This wraps `tokio::sync::broadcast::error::SendError` without exposing the
+/// generic parameter, making it easier to use across crate boundaries.
+#[derive(Debug, thiserror::Error)]
+#[error("Broadcast send error: no active receivers — {0}")]
+pub struct BroadcastError(pub String);
+
+impl<T: std::fmt::Debug> From<broadcast::error::SendError<T>> for BroadcastError {
+    fn from(e: broadcast::error::SendError<T>) -> Self {
+        Self(format!("{e:?}"))
+    }
+}
+
+/// Central publish/subscribe hub for MAM domain events.
+///
+/// Multiple subsystems subscribe via [`MamEventBus::subscribe`].  The ingest
+/// pipeline (and folder sync) publish via [`MamEventBus::publish`] or by
+/// cloning [`MamEventBus::sender`].
+///
+/// # Notes on slow subscribers
+///
+/// `tokio::sync::broadcast` uses a fixed-capacity ring buffer.  Slow receivers
+/// that fall more than `capacity` messages behind will experience
+/// [`broadcast::error::RecvError::Lagged`] on the next `recv()` call — they
+/// are **not** blocked and do **not** slow down the sender.
+pub struct MamEventBus {
+    tx: broadcast::Sender<MamEvent>,
+}
+
+impl MamEventBus {
+    /// Create a new bus with the given ring-buffer `capacity`.
+    ///
+    /// A capacity of 16–64 is sufficient for typical usage.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        let (tx, _) = broadcast::channel(capacity);
+        Self { tx }
+    }
+
+    /// Subscribe to all events on this bus.
+    ///
+    /// Subscribers receive events in the order they are published.
+    #[must_use]
+    pub fn subscribe(&self) -> broadcast::Receiver<MamEvent> {
+        self.tx.subscribe()
+    }
+
+    /// Publish an event to all active subscribers.
+    ///
+    /// Returns the number of receivers that will receive the event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BroadcastError`] if there are no active receivers (the message
+    /// could not be delivered to anyone).
+    pub fn publish(&self, event: MamEvent) -> std::result::Result<usize, BroadcastError> {
+        self.tx.send(event).map_err(BroadcastError::from)
+    }
+
+    /// Clone the underlying sender so that other components can publish events
+    /// without holding a reference to the bus itself (e.g. `FolderSync`).
+    #[must_use]
+    pub fn sender(&self) -> broadcast::Sender<MamEvent> {
+        self.tx.clone()
+    }
+
+    /// Return the number of active receivers.
+    #[must_use]
+    pub fn receiver_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

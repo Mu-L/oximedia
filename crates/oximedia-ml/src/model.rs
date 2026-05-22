@@ -157,6 +157,7 @@ mod imp {
     use super::{ModelInfo, TensorDType, TensorSpec};
     use crate::device::DeviceType;
     use crate::error::{MlError, MlResult};
+    use oxionnx::execution_providers::ProviderKind;
     use oxionnx::graph::TensorInfo;
     use oxionnx::DType;
     use oxionnx::{OptLevel, Session, SessionBuilder, Tensor};
@@ -183,6 +184,11 @@ mod imp {
     impl OnnxModel {
         /// Load an ONNX model from disk.
         ///
+        /// The session is configured with an ordered [`ProviderKind`] list
+        /// derived from `device` (see `device_to_providers`).  CPU is
+        /// always the implicit terminal fallback, so the session can never
+        /// fail solely because a GPU backend is unavailable at runtime.
+        ///
         /// # Errors
         ///
         /// * [`MlError::DeviceUnavailable`] if `device` is not available in
@@ -195,8 +201,10 @@ mod imp {
                 return Err(MlError::DeviceUnavailable(device.name().to_string()));
             }
 
+            let providers = device_to_providers(device);
             let session = SessionBuilder::new()
                 .with_optimization_level(OptLevel::All)
+                .with_provider_kinds(providers)
                 .load(path_ref)
                 .map_err(|e| MlError::ModelLoad {
                     path: PathBuf::from(path_ref),
@@ -218,6 +226,9 @@ mod imp {
         /// [`ModelInfo::path`] and cache keying; it does not need to
         /// refer to a real file on disk.
         ///
+        /// The session is configured with an ordered [`ProviderKind`] list
+        /// derived from `device` (see `device_to_providers`).
+        ///
         /// # Errors
         ///
         /// * [`MlError::DeviceUnavailable`] if `device` is not available.
@@ -231,8 +242,10 @@ mod imp {
                 return Err(MlError::DeviceUnavailable(device.name().to_string()));
             }
             let path = virtual_path.into();
+            let providers = device_to_providers(device);
             let session = SessionBuilder::new()
                 .with_optimization_level(OptLevel::All)
+                .with_provider_kinds(providers)
                 .load_from_bytes(bytes)
                 .map_err(|e| MlError::ModelLoad {
                     path: path.clone(),
@@ -321,6 +334,60 @@ mod imp {
         #[must_use]
         pub fn device(&self) -> DeviceType {
             self.device
+        }
+    }
+
+    /// Map a [`DeviceType`] to an ordered list of [`ProviderKind`] backends.
+    ///
+    /// The returned list is passed to
+    /// [`SessionBuilder::with_provider_kinds`][oxionnx::SessionBuilder::with_provider_kinds]
+    /// so that the oxionnx dispatch loop tries the requested backend first
+    /// and falls back to CPU when it is unavailable or returns `None` for a
+    /// specific operator.
+    ///
+    /// | DeviceType  | Provider priority list              |
+    /// |-------------|--------------------------------------|
+    /// | Cpu         | `[Cpu]`                             |
+    /// | Cuda        | `[Cuda, Cpu]` (feature `cuda`)      |
+    /// | WebGpu      | `[Gpu, Cpu]`  (feature `webgpu`)    |
+    /// | DirectMl    | `[DirectMl, Cpu]` (feature `directml`) |
+    /// | CoreMl      | `[Cpu]` (CoreML not yet wired)      |
+    fn device_to_providers(device: DeviceType) -> Vec<ProviderKind> {
+        match device {
+            DeviceType::Cpu | DeviceType::CoreMl => vec![ProviderKind::Cpu],
+            DeviceType::Cuda => {
+                // cuda feature is required for ProviderKind::Cuda to exist.
+                #[cfg(feature = "cuda")]
+                {
+                    vec![ProviderKind::Cuda, ProviderKind::Cpu]
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    vec![ProviderKind::Cpu]
+                }
+            }
+            DeviceType::WebGpu => {
+                // webgpu feature is required for ProviderKind::Gpu to exist.
+                #[cfg(feature = "webgpu")]
+                {
+                    vec![ProviderKind::Gpu, ProviderKind::Cpu]
+                }
+                #[cfg(not(feature = "webgpu"))]
+                {
+                    vec![ProviderKind::Cpu]
+                }
+            }
+            DeviceType::DirectMl => {
+                // directml feature is required for ProviderKind::DirectMl to exist.
+                #[cfg(feature = "directml")]
+                {
+                    vec![ProviderKind::DirectMl, ProviderKind::Cpu]
+                }
+                #[cfg(not(feature = "directml"))]
+                {
+                    vec![ProviderKind::Cpu]
+                }
+            }
         }
     }
 

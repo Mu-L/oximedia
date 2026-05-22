@@ -140,11 +140,7 @@ impl PoolInner {
         self.slots.insert(desc.id.clone(), SlotState::new(desc));
     }
 
-    fn try_acquire_slot(
-        &mut self,
-        slot_id: &str,
-        holder: &str,
-    ) -> Result<(), ResourcePoolError> {
+    fn try_acquire_slot(&mut self, slot_id: &str, holder: &str) -> Result<(), ResourcePoolError> {
         let slot = self
             .slots
             .get_mut(slot_id)
@@ -167,9 +163,7 @@ impl PoolInner {
         let slot_id = self
             .slots
             .iter()
-            .filter(|(_, s)| {
-                !s.busy && resource_type.map_or(true, |rt| s.desc.resource_type == rt)
-            })
+            .filter(|(_, s)| !s.busy && resource_type.map_or(true, |rt| s.desc.resource_type == rt))
             .max_by_key(|(_, s)| s.desc.capacity)
             .map(|(id, _)| id.clone())
             .ok_or(ResourcePoolError::AtCapacity)?;
@@ -331,11 +325,7 @@ impl ResourcePool {
     /// Total number of registered slots.
     #[must_use]
     pub fn slot_count(&self) -> usize {
-        self.inner
-            .0
-            .lock()
-            .map(|g| g.slots.len())
-            .unwrap_or(0)
+        self.inner.0.lock().map(|g| g.slots.len()).unwrap_or(0)
     }
 
     /// Number of busy slots.
@@ -401,7 +391,9 @@ mod tests {
     #[test]
     fn test_try_acquire_busy_returns_error() {
         let pool = pool_with_gpus(1);
-        let _lease = pool.try_acquire("gpu-0", "worker-1").expect("first acquire");
+        let _lease = pool
+            .try_acquire("gpu-0", "worker-1")
+            .expect("first acquire");
         let result = pool.try_acquire("gpu-0", "worker-2");
         assert!(matches!(result, Err(ResourcePoolError::SlotBusy(_))));
     }

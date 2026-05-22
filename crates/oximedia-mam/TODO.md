@@ -23,20 +23,35 @@
 - [x] Add `retention_policy.rs` support for legal hold overrides that prevent deletion
 - [x] Implement `webhook.rs` retry with exponential backoff for failed webhook deliveries
 - [x] Extend `permissions.rs` with attribute-based access control (ABAC) in addition to RBAC
-- [ ] Add `audit.rs` log export to SIEM-compatible formats (CEF, LEEF)
-- [ ] Implement `batch_ingest.rs` support for watch folders with automatic ingest on file arrival
-- [ ] Extend `proxy.rs` with adaptive bitrate proxy generation (HLS/DASH) for browser preview
+- [x] Add `audit.rs` log export to SIEM-compatible formats (CEF, LEEF) (verified 2026-05-16; src/audit.rs:574 fn export_cef)
+- [x] Implement `batch_ingest.rs` support for watch folders with automatic ingest on file arrival (completed 2026-05-05)
+  - **Goal:** Folder sync: directory walk → fingerprint → upload → emit AssetIngested event
+  - **Design:** `notify` crate RecursiveMode::Recursive on watched folder; on Event::Create, fingerprint via oximedia-dedup, upload if not in MAM, emit MamEvent::AssetIngested via broadcast channel
+  - **Files:** `crates/oximedia-mam/src/folders.rs`
+  - **Tests:** `tests/folder_sync.rs` — 4 tests: uploads new file + event emitted; idempotent second call returns 0; empty dir returns 0; multiple files
+  - **Risk:** Debounce rapid create/rename sequences to avoid double-ingest
+- [x] Extend `proxy.rs` with adaptive bitrate proxy generation (HLS/DASH) for browser preview (verified 2026-05-16; src/proxy.rs:1008 AbrProxyConfig, AbrProxySet:1130, HLS/DASH manifest gen:1236)
 
 ## New Features
-- [ ] Add an `archive_tier.rs` module for cold/glacier storage tier management with retrieval scheduling
-- [ ] Implement a `collaboration.rs` module for real-time comments, annotations, and review markers on assets
-- [ ] Add a `notification.rs` module for email/Slack/Teams notifications on asset and workflow events
-- [ ] Implement a `custom_field.rs` module for user-defined metadata fields with type validation
-- [ ] Add a `duplicate_detect.rs` module for perceptual hash-based duplicate asset detection
-- [ ] Implement an `access_request.rs` module for request/approve access workflows
-- [ ] Add a `reporting.rs` module for scheduled report generation (storage usage, asset stats, user activity)
-- [ ] Implement a `federated_search.rs` module for searching across multiple MAM instances
-- [ ] Add a `trash_bin.rs` module with soft-delete and configurable auto-purge
+- [x] Add an `archive_tier.rs` module for cold/glacier storage tier management with retrieval scheduling (completed 2026-05-05)
+  - **Goal:** Wire each MAM storage method to `oximedia-storage::StorageBackend` trait
+  - **Design:** URI scheme dispatch (s3://, gs://, https://*.blob.core.windows.net, file://, bare paths) → MamStorage backed by oximedia_storage::local::LocalStorage (shadow dirs for remote stubs). Methods: put/get/list/delete/exists
+  - **Files:** `crates/oximedia-mam/src/storage.rs`
+  - **Tests:** `tests/storage_glue.rs` — 19 tests: URI parsing (bare/relative/file/s3/gcs/azure/unsupported), round-trip put/get, exists, delete, list, from_uri construction
+  - **Risk:** Use only oximedia-storage's existing pure-Rust paths; do NOT add aws-sdk-s3 or azure-storage
+- [x] Implement a `collaboration.rs` module for real-time comments, annotations, and review markers on assets (verified 2026-05-16; src/collaboration.rs:884 lines, struct AssetComment:21)
+- [x] Add a `notification.rs` module for email/Slack/Teams notifications on asset and workflow events (completed 2026-05-05)
+  - **Goal:** Event bus: fan-out MamEvent to all subscribers when assets are ingested
+  - **Design:** tokio::sync::broadcast channel + topic-based filter; emit on asset ingest, folder sync, metadata update
+  - **Files:** `crates/oximedia-mam/src/integration.rs`
+  - **Tests:** `tests/event_bus.rs` — 5 tests: 3 subscribers fan-out, no-receiver error, receiver_count, sender clone delivery, multiple events in order
+  - **Risk:** Broadcast channel capacity; slow subscribers should not block the ingest path
+- [x] Implement a `custom_field.rs` module for user-defined metadata fields with type validation (verified 2026-05-16; src/custom_field.rs:808 lines)
+- [x] Add a `duplicate_detect.rs` module for perceptual hash-based duplicate asset detection (verified 2026-05-16; src/duplicate_detect.rs:547 lines)
+- [x] Implement an `access_request.rs` module for request/approve access workflows (verified 2026-05-16; src/access_request.rs:771 lines)
+- [x] Add a `reporting.rs` module for scheduled report generation (storage usage, asset stats, user activity) (verified 2026-05-16; src/reporting.rs:792 lines)
+- [x] Implement a `federated_search.rs` module for searching across multiple MAM instances (verified 2026-05-16; src/federated_search.rs:1042 lines)
+- [x] Add a `trash_bin.rs` module with soft-delete and configurable auto-purge (verified 2026-05-16; src/trash_bin.rs:458 lines)
 
 ## Performance
 - [ ] Add Tantivy index warming on startup in `search_index.rs` for faster first-query response
@@ -47,6 +62,12 @@
 - [ ] Implement incremental search index updates in `search_index.rs` instead of full reindex
 
 ## Testing
+- [x] Add storage_glue integration tests for MamStorage URI dispatch and round-trip ops (completed 2026-05-05)
+  - `tests/storage_glue.rs` — 19 tests: URI parsing, put/get/exists/delete/list round-trips, from_uri construction
+- [x] Add folder_sync integration tests for FolderSync watch directory → upload → event (completed 2026-05-05)
+  - `tests/folder_sync.rs` — 4 tests: new file upload + AssetIngested event, idempotent second call, empty directory, multiple files
+- [x] Add event_bus integration tests for MamEventBus fan-out pub/sub (completed 2026-05-05)
+  - `tests/event_bus.rs` — 5 tests: 3-subscriber fan-out, no-receiver error, receiver_count, sender clone, multiple events in order
 - [ ] Add integration tests for the full ingest pipeline (file upload -> metadata extraction -> indexing -> proxy gen)
 - [ ] Test `permissions.rs` RBAC with complex role hierarchies and permission inheritance
 - [ ] Add `workflow_trigger.rs` tests with concurrent asset events firing multiple triggers

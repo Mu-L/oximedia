@@ -143,6 +143,193 @@ impl Default for OutputValidator {
 }
 
 // ---------------------------------------------------------------------------
+// Image dimension probing
+// ---------------------------------------------------------------------------
+
+/// Probe image dimensions from the file header without fully decoding.
+///
+/// Reads up to 65536 bytes and inspects magic bytes to determine the image
+/// format, then extracts width and height from well-known header structures.
+///
+/// Supported formats: PNG, JPEG (SOF0/SOF1/SOF2), TIFF (IFD tags 256/257),
+/// OpenEXR (displayWindow/dataWindow attribute).
+///
+/// Returns `None` when the format is not recognised or the header is too short.
+fn probe_image_dimensions(path: &std::path::Path) -> Option<(u32, u32)> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut data = Vec::with_capacity(65536);
+    let _ = f.by_ref().take(65536).read_to_end(&mut data);
+    if data.is_empty() {
+        return None;
+    }
+
+    // ── PNG ──────────────────────────────────────────────────────────────────
+    // Signature (8 bytes) + IHDR chunk: length(4) + type(4) + width(4) + height(4)
+    if data.len() >= 24 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
+        let w = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+        let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+        return Some((w, h));
+    }
+
+    // ── JPEG ─────────────────────────────────────────────────────────────────
+    // SOI marker is 0xFF 0xD8; scan for SOF0/SOF1/SOF2/SOF3 markers.
+    if data.len() >= 4 && data[0] == 0xFF && data[1] == 0xD8 {
+        let mut i = 2usize;
+        while i + 3 < data.len() {
+            if data[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            let marker = data[i + 1];
+            // SOF0=0xC0 SOF1=0xC1 SOF2=0xC2 SOF3=0xC3 (start-of-frame)
+            if marker == 0xC0 || marker == 0xC1 || marker == 0xC2 || marker == 0xC3 {
+                if i + 9 <= data.len() {
+                    let h = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
+                    let w = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
+                    return Some((w, h));
+                }
+                return None;
+            }
+            // Segment length includes the 2-byte length field itself.
+            if i + 3 >= data.len() {
+                break;
+            }
+            let seg_len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+            if seg_len < 2 {
+                break;
+            }
+            i += 2 + seg_len;
+        }
+        return None;
+    }
+
+    // ── TIFF ─────────────────────────────────────────────────────────────────
+    if data.len() >= 8 {
+        let le_magic = &data[0..2] == b"II";
+        let be_magic = &data[0..2] == b"MM";
+        if le_magic || be_magic {
+            let le = le_magic;
+            let read_u16 = |d: &[u8], off: usize| -> Option<u16> {
+                if off + 1 >= d.len() {
+                    return None;
+                }
+                Some(if le {
+                    u16::from_le_bytes([d[off], d[off + 1]])
+                } else {
+                    u16::from_be_bytes([d[off], d[off + 1]])
+                })
+            };
+            let read_u32 = |d: &[u8], off: usize| -> Option<u32> {
+                if off + 3 >= d.len() {
+                    return None;
+                }
+                Some(if le {
+                    u32::from_le_bytes([d[off], d[off + 1], d[off + 2], d[off + 3]])
+                } else {
+                    u32::from_be_bytes([d[off], d[off + 1], d[off + 2], d[off + 3]])
+                })
+            };
+            let magic = read_u16(&data, 2)?;
+            if magic == 42 {
+                let ifd_off = read_u32(&data, 4)? as usize;
+                let num_entries = read_u16(&data, ifd_off)? as usize;
+                let mut width: Option<u32> = None;
+                let mut height: Option<u32> = None;
+                for e in 0..num_entries.min(512) {
+                    let entry_off = ifd_off + 2 + e * 12;
+                    if entry_off + 11 >= data.len() {
+                        break;
+                    }
+                    let tag = read_u16(&data, entry_off)?;
+                    let typ = read_u16(&data, entry_off + 2)?;
+                    let val_off = entry_off + 8;
+                    let val_u32 = if typ == 3 {
+                        // SHORT
+                        read_u16(&data, val_off).map(|v| v as u32)
+                    } else {
+                        // LONG (typ == 4) or fallback
+                        read_u32(&data, val_off)
+                    };
+                    match tag {
+                        256 => width = val_u32,
+                        257 => height = val_u32,
+                        _ => {}
+                    }
+                    if width.is_some() && height.is_some() {
+                        break;
+                    }
+                }
+                if let (Some(w), Some(h)) = (width, height) {
+                    return Some((w, h));
+                }
+            }
+        }
+    }
+
+    // ── OpenEXR ──────────────────────────────────────────────────────────────
+    // Magic: 0x76 0x2F 0x31 0x01; then 4-byte version, then attribute list.
+    if data.len() >= 8 && &data[0..4] == b"\x76\x2F\x31\x01" {
+        let mut pos = 8usize; // skip magic(4) + version(4)
+        while pos < data.len() {
+            // Attribute name: null-terminated string.
+            let name_end = data[pos..].iter().position(|&b| b == 0).map(|p| p + pos)?;
+            let attr_name = std::str::from_utf8(&data[pos..name_end]).ok()?;
+            pos = name_end + 1;
+            // Type name: null-terminated string (skip it).
+            let type_end = data[pos..].iter().position(|&b| b == 0).map(|p| p + pos)?;
+            pos = type_end + 1;
+            // Size: 4 bytes LE.
+            if pos + 4 > data.len() {
+                break;
+            }
+            let size = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                as usize;
+            pos += 4;
+            if attr_name == "displayWindow" || attr_name == "dataWindow" {
+                // box2i: xmin, ymin, xmax, ymax as i32 LE (16 bytes total).
+                if pos + 16 <= data.len() {
+                    let xmin = i32::from_le_bytes([
+                        data[pos],
+                        data[pos + 1],
+                        data[pos + 2],
+                        data[pos + 3],
+                    ]);
+                    let ymin = i32::from_le_bytes([
+                        data[pos + 4],
+                        data[pos + 5],
+                        data[pos + 6],
+                        data[pos + 7],
+                    ]);
+                    let xmax = i32::from_le_bytes([
+                        data[pos + 8],
+                        data[pos + 9],
+                        data[pos + 10],
+                        data[pos + 11],
+                    ]);
+                    let ymax = i32::from_le_bytes([
+                        data[pos + 12],
+                        data[pos + 13],
+                        data[pos + 14],
+                        data[pos + 15],
+                    ]);
+                    let w = (xmax - xmin + 1).max(0) as u32;
+                    let h = (ymax - ymin + 1).max(0) as u32;
+                    return Some((w, h));
+                }
+            }
+            if let Some(next) = pos.checked_add(size) {
+                pos = next;
+            } else {
+                break;
+            }
+        }
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Container format detection helpers
 // ---------------------------------------------------------------------------
 
@@ -392,8 +579,12 @@ impl OutputValidator {
                 OutputCheck::FileExists => meta.is_ok(),
                 OutputCheck::FileSizeAboveMinimum => file_size >= self.min_file_size_bytes,
                 OutputCheck::DimensionsMatch => {
-                    // Dimension checking requires decoding; not implemented here — pass.
-                    true
+                    // Probe dimensions from the image file header (pure Rust,
+                    // no full decode).  Unrecognised formats pass gracefully.
+                    match probe_image_dimensions(path) {
+                        Some((w, h)) => w == self.expected_width && h == self.expected_height,
+                        None => true, // cannot probe → skip check gracefully
+                    }
                 }
                 OutputCheck::NoCorruption => {
                     // Basic corruption check: non-empty file.
@@ -975,5 +1166,115 @@ mod tests {
         assert!(!ok, "gap at frame 3 should be detected");
 
         tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    // ── probe_image_dimensions tests ─────────────────────────────────────────
+
+    /// Build a minimal valid PNG file header (24 bytes with PNG signature +
+    /// IHDR length + IHDR type + width + height), write it to a temp file,
+    /// and verify that `probe_image_dimensions` returns the correct size.
+    #[test]
+    fn test_dimensions_match_png() {
+        let tmp_dir = std::env::temp_dir();
+        let path = tmp_dir.join("oximedia_probe_test_800x600.png");
+
+        // Minimal PNG header: 8-byte signature + IHDR chunk preamble.
+        let mut header = vec![0u8; 24];
+        header[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        header[8..12].copy_from_slice(&13u32.to_be_bytes()); // IHDR data length
+        header[12..16].copy_from_slice(b"IHDR");
+        header[16..20].copy_from_slice(&800u32.to_be_bytes()); // width
+        header[20..24].copy_from_slice(&600u32.to_be_bytes()); // height
+
+        std::fs::write(&path, &header).expect("write PNG header");
+
+        let dims = probe_image_dimensions(&path);
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(
+            dims,
+            Some((800, 600)),
+            "probe should extract 800×600 from PNG header"
+        );
+    }
+
+    /// Verify the DimensionsMatch check passes when the probed file matches
+    /// the validator's expected dimensions.
+    #[tokio::test]
+    async fn test_validate_file_dimensions_match_png() {
+        let tmp_dir = std::env::temp_dir();
+        let path = tmp_dir.join("oximedia_dims_check_1920x1080.png");
+
+        let mut header = vec![0u8; 24];
+        header[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        header[8..12].copy_from_slice(&13u32.to_be_bytes());
+        header[12..16].copy_from_slice(b"IHDR");
+        header[16..20].copy_from_slice(&1920u32.to_be_bytes());
+        header[20..24].copy_from_slice(&1080u32.to_be_bytes());
+
+        tokio::fs::write(&path, &header).await.expect("write");
+
+        let validator = OutputValidator {
+            enabled_checks: vec![OutputCheck::DimensionsMatch],
+            expected_width: 1920,
+            expected_height: 1080,
+            ..OutputValidator::default()
+        };
+
+        let result = validator
+            .validate_file(1, &path)
+            .await
+            .expect("validate_file");
+        tokio::fs::remove_file(&path).await.ok();
+
+        assert!(
+            result.passes_all(),
+            "1920×1080 PNG should pass DimensionsMatch"
+        );
+    }
+
+    /// Verify the DimensionsMatch check fails when the probed dimensions differ.
+    #[tokio::test]
+    async fn test_validate_file_dimensions_mismatch_png() {
+        let tmp_dir = std::env::temp_dir();
+        let path = tmp_dir.join("oximedia_dims_check_mismatch.png");
+
+        let mut header = vec![0u8; 24];
+        header[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        header[8..12].copy_from_slice(&13u32.to_be_bytes());
+        header[12..16].copy_from_slice(b"IHDR");
+        header[16..20].copy_from_slice(&640u32.to_be_bytes()); // wrong width
+        header[20..24].copy_from_slice(&480u32.to_be_bytes()); // wrong height
+
+        tokio::fs::write(&path, &header).await.expect("write");
+
+        let validator = OutputValidator {
+            enabled_checks: vec![OutputCheck::DimensionsMatch],
+            expected_width: 1920,
+            expected_height: 1080,
+            ..OutputValidator::default()
+        };
+
+        let result = validator
+            .validate_file(1, &path)
+            .await
+            .expect("validate_file");
+        tokio::fs::remove_file(&path).await.ok();
+
+        assert!(
+            !result.passes_all(),
+            "640×480 PNG should fail 1920×1080 DimensionsMatch"
+        );
+    }
+
+    /// Verify that probe_image_dimensions handles unrecognised formats gracefully.
+    #[test]
+    fn test_probe_unknown_format_returns_none() {
+        let tmp_dir = std::env::temp_dir();
+        let path = tmp_dir.join("oximedia_probe_unknown.bin");
+        std::fs::write(&path, b"not_an_image_format").expect("write");
+        let dims = probe_image_dimensions(&path);
+        std::fs::remove_file(&path).ok();
+        assert!(dims.is_none(), "unknown format should return None");
     }
 }

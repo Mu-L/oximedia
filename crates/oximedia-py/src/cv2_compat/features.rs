@@ -127,39 +127,55 @@ impl PyORB {
     ) -> PyResult<Vec<PyKeyPoint>> {
         let _ = mask;
         let (data, h, w, ch) = extract_img(py, &img)?;
-        let gray = to_gray(&data, w, h, ch);
-        let kps = detect_fast_keypoints(
-            &gray,
-            w,
-            h,
-            self.fast_threshold as u8,
-            self.n_features,
-            self.edge_threshold as usize,
-        );
-        Ok(kps)
+        let fast_threshold = self.fast_threshold as u8;
+        let n_features = self.n_features;
+        let edge_threshold = self.edge_threshold as usize;
+        // Release GIL for FAST keypoint detection (per-pixel corner response)
+        Ok(py.detach(move || {
+            let gray = to_gray(&data, w, h, ch);
+            detect_fast_keypoints(&gray, w, h, fast_threshold, n_features, edge_threshold)
+        }))
     }
 
     /// Compute descriptors for detected keypoints.
-    /// Returns (keypoints, descriptors) — descriptors are returned as None (placeholder).
+    ///
+    /// Returns (keypoints, descriptors) where descriptors is a numpy array of
+    /// shape (N, 32) with dtype uint8 — one 32-byte BRIEF descriptor per keypoint.
     pub fn compute(
         &self,
         py: Python<'_>,
         img: Py<PyAny>,
         keypoints: Vec<PyKeyPoint>,
     ) -> PyResult<(Vec<PyKeyPoint>, Py<PyAny>)> {
-        let _ = img;
-        Ok((keypoints, py.None()))
+        let (data, h, w, ch) = extract_img(py, &img)?;
+        let kp_coords: Vec<(f32, f32)> = keypoints.iter().map(|k| (k.x, k.y)).collect();
+        // Release GIL for BRIEF descriptor sampling
+        let rows: Vec<Vec<u8>> = py.detach(move || {
+            let gray_u8: Vec<u8> = to_gray(&data, w, h, ch)
+                .into_iter()
+                .map(|v| v.clamp(0.0, 255.0) as u8)
+                .collect();
+            let descs =
+                oximedia_cv::keypoint::compute_brief_descriptors(&gray_u8, w, h, &kp_coords);
+            descs.into_iter().map(|d| d.to_vec()).collect()
+        });
+        let py_arr = numpy::PyArray2::<u8>::from_vec2(py, &rows)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok((keypoints, py_arr.into_any().unbind()))
     }
 
     /// Detect and compute in one step.
+    ///
+    /// Returns (keypoints, descriptors) where descriptors is a numpy array of
+    /// shape (N, 32) with dtype uint8.
     pub fn detect_and_compute(
         &self,
         py: Python<'_>,
         img: Py<PyAny>,
         mask: Option<Py<PyAny>>,
     ) -> PyResult<(Vec<PyKeyPoint>, Py<PyAny>)> {
-        let kps = self.detect(py, img, mask)?;
-        Ok((kps, py.None()))
+        let kps = self.detect(py, img.clone_ref(py), mask)?;
+        self.compute(py, img, kps)
     }
 
     #[getter]
@@ -269,47 +285,48 @@ pub fn good_features_to_track(
 ) -> PyResult<Py<PyAny>> {
     let _ = (mask, use_harris_detector);
     let (data, h, w, ch) = extract_img(py, &image)?;
-    let gray = to_gray(&data, w, h, ch);
 
-    // Compute corner response using Harris/Shi-Tomasi
-    let corners = if use_harris_detector {
-        compute_harris_response(&gray, w, h, block_size, k)
-    } else {
-        compute_shi_tomasi_response(&gray, w, h, block_size)
-    };
+    // Release GIL for the Harris/Shi-Tomasi corner response computation
+    let selected = py.detach(move || {
+        let gray = to_gray(&data, w, h, ch);
 
-    // Find max response for quality threshold
-    let max_resp = corners.iter().cloned().fold(0.0f32, f32::max);
-    let threshold = max_resp * quality_level as f32;
+        let corners = if use_harris_detector {
+            compute_harris_response(&gray, w, h, block_size, k)
+        } else {
+            compute_shi_tomasi_response(&gray, w, h, block_size)
+        };
 
-    // Collect candidate corners above threshold
-    let mut candidates: Vec<(usize, usize, f32)> = corners
-        .iter()
-        .enumerate()
-        .filter(|&(_, &r)| r >= threshold)
-        .map(|(idx, &r)| (idx % w, idx / w, r))
-        .collect();
+        let max_resp = corners.iter().cloned().fold(0.0f32, f32::max);
+        let threshold = max_resp * quality_level as f32;
 
-    // Sort by response (descending)
-    candidates.sort_unstable_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        let mut candidates: Vec<(usize, usize, f32)> = corners
+            .iter()
+            .enumerate()
+            .filter(|&(_, &r)| r >= threshold)
+            .map(|(idx, &r)| (idx % w, idx / w, r))
+            .collect();
 
-    // Non-maximum suppression by min_distance
-    let mut selected: Vec<(f32, f32)> = Vec::new();
-    for (cx, cy, _) in candidates {
-        if selected.len() >= max_corners {
-            break;
+        candidates
+            .sort_unstable_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut selected: Vec<(f32, f32)> = Vec::new();
+        for (cx, cy, _) in candidates {
+            if selected.len() >= max_corners {
+                break;
+            }
+            let too_close = selected.iter().any(|&(sx, sy)| {
+                let dx = cx as f32 - sx;
+                let dy = cy as f32 - sy;
+                ((dx * dx + dy * dy) as f64).sqrt() < min_distance
+            });
+            if !too_close {
+                selected.push((cx as f32, cy as f32));
+            }
         }
-        let too_close = selected.iter().any(|&(sx, sy)| {
-            let dx = cx as f32 - sx;
-            let dy = cy as f32 - sy;
-            ((dx * dx + dy * dy) as f64).sqrt() < min_distance
-        });
-        if !too_close {
-            selected.push((cx as f32, cy as f32));
-        }
-    }
+        selected
+    });
 
-    // Return as list of (x, y) float tuples
+    // Return as list of (x, y) float tuples (requires GIL)
     let result = pyo3::types::PyList::empty(py);
     for (x, y) in selected {
         result.append(pyo3::types::PyTuple::new(py, [x, y])?)?;

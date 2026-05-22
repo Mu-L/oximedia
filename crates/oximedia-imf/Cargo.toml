@@ -19,7 +19,7 @@ workspace = true
 oximedia-core.workspace = true
 thiserror.workspace = true
 bytes.workspace = true
-quick-xml = "0.39"
+quick-xml = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }

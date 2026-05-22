@@ -130,17 +130,30 @@ pub async fn find_frame_differences(
     Ok(Vec::new())
 }
 
-/// Calculate perceptual difference score.
+/// Calculate a perceptual difference score in `[0.0, 1.0]`.
+///
+/// `0.0` means the two versions are perceptually identical, `1.0` means they
+/// are maximally different given the metadata available to this crate.
+///
+/// A full implementation would decode frames and run SSIM/VMAF; this version
+/// uses the same metadata-derived heuristic as [`compare_versions`] (content
+/// hash + resolution / duration / frame-rate match) so it is consistent with
+/// the similarity score reported there: `difference = 1.0 - similarity`.
 ///
 /// # Errors
 ///
-/// Returns error if calculation fails.
+/// Returns error if calculation fails. The metadata-based implementation
+/// never errors; the `Result` is preserved for API stability with future
+/// decoder-backed implementations.
 pub async fn calculate_perceptual_difference(
-    _version_a: &Version,
-    _version_b: &Version,
+    version_a: &Version,
+    version_b: &Version,
 ) -> ReviewResult<f64> {
-    // In a real implementation, this would use SSIM or similar metrics
-    Ok(0.0)
+    let comparison = compare_versions(version_a, version_b).await?;
+    // Clamp defensively – `compare_versions` produces values in [0.80, 1.0]
+    // today, but callers should always see a value in [0.0, 1.0].
+    let diff = (1.0 - comparison.similarity).clamp(0.0, 1.0);
+    Ok(diff)
 }
 
 #[cfg(test)]

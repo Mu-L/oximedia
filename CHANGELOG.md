@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `oximedia-repair`: mmap-backed `deep_scan` (memmap2, ≥4 MiB threshold with streaming fallback for smaller files), mtime-aware `detection_cache` (parking_lot `RwLock` short-circuit), and full `fix_issue` dispatcher wired to `conceal`, `partial`, `container_migrate`, and `codec_probe` submodules.
+- `oximedia-neural`: `onnx` Cargo feature gate; new `OnnxBackend` struct (`load`, `run` with `HashMap<String, Tensor>` API) backed by `oxionnx`.
+- `oximedia-audio`: `compute_log_mel_spectrogram` (STFT → Hann window → MelScale filterbank → log) added to the `spectrum` module.
+- `oximedia-ml`: `AutoCaptionPipeline` — Whisper-compatible encoder+decoder ONNX inference pipeline with greedy decode; `AutoCaptionConfig`, `encode_audio`, `step_decode`, and `caption` entry points; gated behind the `auto-caption` Cargo feature.
+- `oxionnx` (companion crate): `SessionBuilder::with_provider_kinds()` for typed runtime EP selection; `ProviderKind::DirectMl` variant (behind `directml` feature); EP dispatch chain consults the provider priority list at runtime.
+- `oximedia-hdr`: process-wide `GamutConversionMatrix` cache (`OnceLock<RwLock<HashMap<(ColorGamut, ColorGamut), [[f32;3];3]>>>`) eliminates redundant Bradford CAT + matrix-inverse computation per call pair.
+- `oximedia-stream`: six `SpliceInfoSection` encode→parse→re-encode roundtrip tests; `CmafChunk.data` migrated from `Vec<u8>` to `bytes::Bytes`; `write_cmaf_segment` returns `Vec<Bytes>` for zero-copy scatter-gather segment output.
+- `oximedia-colormgmt`: `ToneCurve` enum with `ReinhardSimple`, `ReinhardExtended { l_white }`, `FilmicHable` (Hable/Uncharted2), and `AcesFitted` (Narkowicz rational) operators.
+- `oximedia-dedup`: `MergeExecutor`, `AppliedAction`, and `MergeReport` — real filesystem duplicate resolution with symlink, hardlink, delete, and dry-run modes, including safety precondition checks.
+
+### Changed
+- `oxionnx`: version bumped `0.1.2 → 0.1.3` to reflect the new typed EP selection API.
+
+### Fixed
+- `oxionnx`: 18 clippy warnings in CoreML example files (`coreml_arcface_smoke.rs`, `coreml_scrfd_smoke.rs`, `coreml_inswapper_smoke.rs`) resolved; examples now compile cleanly under `-D warnings`.
+- `oximedia-repair`: orphaned stub `repair_engine.rs` (all branches logged no-ops with no real implementation) deleted.
+
+## [0.1.7] - 2026-05-21
+
+### Fixed
+- **Issue #9** — Theora decoded frame plane data now correctly written into `VideoFrame` planes via `copy_from_slice` instead of writing to a dropped temporary clone.
+- **Issue #13** — `oximedia-timesync` IPC socket module now gated on `#[cfg(all(unix, not(target_arch = "wasm32")))]` to prevent Windows/WASM compilation failures.
+- **Issue #14** — `TempFileManager` filenames are now globally unique across concurrent instances using a static `AtomicU64` manager-ID counter combined with process ID and creation nanoseconds.
+- **Issue #15** — AVC SPS constraint byte doctest corrected to use 8-bit read (6 flags + 2 reserved) per H.264 §7.3.2.1.1.
+- **Issue #16** — Scope command temp input files now use unique per-call names (PID + thread ID + AtomicU64 + nanos) to prevent parallel invocation collisions; frame-extract hardcoded `/tmp/out.y4m` replaced with `std::env::temp_dir()`.
+
+### Added
+- Regression tests for all fixed issues (#9, #13, #14, #15, #16).
+- Build prerequisites documentation for `protoc` (tonic-build), `cmake`, and `shaderc` toolchain in root `README.md` and `crates/oximedia-accel/README.md`.
+
 ## [0.1.6] - 2026-04-25
 
 ### Added
@@ -370,7 +401,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `oximedia-wasm` — WebAssembly bindings
 - `oximedia-cli` — command-line interface
 
-[Unreleased]: https://github.com/cool-japan/oximedia/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/cool-japan/oximedia/compare/v0.1.7...HEAD
 [0.1.2]: https://github.com/cool-japan/oximedia/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/cool-japan/oximedia/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/cool-japan/oximedia/releases/tag/v0.1.0

@@ -888,4 +888,77 @@ mod tests {
             qoe.bitrate_factor
         );
     }
+
+    // ── Additional QoE pattern tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_stream_health_packet_loss_pattern() {
+        // An error-heavy session should produce a degraded overall score.
+        // There is no HealthIssue::Error variant; we verify score degradation.
+        let mut m = make_monitor();
+        m.start_session();
+        // Record 10 errors and minimal playback
+        for _ in 0..10 {
+            m.record_error();
+        }
+        m.record_playback_duration(1_000); // very short playback
+        let perfect = make_monitor().report(2000.0, 10.0);
+        let degraded = m.report(2000.0, 10.0);
+        // error_count is captured in the report; the overall score should be
+        // equal-to-or-less-than a clean session at the same bitrate/buffer.
+        assert!(
+            degraded.overall_score <= perfect.overall_score,
+            "error-heavy session should not score higher than clean session: \
+             errors={} degraded={} perfect={}",
+            degraded.error_count,
+            degraded.overall_score,
+            perfect.overall_score
+        );
+        assert_eq!(degraded.error_count, 10);
+    }
+
+    #[test]
+    fn test_stream_health_jitter_pattern() {
+        // 10 stall events of 50 ms each with 200 ms total playback duration.
+        // rebuffer_duration_ms = 500, total_playback_ms = 200
+        // ratio = 500 / (200 + 500) ≈ 0.714 → well above 0.5
+        let mut m = make_monitor();
+        for _ in 0..10 {
+            m.record_rebuffer_with_duration(50);
+        }
+        m.record_playback_duration(200);
+        let ratio = m.rebuffer_ratio();
+        assert!(
+            ratio > 0.5,
+            "high-jitter session should have rebuffer_ratio > 0.5, got {ratio:.4}"
+        );
+        let report = m.report(2000.0, 1.0);
+        assert!(
+            report.overall_score < 80.0,
+            "high rebuffer ratio should heavily degrade score: {}",
+            report.overall_score
+        );
+    }
+
+    #[test]
+    fn test_stream_health_bitrate_drop() {
+        // A very low bitrate (200 kbps) combined with a low buffer (2 s) should
+        // produce a score below 90.
+        let m = make_monitor();
+        let report = m.report(200.0, 2.0);
+        assert!(
+            report.overall_score < 90.0,
+            "low bitrate + low buffer should degrade score below 90: {}",
+            report.overall_score
+        );
+        // The low buffer should also trigger a BufferTooLow health issue.
+        let has_buffer_issue = report
+            .issues
+            .iter()
+            .any(|i| matches!(i, HealthIssue::BufferTooLow { .. }));
+        assert!(
+            has_buffer_issue,
+            "low buffer should trigger BufferTooLow issue"
+        );
+    }
 }

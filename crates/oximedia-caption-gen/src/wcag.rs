@@ -1,11 +1,74 @@
 //! WCAG 2.1 accessibility compliance checks for caption blocks.
 //!
-//! Covers success criteria:
-//! - 1.2.2 Captions (Prerecorded) — Level A
-//! - 1.2.4 Captions (Live) — Level AA
-//! - 1.2.6 Sign Language — Level AAA (not machine-checkable)
-//! - Reading speed / CPS guideline
-//! - Minimum display duration
+//! This module implements machine-checkable WCAG 2.1 success criteria that
+//! apply to caption and subtitle tracks in multimedia content.  Each check
+//! function corresponds to one or more guidelines; the table below maps
+//! functions to their rule identifiers, WCAG success criteria, and conformance
+//! level.
+//!
+//! ## Conformance Level Mapping
+//!
+//! | Function | rule_id | WCAG SC | Level | Notes |
+//! |---|---|---|---|---|
+//! | [`check_caption_coverage`] | `"1.2.2"` | 1.2.2 Captions (Prerecorded) | A | Fails when gap > 2 000 ms |
+//! | [`check_live_latency`] | `"1.2.4"` | 1.2.4 Captions (Live) | AA | Fails when latency > 3 000 ms |
+//! | [`check_sign_language`] | — | 1.2.6 Sign Language | AAA | Always `None`; not machine-checkable |
+//! | [`check_cps`] | `"CPS"` | Reading speed (BBC/Netflix 17 cps) | AA | Per-block check |
+//! | [`check_min_duration`] | `"MIN_DUR"` | Min display time 1 000 ms | A | Per-block check |
+//! | [`check_gap_duration`] | `"GAP"` | Gap between blocks | A | Returns all violations |
+//! | [`run_all_checks`] | (multi) | Aggregate | varies | Runs coverage + min\_dur + CPS (≥ AA) + gap |
+//! | [`check_max_simultaneous_captions`] | `"MAX_SIMULTANEOUS"` | EBU STL / SMPTE 2052 | AA | ≤ 2 simultaneous blocks |
+//! | [`check_cps_for_audience`] | `"CPS_AUDIENCE"` | Per-audience cps limit | AA | Children vs. adult profiles |
+//! | [`compliance_score`] | — | Scoring helper | — | 100 − penalty (10 / AA-AAA, 2 / A) |
+//!
+//! ## Not Implemented
+//!
+//! **1.2.5 Audio Description (Prerecorded)** and **1.2.7 Extended Audio
+//! Description (Prerecorded)** are _not_ implemented here.  These success
+//! criteria require a producer to supply a separate audio track describing
+//! visual information; they are not derivable from caption text alone and
+//! therefore cannot be machine-checked by this module.
+//!
+//! ## Usage Example
+//!
+//! ```rust
+//! use oximedia_caption_gen::wcag::{
+//!     WcagChecker, WcagLevel, run_all_checks, compliance_score,
+//! };
+//! use oximedia_caption_gen::alignment::{CaptionBlock, CaptionPosition};
+//!
+//! // Build a minimal set of caption blocks for illustration.
+//! let blocks = vec![
+//!     CaptionBlock {
+//!         id: 1,
+//!         start_ms: 0,
+//!         end_ms: 3_000,
+//!         lines: vec!["Hello, world.".to_string()],
+//!         speaker_id: None,
+//!         position: CaptionPosition::Bottom,
+//!     },
+//!     CaptionBlock {
+//!         id: 2,
+//!         start_ms: 3_500,
+//!         end_ms: 7_000,
+//!         lines: vec!["This caption meets the minimum display-time requirement.".to_string()],
+//!         speaker_id: None,
+//!         position: CaptionPosition::Bottom,
+//!     },
+//! ];
+//!
+//! // Create a checker targeting WCAG Level AA.
+//! let checker = WcagChecker::new(WcagLevel::AA);
+//! let content_duration_ms: u64 = 7_000;
+//!
+//! // Run all checks appropriate for the configured level.
+//! let violations = run_all_checks(&blocks, content_duration_ms, checker.level.clone());
+//!
+//! // Compute a numeric compliance score.
+//! let score = compliance_score(&violations);
+//! assert!(score >= 0.0 && score <= 100.0);
+//! println!("WCAG compliance score: {score:.1} ({} violation(s))", violations.len());
+//! ```
 
 use crate::{alignment::CaptionBlock, line_breaking::compute_cps};
 

@@ -46,8 +46,12 @@
 pub mod auto_scaling;
 pub mod aws;
 pub mod azure;
+/// Backblaze B2 low-cost storage provider.
+pub mod b2;
 /// Cloud transfer bandwidth throttling and scheduling.
 pub mod bandwidth_throttle;
+/// Edge cache invalidation patterns (wildcard, tag-based).
+pub mod cache_invalidation;
 pub mod cdn;
 pub mod cdn_config;
 pub mod cdn_edge;
@@ -55,11 +59,14 @@ pub mod cloud_auth;
 /// Cloud backup strategies: incremental, differential, and versioned backups.
 pub mod cloud_backup;
 pub mod cloud_credentials;
+pub mod cloud_extras;
 pub mod cloud_job;
 /// Object lifecycle management: tier transitions, expiration, and archival rules.
 pub mod cloud_lifecycle;
 pub mod cloud_monitor;
 pub mod cloud_queue;
+/// HTTP connection pooling with keep-alive and timeout management.
+pub mod connection_pool;
 pub mod cost;
 pub mod cost_model;
 pub mod cost_monitor;
@@ -70,7 +77,12 @@ pub mod gcp;
 pub mod generic;
 pub mod multicloud;
 pub mod multiregion;
+/// Cross-region transfer optimisation and routing.
+pub mod multiregion_transfer;
 pub mod object_store;
+pub mod oci;
+/// Pre-signed POST policy generation for browser-based direct uploads.
+pub mod presigned_post;
 pub mod provider;
 pub mod region_selector;
 pub mod replication_policy;
@@ -79,6 +91,8 @@ pub mod storage;
 pub mod storage_class;
 pub mod storage_provider;
 pub mod task_queue;
+/// Cloud-native video thumbnail generation.
+pub mod thumbnail;
 pub mod transcoding;
 pub mod transcoding_pipeline;
 pub mod transfer;

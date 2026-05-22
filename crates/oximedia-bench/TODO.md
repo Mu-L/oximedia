@@ -10,21 +10,25 @@
 - [x] Fix `format_timestamp()` to use proper calendar calculation instead of approximate year/month/day
 - [x] Add BD-Rate (Bjontegaard Delta) calculation to `comparison` module for codec efficiency comparison
 - [x] Extend `metrics::QualityMetrics` with MS-SSIM (Multi-Scale SSIM) support
-- [ ] Add per-frame quality metric tracking in `metrics` for temporal quality analysis
-- [ ] Improve `stats::compute_statistics` with outlier detection and removal (IQR method)
-- [ ] Add confidence intervals to `Statistics` for mean encoding/decoding FPS
-- [ ] Extend `BenchmarkFilter` with date range filtering for historical result comparison
-- [ ] Add `CodecConfig` validation to reject invalid preset/bitrate/CQ combinations per codec
+- [x] Add per-frame quality metric tracking in `metrics` for temporal quality analysis (verified 2026-05-16; src/metrics.rs:69 per-frame quality measurement push API)
+- [x] Improve `stats::compute_statistics` with outlier detection and removal (IQR method) (verified 2026-05-16; src/stats.rs:61 IQR Tukey fences outlier removal, outliers_removed:46)
+- [x] Add confidence intervals to `Statistics` for mean encoding/decoding FPS (done 2026-05-05)
+  - **Goal:** Welch's t-test and bootstrap confidence intervals for benchmark stat significance
+  - **Design:** t = (μ₁−μ₂)/sqrt(s₁²/n₁ + s₂²/n₂); Welch–Satterthwaite df; two-tailed p via incomplete-beta CDF; bootstrap CI percentile method (1000 resamples)
+  - **Files:** `crates/oximedia-bench/src/stats.rs`
+  - **Tests:** `tests/stats.rs` — Welch t; p value; 95% CI; bootstrap CI coverage; cross-validation
+- [x] Extend `BenchmarkFilter` with date range filtering for historical result comparison (verified 2026-05-16; src/lib.rs:1147 timestamp-based date-range checks in BenchmarkFilter)
+- [x] Add `CodecConfig` validation to reject invalid preset/bitrate/CQ combinations per codec (verified 2026-05-16; src/runner.rs:535 bitrate validation, src/container_bench.rs:215 validate fn)
 
 ## New Features
 - [x] Implement `audio_bench` module for audio codec benchmarking (Opus, Vorbis, FLAC)
-- [ ] Add `container_bench` module benchmarking mux/demux overhead for WebM, MKV, OGG
-- [ ] Implement `ab_comparison` module generating side-by-side visual quality comparisons
+- [x] Add `container_bench` module benchmarking mux/demux overhead for WebM, MKV, OGG (verified 2026-05-16; src/container_bench.rs:922 lines)
+- [x] Implement `ab_comparison` module generating side-by-side visual quality comparisons (verified 2026-05-16; src/ab_comparison.rs:974 lines)
 - [x] Add `rate_distortion` module for automated RD-curve generation across quality levels
-- [ ] Implement `historical_db` module storing benchmark results in SQLite for trend analysis
-- [ ] Add `system_fingerprint` module capturing exact hardware/OS/compiler info for reproducibility
-- [ ] Implement `flamegraph_integration` module for automated CPU profiling during benchmarks
-- [ ] Add markdown report export format alongside existing JSON/CSV/HTML
+- [x] Implement `historical_db` module storing benchmark results in SQLite for trend analysis (verified 2026-05-16; src/historical_db.rs:1039 lines)
+- [x] Add `system_fingerprint` module capturing exact hardware/OS/compiler info for reproducibility (verified 2026-05-16; src/system_fingerprint.rs:368 lines)
+- [x] Implement `flamegraph_integration` module for automated CPU profiling during benchmarks (verified 2026-05-16; src/flamegraph_integration.rs:810 lines)
+- [x] Add markdown report export format alongside existing JSON/CSV/HTML (verified 2026-05-16; src/markdown_report.rs:461 lines)
 
 ## Performance
 - [ ] Parallelize multi-codec benchmarks in `BenchmarkSuite::run_all()` using rayon thread pool
@@ -42,6 +46,28 @@
 - [ ] Test `duration_serde` round-trip for edge cases (zero, very large durations)
 
 ## Documentation
-- [ ] Document how to create custom test sequences for `sequences` module
+- [x] Document how to create custom test sequences for `sequences` module (done 2026-05-05)
+  - **Goal:** Full y4m sequence parsing and frame iteration for benchmark pipelines
+  - **Design:** Parse YUV4MPEG2 header (W/H/F/I/A/C fields per Xiph spec); frame separator `FRAME\n`; yield frames with PTS and planar data slices
+  - **Files:** `crates/oximedia-bench/src/sequences.rs`
+  - **Tests:** `tests/y4m_parse.rs` — round-trip 4-frame 64×64; reject malformed header; reject frame-size mismatch
 - [ ] Add guide for interpreting benchmark results and quality metrics
 - [ ] Document `regression_detect` module usage for CI-based performance regression detection
+
+## Planned (2026-05-04)
+
+- [x] Add spatial/temporal/motion complexity metrics per ITU-T P.910 (done 2026-05-05)
+  - **Goal:** Per-frame spatial (SI), temporal (TI), motion complexity per ITU-T P.910
+  - **Design:** SI = stddev(Sobel(frame)); TI = stddev(frame[t]−frame[t-1]); motion = 16×16 block-SAD vs prev frame, magnitude histogram
+  - **Files:** `crates/oximedia-bench/src/runner.rs`
+  - **Tests:** `tests/complexity.rs` — constant-color → 0 complexity; noise-frame → positive SI; translating square → positive TI
+
+- [x] Implement Bjøntegaard Delta (BD-Rate, BD-PSNR) from 4-point RD curves (done 2026-05-05)
+  - **Goal:** Bjøntegaard Delta (BD-Rate, BD-PSNR) from 4-point RD curves
+  - **Design:** log-rate vs PSNR; 4×4 Vandermonde Gaussian elimination (exact cubic fit); analytic integral; rank-check for collinear → `Err(BdRateError::NoOverlap)`
+  - **Files:** `crates/oximedia-bench/src/comparison.rs`
+  - **Tests:** `tests/bd_rate.rs` — identical curves → 0%; uniformly shifted → matches shift; ill-conditioned guard
+
+## Refinement proposals (added 2026-05-04 by /ultra)
+
+- Note: Several UU (unmerged/conflict) files exist in the workspace (e.g. `crates/oximedia-accel/src/cpu_fallback.rs`, `crates/oximedia-farm/src/worker_health_check.rs`, `crates/oximedia-graphics/src/text.rs`, `crates/oximedia-lut/src/aces.rs`, `crates/oximedia-net/src/dash/client.rs`, `crates/oximedia-py/src/context_manager.rs`) — resolve merge conflicts before implementing benchmark features that depend on these crates.

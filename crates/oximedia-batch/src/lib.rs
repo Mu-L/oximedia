@@ -8,7 +8,10 @@
 //! - Distributed processing support
 //! - REST API and CLI interfaces
 
-#![forbid(unsafe_code)]
+// `memmap2` requires one unavoidable `unsafe` block per `Mmap::map()` call;
+// the block is isolated in `operations/mmap_reader.rs` with a safety comment.
+// All other modules remain fully safe.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "sqlite"))]

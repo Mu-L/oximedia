@@ -1,6 +1,6 @@
 # oximedia-neural
 
-**Status: [Stable]** | Version: 0.1.6 | Tests: 696 | Updated: 2026-04-26
+**Status: [Stable]** | Version: 0.1.7 | Tests: 700 | Updated: 2026-05-21
 
 Lightweight neural network inference for media processing — pure Rust tensor ops, conv2d, and pre-defined media models
 
@@ -12,9 +12,10 @@ Part of the [OxiMedia](https://github.com/cool-japan/oximedia) sovereign media f
 
 ## Features
 
-- Pure Rust n-dimensional f32 tensor with row-major (C-contiguous) storage
-- Matrix multiplication, element-wise add/mul, bias broadcasting, dimension reduction
-- Neural network layers: `LinearLayer`, `Conv2dLayer`, `DepthwiseConv2d`, `BatchNorm1d`, `MaxPool2d`, `GlobalAvgPool`
+- Pure Rust n-dimensional f32 tensor with row-major (C-contiguous) storage; batch dimension `[N,C,H,W]` support
+- Matrix multiplication, element-wise add/mul, NumPy-style shape broadcasting, dimension reduction
+- In-place tensor operations (`relu_inplace`, `add_inplace`) to minimize allocations during inference
+- Neural network layers: `LinearLayer`, `Conv2dLayer`, `DepthwiseConv2d`, `BatchNorm1d`, `MaxPool2d`, `AvgPool2d`, `GlobalAvgPool`, `ConvTranspose2d`
 - Activation functions: ReLU, Leaky ReLU, GELU, Sigmoid, Swish, Tanh, Softmax
 - Pre-built media models: scene classifier, thumbnail ranker, super-resolution upscaler, HOG feature extractor
 - Zero C/Fortran dependencies
@@ -72,7 +73,7 @@ assert_eq!(upscaled.len(), 16 * 16); // 2x in each dimension
 
 ### `tensor`
 
-Core n-dimensional `Tensor` type with row-major storage. Supports construction (`new`, `zeros`, `ones`, `from_data`), indexing (`get`, `set`), shape manipulation (`reshape`, `slice`, `transpose_2d`), and free functions for `matmul`, `add` (with bias broadcasting), `mul`, and `sum_along`.
+Core n-dimensional `Tensor` type with row-major storage. Supports construction (`new`, `zeros`, `ones`, `from_data`, `from_chw`), indexing (`get`, `set`), shape manipulation (`reshape`, `slice`, `transpose_2d`), batch dimension `[N,C,H,W]` iteration, NumPy-style shape broadcasting for element-wise ops, in-place mutations (`relu_inplace`, `add_inplace`), and free functions for `matmul`, `add` (with bias broadcasting), `mul`, and `sum_along`.
 
 ### `activations`
 
@@ -87,7 +88,9 @@ Inference-only neural network layers:
 - **`DepthwiseConv2d`** -- depthwise separable convolution (one kernel per channel)
 - **`BatchNorm1d`** -- 1D batch normalization using running statistics
 - **`MaxPool2d`** -- 2D max pooling with configurable kernel and stride
+- **`AvgPool2d`** -- 2D average pooling with configurable kernel and stride
 - **`GlobalAvgPool`** -- reduces spatial dimensions to 1x1 by averaging
+- **`ConvTranspose2d`** -- transposed convolution (dilate-then-convolve) for decoder and upsampling networks
 
 ### `media_models`
 

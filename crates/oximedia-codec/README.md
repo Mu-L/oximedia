@@ -6,7 +6,7 @@ Video and audio codec implementations for the OxiMedia multimedia framework. Pur
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.6 — 2026-04-26 — 3,063 tests
+Version: 0.1.7 — 2026-05-16 — 3,063 tests
 
 ## Overview
 
@@ -27,7 +27,7 @@ per codec, and the effort required to close each gap.
 | AV1      | Functional | Bitstream-parsing   | `av1` (default)   | OBU parsing complete; pixel reconstruction pipeline is stubbed. GitHub issue #9. |
 | VP9      | Functional | Bitstream-parsing   | `vp9`             | Frame/tile parsing complete; reconstruction pipeline stages are no-ops. |
 | VP8      | Functional | Bitstream-parsing   | `vp8`             | Y plane is emitted as constant gray; no intra/inter decode. |
-| Theora   | Functional | Bitstream-parsing   | `theora`          | DCT/motion implemented but decoded pixels are copied into a dropped `Vec`. |
+| Theora   | Functional | Bitstream-parsing   | `theora`          | DCT, motion compensation, and per-frame pixel hand-off into `VideoFrame` (decode hand-off bug fixed in 0.1.7, issue #9); encoder↔decoder bitstream alignment for full round-trip remains outstanding. |
 | H.263    | Functional | Functional          | *(always)*        | Real macroblock decode, motion compensation, loop filter. |
 | MJPEG    | Functional | Functional          | `mjpeg`           | Wraps `oximedia-image` JPEG baseline; ≥28 dB PSNR at Q85. |
 | APV      | Functional | Functional          | `apv`             | ISO/IEC 23009-13 royalty-free intra-frame. |
@@ -48,19 +48,24 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-codec = "0.1.6"
+oximedia-codec = "0.1.7"
 # or with additional codecs:
-oximedia-codec = { version = "0.1.6", features = ["av1", "vp9", "vp8", "opus"] }
+oximedia-codec = { version = "0.1.7", features = ["av1", "vp9", "vp8", "opus"] }
 ```
 
 ### AV1 / VP9 / VP8 / Theora Bitstream Parsing
 
-These decoders currently parse bitstreams but do not reconstruct pixel data
-(see the matrix above). They are useful for format inspection, extradata
-handling, and container-side work. The API shape below matches what the
-crate exposes today; the returned frames have allocated planes but do not
-contain reconstructed pixels until the work tracked in GitHub issue #9
-lands.
+These decoders currently parse bitstreams but do not provide a
+self-consistent end-to-end round-trip (see the matrix above). They are
+useful for format inspection, extradata handling, and container-side
+work. The API shape below matches what the crate exposes today; the
+returned frames have allocated planes but do not contain
+externally-validated reconstructed pixels until the work tracked in
+GitHub issue #9 lands. (Theora's decoder no longer drops the
+reconstructed pixels into a temporary `to_vec()` clone — the 0.1.7
+hand-off fix lands them in `VideoFrame.planes[i].data` — but the
+encoder↔decoder bitstream contract for non-trivial inputs is still
+outstanding.)
 
 ```rust,ignore
 use oximedia_codec::{Av1Decoder, DecoderConfig, VideoDecoder};
@@ -76,13 +81,16 @@ let mut decoder = Av1Decoder::new(config)?;
 decoder.send_packet(&packet_bytes, pts)?;
 while let Some(_frame) = decoder.receive_frame()? {
     // Frame metadata (width/height/format/timestamp) is populated;
-    // pixel planes are not reconstructed in 0.1.6.
+    // pixel planes are not reconstructed in 0.1.7.
 }
 ```
 
 `Vp9Decoder`, `Vp8Decoder`, and `TheoraDecoder` follow the same
-`VideoDecoder` trait shape. See `docs/codec_status.md` for the honest
-per-decoder status.
+`VideoDecoder` trait shape. As of 0.1.7, `TheoraDecoder` lands its
+per-block reconstructed pixels in `VideoFrame.planes[i].data` (rather
+than dropping them into a temporary `Vec` clone), but full encode→decode
+round-trip is still gated on a separate bitstream-alignment fix. See
+`docs/codec_status.md` for the honest per-decoder status.
 
 ### Opus Decoding
 

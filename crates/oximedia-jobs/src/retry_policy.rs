@@ -4,6 +4,62 @@
 //! Provides flexible retry strategies including exponential backoff, linear backoff,
 //! and fixed-interval retries with jitter support, circuit breaker patterns,
 //! and per-error-class retry behavior.
+//!
+//! ## Default Configuration
+//!
+//! | Parameter | Default | Description |
+//! |-----------|---------|-------------|
+//! | `max_retries` | 3 | Maximum number of retry attempts after the initial failure |
+//! | `initial` (Exponential) | 1 s | Delay before the first retry |
+//! | `multiplier` (Exponential) | 2.0 | Factor by which the delay grows on each retry |
+//! | `max_delay` | 60 s | Upper cap on any single inter-retry delay |
+//! | `jitter` | `JitterMode::None` | Randomness mode added to computed delays |
+//! | `circuit_breaker_threshold` | 5 | Consecutive failures that open the circuit |
+//! | `retry_on_timeout` | `true` | Whether timed-out jobs are retried |
+//!
+//! ## Backoff Formula
+//!
+//! For `BackoffStrategy::Exponential`, the delay before attempt *n* (0-indexed) is:
+//!
+//! ```text
+//! delay(n) = min(initial × multiplier^n, max_delay)
+//! ```
+//!
+//! With the defaults this gives: 1 s → 2 s → 4 s → 8 s → 16 s → (capped at 60 s).
+//!
+//! ## Jitter Modes
+//!
+//! Jitter spreads retry storms across time when many jobs fail simultaneously.
+//!
+//! | Mode | Effect |
+//! |------|--------|
+//! | `JitterMode::None` | Use the computed delay exactly (no randomness) |
+//! | `JitterMode::Full` | Replace the delay with a uniform random value in `[0, delay]` |
+//! | `JitterMode::Equal` | Use `delay/2 + uniform_random(0, delay/2)` |
+//!
+//! ## Per-Error-Class Overrides
+//!
+//! Use `ErrorClassPolicy` to apply different retry rules for different error
+//! categories.  For example you might never retry `ErrorClass::Permanent` errors
+//! while retrying `ErrorClass::Network` errors up to 5 times with a fixed 500 ms
+//! interval:
+//!
+//! ```rust,no_run
+//! use oximedia_jobs::retry_policy::{
+//!     BackoffStrategy, ErrorClass, ErrorClassPolicy, RetryPolicyConfig,
+//! };
+//! use std::time::Duration;
+//!
+//! let policy = RetryPolicyConfig::new()
+//!     .with_error_override(ErrorClassPolicy {
+//!         error_class: ErrorClass::Network,
+//!         max_retries: 5,
+//!         retryable: true,
+//!     })
+//!     .with_backoff(BackoffStrategy::Fixed {
+//!         interval: Duration::from_millis(500),
+//!     });
+//! ```
 
 use std::collections::HashMap;
 use std::time::Duration;

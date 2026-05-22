@@ -6,30 +6,30 @@
 - Dependencies: oximedia-core, oximedia-timecode, serde, chrono, uuid, tokio
 
 ## Enhancements
-- [ ] Add `SessionConfigBuilder::build()` validation that returns Result instead of using `unwrap_or_default` for required fields
-- [ ] Extend `approval_workflow` with conditional approval rules (e.g., auto-approve if all issues marked resolved)
-- [ ] Add `comment_thread` resolution tracking (open/resolved/wont-fix) with audit trail
-- [ ] Implement `review_metrics` with cycle time analytics (time from submission to approval per stage)
-- [ ] Extend `drawing` tools with measurement annotations (rulers, angle markers, safe-area overlays)
-- [ ] Add `review_diff` visual diff highlighting for comparing version changes (pixel-level diff overlay)
-- [ ] Implement `feedback_round` automatic numbering and deadline tracking per round
-- [ ] Add `review_tag` hierarchical tagging with category groups (technical, creative, compliance)
+- [ ] Add `SessionConfigBuilder::build()` validation that returns Result instead of using `unwrap_or_default` for required fields (verified-open 2026-05-16: not yet changed to return Result)
+- [x] Extend `approval_workflow` with conditional approval rules (e.g., auto-approve if all issues marked resolved) (verified 2026-05-16; src/approval_workflow.rs:141 auto_approve_on_timeout, conditional rules:265)
+- [x] Add `comment_thread` resolution tracking (open/resolved/wont-fix) with audit trail (verified 2026-05-16; src/comment_thread.rs:1 CommentStatus open/resolved/wont-fix, ThreadResolutionState:24)
+- [x] Implement `review_metrics` with cycle time analytics (time from submission to approval per stage) (verified 2026-05-16; src/review_metrics.rs:343 CycleTimeStats, 712 lines)
+- [x] Extend `drawing` tools with measurement annotations (rulers, angle markers, safe-area overlays) (verified 2026-05-16; src/drawing.rs:14 Ruler, AngleMarker, SafeAreaOverlay re-exports)
+- [x] Add `review_diff` visual diff highlighting for comparing version changes (pixel-level diff overlay) (verified 2026-05-16; src/review_diff.rs:563 lines ReviewDiff, src/compare.rs:113 pixel-diff stats)
+- [x] Implement `feedback_round` automatic numbering and deadline tracking per round (verified 2026-05-16; src/feedback_round.rs:176 FeedbackRound, FeedbackRoundManager:257)
+- [x] Add `review_tag` hierarchical tagging with category groups (technical, creative, compliance) (verified 2026-05-16; src/review_tag.rs:438 lines ReviewTag hierarchical)
 
 ## New Features
-- [ ] Add a `review_api` module exposing REST endpoints for external tool integration (Slack, Jira, Shotgrid)
-- [ ] Implement `review_link` for generating shareable review URLs with expiration and password protection
-- [ ] Add `review_playlist` module for organizing multiple clips into a sequential review session
-- [ ] Implement `comparison_mode` with A/B split, onion skin, and difference overlays in `compare`
-- [ ] Add `review_snapshot` module for capturing frame grabs with annotations baked in as PNG export
-- [ ] Implement `review_automation` for auto-triggering reviews on new version uploads
-- [ ] Add `review_permission` fine-grained permissions (can annotate, can approve, can export, can invite)
-- [ ] Implement `offline_review` for downloading review packages and syncing comments when reconnected
+- [x] Add a `review_api` module exposing REST endpoints for external tool integration (Slack, Jira, Shotgrid) (verified 2026-05-16; src/review_api.rs:407 lines ReviewApi)
+- [x] Implement `review_link` for generating shareable review URLs with expiration and password protection (verified 2026-05-16; src/review_link.rs:641 lines ReviewLink expiration+password)
+- [x] Add `review_playlist` module for organizing multiple clips into a sequential review session (verified 2026-05-16; src/review_playlist.rs:236 lines ReviewPlaylist)
+- [x] Implement `comparison_mode` with A/B split, onion skin, and difference overlays in `compare` (verified 2026-05-16; src/comparison_mode.rs:426 lines A/B split, onion skin, difference)
+- [x] Add `review_snapshot` module for capturing frame grabs with annotations baked in as PNG export (verified 2026-05-16; src/review_snapshot.rs:253 lines ReviewSnapshot)
+- [x] Implement `review_automation` for auto-triggering reviews on new version uploads (verified 2026-05-16; src/review_automation.rs:526 lines ReviewAutomation)
+- [x] Add `review_permission` fine-grained permissions (can annotate, can approve, can export, can invite) (verified 2026-05-16; src/review_permission.rs:446 lines ReviewPermission)
+- [x] Implement `offline_review` for downloading review packages and syncing comments when reconnected (verified 2026-05-16; src/offline_review.rs:653 lines OfflineReview)
 
 ## Performance
-- [ ] Add pagination to `comment` listing for sessions with 1000+ comments
-- [ ] Implement delta-based `realtime` sync instead of full-state broadcast for annotation updates
-- [ ] Cache rendered `drawing` overlays in `compare` to avoid recomputation on scrub
-- [ ] Add lazy loading for `version` history to avoid fetching all versions on session open
+- [x] Add pagination to `comment` listing for sessions with 1000+ comments (verified 2026-05-16; src/comment.rs:14 paginate_comments, CommentPage, PageRequest)
+- [ ] Implement delta-based `realtime` sync instead of full-state broadcast for annotation updates (verified-open 2026-05-16: no delta/incremental sync in realtime.rs)
+- [ ] Cache rendered `drawing` overlays in `compare` to avoid recomputation on scrub (verified-open 2026-05-16: no rendered overlay cache in compare.rs)
+- [x] Add lazy loading for `version` history to avoid fetching all versions on session open (verified 2026-05-16; src/version_lazy.rs:139 LazyVersionHistory, paginated provider:79)
 
 ## Testing
 - [ ] Add tests for `approval_workflow` multi-stage progression with mixed approve/reject decisions

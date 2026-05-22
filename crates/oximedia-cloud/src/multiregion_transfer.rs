@@ -142,7 +142,8 @@ impl RegionLatency {
 
     /// Retrieve the metrics for a directed edge, if present.
     pub fn edge(&self, source_id: &str, destination_id: &str) -> Option<&EdgeMetrics> {
-        self.edges.get(&(source_id.to_string(), destination_id.to_string()))
+        self.edges
+            .get(&(source_id.to_string(), destination_id.to_string()))
     }
 
     /// Return all regions registered in this matrix.
@@ -155,9 +156,7 @@ impl RegionLatency {
         self.edges
             .iter()
             .filter(|((_, dst), _)| dst == destination_id)
-            .filter_map(|((src, _), metrics)| {
-                self.nodes.get(src).map(|node| (node, metrics))
-            })
+            .filter_map(|((src, _), metrics)| self.nodes.get(src).map(|node| (node, metrics)))
             .collect()
     }
 }
@@ -313,11 +312,7 @@ impl TransferOptimizer {
     /// `destination_id` for a payload of `payload_bytes`.
     ///
     /// Returns an error when no viable route exists.
-    pub fn plan(
-        &self,
-        destination_id: &str,
-        payload_bytes: u64,
-    ) -> Result<TransferPlan> {
+    pub fn plan(&self, destination_id: &str, payload_bytes: u64) -> Result<TransferPlan> {
         let candidates = self.matrix.sources_for(destination_id);
         if candidates.is_empty() {
             return Err(CloudError::NotFound(format!(
@@ -369,15 +364,12 @@ impl TransferOptimizer {
         destination_id: &str,
         payload_bytes: u64,
     ) -> Result<TransferPlan> {
-        let metrics = self
-            .matrix
-            .edge(source_id, destination_id)
-            .ok_or_else(|| {
-                CloudError::NotFound(format!(
-                    "no edge from '{}' to '{}'",
-                    source_id, destination_id
-                ))
-            })?;
+        let metrics = self.matrix.edge(source_id, destination_id).ok_or_else(|| {
+            CloudError::NotFound(format!(
+                "no edge from '{}' to '{}'",
+                source_id, destination_id
+            ))
+        })?;
 
         if metrics.reliability < self.min_reliability {
             return Err(CloudError::ServiceUnavailable(format!(
@@ -436,7 +428,11 @@ impl TransferOptimizer {
 
             OptimisationObjective::Balanced => {
                 // Compute normalisation ranges.
-                let max_lat = candidates.iter().map(|(_, m)| m.latency_ms).max().unwrap_or(1);
+                let max_lat = candidates
+                    .iter()
+                    .map(|(_, m)| m.latency_ms)
+                    .max()
+                    .unwrap_or(1);
                 let max_cost = candidates
                     .iter()
                     .map(|(_, m)| m.estimated_cost_usd(payload_bytes))
@@ -449,7 +445,9 @@ impl TransferOptimizer {
                     .min_by(|(_, a), (_, b)| {
                         let score_a = self.balanced_score(*a, payload_bytes, max_lat_f, max_cost_f);
                         let score_b = self.balanced_score(*b, payload_bytes, max_lat_f, max_cost_f);
-                        score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+                        score_a
+                            .partial_cmp(&score_b)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .copied()
                     .ok_or_else(|| CloudError::Other("empty candidate list".into()))
@@ -492,12 +490,28 @@ mod tests {
         let mut m = RegionLatency::new();
         m.add_region(RegionNode::new("us-east-1", "US East (N. Virginia)", "aws"));
         m.add_region(RegionNode::new("eu-west-1", "EU (Ireland)", "aws"));
-        m.add_region(RegionNode::new("ap-southeast-1", "Asia Pacific (Singapore)", "aws"));
+        m.add_region(RegionNode::new(
+            "ap-southeast-1",
+            "Asia Pacific (Singapore)",
+            "aws",
+        ));
         // Edges to "eu-west-1"
-        m.set_edge("us-east-1", "eu-west-1", make_metrics(85, 0.09, 500.0, 0.99));
-        m.set_edge("ap-southeast-1", "eu-west-1", make_metrics(200, 0.06, 300.0, 0.95));
+        m.set_edge(
+            "us-east-1",
+            "eu-west-1",
+            make_metrics(85, 0.09, 500.0, 0.99),
+        );
+        m.set_edge(
+            "ap-southeast-1",
+            "eu-west-1",
+            make_metrics(200, 0.06, 300.0, 0.95),
+        );
         // Edge to "ap-southeast-1"
-        m.set_edge("us-east-1", "ap-southeast-1", make_metrics(160, 0.09, 400.0, 0.98));
+        m.set_edge(
+            "us-east-1",
+            "ap-southeast-1",
+            make_metrics(160, 0.09, 400.0, 0.98),
+        );
         m
     }
 
@@ -525,7 +539,11 @@ mod tests {
         // 1 GiB = 1024^3 bytes
         let one_gib = 1024u64 * 1024 * 1024;
         let cost = m.estimated_cost_usd(one_gib);
-        assert!((cost - 0.09).abs() < 1e-9, "cost for 1 GiB should be ~0.09, got {}", cost);
+        assert!(
+            (cost - 0.09).abs() < 1e-9,
+            "cost for 1 GiB should be ~0.09, got {}",
+            cost
+        );
     }
 
     #[test]
@@ -534,7 +552,11 @@ mod tests {
         let m = make_metrics(0, 0.0, 1000.0, 1.0);
         let one_gib = 1024u64 * 1024 * 1024;
         let secs = m.estimated_transfer_secs(one_gib);
-        assert!(secs > 8.0 && secs < 9.0, "transfer time ~8.59 s, got {}", secs);
+        assert!(
+            secs > 8.0 && secs < 9.0,
+            "transfer time ~8.59 s, got {}",
+            secs
+        );
     }
 
     #[test]
@@ -546,8 +568,11 @@ mod tests {
 
     #[test]
     fn test_optimizer_minimise_latency() {
-        let optimizer = TransferOptimizer::new(make_matrix(), OptimisationObjective::MinimiseLatency);
-        let plan = optimizer.plan("eu-west-1", 1024 * 1024 * 1024).expect("plan");
+        let optimizer =
+            TransferOptimizer::new(make_matrix(), OptimisationObjective::MinimiseLatency);
+        let plan = optimizer
+            .plan("eu-west-1", 1024 * 1024 * 1024)
+            .expect("plan");
         // us-east-1 has lower latency (85 ms) vs ap-southeast-1 (200 ms).
         assert_eq!(plan.source_region(), Some("us-east-1"));
     }
@@ -555,7 +580,9 @@ mod tests {
     #[test]
     fn test_optimizer_minimise_cost() {
         let optimizer = TransferOptimizer::new(make_matrix(), OptimisationObjective::MinimiseCost);
-        let plan = optimizer.plan("eu-west-1", 10 * 1024 * 1024 * 1024).expect("plan");
+        let plan = optimizer
+            .plan("eu-west-1", 10 * 1024 * 1024 * 1024)
+            .expect("plan");
         // ap-southeast-1 has lower cost (0.06/GiB) vs us-east-1 (0.09/GiB).
         assert_eq!(plan.source_region(), Some("ap-southeast-1"));
     }
@@ -563,7 +590,9 @@ mod tests {
     #[test]
     fn test_optimizer_balanced() {
         let optimizer = TransferOptimizer::new(make_matrix(), OptimisationObjective::Balanced);
-        let plan = optimizer.plan("eu-west-1", 1024 * 1024 * 1024).expect("plan");
+        let plan = optimizer
+            .plan("eu-west-1", 1024 * 1024 * 1024)
+            .expect("plan");
         // Just verify a plan is produced and contains a valid source.
         assert!(plan.source_region().is_some());
         assert_eq!(plan.destination_region(), Some("eu-west-1"));
@@ -571,7 +600,8 @@ mod tests {
 
     #[test]
     fn test_optimizer_no_routes_error() {
-        let optimizer = TransferOptimizer::new(make_matrix(), OptimisationObjective::MinimiseLatency);
+        let optimizer =
+            TransferOptimizer::new(make_matrix(), OptimisationObjective::MinimiseLatency);
         let result = optimizer.plan("nonexistent-region", 1000);
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -582,8 +612,9 @@ mod tests {
 
     #[test]
     fn test_optimizer_min_reliability_filter() {
-        let optimizer = TransferOptimizer::new(make_matrix(), OptimisationObjective::MinimiseLatency)
-            .with_min_reliability(0.97); // ap-southeast-1 has 0.95 → excluded
+        let optimizer =
+            TransferOptimizer::new(make_matrix(), OptimisationObjective::MinimiseLatency)
+                .with_min_reliability(0.97); // ap-southeast-1 has 0.95 → excluded
         let plan = optimizer.plan("eu-west-1", 1000).expect("plan");
         // Only us-east-1 (reliability 0.99) should survive.
         assert_eq!(plan.source_region(), Some("us-east-1"));
@@ -591,8 +622,9 @@ mod tests {
 
     #[test]
     fn test_optimizer_max_latency_filter_excludes_all() {
-        let optimizer = TransferOptimizer::new(make_matrix(), OptimisationObjective::MinimiseLatency)
-            .with_max_latency_ms(10); // both edges exceed 10 ms
+        let optimizer =
+            TransferOptimizer::new(make_matrix(), OptimisationObjective::MinimiseLatency)
+                .with_max_latency_ms(10); // both edges exceed 10 ms
         let result = optimizer.plan("eu-west-1", 1000);
         assert!(result.is_err());
         match result.unwrap_err() {

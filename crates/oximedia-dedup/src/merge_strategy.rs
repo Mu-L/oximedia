@@ -389,6 +389,509 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
+// Real FS Executor — MergeExecutor
+// ---------------------------------------------------------------------------
+
+/// The concrete action that was applied (or would be applied in dry-run) to a
+/// duplicate file during [`MergeExecutor::apply`] or [`MergeExecutor::dry_run`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppliedAction {
+    /// The file was replaced with a symbolic link pointing to `target`.
+    Symlinked {
+        /// Canonical (primary) file the symlink points to.
+        target: PathBuf,
+    },
+    /// The file was replaced with a hard link pointing to the same inode as `target`.
+    Hardlinked {
+        /// Canonical (primary) file that shares the inode.
+        target: PathBuf,
+    },
+    /// The file was deleted.
+    Deleted,
+    /// The file was left untouched (it is the primary / canonical copy).
+    Kept,
+    /// The action was not performed; `reason` explains why.
+    Skipped(String),
+}
+
+/// A per-file action record returned by [`MergeExecutor`].
+#[derive(Debug, Clone)]
+pub struct MergeReport {
+    /// The file that was chosen as the canonical copy to retain.
+    pub primary_path: PathBuf,
+    /// Actions taken (or planned, in dry-run mode) for each duplicate file.
+    ///
+    /// The first element of each tuple is the duplicate path; the second is
+    /// what was (or would be) done to it.
+    pub actions: Vec<(PathBuf, AppliedAction)>,
+}
+
+impl MergeReport {
+    /// Returns the number of files that were actually modified (not Kept/Skipped).
+    #[must_use]
+    pub fn modified_count(&self) -> usize {
+        self.actions
+            .iter()
+            .filter(|(_, a)| !matches!(a, AppliedAction::Kept | AppliedAction::Skipped(_)))
+            .count()
+    }
+
+    /// Returns `true` if any action was skipped.
+    #[must_use]
+    pub fn has_skipped(&self) -> bool {
+        self.actions
+            .iter()
+            .any(|(_, a)| matches!(a, AppliedAction::Skipped(_)))
+    }
+}
+
+/// Executes real filesystem mutations (symlink / hardlink / delete) for a set
+/// of duplicate files.
+///
+/// ```rust
+/// use oximedia_dedup::merge_strategy::{MergeExecutor, LinkMode};
+/// use std::path::PathBuf;
+///
+/// // Build an executor that replaces duplicates with hard links.
+/// let executor = MergeExecutor::new(LinkMode::Hardlink);
+///
+/// // Dry-run: returns what *would* happen without touching the filesystem.
+/// let primary = PathBuf::from("/media/archive/original.mp4");
+/// let dups = vec![PathBuf::from("/media/inbox/copy.mp4")];
+/// let report = executor.dry_run(&primary, &dups);
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct MergeExecutor {
+    link_mode: LinkMode,
+}
+
+impl MergeExecutor {
+    /// Create a new executor with the given [`LinkMode`].
+    #[must_use]
+    pub fn new(link_mode: LinkMode) -> Self {
+        Self { link_mode }
+    }
+
+    /// Apply the configured action to every path in `duplicates`, treating
+    /// `primary_path` as the canonical file to keep.
+    ///
+    /// The primary path itself is silently skipped if it appears in
+    /// `duplicates` (path equality check using [`Path::canonicalize`] if both
+    /// exist, falling back to byte comparison otherwise).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::DedupError::Io`] for unrecoverable I/O failures.
+    /// Cross-device hardlink failures are NOT errors — they produce
+    /// [`AppliedAction::Skipped`] instead.
+    pub fn apply(
+        &self,
+        primary_path: &Path,
+        duplicates: &[PathBuf],
+    ) -> Result<MergeReport, crate::DedupError> {
+        self.execute(primary_path, duplicates, false)
+    }
+
+    /// Preview what [`apply`](Self::apply) would do without touching the
+    /// filesystem.
+    ///
+    /// The returned [`MergeReport`] describes the intended actions.  No files
+    /// are created, removed, or modified.
+    ///
+    /// # Errors
+    ///
+    /// Currently infallible (always returns `Ok`), but uses the same error
+    /// type as [`apply`](Self::apply) for API symmetry.
+    pub fn dry_run(
+        &self,
+        primary_path: &Path,
+        duplicates: &[PathBuf],
+    ) -> Result<MergeReport, crate::DedupError> {
+        self.execute(primary_path, duplicates, true)
+    }
+
+    /// Execute a pre-computed [`MergeResolution`] produced by [`MergeResolver`].
+    ///
+    /// This bridges the selection phase (which file to keep) with the
+    /// execution phase (actually modifying the filesystem).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::DedupError::Io`] for unrecoverable I/O failures.
+    pub fn apply_resolution(
+        &self,
+        resolution: &MergeResolution,
+    ) -> Result<MergeReport, crate::DedupError> {
+        // The primary is the one file whose action is Keep.
+        let primary = resolution
+            .files
+            .iter()
+            .find(|f| f.action.is_keep())
+            .map(|f| f.candidate.path.clone());
+
+        let Some(primary_path) = primary else {
+            // Degenerate resolution (e.g., empty group) — nothing to do.
+            return Ok(MergeReport {
+                primary_path: PathBuf::new(),
+                actions: Vec::new(),
+            });
+        };
+
+        let duplicates: Vec<PathBuf> = resolution
+            .files
+            .iter()
+            .filter(|f| !f.action.is_keep())
+            .map(|f| f.candidate.path.clone())
+            .collect();
+
+        self.execute(&primary_path, &duplicates, false)
+    }
+
+    // --- internal ---
+
+    fn execute(
+        &self,
+        primary_path: &Path,
+        duplicates: &[PathBuf],
+        dry: bool,
+    ) -> Result<MergeReport, crate::DedupError> {
+        let mut report = MergeReport {
+            primary_path: primary_path.to_path_buf(),
+            actions: Vec::new(),
+        };
+
+        for dup in duplicates {
+            // Skip if `dup` and `primary_path` refer to the same file.
+            if Self::same_path(primary_path, dup) {
+                report.actions.push((dup.clone(), AppliedAction::Kept));
+                continue;
+            }
+
+            let action = self.apply_to_one(primary_path, dup, dry)?;
+            report.actions.push((dup.clone(), action));
+        }
+
+        Ok(report)
+    }
+
+    fn apply_to_one(
+        &self,
+        primary: &Path,
+        dup: &Path,
+        dry: bool,
+    ) -> Result<AppliedAction, crate::DedupError> {
+        match self.link_mode {
+            LinkMode::Symlink => {
+                if dry {
+                    return Ok(AppliedAction::Symlinked {
+                        target: primary.to_path_buf(),
+                    });
+                }
+                // Remove the duplicate first.
+                if dup.exists() || dup.symlink_metadata().is_ok() {
+                    std::fs::remove_file(dup)?;
+                }
+                create_symlink(primary, dup)?;
+                Ok(AppliedAction::Symlinked {
+                    target: primary.to_path_buf(),
+                })
+            }
+
+            LinkMode::Hardlink => {
+                if dry {
+                    return Ok(AppliedAction::Hardlinked {
+                        target: primary.to_path_buf(),
+                    });
+                }
+                if !primary.exists() {
+                    return Ok(AppliedAction::Skipped(format!(
+                        "primary does not exist: {}",
+                        primary.display()
+                    )));
+                }
+                // Remove the duplicate first.
+                if dup.exists() || dup.symlink_metadata().is_ok() {
+                    std::fs::remove_file(dup)?;
+                }
+                // hard_link fails with EXDEV on cross-device links — treat as
+                // a graceful skip rather than a hard error.
+                match std::fs::hard_link(primary, dup) {
+                    Ok(()) => Ok(AppliedAction::Hardlinked {
+                        target: primary.to_path_buf(),
+                    }),
+                    Err(e) => Ok(AppliedAction::Skipped(format!(
+                        "hardlink failed (cross-device or permission?): {e}"
+                    ))),
+                }
+            }
+
+            LinkMode::Delete => {
+                if dry {
+                    return Ok(AppliedAction::Deleted);
+                }
+                if !primary.exists() {
+                    return Ok(AppliedAction::Skipped(
+                        "primary does not exist — refusing to delete duplicate".into(),
+                    ));
+                }
+                std::fs::remove_file(dup)?;
+                Ok(AppliedAction::Deleted)
+            }
+        }
+    }
+
+    /// Compare two paths for identity.  Tries canonicalization first (handles
+    /// symlinks and `..` components); falls back to byte comparison.
+    fn same_path(a: &Path, b: &Path) -> bool {
+        if a == b {
+            return true;
+        }
+        let ca = std::fs::canonicalize(a);
+        let cb = std::fs::canonicalize(b);
+        match (ca, cb) {
+            (Ok(ca), Ok(cb)) => ca == cb,
+            _ => false,
+        }
+    }
+}
+
+/// Platform-specific symlink creation.
+fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "symlinks not supported on this platform (target={}, link={})",
+                target.display(),
+                link.display()
+            ),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MergeExecutor tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod executor_tests {
+    use super::*;
+    use std::env::temp_dir;
+    use std::fs;
+
+    /// Create `n` temporary files under a unique subdirectory and return their
+    /// paths.  Each file contains distinct content to avoid accidental sharing.
+    fn make_temp_files(n: usize) -> Vec<PathBuf> {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let base = temp_dir().join(format!("oxidedup_exec_{unique}_{n}"));
+        fs::create_dir_all(&base).expect("create test dir");
+        (0..n)
+            .map(|i| {
+                let p = base.join(format!("file_{i}.bin"));
+                // Content must be non-trivial so files are not accidentally
+                // sharing blocks at the filesystem level.
+                let content = format!("oximedia-dedup-test-content-{i}-{unique}").repeat(100);
+                fs::write(&p, content.as_bytes()).expect("write test file");
+                p
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_symlink_strategy_creates_symlinks() {
+        let files = make_temp_files(3);
+        let executor = MergeExecutor::new(LinkMode::Symlink);
+        let report = executor
+            .apply(&files[0], &files[1..])
+            .expect("apply symlink");
+
+        assert_eq!(report.primary_path, files[0]);
+        assert_eq!(report.actions.len(), 2);
+
+        for (path, action) in &report.actions {
+            assert!(
+                path.symlink_metadata()
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false),
+                "expected symlink at {path:?}"
+            );
+            match action {
+                AppliedAction::Symlinked { target } => {
+                    assert_eq!(target, &files[0]);
+                }
+                other => panic!("unexpected action: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_hardlink_strategy_creates_hardlinks() {
+        let files = make_temp_files(2);
+        let executor = MergeExecutor::new(LinkMode::Hardlink);
+        let report = executor
+            .apply(&files[0], &files[1..])
+            .expect("apply hardlink");
+
+        assert_eq!(report.actions.len(), 1);
+
+        let (path, action) = &report.actions[0];
+        match action {
+            AppliedAction::Hardlinked { target } => {
+                assert_eq!(target, &files[0]);
+                // On a single filesystem, nlink must be 2 after hard_link.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    let meta = fs::metadata(path).expect("metadata after hardlink");
+                    assert_eq!(meta.nlink(), 2, "hardlink count should be 2");
+                }
+            }
+            // Cross-device: graceful skip is acceptable.
+            AppliedAction::Skipped(_) => {}
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_delete_strategy_removes_duplicates() {
+        let files = make_temp_files(3);
+        let executor = MergeExecutor::new(LinkMode::Delete);
+        executor
+            .apply(&files[0], &files[1..])
+            .expect("apply delete");
+
+        assert!(files[0].exists(), "primary should still exist");
+        assert!(!files[1].exists(), "dup 1 should be deleted");
+        assert!(!files[2].exists(), "dup 2 should be deleted");
+    }
+
+    #[test]
+    fn test_dry_run_changes_nothing() {
+        let files = make_temp_files(2);
+        let original_content = fs::read(&files[1]).expect("read original");
+
+        let executor = MergeExecutor::new(LinkMode::Delete);
+        let report = executor.dry_run(&files[0], &files[1..]).expect("dry_run");
+
+        // File must still exist and be unchanged.
+        assert!(files[1].exists(), "dry run must not delete");
+        assert_eq!(
+            fs::read(&files[1]).expect("read after dry_run"),
+            original_content,
+            "content must not change after dry_run"
+        );
+
+        // Report must still describe the intended action.
+        assert_eq!(report.actions.len(), 1);
+        assert!(matches!(report.actions[0].1, AppliedAction::Deleted));
+    }
+
+    #[test]
+    fn test_cross_fs_hardlink_skipped_gracefully() {
+        // In most CI environments tempdir is on the same filesystem, so the
+        // hard link will succeed and return Hardlinked.  Either outcome must
+        // not panic or return Err — only Ok(Hardlinked|Skipped) is valid.
+        let files = make_temp_files(2);
+        let executor = MergeExecutor::new(LinkMode::Hardlink);
+        let result = executor.apply(&files[0], &files[1..]);
+        assert!(
+            result.is_ok(),
+            "hardlink executor must not fail: {result:?}"
+        );
+        let report = result.expect("hardlink result");
+        for (_, action) in &report.actions {
+            assert!(
+                matches!(
+                    action,
+                    AppliedAction::Hardlinked { .. } | AppliedAction::Skipped(_)
+                ),
+                "unexpected action: {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_primary_skipped_when_in_duplicates_list() {
+        let files = make_temp_files(1);
+        // Pass primary as its own duplicate — must produce Kept, not delete itself.
+        let executor = MergeExecutor::new(LinkMode::Delete);
+        let report = executor
+            .apply(&files[0], &[files[0].clone()])
+            .expect("apply self-dup");
+        assert!(files[0].exists(), "primary must not be deleted");
+        assert_eq!(report.actions.len(), 1);
+        assert!(matches!(report.actions[0].1, AppliedAction::Kept));
+    }
+
+    #[test]
+    fn test_dry_run_symlink_returns_intended_action() {
+        let files = make_temp_files(2);
+        let executor = MergeExecutor::new(LinkMode::Symlink);
+        let report = executor
+            .dry_run(&files[0], &files[1..])
+            .expect("dry_run symlink");
+
+        // File must NOT have been replaced with a symlink.
+        assert!(
+            !files[1]
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false),
+            "dry_run must not create a symlink"
+        );
+        assert!(matches!(
+            report.actions[0].1,
+            AppliedAction::Symlinked { .. }
+        ));
+    }
+
+    #[test]
+    fn test_merge_report_modified_count() {
+        let files = make_temp_files(3);
+        let executor = MergeExecutor::new(LinkMode::Delete);
+        let report = executor.apply(&files[0], &files[1..]).expect("apply");
+        assert_eq!(report.modified_count(), 2);
+    }
+
+    #[test]
+    fn test_apply_resolution_integrates_with_resolver() {
+        let files = make_temp_files(3);
+        // Build candidates: file 0 is smallest, file 1 is largest, file 2 is middle.
+        let candidates = vec![
+            FileCandidate::new(files[0].clone(), 100, 100, 100),
+            FileCandidate::new(files[1].clone(), 9000, 200, 200),
+            FileCandidate::new(files[2].clone(), 500, 50, 50),
+        ];
+        let resolver = MergeResolver::new(MergeStrategy::KeepLargest, LinkMode::Delete);
+        let resolution = resolve(&candidates, resolver.strategy(), resolver.link_mode());
+
+        let executor = MergeExecutor::new(LinkMode::Delete);
+        let report = executor
+            .apply_resolution(&resolution)
+            .expect("apply_resolution");
+
+        // Primary should be files[1] (largest); files[0] and [2] deleted.
+        assert_eq!(report.primary_path, files[1]);
+        assert!(!files[0].exists(), "dup 0 should be deleted");
+        assert!(files[1].exists(), "primary should survive");
+        assert!(!files[2].exists(), "dup 2 should be deleted");
+        assert_eq!(report.modified_count(), 2);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DuplicateGroup
 // ---------------------------------------------------------------------------
 

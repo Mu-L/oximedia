@@ -205,6 +205,17 @@ impl Ffv1Config {
         (1i32 << self.bits_per_raw_sample) - 1
     }
 
+    /// Number of bytes occupied by each sample in the output plane buffer.
+    /// Returns 1 for 8-bit depth, 2 for 10/12/16-bit depth.
+    #[must_use]
+    pub fn bytes_per_sample(&self) -> usize {
+        if self.bits_per_raw_sample <= 8 {
+            1
+        } else {
+            2
+        }
+    }
+
     /// Number of planes for this configuration.
     #[must_use]
     pub fn plane_count(&self) -> usize {

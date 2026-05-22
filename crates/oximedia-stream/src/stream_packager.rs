@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
+use crate::cmaf::{CmafChunk, CmafMuxer};
 use crate::StreamError;
 
 // ─── StreamType ───────────────────────────────────────────────────────────────
@@ -158,10 +159,64 @@ impl SegmentPackager {
         }
 
         let units: Vec<MediaUnit> = self.pending_frames.drain(..).collect();
-        let segment = pack_segment_from_units(&units, self.segment_counter);
+        let segment = if self.config.enable_cmaf {
+            pack_segment_cmaf(&units, self.segment_counter)
+        } else {
+            pack_segment_from_units(&units, self.segment_counter)
+        };
         self.segment_counter += 1;
         self.segment_start_pts = None;
         Some(segment)
+    }
+}
+
+/// Pack a slice of [`MediaUnit`]s into a CMAF-fragmented [`PackagedSegment`].
+///
+/// Each unit becomes a single CMAF chunk: `sequence_number` is the unit's
+/// 1-based index, `base_media_decode_time` is taken from `dts_ms`, and the
+/// payload is the unit's `data`. The resulting segment data is a complete
+/// CMAF byte sequence (one `ftyp` followed by `moof`+`mdat` per chunk).
+fn pack_segment_cmaf(units: &[MediaUnit], sequence_number: u64) -> PackagedSegment {
+    if units.is_empty() {
+        return PackagedSegment {
+            sequence_number,
+            duration_ms: 0,
+            data: Vec::new(),
+            keyframe_aligned: false,
+        };
+    }
+
+    let min_pts = units.iter().map(|u| u.pts_ms).min().unwrap_or(0);
+    let max_pts = units.iter().map(|u| u.pts_ms).max().unwrap_or(0);
+    let duration_ms = (max_pts - min_pts).max(0) as u32;
+
+    let keyframe_aligned = units
+        .iter()
+        .find(|u| u.stream_type == StreamType::Video)
+        .map(|u| u.is_keyframe)
+        .unwrap_or(false);
+
+    let chunks: Vec<CmafChunk> = units
+        .iter()
+        .enumerate()
+        .filter(|(_, u)| !u.data.is_empty())
+        .map(|(i, u)| {
+            CmafChunk::new(
+                (i as u32).saturating_add(1),
+                u.dts_ms.max(0) as u64,
+                u.data.clone(),
+            )
+        })
+        .collect();
+
+    let muxer = CmafMuxer::new();
+    let data = muxer.collect_bytes(&chunks);
+
+    PackagedSegment {
+        sequence_number,
+        duration_ms,
+        data,
+        keyframe_aligned,
     }
 }
 

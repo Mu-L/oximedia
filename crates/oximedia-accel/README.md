@@ -6,7 +6,7 @@ Hardware acceleration layer for OxiMedia using Vulkan compute shaders, with auto
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.6 — 2026-04-26 — 409 tests
+Version: 0.1.7 — 2026-05-16 — 409 tests
 
 ## Features
 
@@ -22,13 +22,44 @@ Version: 0.1.6 — 2026-04-26 — 409 tests
 - Profiling and performance statistics
 - Prefetch and cache management
 
+## Build prerequisites
+
+`oximedia-accel` depends on [`vulkano-shaders`](https://crates.io/crates/vulkano-shaders),
+which uses the `vulkano_shaders::shader!` proc-macro to compile GLSL compute
+shaders to SPIR-V **at build time**. That macro pulls in `shaderc-sys`, and
+when no pre-built `shaderc` library is found on the host (the typical case
+on a fresh developer machine), `shaderc-sys` builds `shaderc` from source.
+Building `shaderc` from source requires the following native tools to be on
+`PATH`:
+
+| Tool | Purpose | Install |
+|---|---|---|
+| **cmake** (>= 3.17) | Drives the `shaderc` C++ build | `brew install cmake` / `apt install cmake` / `winget install Kitware.CMake` |
+| **Python 3** | Used by `glslang`'s build scripts | `brew install python` / `apt install python3` / `winget install Python.Python.3` |
+| **C++ compiler** | Compiles `shaderc` / `glslang` / `SPIRV-Tools` | Xcode CLT / `apt install build-essential` / MSVC Build Tools |
+| **Git** | `shaderc-sys` clones `shaderc` sources | `brew install git` / `apt install git` / `winget install Git.Git` |
+
+These prerequisites apply to **every** build of `oximedia-accel` — the
+dependency on `vulkano-shaders` is not feature-gated.
+
+If you do not need Vulkan compute acceleration, you can exclude this crate
+from a workspace build:
+
+```bash
+cargo build --workspace --exclude oximedia-accel
+```
+
+The runtime itself still falls back to the pure-Rust `CpuFallback` backend
+when no Vulkan driver is present, but the GLSL → SPIR-V step at compile
+time is unconditional.
+
 ## Usage
 
 Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-accel = "0.1.6"
+oximedia-accel = "0.1.7"
 ```
 
 ```rust

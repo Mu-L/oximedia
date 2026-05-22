@@ -18,10 +18,7 @@ pub enum ReplayError {
     NotReplayable(JobStatus),
     /// A parameter override could not be applied to this payload type.
     #[error("Cannot apply parameter override '{key}' to payload type '{payload_type}'")]
-    IncompatibleOverride {
-        key: String,
-        payload_type: String,
-    },
+    IncompatibleOverride { key: String, payload_type: String },
     /// Serialisation error.
     #[error("Serialise error: {0}")]
     Serialise(String),
@@ -65,7 +62,11 @@ pub struct ReplaySpec {
 impl ReplaySpec {
     /// Create a replay spec for the given original job ID.
     #[must_use]
-    pub fn new(original_id: Uuid, replay_name: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub fn new(
+        original_id: Uuid,
+        replay_name: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
         Self {
             original_id,
             replay_name: replay_name.into(),
@@ -280,7 +281,11 @@ mod tests {
             preset: "medium".to_string(),
             hw_accel: None,
         };
-        let mut job = Job::new("transcode".to_string(), Priority::Normal, JobPayload::Transcode(params));
+        let mut job = Job::new(
+            "transcode".to_string(),
+            Priority::Normal,
+            JobPayload::Transcode(params),
+        );
         job.status = JobStatus::Failed;
         job.error = Some("codec not found".to_string());
         job
@@ -292,7 +297,11 @@ mod tests {
             analysis_type: AnalysisType::Scenes,
             output: None,
         };
-        let mut job = Job::new("analysis".to_string(), Priority::Normal, JobPayload::Analysis(params));
+        let mut job = Job::new(
+            "analysis".to_string(),
+            Priority::Normal,
+            JobPayload::Analysis(params),
+        );
         job.status = JobStatus::Failed;
         job
     }
@@ -302,7 +311,9 @@ mod tests {
         let original = failed_transcode_job();
         let mut replayer = JobReplay::new();
         let spec = ReplaySpec::new(original.id, "transcode-retry", "codec was updated");
-        let replayed = replayer.replay(&original, &spec).expect("replay should succeed");
+        let replayed = replayer
+            .replay(&original, &spec)
+            .expect("replay should succeed");
         assert_ne!(replayed.id, original.id);
         assert_eq!(replayed.status, JobStatus::Pending);
         assert_eq!(replayed.name, "transcode-retry");
@@ -314,7 +325,9 @@ mod tests {
         let mut replayer = JobReplay::new();
         let spec = ReplaySpec::new(original.id, "retry", "fix input")
             .with_override("input", "fixed_input.mp4");
-        let replayed = replayer.replay(&original, &spec).expect("replay should succeed");
+        let replayed = replayer
+            .replay(&original, &spec)
+            .expect("replay should succeed");
         if let JobPayload::Transcode(p) = replayed.payload {
             assert_eq!(p.input, "fixed_input.mp4");
         } else {
@@ -326,9 +339,11 @@ mod tests {
     fn test_replay_with_priority_override() {
         let original = failed_transcode_job();
         let mut replayer = JobReplay::new();
-        let spec = ReplaySpec::new(original.id, "retry", "urgent retry")
-            .with_priority(Priority::High);
-        let replayed = replayer.replay(&original, &spec).expect("replay should succeed");
+        let spec =
+            ReplaySpec::new(original.id, "retry", "urgent retry").with_priority(Priority::High);
+        let replayed = replayer
+            .replay(&original, &spec)
+            .expect("replay should succeed");
         assert_eq!(replayed.priority, Priority::High);
     }
 
@@ -357,8 +372,12 @@ mod tests {
     fn test_replay_multiple_times_recorded_separately() {
         let original = failed_transcode_job();
         let mut replayer = JobReplay::new();
-        replayer.replay(&original, &ReplaySpec::new(original.id, "r1", "try 1")).expect("1");
-        replayer.replay(&original, &ReplaySpec::new(original.id, "r2", "try 2")).expect("2");
+        replayer
+            .replay(&original, &ReplaySpec::new(original.id, "r1", "try 1"))
+            .expect("1");
+        replayer
+            .replay(&original, &ReplaySpec::new(original.id, "r2", "try 2"))
+            .expect("2");
         assert_eq!(replayer.history_for(original.id).len(), 2);
         assert_eq!(replayer.history().len(), 2);
     }
@@ -384,7 +403,10 @@ mod tests {
         let spec = ReplaySpec::new(original.id, "retry", "bad override")
             .with_override("video_codec", "av1"); // not applicable to Analysis
         let result = replayer.replay(&original, &spec);
-        assert!(matches!(result, Err(ReplayError::IncompatibleOverride { .. })));
+        assert!(matches!(
+            result,
+            Err(ReplayError::IncompatibleOverride { .. })
+        ));
     }
 
     #[test]

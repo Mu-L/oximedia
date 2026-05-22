@@ -15,23 +15,23 @@
 ## Enhancements
 - [x] Add anti-aliased rendering to `shape_render.rs` for smoother vector output at broadcast resolution
 - [x] Extend `animation_curve.rs` with spring physics and damped oscillation easing functions
-- [ ] Add multi-line text wrapping with justification modes to `text_layout.rs`
-- [ ] Implement text outline and drop shadow directly in `text_renderer.rs` (not as post-effect)
-- [ ] Add real-time data binding to `scoreboard.rs` (live score updates via data source trait)
-- [ ] Extend `ticker.rs` with variable scroll speed, pause-on-item, and looping modes
-- [ ] Add configurable safe-area margins to `layout_engine.rs` for broadcast compliance
-- [ ] Implement sub-pixel font rendering in `font_metrics.rs` for sharper text at small sizes
-- [ ] Add motion blur to `particles.rs` for more realistic particle trails
+- [x] Add multi-line text wrapping with justification modes to `text_layout.rs` (verified 2026-05-16; src/text_layout.rs:44 TextAlign::Justify, justify multi-line:627, test:926)
+- [x] Implement text outline and drop shadow directly in `text_renderer.rs` (not as post-effect) (verified 2026-05-16; src/text_renderer.rs:272 TextOutline struct, DropShadow:319)
+- [x] Add real-time data binding to `scoreboard.rs` (live score updates via data source trait) (verified 2026-05-16; src/scoreboard.rs:369 ScoreDataSource trait, LiveScoreboard:426)
+- [x] Extend `ticker.rs` with variable scroll speed, pause-on-item, and looping modes (verified 2026-05-16; src/ticker.rs:101 scroll_speed_pps, pause_on_item:115, item_speed_multiplier:239)
+- [x] Add configurable safe-area margins to `layout_engine.rs` for broadcast compliance (verified 2026-05-16; src/layout_margins.rs:152 SafeAreaMargins, BroadcastStandard, SafeRect)
+- [x] Implement sub-pixel font rendering in `font_metrics.rs` for sharper text at small sizes (verified 2026-05-16; src/font_metrics.rs:279 SubPixelMode enum, SubPixelMetrics:388)
+- [x] Add motion blur to `particles.rs` for more realistic particle trails (verified 2026-05-16; src/particles.rs:318 render_to_rgba_motion_blur)
 
 ## New Features
 - [x] Add a `chroma_key.rs` module for green/blue screen keying with spill suppression
 - [x] Implement a `picture_in_picture.rs` module with configurable position, size, border, and shadow
-- [ ] Add a `crawl.rs` module for vertical text crawl (end credits style)
+- [x] Add a `crawl.rs` module for vertical text crawl (end credits style) (verified 2026-05-16; src/crawl.rs:1021 lines)
 - [x] Implement a `data_visualization.rs` module for live charts/graphs (bar, line, pie) in broadcast
-- [ ] Add a `stinger_transition.rs` module for animated full-screen transitions with alpha channel
-- [ ] Implement a `logo_bug.rs` module for persistent corner logo placement with fade in/out
-- [ ] Add an `audio_waveform.rs` module for rendering audio waveform/spectrum visualizations
-- [ ] Implement `template_variables.rs` for tera template variable hot-reload from JSON/API
+- [x] Add a `stinger_transition.rs` module for animated full-screen transitions with alpha channel (verified 2026-05-16; src/stinger_transition.rs:465 lines)
+- [x] Implement a `logo_bug.rs` module for persistent corner logo placement with fade in/out (verified 2026-05-16; src/logo_bug.rs:504 lines)
+- [x] Add an `audio_waveform.rs` module for rendering audio waveform/spectrum visualizations (verified 2026-05-16; src/audio_waveform.rs:668 lines)
+- [x] Implement `template_variables.rs` for tera template variable hot-reload from JSON/API (verified 2026-05-16; src/template_variables.rs:484 lines)
 
 ## Performance
 - [ ] Batch draw calls in `render.rs` to reduce per-primitive overhead

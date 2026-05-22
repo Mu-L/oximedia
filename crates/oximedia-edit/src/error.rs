@@ -30,9 +30,22 @@ pub enum EditError {
     #[error("Clip overlap at time {0} on track {1}")]
     ClipOverlap(i64, usize),
 
+    /// Clip type does not match the track type.
+    #[error("Track type mismatch: track expects {expected:?} clip but got {got:?}")]
+    TrackTypeMismatch {
+        /// The clip type the track accepts.
+        expected: crate::clip::ClipType,
+        /// The clip type that was provided.
+        got: crate::clip::ClipType,
+    },
+
     /// Invalid edit operation.
     #[error("Invalid edit operation: {0}")]
     InvalidEdit(String),
+
+    /// Invalid operation (e.g., unsupported format or capability).
+    #[error("Invalid operation: {0}")]
+    InvalidOperation(String),
 
     /// Keyframe error.
     #[error("Keyframe error: {0}")]

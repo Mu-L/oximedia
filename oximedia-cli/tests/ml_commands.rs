@@ -42,14 +42,22 @@ fn ml_probe_without_ml_feature() {
 #[test]
 fn ml_run_without_ml_feature() {
     let mut cmd = Command::cargo_bin("oximedia").expect("locate oximedia binary");
+    let missing_model = std::env::temp_dir()
+        .join("does-not-exist.onnx")
+        .display()
+        .to_string();
+    let missing_input = std::env::temp_dir()
+        .join("also-absent.png")
+        .display()
+        .to_string();
     cmd.arg("ml")
         .arg("run")
         .arg("--pipeline")
         .arg("scene-classifier")
         .arg("--model")
-        .arg("/tmp/does-not-exist.onnx")
+        .arg(&missing_model)
         .arg("--input")
-        .arg("/tmp/also-absent.png")
+        .arg(&missing_input)
         .arg("--dry-run");
     cmd.assert()
         .failure()

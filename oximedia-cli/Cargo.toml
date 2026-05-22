@@ -21,7 +21,12 @@ path = "src/main.rs"
 name = "oximedia-ff"
 path = "src/bin/oximedia-ff.rs"
 
+[[bin]]
+name = "oximedia-cv2"
+path = "src/bin/oximedia-cv2.rs"
+
 [dependencies]
+oximedia-compat-cv2.workspace = true
 oximedia-compat-ffmpeg.workspace = true
 oximedia-plugin.workspace = true
 oximedia-mir.workspace = true
@@ -55,6 +60,7 @@ oximedia-packager.workspace = true
 oximedia-forensics.workspace = true
 oximedia-monitor.workspace = true
 oximedia-restore.workspace = true
+oximedia-audio.workspace = true
 oximedia-captions.workspace = true
 oximedia-timecode.workspace = true
 oximedia-search.workspace = true
@@ -62,6 +68,8 @@ oximedia-repair.workspace = true
 oximedia-colormgmt.workspace = true
 oximedia-playlist.workspace = true
 oximedia-conform.workspace = true
+oximedia-storage.workspace = true
+oximedia-metadata.workspace = true
 oximedia-archive.workspace = true
 oximedia-watermark.workspace = true
 oximedia-image.workspace = true
@@ -84,8 +92,13 @@ oximedia-drm.workspace = true
 oximedia-dedup.workspace = true
 oximedia-batch = { workspace = true, features = ["sqlite"] }
 oximedia-archive-pro.workspace = true
+oximedia-proxy.workspace = true
 oximedia-dolbyvision.workspace = true
 oximedia-ml = { workspace = true, optional = true }
+oximedia-caption-gen = { workspace = true, optional = true, features = ["onnx"] }
+# Provides `ndarray::Array2`, the pixel-plane container used by
+# `oximedia-stabilize::Frame` for the `restore video --mode stabilize` path.
+scirs2-core = { workspace = true }
 uuid = { workspace = true }
 tokio.workspace = true
 clap.workspace = true
@@ -93,19 +106,34 @@ ratatui.workspace = true
 crossterm = "0.29"
 indicatif = "0.18"
 anyhow = "1"
+thiserror.workspace = true
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap_complete.workspace = true
+clap_mangen.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 colored = "3"
 rayon.workspace = true
+num_cpus.workspace = true
 chrono.workspace = true
 humantime = "2"
 dirs = "6"
 
 [features]
 default = []
+# Enable the cv2.dnn family in the `oximedia-cv2` binary (`dnn-forward`
+# subcommand). Pulls in `oxionnx` via the `oximedia-compat-cv2/dnn`
+# passthrough; without this feature the subcommand is compiled out so the
+# binary still builds with no extra runtime cost.
+dnn = ["oximedia-compat-cv2/dnn"]
+# Enable the S3 cloud upload/download backend (pulls in aws-sdk-s3 via oximedia-storage).
+s3 = ["oximedia-storage/s3"]
+# Enable the Azure Blob Storage cloud upload/download backend.
+azure = ["oximedia-storage/azure"]
+# Enable the Google Cloud Storage cloud upload/download backend.
+gcs = ["oximedia-storage/gcs"]
 # Enable the `oximedia ml ...` subcommand family.
 #
 # Without this feature, the `ml` subcommand is still wired into the clap
@@ -115,8 +143,18 @@ default = []
 ml = ["dep:oximedia-ml", "oximedia-ml/serde"]
 # Enable every built-in pipeline in the `ml` command surface.
 ml-all-pipelines = ["ml", "oximedia-ml/all-pipelines"]
+# Enable the real ASR-driven `captions generate` pipeline.
+#
+# Without this feature, `captions generate` returns an informative error
+# directing the user to rebuild with `--features caption-gen`.
+# Enabling this pulls in `oximedia-caption-gen` with its ONNX runtime.
+# At runtime the user must also supply `--model <encoder.onnx>` and
+# `--vocab <vocab.json>` to the `captions generate` subcommand.
+caption-gen = ["dep:oximedia-caption-gen", "dep:oximedia-ml"]
 
 [dev-dependencies]
 tempfile.workspace = true
 assert_cmd = "2"
 predicates = "3"
+serde.workspace = true
+serde_json.workspace = true

@@ -153,10 +153,7 @@ impl NotificationRule {
             return false;
         }
 
-        let event_matches = self
-            .trigger_events
-            .iter()
-            .any(|e| e.matches(job.status));
+        let event_matches = self.trigger_events.iter().any(|e| e.matches(job.status));
 
         if !event_matches {
             return false;
@@ -167,9 +164,7 @@ impl NotificationRule {
         }
 
         // At least one of the filter tags must be present on the job.
-        self.tag_filter
-            .iter()
-            .any(|t| job.tags.contains(t))
+        self.tag_filter.iter().any(|t| job.tags.contains(t))
     }
 }
 
@@ -295,19 +290,13 @@ impl CapturingSender {
     /// Return a snapshot of all captured notifications.
     #[must_use]
     pub fn captured(&self) -> Vec<(NotificationDestination, NotificationPayload)> {
-        self.captured
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default()
+        self.captured.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     /// Number of captured notifications.
     #[must_use]
     pub fn count(&self) -> usize {
-        self.captured
-            .lock()
-            .map(|g| g.len())
-            .unwrap_or(0)
+        self.captured.lock().map(|g| g.len()).unwrap_or(0)
     }
 }
 
@@ -550,7 +539,11 @@ mod tests {
             preset: "fast".into(),
             hw_accel: None,
         };
-        let mut job = Job::new("encode".into(), Priority::Normal, JobPayload::Transcode(params));
+        let mut job = Job::new(
+            "encode".into(),
+            Priority::Normal,
+            JobPayload::Transcode(params),
+        );
         job.status = status;
         job.tags = tags.into_iter().map(|s| s.to_string()).collect();
         job
@@ -610,10 +603,7 @@ mod tests {
         mgr.notify(&failed);
 
         assert_eq!(sender.count(), 1);
-        assert_eq!(
-            sender.captured()[0].1.event,
-            TriggerEvent::OnFailure
-        );
+        assert_eq!(sender.captured()[0].1.event, TriggerEvent::OnFailure);
     }
 
     #[test]
@@ -660,7 +650,9 @@ mod tests {
         let rule = NotificationRule::new(
             "fail-send",
             vec![TriggerEvent::OnCompletion],
-            NotificationDestination::Webhook { url: "http://example.com".into() },
+            NotificationDestination::Webhook {
+                url: "http://example.com".into(),
+            },
         );
         let mut mgr = NotificationManager::new(sender);
         mgr.add_rule(rule);

@@ -13,6 +13,7 @@ use crate::codec_map::{CodecCategory, CodecMap};
 use crate::diagnostics::{unknown_codec_diagnostic, Diagnostic, DiagnosticSink};
 use crate::encoder_options::EncoderQualityOptions;
 use crate::filter_lex::{parse_filter_graph, parse_filters, ParsedFilter};
+use crate::hwaccel_compat::{translate_hwaccel, HwAccelConfig};
 use crate::pass::PassPhase;
 
 /// A single transcode job derived from one FFmpeg output specification.
@@ -68,6 +69,14 @@ pub struct TranscodeJob {
     pub pass_phase: Option<PassPhase>,
     /// Translated muxer options.
     pub muxer_options: Vec<MuxerOption>,
+    /// Hardware acceleration configuration derived from `-hwaccel`, if set.
+    pub hwaccel: Option<HwAccelConfig>,
+    /// Map-metadata directives (`-map_metadata`).
+    pub map_metadata: Vec<MapMetadataDirective>,
+    /// GOP size (keyframe interval, `-g N`).
+    pub gop_size: Option<u32>,
+    /// Minimum keyframe interval (`-keyint_min N`).
+    pub keyint_min: Option<u32>,
 }
 
 /// A translated muxer option with OxiMedia semantics.
@@ -107,6 +116,74 @@ pub enum MuxerAction {
         /// The original option value.
         value: String,
     },
+}
+
+/// Specifies how metadata is copied between input and output in `-map_metadata`.
+///
+/// FFmpeg's `-map_metadata` accepts three main forms:
+/// - `0` / `<N>` — copy all metadata from input file N
+/// - `-1` — strip all metadata (do not copy anything)
+/// - `0:s:0` / `0:g` — copy a specific stream or global scope from an input
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MapMetadataDirective {
+    /// Copy all metadata from input file at the given index.
+    FromInput(usize),
+    /// Strip all metadata (do not copy any tags).
+    StripAll,
+    /// Copy metadata from a specific stream of an input file.
+    ///
+    /// `(file_index, stream_type_char, stream_index)` —  e.g. `(0, 'a', 1)` means
+    /// the second audio stream of the first input file.
+    FromStream {
+        /// Input file index.
+        file_idx: usize,
+        /// Stream type character (`'v'`, `'a'`, `'s'`) or `'g'` for global.
+        stream_type: char,
+        /// Zero-based stream index within that type.
+        stream_idx: usize,
+    },
+}
+
+impl MapMetadataDirective {
+    /// Parse the value of a `-map_metadata` flag.
+    ///
+    /// Handles:
+    /// - `"-1"` → [`Self::StripAll`]
+    /// - `"0"`, `"1"`, … → [`Self::FromInput`]
+    /// - `"0:s:0"`, `"0:a:1"`, `"0:v:0"`, `"0:g"` → [`Self::FromStream`]
+    pub fn parse(value: &str) -> Option<Self> {
+        let v = value.trim();
+        if v == "-1" {
+            return Some(Self::StripAll);
+        }
+        // Check for "N:TYPE:IDX" or "N:g" patterns.
+        let parts: Vec<&str> = v.splitn(3, ':').collect();
+        match parts.as_slice() {
+            [file_str, type_str, idx_str] => {
+                let file_idx = file_str.parse::<usize>().ok()?;
+                let stream_type = type_str.chars().next()?;
+                let stream_idx = idx_str.parse::<usize>().ok()?;
+                Some(Self::FromStream {
+                    file_idx,
+                    stream_type,
+                    stream_idx,
+                })
+            }
+            [file_str, "g"] | [file_str, "global"] => {
+                let file_idx = file_str.parse::<usize>().ok()?;
+                Some(Self::FromStream {
+                    file_idx,
+                    stream_type: 'g',
+                    stream_idx: 0,
+                })
+            }
+            [num_str] => {
+                let n = num_str.parse::<usize>().ok()?;
+                Some(Self::FromInput(n))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// The result of a full parse + translate pass.
@@ -166,6 +243,13 @@ pub fn parse_and_translate(args: &[String]) -> TranslateResult {
 
     let overwrite = parsed.global_options.overwrite;
 
+    // Resolve hardware acceleration once for the whole invocation.
+    let global_hwaccel: Option<HwAccelConfig> = parsed
+        .global_options
+        .hwaccel
+        .as_deref()
+        .map(|method| translate_hwaccel(method, None, None));
+
     let mut jobs = Vec::with_capacity(parsed.outputs.len());
 
     for output in &parsed.outputs {
@@ -176,6 +260,7 @@ pub fn parse_and_translate(args: &[String]) -> TranslateResult {
             &codec_map,
             &mut sink,
             overwrite,
+            global_hwaccel.clone(),
         );
         jobs.push(job);
     }
@@ -203,6 +288,7 @@ fn translate_output(
     codec_map: &CodecMap,
     sink: &mut DiagnosticSink,
     overwrite: bool,
+    hwaccel: Option<HwAccelConfig>,
 ) -> TranscodeJob {
     // ── Codec resolution ──────────────────────────────────────────────────────
     let video_codec = if output.no_video {
@@ -286,6 +372,13 @@ fn translate_output(
     // ── Muxer options ────────────────────────────────────────────────────────
     let muxer_options = translate_muxer_options(&output.muxer_options, sink);
 
+    // Parse map_metadata directives.
+    let map_metadata: Vec<MapMetadataDirective> = output
+        .map_metadata
+        .iter()
+        .filter_map(|s| MapMetadataDirective::parse(s))
+        .collect();
+
     TranscodeJob {
         input_path: input_path.to_string(),
         output_path: output.path.clone(),
@@ -312,6 +405,10 @@ fn translate_output(
         passlogfile: output.passlogfile.clone(),
         pass_phase: output.pass_phase.clone(),
         muxer_options,
+        hwaccel,
+        map_metadata,
+        gop_size: output.gop_size,
+        keyint_min: output.keyint_min,
     }
 }
 

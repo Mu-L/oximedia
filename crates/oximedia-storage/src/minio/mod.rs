@@ -277,6 +277,14 @@ impl CloudStorage for MinioStorage {
             .generate_presigned_upload_url(key, expiration_secs)
             .await
     }
+
+    async fn update_metadata(
+        &self,
+        key: &str,
+        tags: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        self.inner.update_metadata(key, tags).await
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -520,6 +528,19 @@ impl CloudStorage for MinioStorage {
             expiration_secs
         ))
     }
+
+    async fn update_metadata(
+        &self,
+        key: &str,
+        new_tags: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        let mut guard = self.lock_objects();
+        let entry = guard
+            .get_mut(key)
+            .ok_or_else(|| StorageError::NotFound(key.to_string()))?;
+        entry.metadata = new_tags;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -759,5 +780,43 @@ mod tests {
             .expect("presigned url");
         assert!(url.contains("media/clip.mp4"));
         assert!(url.contains("3600"));
+    }
+
+    #[cfg(not(feature = "minio"))]
+    #[tokio::test]
+    async fn test_update_metadata_persists_tags() {
+        let storage = make_storage();
+        // Upload an object first
+        let stream = bytes_stream(b"tagged content".to_vec());
+        storage
+            .upload_stream("tagged.bin", stream, None, UploadOptions::default())
+            .await
+            .expect("upload");
+
+        // Apply tags
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("env".to_string(), "test".to_string());
+        tags.insert("project".to_string(), "oximedia".to_string());
+        storage
+            .update_metadata("tagged.bin", tags.clone())
+            .await
+            .expect("update_metadata should succeed");
+
+        // Verify tags are reflected in get_metadata
+        let meta = storage.get_metadata("tagged.bin").await.expect("metadata");
+        assert_eq!(meta.metadata.get("env").map(String::as_str), Some("test"));
+        assert_eq!(
+            meta.metadata.get("project").map(String::as_str),
+            Some("oximedia")
+        );
+    }
+
+    #[cfg(not(feature = "minio"))]
+    #[tokio::test]
+    async fn test_update_metadata_missing_key_returns_not_found() {
+        let storage = make_storage();
+        let tags = std::collections::HashMap::new();
+        let result = storage.update_metadata("nonexistent.bin", tags).await;
+        assert!(matches!(result, Err(StorageError::NotFound(_))));
     }
 }

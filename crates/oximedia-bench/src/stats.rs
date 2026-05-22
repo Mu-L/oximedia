@@ -685,3 +685,304 @@ mod advanced_tests {
         assert_eq!(analysis.range, 4.0);
     }
 }
+
+// ─── Welch's t-test and bootstrap confidence intervals ───────────────────────
+
+use rand::RngExt;
+use rand::SeedableRng;
+
+/// Errors produced by the statistical inference functions.
+#[derive(Debug, thiserror::Error)]
+pub enum StatsError {
+    /// The sample has fewer than 2 observations.
+    #[error("insufficient data: need at least 2 observations, got {got}")]
+    InsufficientData {
+        /// Actual number of observations.
+        got: usize,
+    },
+    /// The confidence level is outside (0, 1).
+    #[error("invalid confidence level {level}: must be in (0, 1)")]
+    InvalidConfidence {
+        /// The invalid confidence value.
+        level: f64,
+    },
+}
+
+/// Result of a Welch's two-sample t-test.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WelchResult {
+    /// The Welch t-statistic.
+    pub t_statistic: f64,
+    /// Welch–Satterthwaite degrees of freedom.
+    pub degrees_of_freedom: f64,
+    /// Two-tailed p-value.
+    pub p_value: f64,
+}
+
+/// Percentile bootstrap confidence interval.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BootstrapCi {
+    /// Lower bound.
+    pub lower: f64,
+    /// Upper bound.
+    pub upper: f64,
+    /// Number of bootstrap resamples used.
+    pub n_resamples: usize,
+}
+
+// ── Regularised incomplete beta via Lentz's continued-fraction (two-tailed p) ─
+
+/// Evaluate the beta continued-fraction kernel using the Legendre CF:
+///
+///   cf(x, a, b) = 1 / (1 + d1/(1 + d2/(1 + ...)))
+///
+/// where d_{2m}   = m*(b-m)*x / [(a+2m-1)*(a+2m)]
+///       d_{2m+1} = -(a+m)*(a+b+m)*x / [(a+2m)*(a+2m+1)]
+///
+/// Returns the CF value directly (not the full I_x).
+/// Reference: Abramowitz & Stegun §26.5.8 / Numerical Recipes §6.4.
+fn betacf(x: f64, a: f64, b: f64) -> f64 {
+    const MAX_ITER: u32 = 200;
+    const EPS: f64 = 3e-15;
+    const TINY: f64 = 1e-30;
+
+    let qab = a + b;
+    let qap = a + 1.0;
+    let qam = a - 1.0;
+
+    // First step of Lentz initialised to the first denominator element.
+    let mut c = 1.0;
+    let mut d = 1.0 - qab * x / qap;
+    if d.abs() < TINY {
+        d = TINY;
+    }
+    d = 1.0 / d;
+    let mut h = d;
+
+    for m in 1_u32..=MAX_ITER {
+        let m = m as f64;
+        let m2 = 2.0 * m;
+
+        // Even step
+        let aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+        d = 1.0 + aa * d;
+        if d.abs() < TINY {
+            d = TINY;
+        }
+        c = 1.0 + aa / c;
+        if c.abs() < TINY {
+            c = TINY;
+        }
+        d = 1.0 / d;
+        h *= d * c;
+
+        // Odd step
+        let aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+        d = 1.0 + aa * d;
+        if d.abs() < TINY {
+            d = TINY;
+        }
+        c = 1.0 + aa / c;
+        if c.abs() < TINY {
+            c = TINY;
+        }
+        d = 1.0 / d;
+        let del = d * c;
+        h *= del;
+
+        if (del - 1.0).abs() < EPS {
+            break;
+        }
+    }
+
+    h
+}
+
+/// Evaluate the regularised incomplete beta I_x(a, b) using the CF decomposition
+/// `I_x(a,b) = x^a*(1-x)^b / (a*B(a,b)) * betacf(x,a,b)`.
+///
+/// Uses the symmetry relation `I_x(a,b) = 1 - I_{1-x}(b,a)` for x > (a+1)/(a+b+2).
+fn regularised_incomplete_beta(x: f64, a: f64, b: f64) -> f64 {
+    // Guard: domain
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+
+    // log of the beta function: B(a,b) = Γ(a)Γ(b)/Γ(a+b)
+    let lbeta = lgamma(a) + lgamma(b) - lgamma(a + b);
+
+    // Symmetry: use I_{1-x}(b,a) = 1 - I_x(a,b) when x is large.
+    let (xx, aa, bb, flipped) = if x < (a + 1.0) / (a + b + 2.0) {
+        (x, a, b, false)
+    } else {
+        (1.0 - x, b, a, true)
+    };
+
+    // Compute the prefactor entirely in log-space to avoid underflow.
+    // front = x^a*(1-x)^b / (a*B(a,b))  [in log space]
+    let log_front = aa * xx.ln() + bb * (1.0 - xx).ln() - lbeta - aa.ln();
+
+    let cf = betacf(xx, aa, bb);
+
+    // cf must be positive; guard against numerical drift.
+    let val = if cf > 0.0 {
+        (log_front + cf.ln()).exp().clamp(0.0, 1.0)
+    } else if cf < 0.0 {
+        // Sign drift: use the power-series bound as a fallback.
+        // For the regularised beta, result is in (0,1), so clamp to 0.
+        0.0
+    } else {
+        0.0
+    };
+
+    if flipped {
+        1.0 - val
+    } else {
+        val
+    }
+}
+
+/// Approximation of the log-gamma function via Lanczos (g = 7, n = 9).
+fn lgamma(z: f64) -> f64 {
+    const G: f64 = 7.0;
+    const C: [f64; 9] = [
+        0.999_999_999_998_099_3,
+        676.520_368_121_885_1,
+        -1_259.139_216_722_403,
+        771.323_428_777_653_1,
+        -176.615_029_162_140_6,
+        12.507_343_278_686_905,
+        -0.138_571_095_265_720_12,
+        9.984_369_578_019_571_4e-6,
+        1.505_632_735_149_311_6e-7,
+    ];
+
+    let mut z = z;
+    if z < 0.5 {
+        // Reflection formula: Γ(z)Γ(1-z) = π/sin(πz)
+        return std::f64::consts::PI.ln() - (std::f64::consts::PI * z).sin().ln() - lgamma(1.0 - z);
+    }
+    z -= 1.0;
+    let mut x = C[0];
+    for (i, &ci) in C.iter().enumerate().skip(1) {
+        x += ci / (z + i as f64);
+    }
+    let t = z + G + 0.5;
+    0.5 * (2.0 * std::f64::consts::PI).ln() + (z + 0.5) * t.ln() - t + x.ln()
+}
+
+/// Two-tailed p-value for a t-statistic and given degrees of freedom.
+///
+/// Uses the relationship: p = I_{df/(df+t²)}(df/2, 1/2) where I is the
+/// regularised incomplete beta function.
+fn t_dist_two_tailed_p(t: f64, df: f64) -> f64 {
+    let t2 = t * t;
+    let x = df / (df + t2);
+    // I_x(df/2, 1/2) gives the two-tailed p-value directly.
+    regularised_incomplete_beta(x, df / 2.0, 0.5)
+}
+
+// ── Public API ─────────────────────────────────────────────────────────────────
+
+/// Perform Welch's unequal-variances two-sample t-test.
+///
+/// Returns the t-statistic, Welch–Satterthwaite degrees of freedom, and
+/// two-tailed p-value.  Requires at least 2 observations in each sample.
+pub fn welch_t_test(a: &[f64], b: &[f64]) -> Result<WelchResult, StatsError> {
+    let n1 = a.len();
+    let n2 = b.len();
+    if n1 < 2 {
+        return Err(StatsError::InsufficientData { got: n1 });
+    }
+    if n2 < 2 {
+        return Err(StatsError::InsufficientData { got: n2 });
+    }
+
+    let mean1 = a.iter().sum::<f64>() / n1 as f64;
+    let mean2 = b.iter().sum::<f64>() / n2 as f64;
+
+    let var1 = a.iter().map(|&v| (v - mean1).powi(2)).sum::<f64>() / (n1 - 1) as f64;
+    let var2 = b.iter().map(|&v| (v - mean2).powi(2)).sum::<f64>() / (n2 - 1) as f64;
+
+    let se = (var1 / n1 as f64 + var2 / n2 as f64).sqrt();
+
+    // Guard against degenerate case where both variances are zero.
+    let t_statistic = if se == 0.0 {
+        if (mean1 - mean2).abs() < f64::EPSILON {
+            0.0
+        } else {
+            f64::INFINITY
+        }
+    } else {
+        (mean1 - mean2) / se
+    };
+
+    // Welch–Satterthwaite degrees of freedom
+    let s1_n1 = var1 / n1 as f64;
+    let s2_n2 = var2 / n2 as f64;
+    let denom = s1_n1.powi(2) / (n1 - 1) as f64 + s2_n2.powi(2) / (n2 - 1) as f64;
+    let degrees_of_freedom = if denom == 0.0 {
+        (n1 + n2 - 2) as f64
+    } else {
+        (s1_n1 + s2_n2).powi(2) / denom
+    };
+
+    let p_value = if t_statistic.is_infinite() || t_statistic.is_nan() {
+        0.0
+    } else {
+        t_dist_two_tailed_p(t_statistic, degrees_of_freedom)
+    };
+
+    Ok(WelchResult {
+        t_statistic,
+        degrees_of_freedom,
+        p_value,
+    })
+}
+
+/// Compute a percentile bootstrap confidence interval for the mean.
+///
+/// Uses `n_resamples` bootstrap resamples (default 1000 when 0 is passed).
+/// The `confidence` parameter must be in the open interval (0, 1).
+pub fn bootstrap_ci(
+    data: &[f64],
+    confidence: f64,
+    n_resamples: usize,
+) -> Result<BootstrapCi, StatsError> {
+    if data.len() < 2 {
+        return Err(StatsError::InsufficientData { got: data.len() });
+    }
+    if confidence <= 0.0 || confidence >= 1.0 {
+        return Err(StatsError::InvalidConfidence { level: confidence });
+    }
+
+    let n_resamples = if n_resamples == 0 { 1000 } else { n_resamples };
+    let n = data.len();
+
+    // Deterministic seed for reproducibility across runs.
+    let mut rng = rand::rngs::SmallRng::seed_from_u64(0xdeadbeef_cafebabe);
+
+    let mut means: Vec<f64> = Vec::with_capacity(n_resamples);
+    for _ in 0..n_resamples {
+        let resample_sum: f64 = (0..n).map(|_| data[rng.random_range(0..n)]).sum();
+        means.push(resample_sum / n as f64);
+    }
+
+    means.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let alpha = 1.0 - confidence;
+    let lo_idx = ((alpha / 2.0) * n_resamples as f64).floor() as usize;
+    let hi_idx = ((1.0 - alpha / 2.0) * n_resamples as f64).ceil() as usize;
+
+    let lo_idx = lo_idx.min(n_resamples - 1);
+    let hi_idx = hi_idx.min(n_resamples - 1);
+
+    Ok(BootstrapCi {
+        lower: means[lo_idx],
+        upper: means[hi_idx],
+        n_resamples,
+    })
+}

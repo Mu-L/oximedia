@@ -552,6 +552,19 @@ impl CloudStorage for AzureStorage {
         // This returns the base URL - in production, you'd add SAS token parameters
         Ok(base_url.to_string())
     }
+
+    async fn update_metadata(&self, key: &str, tags: HashMap<String, String>) -> Result<()> {
+        debug!("Updating metadata (tags) for blob: {}", key);
+
+        self.blob_client(key).set_tags(tags).await.map_err(|e| {
+            StorageError::ProviderError(format!(
+                "Failed to update metadata (tags) for blob {key}: {e}"
+            ))
+        })?;
+
+        info!("Updated metadata (tags) for blob: {}", key);
+        Ok(())
+    }
 }
 
 /// Calculate optimal block size

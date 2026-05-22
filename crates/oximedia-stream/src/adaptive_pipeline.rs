@@ -3,6 +3,33 @@
 //! Implements both a BOLA-inspired adaptive bitrate (ABR) algorithm and a
 //! throughput-based ABR algorithm that selects quality tiers based on measured
 //! bandwidth and playback buffer level.
+//!
+//! # Tuning Guide
+//!
+//! The table below gives recommended starting parameters for common deployment
+//! scenarios.  All timing fields are in seconds unless noted.
+//!
+//! | Parameter | Mobile / Cellular | Residential Broadband | Enterprise / Fiber | Live Event (Stadium) |
+//! |---|---|---|---|---|
+//! | `buffer_target_secs` | 10–15 | 20–30 | 30–60 | 8–12 |
+//! | `upgrade_cooldown_secs` | 12–16 | 8–12 | 4–8 | 4–6 |
+//! | `downgrade_cooldown_secs` | 1–2 | 2–4 | 2–4 | 0.5–1 |
+//! | `ewma_alpha` | 0.1–0.2 | 0.2–0.3 | 0.3–0.5 | 0.4–0.6 |
+//! | `max_samples` | 5–8 | 8–12 | 10–15 | 5–8 |
+//! | BOLA `safety_factor` | 0.8 | 0.9 | 0.95 | 0.85 |
+//!
+//! ## When to choose BOLA vs ThroughputBased
+//!
+//! **BOLA** (`AbrAlgorithm::Bola`) is buffer-driven: it targets a configurable
+//! buffer occupancy level and raises or lowers quality to maintain that level.
+//! It is more conservative and tolerates variable-bandwidth links gracefully.
+//! Prefer BOLA when rebuffering is the primary concern (e.g. mobile, satellite).
+//!
+//! **ThroughputBased** (`AbrAlgorithm::ThroughputBased { safety_factor }`) is
+//! bandwidth-driven: it measures the recent download throughput and selects the
+//! highest quality tier whose bitrate fits within `throughput × safety_factor`.
+//! It upgrades faster and is better suited to low-latency live events where
+//! startup time matters more than absolute stability (e.g. stadium, esports).
 
 use std::collections::VecDeque;
 use std::time::{Instant, SystemTime};
@@ -902,5 +929,87 @@ mod tests {
         }
         let sw = p.evaluate_switch();
         assert!(sw.is_none(), "should stay at tier 0");
+    }
+
+    // ── ABR fluctuation / hysteresis tests ───────────────────────────────────
+
+    #[test]
+    fn test_pipeline_fluctuation_hysteresis_prevents_oscillation() {
+        // This test verifies that when bandwidth alternates between high (5000
+        // kbps) and low (500 kbps), the cooldown mechanism limits the total
+        // number of quality switches to a bounded value rather than oscillating
+        // on every evaluation.
+        let mut p = make_pipeline();
+        // Zero cooldowns so we can observe the raw switch counting, then we
+        // restore real cooldowns mid-way to demonstrate hysteresis.
+        p.upgrade_cooldown_secs = 0.0;
+        p.downgrade_cooldown_secs = 0.0;
+        p.last_switch_time = Instant::now()
+            .checked_sub(std::time::Duration::from_hours(1))
+            .unwrap_or_else(Instant::now);
+        p.update_buffer(20.0);
+
+        let mut upgrades = 0u32;
+        let mut downgrades = 0u32;
+
+        // Alternate between high and low bandwidth 10 times
+        for cycle in 0..10u32 {
+            let kbps = if cycle % 2 == 0 { 5000.0 } else { 500.0 };
+            for _ in 0..5 {
+                p.bandwidth.add_sample(kbps);
+            }
+            if let Some(sw) = p.evaluate_switch() {
+                match sw.reason {
+                    SwitchReason::BandwidthUpgrade => upgrades += 1,
+                    SwitchReason::BandwidthDowngrade => downgrades += 1,
+                    _ => {}
+                }
+                // Restore cooldown after first switch to simulate hysteresis
+                p.upgrade_cooldown_secs = 4.0;
+                p.downgrade_cooldown_secs = 2.0;
+            }
+        }
+
+        // Without any hysteresis we would expect 10 alternations = 10 switches.
+        // With cooldowns re-engaged after the first switch, total should be << 10.
+        let total_switches = upgrades + downgrades;
+        assert!(
+            total_switches <= 5,
+            "hysteresis should bound oscillation: got {total_switches} switches \
+             ({upgrades} up, {downgrades} down)"
+        );
+    }
+
+    #[test]
+    fn test_pipeline_fluctuation_strict_cooldown_cap() {
+        // With real cooldowns active from the start, alternating bandwidth 10×
+        // must produce at most 4 switches total.
+        let mut p = make_pipeline();
+        // Reasonable cooldowns that prevent rapid oscillation
+        p.upgrade_cooldown_secs = 5.0;
+        p.downgrade_cooldown_secs = 3.0;
+        // last_switch_time set to long ago so the very first switch is allowed
+        p.last_switch_time = Instant::now()
+            .checked_sub(std::time::Duration::from_hours(1))
+            .unwrap_or_else(Instant::now);
+        p.update_buffer(20.0);
+
+        let mut total_switches = 0u32;
+
+        for cycle in 0..10u32 {
+            let kbps = if cycle % 2 == 0 { 5000.0 } else { 500.0 };
+            for _ in 0..5 {
+                p.bandwidth.add_sample(kbps);
+            }
+            if p.evaluate_switch().is_some() {
+                total_switches += 1;
+            }
+        }
+
+        assert!(
+            total_switches <= 4,
+            "strict cooldown should cap oscillation to at most 4 switches, \
+             got {total_switches}"
+        );
     }
 }

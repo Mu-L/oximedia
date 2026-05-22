@@ -183,7 +183,11 @@ impl ResolutionScaler {
         let (sx, sy) = self.config.quality.steps();
         if sx == 1 && sy == 1 {
             // No downsampling needed — return a clone.
-            return Ok((frame[..(src_w as usize * src_h as usize * 3)].to_vec(), src_w, src_h));
+            return Ok((
+                frame[..(src_w as usize * src_h as usize * 3)].to_vec(),
+                src_w,
+                src_h,
+            ));
         }
 
         let (aw, ah) = self.config.analysis_dims(src_w, src_h);
@@ -389,7 +393,10 @@ mod tests {
 
     #[test]
     fn test_quality_custom_steps() {
-        let q = AnalysisQuality::Custom { step_x: 3, step_y: 5 };
+        let q = AnalysisQuality::Custom {
+            step_x: 3,
+            step_y: 5,
+        };
         assert_eq!(q.steps(), (3, 5));
     }
 
@@ -441,8 +448,7 @@ mod tests {
     fn test_downsample_box_filter_solid_colour() {
         // Box-filter of a solid colour should produce the same colour.
         let frame = solid_rgb(64, 64, 200, 100, 50);
-        let cfg = ScopeResolutionConfig::new(32, 32, AnalysisQuality::Half)
-            .with_box_filter();
+        let cfg = ScopeResolutionConfig::new(32, 32, AnalysisQuality::Half).with_box_filter();
         let scaler = ResolutionScaler::new(cfg);
         let (out, _, _) = scaler.downsample(&frame, 64, 64).expect("should succeed");
         for px in out.chunks_exact(3) {
@@ -475,7 +481,9 @@ mod tests {
         let scope = solid_rgba(32, 32, 0, 128, 255, 255);
         let cfg = ScopeResolutionConfig::new(32, 32, AnalysisQuality::Half);
         let scaler = ResolutionScaler::new(cfg);
-        let out = scaler.upscale_scope(&scope, 32, 32).expect("should succeed");
+        let out = scaler
+            .upscale_scope(&scope, 32, 32)
+            .expect("should succeed");
         assert_eq!(out.len(), 32 * 32 * 4);
         assert_eq!(out, scope);
     }
@@ -485,7 +493,9 @@ mod tests {
         let scope = solid_rgba(32, 32, 255, 0, 0, 255);
         let cfg = ScopeResolutionConfig::new(64, 64, AnalysisQuality::Half);
         let scaler = ResolutionScaler::new(cfg);
-        let out = scaler.upscale_scope(&scope, 32, 32).expect("should succeed");
+        let out = scaler
+            .upscale_scope(&scope, 32, 32)
+            .expect("should succeed");
         assert_eq!(out.len(), 64 * 64 * 4);
         // Every output pixel should be red
         for px in out.chunks_exact(4) {

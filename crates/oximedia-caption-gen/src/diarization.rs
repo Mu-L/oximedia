@@ -1,5 +1,118 @@
 //! Speaker diarization metadata: speaker turns, statistics, crosstalk detection,
 //! and assigning speakers to caption blocks.
+//!
+//! ## Diarization Workflow
+//!
+//! A typical ASR pipeline produces a stream of text segments together with
+//! speaker labels ("who spoke when").  This module consumes that output and
+//! makes it easy to work with speaker identity throughout the caption
+//! generation pipeline.
+//!
+//! 1. **Intern speaker labels** — Use [`SpeakerLabelPool`] to deduplicate
+//!    speaker-name strings.  Interned labels are `Arc<str>` values; many
+//!    `Speaker` records that share the same name incur only one heap
+//!    allocation.
+//!
+//! 2. **Build speaker records** — Construct [`Speaker`] values for each unique
+//!    speaker, setting an optional display name, gender, and BCP-47 language
+//!    tag.
+//!
+//! 3. **Collect speaker turns** — Push [`SpeakerTurn`] values into a
+//!    [`DiarizationResult`].  Each turn records the speaker id and a
+//!    `[start_ms, end_ms)` interval.
+//!
+//! 4. **Merge short pauses** — Call [`merge_consecutive_turns`] (500 ms gap)
+//!    or [`merge_consecutive_turns_with_gap`] with a custom threshold to
+//!    collapse breath-pauses between turns by the same speaker.
+//!
+//! 5. **Analyse the result** — Use [`dominant_speaker`], [`speaker_stats`],
+//!    and [`format_speaker_label`] to build display-ready metadata.
+//!
+//! 6. **Assign to caption blocks** — Call [`assign_speakers_to_blocks`] to
+//!    set `CaptionBlock::speaker_id` based on the turn with the greatest time
+//!    overlap for each block.  This step bridges diarization output with the
+//!    [`crate::alignment`] module.
+//!
+//! ## Doctest: Building and querying a `DiarizationResult`
+//!
+//! ```rust
+//! use oximedia_caption_gen::diarization::{
+//!     SpeakerLabelPool, Speaker, SpeakerGender, SpeakerTurn,
+//!     DiarizationResult, merge_consecutive_turns,
+//!     dominant_speaker, speaker_stats, format_speaker_label,
+//! };
+//! use std::collections::HashMap;
+//!
+//! // 1. Intern display labels.
+//! let pool = SpeakerLabelPool::new();
+//! let _alice_arc = pool.intern("Alice");
+//! let _bob_arc   = pool.intern("Bob");
+//!
+//! // 2. Create Speaker records.
+//! let alice = Speaker {
+//!     id: 0,
+//!     name: Some("Alice".to_string()),
+//!     gender: Some(SpeakerGender::Female),
+//!     language: Some("en-US".to_string()),
+//! };
+//! let bob = Speaker {
+//!     id: 1,
+//!     name: Some("Bob".to_string()),
+//!     gender: Some(SpeakerGender::Male),
+//!     language: Some("en-GB".to_string()),
+//! };
+//!
+//! // 3. Build a DiarizationResult with speaker turns.
+//! let mut result = DiarizationResult::new();
+//! result.speakers.insert(alice.id, alice.clone());
+//! result.speakers.insert(bob.id, bob.clone());
+//! result.turns.push(SpeakerTurn { speaker_id: 0, start_ms:     0, end_ms: 3_000 });
+//! result.turns.push(SpeakerTurn { speaker_id: 0, start_ms: 3_200, end_ms: 5_000 });
+//! result.turns.push(SpeakerTurn { speaker_id: 1, start_ms: 5_500, end_ms: 9_000 });
+//!
+//! // 4. Merge consecutive turns from the same speaker (500 ms gap threshold).
+//! let merged = merge_consecutive_turns(&result);
+//! // Alice's two turns are within 500 ms of each other and get merged.
+//! assert_eq!(merged.len(), 2);
+//!
+//! // 5. Query dominant speaker and per-speaker statistics.
+//! //    Alice: 0–3 000 ms + 3 200–5 000 ms = 4 800 ms total
+//! //    Bob  : 5 500–9 000 ms               = 3 500 ms total
+//! let stats = speaker_stats(&result);
+//! let alice_time = stats[&0].total_time_ms;
+//! let bob_time   = stats[&1].total_time_ms;
+//! assert!(alice_time > bob_time, "Alice spoke more ({alice_time}ms vs {bob_time}ms)");
+//! let dom = dominant_speaker(&result);
+//! assert_eq!(dom, Some(0)); // Alice is the dominant speaker
+//!
+//! // 6. Format a display label.
+//! let label = format_speaker_label(&result.speakers[&0]);
+//! assert_eq!(label, "Alice");
+//! let label_unknown = format_speaker_label(&Speaker { id: 99, name: None,
+//!                                                     gender: None, language: None });
+//! assert_eq!(label_unknown, "Speaker 99");
+//! ```
+//!
+//! ## Crosstalk Detection
+//!
+//! [`CrosstalkDetector`] finds overlapping turns — sections where two speakers
+//! are active at the same time.  By default any strict overlap is reported.
+//! Use [`CrosstalkDetector::with_overlap_tolerance`] to ignore tiny boundary
+//! artefacts (e.g., `0.05` means the overlap must cover at least 5 % of the
+//! shorter turn before it is reported).
+//!
+//! ```rust
+//! use oximedia_caption_gen::diarization::{CrosstalkDetector, DiarizationResult, SpeakerTurn};
+//!
+//! let mut result = DiarizationResult::new();
+//! result.turns.push(SpeakerTurn { speaker_id: 0, start_ms: 0,   end_ms: 4_000 });
+//! result.turns.push(SpeakerTurn { speaker_id: 1, start_ms: 3_000, end_ms: 7_000 });
+//!
+//! let overlaps = CrosstalkDetector::new().detect(&result);
+//! assert_eq!(overlaps.len(), 1);
+//! let (a, b) = &overlaps[0];
+//! assert!(a.start_ms <= b.start_ms);
+//! ```
 
 use crate::alignment::CaptionBlock;
 use std::collections::HashMap;

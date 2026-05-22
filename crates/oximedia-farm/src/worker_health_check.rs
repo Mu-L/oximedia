@@ -841,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_worker_by_heartbeat_time_closest_match() {
+    fn test_find_worker_by_heartbeat_time_exact_match() {
         let mut reg = default_registry();
         let w1 = worker(10);
         let w2 = worker(11);

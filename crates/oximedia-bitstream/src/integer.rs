@@ -197,7 +197,7 @@ pub trait VBRInteger: Integer {
 ///
 /// # Example
 /// ```
-/// use bitstream_io::{BitReader, BitRead, BigEndian};
+/// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
 ///
 /// #[derive(Debug, PartialEq, Eq)]
 /// struct Flags {
@@ -426,7 +426,7 @@ pub trait UnsignedInteger: Numeric {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::UnsignedInteger;
+    /// use oximedia_bitstream::UnsignedInteger;
     /// assert_eq!(0b00000001u8.as_non_negative(), 1i8);
     /// ```
     fn as_non_negative(self) -> Self::Signed;
@@ -438,7 +438,7 @@ pub trait UnsignedInteger: Numeric {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::UnsignedInteger;
+    /// use oximedia_bitstream::UnsignedInteger;
     /// assert_eq!(0b01111111u8.as_negative(8), -1i8);
     /// ```
     fn as_negative(self, bits: u32) -> Self::Signed;
@@ -448,7 +448,7 @@ pub trait UnsignedInteger: Numeric {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::UnsignedInteger;
+    /// use oximedia_bitstream::UnsignedInteger;
     /// assert_eq!(0b01111111u8.as_negative_fixed::<8>(), -1i8);
     /// ```
     fn as_negative_fixed<const BITS: u32>(self) -> Self::Signed;
@@ -579,7 +579,7 @@ macro_rules! define_unsigned_integer {
         ///
         /// # Examples
         /// ```
-        /// use bitstream_io::{BitReader, BitRead, BigEndian};
+        /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
         /// use core::num::NonZero;
         ///
         /// let data: &[u8] = &[0b001_00000];
@@ -590,7 +590,7 @@ macro_rules! define_unsigned_integer {
         /// ```
         ///
         /// ```
-        /// use bitstream_io::{BitWriter, BitWrite, BigEndian};
+        /// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian};
         /// use core::num::NonZero;
         ///
         /// let mut w = BitWriter::endian(vec![], BigEndian);
@@ -787,7 +787,7 @@ pub trait SignedInteger: Numeric {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::SignedInteger;
+    /// use oximedia_bitstream::SignedInteger;
     /// assert!(!1i8.is_negative());
     /// assert!((-1i8).is_negative());
     /// ```
@@ -799,7 +799,7 @@ pub trait SignedInteger: Numeric {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::SignedInteger;
+    /// use oximedia_bitstream::SignedInteger;
     /// assert_eq!(1i8.as_non_negative(), 0b00000001u8);
     /// ```
     fn as_non_negative(self) -> Self::Unsigned;
@@ -811,7 +811,7 @@ pub trait SignedInteger: Numeric {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::SignedInteger;
+    /// use oximedia_bitstream::SignedInteger;
     /// assert_eq!((-1i8).as_negative(8), 0b01111111u8);
     /// ```
     fn as_negative(self, bits: u32) -> Self::Unsigned;
@@ -821,7 +821,7 @@ pub trait SignedInteger: Numeric {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::SignedInteger;
+    /// use oximedia_bitstream::SignedInteger;
     /// assert_eq!((-1i8).as_negative_fixed::<8>(), 0b01111111u8);
     /// ```
     fn as_negative_fixed<const BITS: u32>(self) -> Self::Unsigned;

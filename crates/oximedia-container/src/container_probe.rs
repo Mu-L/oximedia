@@ -783,6 +783,345 @@ use crate::container_probe_parsers::{
     read_u32_be, read_u64_be,
 };
 
+// ─── Detailed stream statistics ──────────────────────────────────────────────
+
+/// Per-second bitrate window statistics for one stream.
+///
+/// Produced by [`probe_detailed`].  The histogram divides the stream into
+/// 1-second windows and records the number of bits observed in each window.
+#[derive(Debug, Clone)]
+pub struct DetailedStreamStats {
+    /// Zero-based stream index (matching the ordering in [`DetailedContainerInfo::streams`]).
+    pub stream_index: usize,
+    /// Short codec name (e.g. `"av1"`, `"opus"`, `"flac"`).
+    pub codec_id: String,
+    /// Stream duration in fractional seconds (0.0 if unknown).
+    pub duration_s: f64,
+    /// Bitrate window size in seconds (always 1.0 in current implementation).
+    pub bitrate_window_s: f64,
+    /// Number of bits per window, one entry per complete second.
+    pub bitrate_histogram: Vec<u64>,
+    /// Mean bitrate across all windows (bits per second).
+    pub bitrate_mean: f64,
+    /// Median (P50) bitrate (bits per second).
+    pub bitrate_p50: f64,
+    /// 95th-percentile bitrate (bits per second).
+    pub bitrate_p95: f64,
+    /// Peak bitrate across all windows (bits per second).
+    pub bitrate_max: f64,
+    /// Sorted list of inter-keyframe intervals in seconds.  `None` for
+    /// audio/data streams where keyframes are not meaningful.
+    pub keyframe_intervals_s: Option<Vec<f64>>,
+    /// Mean inter-keyframe interval (seconds).  `None` when `keyframe_intervals_s` is `None`
+    /// or empty (fewer than two keyframes observed).
+    pub keyframe_interval_mean: Option<f64>,
+    /// Median (P50) inter-keyframe interval (seconds).
+    pub keyframe_interval_p50: Option<f64>,
+    /// 95th-percentile inter-keyframe interval (seconds).
+    pub keyframe_interval_p95: Option<f64>,
+    /// Maximum inter-keyframe interval (seconds).
+    pub keyframe_interval_max: Option<f64>,
+}
+
+/// Compute detailed per-second bitrate and keyframe-interval statistics from
+/// a raw container byte slice.
+///
+/// # Algorithm
+///
+/// 1. Runs [`MultiFormatProber::probe`] to obtain stream metadata (codec,
+///    duration, type).
+/// 2. For **MPEG-TS** data: replays the byte slice through the enhanced
+///    [`crate::demux::mpegts_enhanced::TsDemuxer`] at packet granularity, bucketing payload bytes into 1-second
+///    windows and collecting PTS timestamps of PUSI-marked video packets as
+///    keyframe proxies.
+/// 3. For all other formats: falls back to a single-bucket histogram derived
+///    from the aggregate bitrate reported by the prober, and sets
+///    `keyframe_intervals_s = None`.
+///
+/// # Errors
+///
+/// Returns an error only if `data` is empty.
+pub fn probe_detailed(data: &[u8]) -> oximedia_core::OxiResult<Vec<DetailedStreamStats>> {
+    if data.is_empty() {
+        return Err(oximedia_core::OxiError::Parse {
+            offset: 0,
+            message: "probe_detailed: empty data".into(),
+        });
+    }
+
+    // Step 1 — Coarse probe for stream metadata.
+    let base = MultiFormatProber::probe(data);
+
+    // Step 2 — Format-specific per-packet analysis.
+    if base.format == "mpeg-ts" {
+        probe_detailed_mpegts(data, &base)
+    } else {
+        probe_detailed_fallback(data, &base)
+    }
+}
+
+// ─── MPEG-TS detailed path ────────────────────────────────────────────────────
+
+fn probe_detailed_mpegts(
+    data: &[u8],
+    base: &DetailedContainerInfo,
+) -> oximedia_core::OxiResult<Vec<DetailedStreamStats>> {
+    use crate::demux::mpegts_enhanced::TsDemuxer;
+
+    const WINDOW_S: f64 = 1.0;
+    const TS_CLOCK: f64 = 90_000.0; // 90 kHz PTS clock
+
+    // Replay through the demuxer to collect per-PID per-packet data.
+    let mut demux = TsDemuxer::new();
+    let packets = demux.feed(data);
+    let si = demux.stream_info();
+
+    // Build a PID → stream-index map from PMT data.
+    let mut pid_to_idx: std::collections::HashMap<u16, usize> = std::collections::HashMap::new();
+    let mut pid_to_type: std::collections::HashMap<u16, &str> = std::collections::HashMap::new();
+    {
+        let mut stream_idx = 0usize;
+        for pmt in si.pmts.values() {
+            for ps in &pmt.streams {
+                pid_to_idx.insert(ps.elementary_pid, stream_idx);
+                pid_to_type.insert(ps.elementary_pid, stream_type_kind(ps.stream_type));
+                stream_idx += 1;
+            }
+        }
+    }
+
+    // Per-stream accumulators: (bits_per_window, keyframe_pts_list).
+    let num_streams = pid_to_idx.len();
+    let mut window_bits: Vec<Vec<u64>> = vec![Vec::new(); num_streams];
+    let mut kf_pts: Vec<Option<Vec<f64>>> = (0..num_streams)
+        .map(|i| {
+            // Determine whether this stream index is video.
+            let pid = pid_to_idx
+                .iter()
+                .find(|(_, &v)| v == i)
+                .map(|(&k, _)| k)
+                .unwrap_or(u16::MAX);
+            if pid_to_type.get(&pid).copied() == Some("video") {
+                Some(Vec::new())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Walk every parsed TS packet and accumulate statistics.
+    for pkt in &packets {
+        let idx = match pid_to_idx.get(&pkt.pid) {
+            Some(&i) => i,
+            None => continue,
+        };
+
+        // Bits contributed by this TS packet (188 bytes × 8).
+        let bits = 188u64 * 8;
+
+        // Determine the 1-second window from PTS when available.
+        let window_idx = if let Some(pts) = pkt.pts {
+            // pts is in 90 kHz ticks; divide by 90000 to get seconds.
+            (pts as f64 / TS_CLOCK / WINDOW_S) as usize
+        } else {
+            // No PTS on this packet — use current window count as a proxy.
+            window_bits[idx].len()
+        };
+
+        // Grow the window vector if needed.
+        if window_idx >= window_bits[idx].len() {
+            window_bits[idx].resize(window_idx + 1, 0);
+        }
+        window_bits[idx][window_idx] += bits;
+
+        // Keyframe proxy: PUSI on video streams.
+        if pkt.payload_unit_start {
+            if let Some(ref mut kf_list) = kf_pts[idx] {
+                if let Some(pts) = pkt.pts {
+                    kf_list.push(pts as f64 / TS_CLOCK);
+                }
+            }
+        }
+    }
+
+    // Build output statistics per stream.
+    let mut stats: Vec<DetailedStreamStats> = Vec::with_capacity(num_streams);
+
+    for stream_idx in 0..num_streams {
+        // Codec and duration from the base probe.
+        let base_stream = base.streams.get(stream_idx);
+        let codec_id = base_stream
+            .map(|s| s.codec.clone())
+            .unwrap_or_else(|| "unknown".into());
+        let duration_s = base_stream
+            .and_then(|s| s.duration_ms)
+            .map(|ms| ms as f64 / 1000.0)
+            .unwrap_or(0.0);
+
+        let histogram = window_bits[stream_idx].clone();
+        let (mean, p50, p95, max) = bitrate_percentiles(&histogram);
+
+        // Keyframe interval computation.
+        let (kf_intervals, kf_mean, kf_p50, kf_p95, kf_max) =
+            compute_kf_interval_stats(kf_pts[stream_idx].as_deref());
+
+        stats.push(DetailedStreamStats {
+            stream_index: stream_idx,
+            codec_id,
+            duration_s,
+            bitrate_window_s: WINDOW_S,
+            bitrate_histogram: histogram,
+            bitrate_mean: mean,
+            bitrate_p50: p50,
+            bitrate_p95: p95,
+            bitrate_max: max,
+            keyframe_intervals_s: kf_intervals,
+            keyframe_interval_mean: kf_mean,
+            keyframe_interval_p50: kf_p50,
+            keyframe_interval_p95: kf_p95,
+            keyframe_interval_max: kf_max,
+        });
+    }
+
+    Ok(stats)
+}
+
+// ─── Fallback path (non-MPEG-TS) ─────────────────────────────────────────────
+
+fn probe_detailed_fallback(
+    _data: &[u8],
+    base: &DetailedContainerInfo,
+) -> oximedia_core::OxiResult<Vec<DetailedStreamStats>> {
+    let mut stats = Vec::with_capacity(base.streams.len());
+
+    for (idx, stream) in base.streams.iter().enumerate() {
+        // Build a single-bucket histogram from overall average bitrate when available.
+        let histogram = if let Some(kbps) = stream.bitrate_kbps {
+            vec![u64::from(kbps) * 1000]
+        } else if let (Some(kbps), Some(dur_ms)) = (base.bitrate_kbps, base.duration_ms) {
+            // Distribute overall bitrate across duration.
+            let n_windows = ((dur_ms as f64 / 1000.0).ceil() as usize).max(1);
+            vec![u64::from(kbps) * 1000; n_windows]
+        } else {
+            Vec::new()
+        };
+
+        let (mean, p50, p95, max) = bitrate_percentiles(&histogram);
+        let duration_s = stream
+            .duration_ms
+            .or(base.duration_ms)
+            .map(|ms| ms as f64 / 1000.0)
+            .unwrap_or(0.0);
+
+        stats.push(DetailedStreamStats {
+            stream_index: idx,
+            codec_id: stream.codec.clone(),
+            duration_s,
+            bitrate_window_s: 1.0,
+            bitrate_histogram: histogram,
+            bitrate_mean: mean,
+            bitrate_p50: p50,
+            bitrate_p95: p95,
+            bitrate_max: max,
+            keyframe_intervals_s: None,
+            keyframe_interval_mean: None,
+            keyframe_interval_p50: None,
+            keyframe_interval_p95: None,
+            keyframe_interval_max: None,
+        });
+    }
+
+    Ok(stats)
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Maps an ISO 13818-1 stream-type byte to `"video"`, `"audio"`, or `"data"`.
+fn stream_type_kind(st: u8) -> &'static str {
+    match st {
+        0x85 | 0x84 | 0x83 | 0x1B | 0x24 => "video",
+        0x81 | 0x82 | 0x80 | 0x03 | 0x04 | 0x0F | 0x11 => "audio",
+        _ => "data",
+    }
+}
+
+/// Computes (mean, p50, p95, max) of a histogram of `u64` bit-count values.
+///
+/// All output values are in the same unit as the input (bits per window).
+/// Returns `(0.0, 0.0, 0.0, 0.0)` if `histogram` is empty.
+#[allow(clippy::cast_precision_loss)]
+fn bitrate_percentiles(histogram: &[u64]) -> (f64, f64, f64, f64) {
+    if histogram.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    let mean = histogram.iter().sum::<u64>() as f64 / histogram.len() as f64;
+    let max = *histogram.iter().max().unwrap_or(&0) as f64;
+
+    let mut sorted: Vec<f64> = histogram.iter().map(|&v| v as f64).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let p50 = percentile(&sorted, 0.50);
+    let p95 = percentile(&sorted, 0.95);
+
+    (mean, p50, p95, max)
+}
+
+/// Derives keyframe interval statistics from an optional list of keyframe timestamps.
+///
+/// Returns `(intervals, mean, p50, p95, max)` — all `None` when `kf_timestamps`
+/// is `None` or has fewer than two entries.
+#[allow(clippy::cast_precision_loss)]
+fn compute_kf_interval_stats(
+    kf_timestamps: Option<&[f64]>,
+) -> (
+    Option<Vec<f64>>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+) {
+    let Some(ts) = kf_timestamps else {
+        return (None, None, None, None, None);
+    };
+    if ts.len() < 2 {
+        return (Some(Vec::new()), None, None, None, None);
+    }
+
+    let mut intervals: Vec<f64> = ts.windows(2).map(|w| w[1] - w[0]).collect();
+    intervals.retain(|&v| v >= 0.0);
+    intervals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    if intervals.is_empty() {
+        return (Some(Vec::new()), None, None, None, None);
+    }
+
+    let mean = intervals.iter().sum::<f64>() / intervals.len() as f64;
+    let max = intervals.last().copied();
+    let p50 = percentile(&intervals, 0.50);
+    let p95 = percentile(&intervals, 0.95);
+
+    (Some(intervals), Some(mean), Some(p50), Some(p95), max)
+}
+
+/// Computes the `p`-th percentile (0.0–1.0) of a **pre-sorted** slice using
+/// linear interpolation between neighbours.
+///
+/// Returns 0.0 for empty slices; returns `sorted[0]` for single-element slices.
+#[allow(clippy::cast_precision_loss)]
+pub fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let idx = p * (sorted.len() - 1) as f64;
+    let lo = idx.floor() as usize;
+    let hi = (lo + 1).min(sorted.len() - 1);
+    let frac = idx - lo as f64;
+    sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+}
+
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
@@ -1375,5 +1714,243 @@ mod tests {
 
         let result = check_container_integrity(&data);
         assert!(result.score < 1.0);
+    }
+
+    // ─── probe_detailed and percentile tests ─────────────────────────────────
+
+    // 43. percentile on empty slice returns 0.0
+    #[test]
+    fn test_percentile_empty() {
+        assert_eq!(percentile(&[], 0.5), 0.0);
+    }
+
+    // 44. percentile on single-element slice
+    #[test]
+    fn test_percentile_single() {
+        assert_eq!(percentile(&[42.0], 0.0), 42.0);
+        assert_eq!(percentile(&[42.0], 1.0), 42.0);
+    }
+
+    // 45. percentile on five-element slice
+    #[test]
+    fn test_percentile_five_elements() {
+        let data = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(percentile(&data, 0.0), 1.0);
+        assert_eq!(percentile(&data, 1.0), 5.0);
+        let p50 = percentile(&data, 0.5);
+        assert!((p50 - 3.0).abs() < 1e-9, "p50={p50}");
+    }
+
+    // 46. percentile linear interpolation
+    #[test]
+    fn test_percentile_interpolation() {
+        let data = [0.0, 10.0];
+        let p25 = percentile(&data, 0.25);
+        assert!((p25 - 2.5).abs() < 1e-9, "p25={p25}");
+        let p75 = percentile(&data, 0.75);
+        assert!((p75 - 7.5).abs() < 1e-9, "p75={p75}");
+    }
+
+    // 47. probe_detailed returns Err on empty slice
+    #[test]
+    fn test_probe_detailed_empty_error() {
+        let result = probe_detailed(&[]);
+        assert!(result.is_err());
+    }
+
+    // 48. probe_detailed on WAV returns Ok with one stream
+    #[test]
+    fn test_probe_detailed_wav_single_stream() {
+        // Minimal WAV: 44100 Hz, mono, 16-bit, 44100 samples = 1 second
+        let pcm_bytes: u32 = 44100 * 2;
+        let total: u32 = 36 + pcm_bytes;
+        let mut data = Vec::new();
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&total.to_le_bytes());
+        data.extend_from_slice(b"WAVE");
+        data.extend_from_slice(b"fmt ");
+        data.extend_from_slice(&16u32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        data.extend_from_slice(&1u16.to_le_bytes()); // mono
+        data.extend_from_slice(&44100u32.to_le_bytes());
+        data.extend_from_slice(&(44100u32 * 2).to_le_bytes());
+        data.extend_from_slice(&2u16.to_le_bytes());
+        data.extend_from_slice(&16u16.to_le_bytes());
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&pcm_bytes.to_le_bytes());
+        data.extend(vec![0u8; pcm_bytes as usize]);
+
+        let stats = probe_detailed(&data).expect("probe_detailed should succeed on WAV");
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].stream_index, 0);
+        assert_eq!(stats[0].codec_id, "pcm");
+        // Audio stream: keyframe intervals not applicable
+        assert!(stats[0].keyframe_intervals_s.is_none());
+        // bitrate_window_s should be 1.0
+        assert!((stats[0].bitrate_window_s - 1.0).abs() < f64::EPSILON);
+    }
+
+    // 49. probe_detailed on unknown data returns Ok with empty stream list
+    #[test]
+    fn test_probe_detailed_unknown_format_empty_streams() {
+        // Random bytes that won't match any format
+        let data = [0xFF_u8; 64];
+        let stats = probe_detailed(&data).expect("probe_detailed should succeed on unknown data");
+        // MultiFormatProber returns format="unknown" with no streams
+        assert!(stats.is_empty());
+    }
+
+    // 50. probe_detailed on FLAC populates codec_id = "flac"
+    #[test]
+    fn test_probe_detailed_flac_codec() {
+        // Minimal FLAC: fLaC + STREAMINFO block
+        let mut data = Vec::new();
+        data.extend_from_slice(b"fLaC");
+        // Block header: last=0, type=0, length=34
+        data.push(0x00);
+        data.push(0x00);
+        data.push(0x00);
+        data.push(0x22); // 34
+                         // STREAMINFO (34 bytes): first 10 bytes zeros then sample_rate/channels/bps
+        data.extend_from_slice(&[0u8; 10]);
+        data.push(0xAC); // sample_rate high
+        data.push(0x44);
+        data.push(0x42);
+        data.push(0xF0);
+        data.extend_from_slice(&[0u8; 20]);
+
+        let stats = probe_detailed(&data).expect("probe_detailed should succeed on FLAC");
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].codec_id, "flac");
+    }
+
+    // 51. DetailedStreamStats has expected fields and defaults
+    #[test]
+    fn test_detailed_stream_stats_fields() {
+        let s = DetailedStreamStats {
+            stream_index: 2,
+            codec_id: "av1".into(),
+            duration_s: 10.5,
+            bitrate_window_s: 1.0,
+            bitrate_histogram: vec![1_000_000, 2_000_000],
+            bitrate_mean: 1_500_000.0,
+            bitrate_p50: 1_500_000.0,
+            bitrate_p95: 1_900_000.0,
+            bitrate_max: 2_000_000.0,
+            keyframe_intervals_s: Some(vec![2.0, 2.0, 2.0]),
+            keyframe_interval_mean: Some(2.0),
+            keyframe_interval_p50: Some(2.0),
+            keyframe_interval_p95: Some(2.0),
+            keyframe_interval_max: Some(2.0),
+        };
+        assert_eq!(s.stream_index, 2);
+        assert_eq!(s.codec_id, "av1");
+        assert!((s.duration_s - 10.5).abs() < f64::EPSILON);
+        assert_eq!(s.bitrate_histogram.len(), 2);
+        assert!(s.keyframe_intervals_s.is_some());
+    }
+
+    // 52. probe_detailed on MPEG-TS data with a synthetic packet sequence
+    #[test]
+    fn test_probe_detailed_mpegts_synthetic() {
+        // Build a minimal MPEG-TS stream:
+        // PAT + PMT (one video stream on PID 0x100) + a few data packets.
+        let mut data = Vec::new();
+
+        // Helper: build a 188-byte TS packet with given PID, PUSI, payload
+        let make_ts_pkt = |pid: u16, pusi: bool, payload: &[u8]| -> [u8; 188] {
+            let mut pkt = [0u8; 188];
+            pkt[0] = 0x47;
+            pkt[1] = (if pusi { 0x40 } else { 0x00 }) | ((pid >> 8) as u8 & 0x1F);
+            pkt[2] = (pid & 0xFF) as u8;
+            pkt[3] = 0x10; // payload only, no adaptation
+            let copy_len = payload.len().min(184);
+            pkt[4..4 + copy_len].copy_from_slice(&payload[..copy_len]);
+            pkt
+        };
+
+        // PAT packet (PID 0x0000): points program 1 to PMT PID 0x0010
+        let mut pat_payload = vec![0u8; 184];
+        pat_payload[0] = 0x00; // pointer field
+        pat_payload[1] = 0x00; // table_id = 0 (PAT)
+        pat_payload[2] = 0xB0; // section_syntax + section_length high
+        pat_payload[3] = 0x0D; // section_length = 13 (5 fixed + 4 CRC + 4 entry)
+        pat_payload[4] = 0x00;
+        pat_payload[5] = 0x01; // transport_stream_id = 1
+        pat_payload[6] = 0xC1; // version + current_next
+        pat_payload[7] = 0x00; // section_number
+        pat_payload[8] = 0x00; // last_section_number
+        pat_payload[9] = 0x00;
+        pat_payload[10] = 0x01; // program_number = 1
+        pat_payload[11] = 0xE0 | 0x00;
+        pat_payload[12] = 0x10; // pmt_pid = 0x0010
+                                // CRC (ignored by TsDemuxer)
+        data.extend_from_slice(&make_ts_pkt(0x0000, true, &pat_payload));
+
+        // PMT packet (PID 0x0010): video stream type 0x85 (AV1) on PID 0x0100
+        let mut pmt_payload = vec![0u8; 184];
+        pmt_payload[0] = 0x00; // pointer
+        pmt_payload[1] = 0x02; // table_id = 2 (PMT)
+        pmt_payload[2] = 0xB0;
+        pmt_payload[3] = 0x12; // section_length = 18
+        pmt_payload[4] = 0x00;
+        pmt_payload[5] = 0x01; // program_number
+        pmt_payload[6] = 0xC1;
+        pmt_payload[7] = 0x00;
+        pmt_payload[8] = 0x00;
+        pmt_payload[9] = 0xE1; // PCR PID high
+        pmt_payload[10] = 0x00; // PCR PID = 0x100
+        pmt_payload[11] = 0xF0;
+        pmt_payload[12] = 0x00; // program_info_length = 0
+                                // Stream entry: type=0x85 (AV1 video), PID=0x0100
+        pmt_payload[13] = 0x85;
+        pmt_payload[14] = 0xE1;
+        pmt_payload[15] = 0x00; // elementary PID = 0x100
+        pmt_payload[16] = 0xF0;
+        pmt_payload[17] = 0x00; // ES info length = 0
+                                // CRC
+        data.extend_from_slice(&make_ts_pkt(0x0010, true, &pmt_payload));
+
+        // Two video packets with PTS (PID 0x0100)
+        // PES header with PTS 90000 (= 1s)
+        let mut pes1 = vec![0u8; 184];
+        pes1[0] = 0x00;
+        pes1[1] = 0x00;
+        pes1[2] = 0x01; // start code
+        pes1[3] = 0xE0; // stream_id = video
+        pes1[4] = 0x00;
+        pes1[5] = 0x00; // PES packet length = 0 (unbounded)
+        pes1[6] = 0x80; // flags: PTS present
+        pes1[7] = 0x80; // PTS_DTS_flags: PTS only
+        pes1[8] = 0x05; // header_data_length
+                        // PTS = 90000 (1 second): encode in 5 bytes
+        let pts1: u64 = 90_000;
+        pes1[9] = 0x21 | (((pts1 >> 29) & 0x0E) as u8);
+        pes1[10] = ((pts1 >> 22) & 0xFF) as u8;
+        pes1[11] = (((pts1 >> 14) & 0xFE) as u8) | 0x01;
+        pes1[12] = ((pts1 >> 7) & 0xFF) as u8;
+        pes1[13] = (((pts1 & 0x7F) << 1) as u8) | 0x01;
+        data.extend_from_slice(&make_ts_pkt(0x0100, true, &pes1));
+
+        // Second video packet PTS = 270000 (= 3s)
+        let mut pes2 = pes1.clone();
+        let pts2: u64 = 270_000;
+        pes2[9] = 0x21 | (((pts2 >> 29) & 0x0E) as u8);
+        pes2[10] = ((pts2 >> 22) & 0xFF) as u8;
+        pes2[11] = (((pts2 >> 14) & 0xFE) as u8) | 0x01;
+        pes2[12] = ((pts2 >> 7) & 0xFF) as u8;
+        pes2[13] = (((pts2 & 0x7F) << 1) as u8) | 0x01;
+        data.extend_from_slice(&make_ts_pkt(0x0100, true, &pes2));
+
+        let stats = probe_detailed(&data).expect("probe_detailed should succeed on TS");
+        // Should have at least one stream.
+        assert!(!stats.is_empty(), "Expected at least one stream");
+
+        // The video stream should have a non-empty histogram.
+        let video_stat = stats.iter().find(|s| !s.bitrate_histogram.is_empty());
+        assert!(
+            video_stat.is_some(),
+            "Expected at least one stream with non-empty bitrate histogram"
+        );
     }
 }

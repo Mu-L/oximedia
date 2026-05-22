@@ -2,7 +2,7 @@
 
 pub mod tonemapping;
 
-pub use tonemapping::{ToneMapper, ToneMappingOperator};
+pub use tonemapping::{ToneCurve, ToneMapper, ToneMappingOperator};
 
 use oximedia_core::hdr::TransferCharacteristic;
 

@@ -556,3 +556,172 @@ mod tests {
         assert_eq!(track.name, "Dialogue");
     }
 }
+
+// ── Sample-rate conversion ────────────────────────────────────────────────────
+
+/// Convert `samples` from `from_rate` Hz to `to_rate` Hz using a high-quality
+/// polyphase sinc resampler (rubato SincAsync under the hood).
+///
+/// When the rates are equal the input slice is returned unchanged (zero-copy
+/// clone).  Mono-only: the function treats `samples` as a single channel.
+///
+/// # Errors
+///
+/// Returns [`AudioPostError::InvalidSampleRate`] for a zero `from_rate` or
+/// `to_rate`, and [`AudioPostError::InvalidBufferSize`] for an empty input.
+/// Internal rubato errors are wrapped in [`AudioPostError::Generic`].
+#[allow(clippy::cast_precision_loss)]
+pub fn convert_sample_rate(
+    samples: &[f32],
+    from_rate: u32,
+    to_rate: u32,
+) -> AudioPostResult<Vec<f32>> {
+    if from_rate == 0 {
+        return Err(AudioPostError::InvalidSampleRate(from_rate));
+    }
+    if to_rate == 0 {
+        return Err(AudioPostError::InvalidSampleRate(to_rate));
+    }
+    if samples.is_empty() {
+        return Err(AudioPostError::InvalidBufferSize(0));
+    }
+
+    // Identity case – avoid any allocation beyond the clone.
+    if from_rate == to_rate {
+        return Ok(samples.to_vec());
+    }
+
+    use rubato::audioadapter::Adapter as AudioAdapter;
+    use rubato::audioadapter_buffers::owned::InterleavedOwned;
+    use rubato::{
+        Async, FixedAsync, Resampler as RubatoResampler, SincInterpolationParameters,
+        SincInterpolationType, WindowFunction,
+    };
+
+    let ratio = f64::from(to_rate) / f64::from(from_rate);
+    let input_len = samples.len();
+
+    // Chunk size: use 1024 input frames per call — large enough for good
+    // anti-aliasing convergence, small enough to avoid excessive latency.
+    let chunk_size = 1024_usize;
+
+    let sinc_params = SincInterpolationParameters {
+        sinc_len: 128,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Cubic,
+        oversampling_factor: 256,
+        window: WindowFunction::BlackmanHarris2,
+    };
+
+    let mut resampler =
+        Async::<f32>::new_sinc(ratio, 2.0, &sinc_params, chunk_size, 1, FixedAsync::Input)
+            .map_err(|e| AudioPostError::Generic(format!("Resampler creation failed: {e}")))?;
+
+    // Wrap the input slice in a mono InterleavedOwned (1 channel).
+    let input_buf = InterleavedOwned::new_from(samples.to_vec(), 1, input_len)
+        .map_err(|e| AudioPostError::Generic(format!("Input buffer construction failed: {e}")))?;
+
+    // Allocate output buffer of the required size.
+    let output_needed = resampler.process_all_needed_output_len(input_len);
+    let mut output_buf = InterleavedOwned::new(0.0_f32, 1, output_needed);
+
+    let (_in_consumed, out_written) = resampler
+        .process_all_into_buffer(&input_buf, &mut output_buf, input_len, None)
+        .map_err(|e| AudioPostError::Generic(format!("Resampling failed: {e}")))?;
+
+    // Collect the written output frames into a flat Vec<f32>.
+    let mut output = Vec::with_capacity(out_written);
+    for frame in 0..out_written {
+        if let Some(s) = output_buf.read_sample(0, frame) {
+            output.push(s);
+        }
+    }
+
+    Ok(output)
+}
+
+// ── Loudness normalisation ─────────────────────────────────────────────────────
+
+/// Configuration for EBU R128 loudness normalisation.
+#[derive(Debug, Clone)]
+pub struct DeliveryConfig {
+    /// Target integrated loudness in LUFS (default −23.0 for broadcast).
+    pub target_lufs: f32,
+    /// Maximum true-peak level in dBTP (default −1.0).
+    pub max_true_peak_dbtp: f32,
+    /// Tolerance window around the target (default 0.5 LU).
+    pub tolerance_lu: f32,
+}
+
+impl Default for DeliveryConfig {
+    fn default() -> Self {
+        Self {
+            target_lufs: -23.0,
+            max_true_peak_dbtp: -1.0,
+            tolerance_lu: 0.5,
+        }
+    }
+}
+
+/// Normalise `samples` to the integrated loudness specified in `config`.
+///
+/// The function:
+/// 1. Measures the current integrated LUFS via EBU R128 gated metering.
+/// 2. Computes the linear gain required to reach `config.target_lufs`.
+/// 3. Applies the gain, then clamps the output so no sample exceeds
+///    the linear amplitude corresponding to `config.max_true_peak_dbtp`.
+///
+/// If the input is already within `config.tolerance_lu` of the target,
+/// the audio is returned unchanged.
+///
+/// # Errors
+///
+/// Returns [`AudioPostError::InvalidSampleRate`] for a zero sample rate or
+/// [`AudioPostError::InvalidBufferSize`] for empty input.
+/// Signals that are too short or too quiet for EBU R128 gating are passed
+/// through unchanged (not treated as errors).
+#[allow(clippy::cast_precision_loss)]
+pub fn normalize_loudness(
+    samples: &[f32],
+    sample_rate: u32,
+    config: &DeliveryConfig,
+) -> AudioPostResult<Vec<f32>> {
+    if sample_rate == 0 {
+        return Err(AudioPostError::InvalidSampleRate(sample_rate));
+    }
+    if samples.is_empty() {
+        return Err(AudioPostError::InvalidBufferSize(0));
+    }
+
+    // Measure current integrated LUFS.
+    let measurement =
+        oximedia_audio::loudness_gating::GatedLoudnessMeter::measure(samples, sample_rate, 1);
+    let current_lufs = measurement.integrated_lufs as f32;
+
+    // If the signal is too short or silent for reliable gating (LUFS is non-finite
+    // or below -70 LUFS), pass through unchanged rather than propagating an error.
+    // Loudness normalisation requires at least one 400 ms gating block to be meaningful.
+    if !current_lufs.is_finite() || current_lufs < -70.0 {
+        return Ok(samples.to_vec());
+    }
+
+    // Skip if already within tolerance.
+    let delta = (current_lufs - config.target_lufs).abs();
+    if delta <= config.tolerance_lu {
+        return Ok(samples.to_vec());
+    }
+
+    // Compute linear gain from dB difference.
+    let gain_db = config.target_lufs - current_lufs;
+    let gain = 10.0_f32.powf(gain_db / 20.0);
+
+    // Maximum linear amplitude permitted by true-peak ceiling.
+    let peak_ceiling = 10.0_f32.powf(config.max_true_peak_dbtp / 20.0);
+
+    let output: Vec<f32> = samples
+        .iter()
+        .map(|&s| (s * gain).clamp(-peak_ceiling, peak_ceiling))
+        .collect();
+
+    Ok(output)
+}

@@ -6,41 +6,51 @@
 - Exports: `WordTimestamp`, `TranscriptSegment`, `CaptionBlock`, `LineBreakConfig`, `WcagChecker`, `Speaker`, `SpeakerTurn`
 
 ## Enhancements
-- [ ] Add word-level confidence scores to `alignment::WordTimestamp` for quality-aware caption display
-- [ ] Extend `line_breaking::optimal_break` with language-aware hyphenation (CJK line break rules)
-- [ ] Add `wcag` check for maximum simultaneous on-screen caption count (accessibility guideline)
-- [ ] Improve `diarization::merge_consecutive_turns` with configurable silence gap threshold
-- [ ] Add `alignment::split_long_segments` support for splitting at sentence boundaries (not just duration)
-- [ ] Extend `line_breaking::LineBreakConfig` with maximum characters-per-line constraint
-- [ ] Add reading speed validation for different target audiences (children vs adults) in `wcag`
-- [ ] Improve `diarization::CrosstalkDetector` with adjustable overlap tolerance percentage
+- [x] Add word-level confidence scores to `alignment::WordTimestamp` for quality-aware caption display (verified 2026-05-16; src/alignment.rs:13 pub confidence: f32, word_confidence: f32)
+- [x] Extend `line_breaking::optimal_break` with language-aware hyphenation (CJK line break rules) (verified 2026-05-16; src/line_breaking.rs:142 CJK line breaking, cjk_break:189, language_aware_break:234)
+- [x] Add `wcag` check for maximum simultaneous on-screen caption count (accessibility guideline) (verified 2026-05-16; src/wcag.rs:295 check_max_simultaneous_captions)
+- [x] Improve `diarization::merge_consecutive_turns` with configurable silence gap threshold (verified 2026-05-16; src/diarization.rs:136 merge_consecutive_turns_with_gap with max_gap_ms)
+- [x] Add `alignment::split_long_segments` support for splitting at sentence boundaries (not just duration) (verified 2026-05-16; src/alignment.rs:279 split_long_segments, find_sentence_boundary:372)
+- [x] Extend `line_breaking::LineBreakConfig` with maximum characters-per-line constraint (verified 2026-05-16; src/line_breaking.rs:8 LineBreakConfig, max_chars_per_line field, effective_max_chars:37)
+- [x] Add reading speed validation for different target audiences (children vs adults) in `wcag` (verified 2026-05-16; src/wcag.rs:334 check_cps_for_audience with AudienceProfile)
+- [x] Improve `diarization::CrosstalkDetector` with adjustable overlap tolerance percentage (verified 2026-05-16; src/diarization.rs:279 with_overlap_tolerance, tolerance filter:319)
 
 ## New Features
 - [x] Add `forced_narrative` module for identifying and marking forced narrative subtitles (FN/SDH)
 - [x] Implement `caption_format_adapter` module converting `CaptionBlock` to SRT/VTT/TTML output strings
-- [ ] Add `punctuation_restoration` module for adding punctuation to raw ASR transcript output
-- [ ] Implement `language_detect` module to auto-detect transcript language for locale-aware line breaking
+- [x] Add `punctuation_restoration` module for adding punctuation to raw ASR transcript output (verified 2026-05-16; src/punctuation_restoration.rs:702 lines PunctuationRestorer)
+- [x] Implement `language_detect` module to auto-detect transcript language for locale-aware line breaking (verified 2026-05-16; src/language_detect.rs:757 lines LanguageDetector)
 - [x] Add `caption_timing_adjuster` module for shifting/stretching caption timings to match edited video
-- [ ] Implement `caption_diff` module for comparing two caption tracks and highlighting differences
-- [ ] Add `style_generator` module suggesting font size, position, colors based on video content analysis
-- [ ] Implement `multi_language` module for bilingual caption layout (primary + secondary language)
+- [x] Implement `caption_diff` module for comparing two caption tracks and highlighting differences (verified 2026-05-16; src/caption_diff.rs:528 lines CaptionDiff)
+- [x] Add `style_generator` module suggesting font size, position, colors based on video content analysis (verified 2026-05-16; src/style_generator.rs:563 lines StyleGenerator)
+- [x] Implement `multi_language` module for bilingual caption layout (primary + secondary language) (verified 2026-05-16; src/multi_language.rs:593 lines, multi_language_sync.rs:522 lines)
 
 ## Performance
-- [ ] Optimize `optimal_break` DP algorithm with Knuth-Plass SMAWK speedup for O(n) line breaking
-- [ ] Add batch processing API to `align_to_frames` for processing multiple segments in one call
-- [ ] Cache CPS (characters-per-second) computation results in `line_breaking` for repeated re-breaks
-- [ ] Use string interning for `Speaker` labels in `diarization` to reduce allocation in large transcripts
+- [~] Optimize `optimal_break` DP algorithm with Knuth-Plass SMAWK speedup for O(n) line breaking (partial 2026-05-13; src/line_breaking.rs: `smawk_row_minima` primitive + `TotallyMonotoneMatrix` trait implemented at line 362; new `optimal_break_smawk` at line 670 uses a forward-DP / feasibility-window pruning reformulation validated against O(n²) DP across 10 000 randomised inputs. Worst-case asymptotic is still O(n²); the primitive is not yet wired into the line-breaking path because the inner DP's `f[]` is dynamic — wiring it requires Larmore-Schieber LARSCH for online concave SMAWK. Use `optimal_break_smawk` for layouts where the feasibility window stays bounded.)
+- [x] Add batch processing API to `align_to_frames` for processing multiple segments in one call (verified 2026-05-16; src/alignment.rs:175 align_to_frames_batch)
+- [x] Cache CPS (characters-per-second) computation results in `line_breaking` for repeated re-breaks (verified 2026-05-16; src/line_breaking.rs:93 CPS cache struct with intern)
+- [x] Use string interning for `Speaker` labels in `diarization` to reduce allocation in large transcripts (verified 2026-05-16; src/diarization.rs:8 SpeakerLabelPool with Arc<str> interning)
 
 ## Testing
-- [ ] Add test for `alignment::build_caption_blocks` with overlapping word timestamps
-- [ ] Test `line_breaking::optimal_break` against known Knuth-Plass reference outputs
-- [ ] Add WCAG compliance test suite with real-world caption samples that pass/fail each criterion
-- [ ] Test `diarization::assign_speakers_to_blocks` with 5+ simultaneous speakers
-- [ ] Add property-based test: `merge_short_segments` output has no segment shorter than min duration
-- [ ] Test `greedy_break` vs `optimal_break` produce identical results for single-line captions
-- [ ] Add round-trip test: split then merge segments should preserve total text content
+- [x] Add test for `alignment::build_caption_blocks` with overlapping word timestamps (implemented 2026-05-13; tests/integration.rs:224 test_alignment_overlapping_words)
+- [x] Test `line_breaking::optimal_break` against known Knuth-Plass reference outputs (implemented 2026-05-13; tests/integration.rs:252 test_optimal_break_matches_kp_reference)
+- [x] Add WCAG compliance test suite with real-world caption samples that pass/fail each criterion (implemented 2026-05-13; tests/integration.rs:294 test_wcag_compliance_suite_a_aa_aaa)
+- [x] Test `diarization::assign_speakers_to_blocks` with 5+ simultaneous speakers (implemented 2026-05-13; tests/integration.rs:336 test_diarization_5_simultaneous_speakers)
+- [x] Add property-based test: `merge_short_segments` output has no segment shorter than min duration (implemented 2026-05-13; tests/integration.rs:374 proptest test_merge_short_segments_no_segment_below_min)
+- [x] Test `greedy_break` vs `optimal_break` produce identical results for single-line captions (implemented 2026-05-13; tests/integration.rs:412 test_greedy_vs_optimal_single_line_identical)
+- [x] Add round-trip test: split then merge segments should preserve total text content (implemented 2026-05-13; tests/integration.rs:435 proptest test_split_merge_segments_text_preserved)
 
 ## Documentation
-- [ ] Document WCAG 2.1 conformance levels (A, AA, AAA) and which checks map to each level
-- [ ] Add example showing complete pipeline: word timestamps -> alignment -> line breaking -> blocks
-- [ ] Document `diarization` module usage with speaker identification metadata from ASR systems
+- [x] Document WCAG 2.1 conformance levels (A, AA, AAA) and which checks map to each level (implemented 2026-05-14)
+  - **Goal:** Module rustdoc in `src/wcag.rs` with a table listing each check function, its rule_id, WCAG SC, level, and notes. Usage example wrapping `WcagChecker::new(WcagLevel::AA).run_all_checks(...)`. Document that 1.2.5/1.2.7 are not machine-checkable.
+  - **Design:** Table: check_caption_coverage→1.2.2/A, check_live_latency→1.2.4/AA, check_sign_language→1.2.6/AAA(stub), check_cps→AA, check_min_duration→A, check_gap_duration→A, check_max_simultaneous_captions→AA, check_cps_for_audience→AA.
+  - **Files:** `crates/oximedia-caption-gen/src/wcag.rs` (top-of-file `//!` rustdoc + one doctest).
+  - **Tests:** `cargo doc -p oximedia-caption-gen --no-deps` clean. Doctest compiles.
+  - **Risk:** Doctest must not require external data — use inline test blocks.
+- [x] Add example showing complete pipeline: word timestamps -> alignment -> line breaking -> blocks (implemented 2026-05-13; src/auto_pipeline.rs:11 doctest demonstrating AsrEngine + AutoCaptionPipeline end-to-end)
+- [x] Document `diarization` module usage with speaker identification metadata from ASR systems (implemented 2026-05-14)
+  - **Goal:** Module rustdoc in `src/diarization.rs` with step-by-step doctest: build SpeakerLabelPool, construct Speakers, push SpeakerTurns, merge consecutive turns, assign to caption blocks. Cover CrosstalkDetector briefly.
+  - **Design:** Doctest uses only public alignment API. Cross-reference dominant_speaker, speaker_stats, format_speaker_label.
+  - **Files:** `crates/oximedia-caption-gen/src/diarization.rs` (top-of-file `//!` rustdoc + doctest).
+  - **Tests:** Doctest compiles + runs. `cargo doc` clean.
+  - **Risk:** Must verify CaptionBlock is accessible from doctest context.

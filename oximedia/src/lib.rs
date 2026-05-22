@@ -133,9 +133,35 @@
 //! | `vr360` | `oximedia-360` | 360° VR video: equirectangular/cubemap projections, fisheye, stereo 3D |
 //! | `analytics` | `oximedia-analytics` | Media engagement analytics: sessions, retention curves, A/B testing, scoring |
 //! | `caption-gen` | `oximedia-caption-gen` | Advanced caption generation: speech alignment, WCAG compliance, diarization |
+//! | `image-transform` | `oximedia-image-transform` | Image transformations: affine, perspective, resize, crop, rotate, color conversion, lens distortion |
+//! | `pipeline` | `oximedia-pipeline` | Declarative media processing DSL: typed filter graph, node composition, execution planning |
 //! | `mjpeg` | `oximedia-codec` (mjpeg) | Motion JPEG intra-frame video codec |
 //! | `apv` | `oximedia-codec` (apv) | APV (Advanced Professional Video) intra-frame codec (ISO/IEC 23009-13) |
 //! | `full` | all of the above | Everything enabled |
+//!
+//! ## Implicit Feature Dependencies
+//!
+//! Some features automatically activate other features:
+//!
+//! - **`normalize`** → also activates **`metering`**: enabling loudness normalization
+//!   requires the EBU R128 metering infrastructure.  Users who enable `normalize` will
+//!   find [`LoudnessMeter`](oximedia_metering::LoudnessMeter) and related types in scope
+//!   even if they did not explicitly request the `metering` feature.
+//!
+//! ## Meta-Feature Presets
+//!
+//! In addition to per-crate feature flags, OxiMedia provides convenience groupings:
+//!
+//! - **`minimal`**: `oximedia-core` + `oximedia-codec` + `oximedia-metadata` — the
+//!   smallest useful set for basic decoding without the full feature tree.
+//! - **`audio-stack`**: everything needed for a professional audio pipeline
+//!   (`audio`, `effects`, `metering`, `normalize`, `audio-analysis`, `mixer`, `audiopost`).
+//! - **`broadcast-stack`**: broadcast production tools
+//!   (`automation`, `playout`, `playlist`, `switcher`, `routing`, `graphics`, `scopes`).
+//! - **`streaming-stack`**: live streaming infrastructure
+//!   (`net`, `packager`, `drm`, `stream`, `cdn`, `cache`, `server`).
+//! - **`full`**: every optional feature enabled.
+//!
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -1451,7 +1477,37 @@ pub mod caption_gen {
 #[cfg(feature = "image-transform")]
 pub mod image_transform {
     //! Image transformation operations: resize, crop, rotate, flip, and color conversion.
+    //! Includes affine transforms, perspective correction, lens distortion, and color-space conversion.
     pub use oximedia_image_transform::*;
+}
+
+/// Declarative media processing pipeline DSL: typed filter graph, node composition, execution planning.
+///
+/// Enable with `features = ["pipeline"]`.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # #[cfg(feature = "pipeline")]
+/// # {
+/// use oximedia::pipeline::{PipelineBuilder, SourceConfig, SinkConfig};
+///
+/// let graph = PipelineBuilder::new()
+///     .source("in", SourceConfig::File("input.mp4".into()))
+///     .scale(1280, 720)
+///     .sink("out", SinkConfig::Null)
+///     .build()
+///     .expect("pipeline validation");
+/// # }
+/// ```
+#[cfg(feature = "pipeline")]
+pub mod pipeline {
+    //! Declarative media processing pipeline DSL.
+    //!
+    //! Build typed filter graphs from a fluent API or by composing nodes directly.
+    //! The execution planner topologically sorts the graph and returns an optimised
+    //! execution plan suitable for single-threaded or parallel execution.
+    pub use oximedia_pipeline::*;
 }
 
 /// Sovereign ML pipelines: Pure-Rust ONNX inference (scene classification, shot boundary

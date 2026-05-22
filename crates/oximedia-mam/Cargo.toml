@@ -15,6 +15,16 @@ readme = "README.md"
 [lints]
 workspace = true
 
+[features]
+# Pure-Rust by default: no cloud SDK is pulled in.
+default = []
+# Amazon S3 backend for `MamStorage` (s3:// URIs).
+s3 = ["oximedia-storage/s3", "dep:aws-sdk-s3", "dep:aws-config"]
+# Google Cloud Storage backend for `MamStorage` (gs:// URIs).
+gcs = ["oximedia-storage/gcs", "dep:google-cloud-storage"]
+# Azure Blob Storage backend for `MamStorage` (https://<account>.blob.core.windows.net URIs).
+azure = ["oximedia-storage/azure", "dep:azure_storage", "dep:azure_storage_blobs"]
+
 [dependencies]
 # Database
 sqlx = { workspace = true, features = ["postgres", "uuid", "chrono", "json", "migrate"] }
@@ -30,14 +40,14 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 
 # Search Engine
-tantivy = "0.26"
+tantivy = { workspace = true }
 
 # Web Framework
-actix-web = { version = "4", features = ["rustls-0_23"] }
+actix-web = { workspace = true }
 actix-rt = "2"
 
 # GraphQL
-async-graphql = { version = "7", features = ["uuid", "chrono"] }
+async-graphql = { workspace = true }
 async-graphql-actix-web = "7"
 
 # Authentication
@@ -47,6 +57,7 @@ bcrypt = "0.19"
 # Async
 tokio = { workspace = true }
 async-trait = { workspace = true }
+futures = "0.3"
 
 # Error handling
 thiserror = { workspace = true }
@@ -62,6 +73,20 @@ sha2 = { workspace = true }
 
 # HTTP client
 reqwest = { workspace = true }
+
+# Storage integration
+oximedia-storage = { workspace = true }
+oximedia-dedup = { workspace = true }
+
+# Cloud storage SDKs (optional — only pulled in by the s3/gcs/azure features)
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
+google-cloud-storage = { workspace = true, optional = true }
+azure_storage = { workspace = true, optional = true }
+azure_storage_blobs = { workspace = true, optional = true }
+
+# Filesystem watching
+notify = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

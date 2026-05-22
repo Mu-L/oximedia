@@ -14,33 +14,33 @@
 - Dependencies: oximedia-core, oximedia-container, oximedia-graph, oximedia-edl, oximedia-aaf, oximedia-audio, tokio, serde, uuid, parking_lot, chrono, dashmap, quick-xml
 
 ## Enhancements
-- [ ] Add three-point and four-point editing support in `edit::EditOperation` (mark in/out on source and timeline)
-- [ ] Extend `multicam` to support angle switching based on timecode match (not just frame position)
+- [x] Add three-point and four-point editing support in `edit::EditOperation` (mark in/out on source and timeline) (verified 2026-05-16; src/point_edit.rs:702 lines)
+- [x] Extend `multicam` to support angle switching based on timecode match (not just frame position) (verified 2026-05-16; src/multicam.rs:381 add_switch_by_timecode, sync_angles_by_timecode:486)
 - [x] Improve `snap_grid` to support magnetic snap to clip boundaries, markers, and playhead position
-- [ ] Add `clip_metadata` support for embedded media metadata (codec info, color space, audio channels)
-- [ ] Extend `transition_engine` to support asymmetric transitions (different in/out curves)
-- [ ] Add linked clip groups in `track` where moving one clip auto-moves linked clips on other tracks
-- [ ] Implement `timeline_lock` per-track locking (currently likely timeline-level) for collaborative editing
+- [x] Add `clip_metadata` support for embedded media metadata (codec info, color space, audio channels) (verified 2026-05-16; src/clip_metadata.rs:732 lines)
+- [ ] Extend `transition_engine` to support asymmetric transitions (different in/out curves) (verified-open 2026-05-16: no asymmetric/in_ease/out_ease in transition_engine.rs)
+- [x] Add linked clip groups in `track` where moving one clip auto-moves linked clips on other tracks (verified 2026-05-16; src/linked_clips.rs:541 lines)
+- [x] Implement `timeline_lock` per-track locking (currently likely timeline-level) for collaborative editing (verified 2026-05-16; src/timeline_lock.rs:122 lock_track fn, lock_range fn:107)
 - [x] Extend `keyframe_animation` with bezier curve interpolation for smooth easing
 
 ## New Features
-- [ ] Implement `proxy_workflow` module for offline/online editing with proxy media and auto-conform to full resolution
+- [x] Implement `proxy_workflow` module for offline/online editing with proxy media and auto-conform to full resolution (verified 2026-05-16; src/proxy_workflow.rs:359 lines)
 - [x] Add `adjustment_layer` module for applying effects to all tracks below without modifying individual clips
 - [x] Implement `freeze_frame` module for creating freeze frame clips from any point in a source clip
-- [ ] Add `speed_ramp` module for variable-speed effects with keyframeable speed curves (optical flow interpolation)
-- [ ] Implement `multi_select` module for group operations on multiple clips (move, trim, delete, copy)
-- [ ] Add `auto_sequence` module for automatic assembly editing based on subclip markers
-- [ ] Implement `fcpxml_export` module for Final Cut Pro XML timeline interchange format
-- [ ] Add `otio_export` module for OpenTimelineIO format support (industry-standard timeline interchange)
-- [ ] Implement `timeline_compare` module for diffing two timeline versions with visual conflict resolution
+- [x] Add `speed_ramp` module for variable-speed effects with keyframeable speed curves (optical flow interpolation) (verified 2026-05-16; src/speed_ramp.rs:530 lines)
+- [x] Implement `multi_select` module for group operations on multiple clips (move, trim, delete, copy) (verified 2026-05-16; src/multi_select.rs:395 lines)
+- [x] Add `auto_sequence` module for automatic assembly editing based on subclip markers (verified 2026-05-16; src/auto_sequence.rs:605 lines)
+- [x] Implement `fcpxml_export` module for Final Cut Pro XML timeline interchange format (verified 2026-05-16; src/fcpxml_export.rs:501 lines)
+- [x] Add `otio_export` module for OpenTimelineIO format support (industry-standard timeline interchange) (verified 2026-05-16; src/otio_export.rs:617 lines)
+- [x] Implement `timeline_compare` module for diffing two timeline versions with visual conflict resolution (verified 2026-05-16; src/timeline_compare.rs:527 lines)
 
 ## Performance
 - [x] Implement interval tree in `timeline` for O(log n) clip lookup by time position instead of linear scan
-- [ ] Add frame cache warming in `playback` that pre-renders upcoming frames based on playhead velocity
-- [ ] Use memory-mapped audio file access in `audio` mixer for large project with many audio clips
-- [ ] Implement incremental render in `renderer` that only re-composites tracks with changed clips
-- [ ] Add lazy clip loading in `import` that defers media probing until clip is first accessed on timeline
-- [ ] Parallelize multi-track rendering in `render` using rayon for compositing independent track layers
+- [x] Add frame cache warming in `playback` that pre-renders upcoming frames based on playhead velocity (verified 2026-05-16; src/cache_warming.rs:609 lines)
+- [ ] Use memory-mapped audio file access in `audio` mixer for large project with many audio clips (verified-open 2026-05-16: no mmap in audio.rs)
+- [x] Implement incremental render in `renderer` that only re-composites tracks with changed clips (verified 2026-05-16; src/incremental_render.rs:729 lines)
+- [x] Add lazy clip loading in `import` that defers media probing until clip is first accessed on timeline (verified 2026-05-16; src/lazy_clip.rs:600 lines)
+- [ ] Parallelize multi-track rendering in `render` using rayon for compositing independent track layers (verified-open 2026-05-16: no rayon/par_iter in render.rs)
 
 ## Testing
 - [ ] Add integration test for full edit workflow: create timeline -> add tracks -> insert clips -> add transition -> export EDL -> verify output

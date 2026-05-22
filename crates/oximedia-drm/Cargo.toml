@@ -25,19 +25,73 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 hex = "0.4"
 bytes = { workspace = true }
-quick-xml = { version = "0.39", features = ["serialize"] }
+quick-xml = { workspace = true, features = ["serialize"] }
 rayon = { workspace = true }
+
+# Widevine RPC transport — kept optional so non-DRM consumers do not pay
+# for hyper/tokio in their dep tree.
+async-trait = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+
+# Pure-Rust TLS stack for widevine license-server traffic.
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+rustls-rustcrypto = { workspace = true, optional = true }
 
 [features]
 default = ["clearkey"]
-widevine = []
-playready = []
-fairplay = []
+widevine = [
+    "dep:async-trait",
+    "dep:tokio",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+]
+widevine-network = [
+    "widevine",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rustls-rustcrypto",
+]
+playready = [
+    "dep:async-trait",
+    "dep:tokio",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+]
+playready-network = [
+    "playready",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rustls-rustcrypto",
+]
+fairplay = [
+    "dep:async-trait",
+    "dep:tokio",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+]
+fairplay-network = [
+    "fairplay",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:rustls-rustcrypto",
+]
+hardware-aes = []
 clearkey = []
-all-drm = ["widevine", "playready", "fairplay", "clearkey"]
+all-drm = ["widevine", "widevine-network", "playready", "playready-network", "fairplay", "fairplay-network", "clearkey", "hardware-aes"]
 
 [dev-dependencies]
 anyhow = "1.0"
+tokio = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
 
 [lib]
 name = "oximedia_drm"

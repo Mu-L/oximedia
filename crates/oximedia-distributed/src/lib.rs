@@ -5,7 +5,75 @@
 //! - Worker nodes for distributed encoding
 //! - Multiple splitting strategies (segment, tile, GOP-based)
 //! - Load balancing and fault tolerance
-//! - gRPC-based communication
+//! - TCP-based coordinator control server (JSON protocol)
+//! - WebSocket-style real-time job event notifications (broadcast channel)
+//! - Cross-region geo-aware task placement
+//! - S3/object-storage segment I/O (behind `s3` feature)
+//! - Kubernetes HPA auto-scaling hooks (behind `k8s` feature)
+//! - Raft consensus primitives with latency profiling
+//!
+//! # gRPC / TCP API
+//!
+//! The coordinator exposes a plain-text TCP control server on the configured
+//! `coordinator_addr`.  Connect with any TCP client and send newline-terminated
+//! commands:
+//!
+//! | Command  | Response                                    |
+//! |----------|---------------------------------------------|
+//! | `status` | JSON object with aggregate counters         |
+//! | `nodes`  | JSON array of registered workers            |
+//! | `jobs`   | JSON array of in-flight jobs with progress  |
+//!
+//! The protobuf/gRPC types live in [`pb`] and the full `CoordinatorService`
+//! gRPC implementation is in `coordinator::CoordinatorServiceImpl`.
+//!
+//! # Deployment Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────┐
+//! │                        Client                           │
+//! │   submit_job / job_status / cancel_job (TCP JSON RPC)   │
+//! └────────────────────────┬────────────────────────────────┘
+//!                          │
+//!                          ▼
+//! ┌─────────────────────────────────────────────────────────┐
+//! │              Coordinator (DistributedEncoder)            │
+//! │  ┌──────────────┐  ┌──────────────┐  ┌─────────────┐  │
+//! │  │ Job Scheduler│  │ Health Check │  │Circuit Break│  │
+//! │  │ (backpressure│  │    Loop      │  │    er       │  │
+//! │  │  / priority) │  │(90s timeout) │  │             │  │
+//! │  └──────────────┘  └──────────────┘  └─────────────┘  │
+//! │  ┌──────────────────────────────────────────────────┐  │
+//! │  │          NotificationBus (broadcast::channel)     │  │
+//! │  └──────────────────────────────────────────────────┘  │
+//! └────────────────────────┬────────────────────────────────┘
+//!                          │   assign / heartbeat / result
+//!          ┌───────────────┼────────────────────┐
+//!          ▼               ▼                    ▼
+//! ┌─────────────┐  ┌─────────────┐    ┌─────────────┐
+//! │  Worker 1   │  │  Worker 2   │ …  │  Worker N   │
+//! │ (us-east-1) │  │ (eu-west-1) │    │ (ap-south)  │
+//! └──────┬──────┘  └──────┬──────┘    └──────┬──────┘
+//!        │                │                   │
+//!        └────────────────┴───────────────────┘
+//!                         │ upload segments
+//!                         ▼
+//!             ┌─────────────────────┐
+//!             │   S3 / Object Store  │
+//!             │  (s3_integration)    │
+//!             └─────────────────────┘
+//! ```
+//!
+//! **Backpressure**: Workers report load via heartbeat; the coordinator
+//! withholds new assignments when a worker is saturated (see [`backpressure`]).
+//!
+//! **Circuit breaker**: Repeated worker failures trip the circuit breaker
+//! (see [`circuit_breaker`]); the coordinator stops routing jobs to that
+//! worker for a configurable cooldown period.
+//!
+//! **Geo-aware placement**: When multiple workers are available, the
+//! scheduler uses [`geo_placement::select_worker_by_region`] to prefer
+//! low-latency workers in the target region.
 
 pub mod audit_log;
 pub mod backpressure;
@@ -19,6 +87,7 @@ pub mod coordinator;
 pub mod discovery;
 pub mod distributed_enhancements;
 pub mod fault_tolerance;
+pub mod geo_placement;
 pub mod heartbeat;
 pub mod job_dag;
 pub mod job_preemption;
@@ -33,6 +102,7 @@ pub mod metrics_aggregator;
 pub mod node_health;
 pub mod node_registry;
 pub mod node_topology;
+pub mod notifications;
 pub mod partition;
 pub mod pb;
 pub mod raft_primitives;
@@ -53,6 +123,12 @@ pub mod weighted_round_robin;
 pub mod work_stealing;
 pub mod worker;
 pub mod worker_draining;
+
+#[cfg(feature = "s3")]
+pub mod s3_integration;
+
+#[cfg(feature = "k8s")]
+pub mod k8s_autoscale;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -285,19 +361,58 @@ struct JobRecord {
 /// `cancel_job` operate on real state. In a production deployment the store
 /// would be backed by the gRPC coordinator; this implementation provides a
 /// fully functional local fallback that exercises the complete lifecycle.
+///
+/// When `config.coordinator_addr` is non-empty, a background coordinator
+/// server is started on that address so workers can connect and register.
 pub struct DistributedEncoder {
     config: DistributedConfig,
     /// Job store keyed by job UUID.
     jobs: Arc<RwLock<HashMap<Uuid, JobRecord>>>,
+    /// Background coordinator server task handle, present when a server was
+    /// successfully started. Aborted on drop.
+    server_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl DistributedEncoder {
-    /// Create a new distributed encoder with the given configuration
+    /// Create a new distributed encoder with the given configuration.
+    ///
+    /// If `config.coordinator_addr` is non-empty and parses as a valid
+    /// [`std::net::SocketAddr`], a background [`coordinator::Coordinator`]
+    /// server is spawned on that address so remote workers can connect.
+    /// Failures to bind are logged as warnings and degrade gracefully —
+    /// the local job store remains fully functional regardless.
     #[must_use]
     pub fn new(config: DistributedConfig) -> Self {
+        let server_handle = if !config.coordinator_addr.is_empty() {
+            match config.coordinator_addr.parse::<std::net::SocketAddr>() {
+                Ok(addr) => {
+                    let coord = crate::coordinator::Coordinator::new(
+                        crate::coordinator::CoordinatorConfig::default(),
+                    );
+                    let handle = tokio::spawn(async move {
+                        if let Err(e) = coord.serve(addr).await {
+                            tracing::warn!("Coordinator server stopped on {}: {}", addr, e);
+                        }
+                    });
+                    Some(handle)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Invalid coordinator_addr '{}': {}",
+                        config.coordinator_addr,
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             config,
             jobs: Arc::new(RwLock::new(HashMap::new())),
+            server_handle,
         }
     }
 
@@ -591,6 +706,31 @@ impl DistributedEncoder {
             .map(|(id, record)| (*id, record.status))
             .collect()
     }
+
+    /// Submit a batch of jobs atomically.
+    ///
+    /// Attempts to submit each job in `jobs` in order.  Returns a parallel
+    /// `Vec` of `Result<Uuid>` — one entry per submitted job.  Jobs that fail
+    /// validation or exceed the concurrency limit produce `Err` entries;
+    /// successful jobs produce `Ok(job_id)`.
+    ///
+    /// The batch is *not* transactional: successful jobs submitted earlier in
+    /// the slice are committed even if a later job fails.
+    pub async fn submit_jobs_batch(&self, jobs: Vec<DistributedJob>) -> Vec<Result<Uuid>> {
+        let mut results = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            results.push(self.submit_job(job).await);
+        }
+        results
+    }
+}
+
+impl Drop for DistributedEncoder {
+    fn drop(&mut self) {
+        if let Some(handle) = self.server_handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 /// Job execution status
@@ -630,8 +770,8 @@ mod tests {
         assert_eq!(config.max_concurrent_jobs, 4);
     }
 
-    #[test]
-    fn test_encoder_creation() {
+    #[tokio::test]
+    async fn test_encoder_creation() {
         let encoder = DistributedEncoder::with_defaults();
         assert_eq!(encoder.config().coordinator_addr, "127.0.0.1:50051");
     }
@@ -988,5 +1128,58 @@ mod tests {
 
         let result = encoder.submit_job(job).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_coordinator_server_starts() {
+        // Bind an ephemeral port to discover a free port, then release it so
+        // the coordinator can bind to it.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("ephemeral port allocation must succeed");
+            l.local_addr().expect("local_addr must work").port()
+        };
+        let addr = format!("127.0.0.1:{port}");
+        let config = DistributedConfig {
+            coordinator_addr: addr.clone(),
+            ..DistributedConfig::default()
+        };
+        let encoder = DistributedEncoder::new(config);
+        // Give the background task a moment to start the TCP listener.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+        // server_handle should be set when the addr parses successfully.
+        assert!(
+            encoder.server_handle.is_some(),
+            "server_handle should be set for a valid coordinator_addr"
+        );
+        // Verify the listener is actually accepting connections on that port.
+        let connect_result = tokio::net::TcpStream::connect(addr.as_str()).await;
+        assert!(
+            connect_result.is_ok(),
+            "coordinator TCP control server should be accepting connections on {addr}"
+        );
+        // Drop must not panic.
+    }
+
+    #[tokio::test]
+    async fn test_distributed_encoder_local_fallback_still_works() {
+        // Port 1 is privileged and will fail to bind, exercising the graceful
+        // failure path.  Privileged-port bind may or may not fail depending on
+        // the OS; either way the local job store must remain functional.
+        let config = DistributedConfig {
+            coordinator_addr: "127.0.0.1:1".to_string(),
+            ..DistributedConfig::default()
+        };
+        let encoder = DistributedEncoder::new(config);
+        // Allow any server-spawn attempt to settle.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Local job store must work regardless of gRPC server outcome.
+        let job = make_job();
+        let result = encoder.submit_job(job).await;
+        assert!(
+            result.is_ok(),
+            "local job store must work even when gRPC server bind may fail"
+        );
     }
 }

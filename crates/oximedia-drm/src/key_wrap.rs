@@ -38,7 +38,7 @@
 //! assert_eq!(unwrapped, Some(cek));
 //! ```
 
-use aes::cipher::{generic_array::GenericArray, BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use aes::Aes128;
 
 // ---------------------------------------------------------------------------
@@ -76,7 +76,7 @@ impl KeyWrapper {
     /// two 8-byte ciphertext blocks.
     #[must_use]
     pub fn wrap_aes128(kek: &[u8; 16], cek: &[u8; 16]) -> [u8; 24] {
-        let cipher = Aes128::new(GenericArray::from_slice(kek));
+        let cipher = Aes128::new_from_slice(kek).expect("KEK is exactly 16 bytes; infallible");
 
         // Split CEK into two 8-byte blocks: R[1] and R[2].
         let mut r: [[u8; 8]; N] = [[0u8; 8]; N];
@@ -125,7 +125,7 @@ impl KeyWrapper {
     /// `Some(cek)` if authentication succeeds, `None` otherwise.
     #[must_use]
     pub fn unwrap_aes128(kek: &[u8; 16], wrapped: &[u8; 24]) -> Option<[u8; 16]> {
-        let cipher = Aes128::new(GenericArray::from_slice(kek));
+        let cipher = Aes128::new_from_slice(kek).expect("KEK is exactly 16 bytes; infallible");
 
         // Decompose wrapped = C[0] || C[1] || C[2]  (each 8 bytes)
         let mut a: u64 = u64::from_be_bytes(wrapped[0..8].try_into().ok()?);
@@ -179,11 +179,11 @@ fn aes_ecb_encrypt_block(cipher: &Aes128, a_val: u64, r_block: &[u8; 8]) -> [u8;
     block_arr[0..8].copy_from_slice(&a_val.to_be_bytes());
     block_arr[8..16].copy_from_slice(r_block);
 
-    let mut ga = GenericArray::clone_from_slice(&block_arr);
-    cipher.encrypt_block(&mut ga);
+    let mut block = aes::Block::from(block_arr);
+    cipher.encrypt_block(&mut block);
 
     let mut out = [0u8; 16];
-    out.copy_from_slice(ga.as_slice());
+    out.copy_from_slice(block.as_slice());
     out
 }
 
@@ -199,11 +199,11 @@ fn aes_ecb_decrypt_block(cipher: &Aes128, a_xor_t: u64, r_block: &[u8; 8]) -> [u
     block_arr[0..8].copy_from_slice(&a_xor_t.to_be_bytes());
     block_arr[8..16].copy_from_slice(r_block);
 
-    let mut ga = GenericArray::clone_from_slice(&block_arr);
-    cipher.decrypt_block(&mut ga);
+    let mut block = aes::Block::from(block_arr);
+    cipher.decrypt_block(&mut block);
 
     let mut out = [0u8; 16];
-    out.copy_from_slice(ga.as_slice());
+    out.copy_from_slice(block.as_slice());
     out
 }
 

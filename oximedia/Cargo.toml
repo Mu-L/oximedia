@@ -122,10 +122,31 @@ oximedia-360 = { workspace = true, optional = true }
 oximedia-analytics = { workspace = true, optional = true }
 oximedia-caption-gen = { workspace = true, optional = true }
 oximedia-image-transform = { workspace = true, optional = true }
+oximedia-pipeline = { workspace = true, optional = true }
 oximedia-ml = { workspace = true, optional = true }
 
 [features]
 default = []
+
+# ── Quick-start preset ────────────────────────────────────────────────────────
+
+## Minimal preset: audio + video + metadata — the smallest useful set for basic
+## decoding (audio and video codecs + extended metadata) without pulling the
+## full feature tree.
+minimal = ["audio", "video", "metadata-ext"]
+
+# ── Category meta-features ────────────────────────────────────────────────────
+
+## Audio production stack: codecs, effects, metering, normalization, analysis, mixer, audiopost.
+audio-stack = ["audio", "effects", "metering", "normalize", "audio-analysis", "mixer", "audiopost"]
+
+## Broadcast production stack: automation, playout, playlist, switcher, routing, graphics, scopes.
+broadcast-stack = ["automation", "playout", "playlist", "switcher", "routing", "graphics", "scopes"]
+
+## Live streaming infrastructure: network, packaging, DRM, stream, CDN, cache, server.
+streaming-stack = ["net", "packager", "drm", "stream", "cdn", "cache", "server"]
+
+# ── Per-crate optional features ───────────────────────────────────────────────
 
 ## Enable audio processing (Opus, Vorbis, FLAC, PCM codecs)
 audio = ["dep:oximedia-audio"]
@@ -424,6 +445,9 @@ caption-gen = ["dep:oximedia-caption-gen"]
 ## Enable image transformation (resize, crop, rotate, flip, color conversion)
 image-transform = ["dep:oximedia-image-transform"]
 
+## Enable the declarative media processing pipeline DSL (typed filter graph, node composition, execution planning)
+pipeline = ["dep:oximedia-pipeline"]
+
 ## Enable Sovereign ML pipelines (Pure-Rust OxiONNX-backed scene classification, shot boundary, aesthetic scoring, object detection, face embedding)
 ml = ["dep:oximedia-ml"]
 ## ML pipeline: scene classifier (requires `ml`, `onnx` features on oximedia-ml to actually run inference)
@@ -546,6 +570,7 @@ full = [
     "analytics",
     "caption-gen",
     "image-transform",
+    "pipeline",
     "ml",
     "ml-scene-classifier",
     "ml-shot-boundary",

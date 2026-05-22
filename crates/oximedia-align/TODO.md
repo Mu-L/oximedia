@@ -12,28 +12,28 @@
 ## Enhancements
 - [x] Add KLT (Kanade-Lucas-Tomasi) tracker to `optical_flow` for sparse flow tracking
   — `KltTracker::track_features(prev, curr, width, height, &[(f32,f32)]) -> Vec<Option<(f32,f32)>>` added to `klt_tracker`
-- [ ] Implement multi-scale feature matching in `features` (pyramid ORB for scale invariance)
+- [x] Implement multi-scale feature matching in `features` (pyramid ORB for scale invariance) (verified 2026-05-16; src/features.rs:1014 FeaturePyramid, build_pyramid:1043, detect_features_at_all_levels:1109, num_levels:1516, 1757 lines)
 - [x] Add PROSAC as alternative to RANSAC in `spatial` for faster convergence with sorted matches
   — `ProsacEstimator` in `prosac` module (Affine + Homography models)
 - [x] Implement weighted least squares in `HomographyEstimator` for refined estimates after RANSAC
 - [x] Add sub-pixel refinement for FAST corner detection in `features`
-- [ ] Implement exposure-invariant feature descriptors in `features` for mixed-lighting scenarios
+- [x] Implement exposure-invariant feature descriptors in `features` for mixed-lighting scenarios (verified 2026-05-16; src/illumination_invariant.rs:25 IlluminationInvariantConfig, IlluminationInvariantDescriptor:48, 334 lines)
 - [x] Add temporal smoothing to `rolling_shutter` correction to prevent frame-to-frame jitter
 - [x] Implement spectral domain audio alignment in `audio_align` using phase correlation
 - [x] Add genlock drift estimation in `drift_correct` for long-duration multi-camera recordings
-- [ ] Implement bundle adjustment in `multicam_sync` for globally consistent multi-camera calibration
+- [x] Implement bundle adjustment in `multicam_sync` for globally consistent multi-camera calibration (verified 2026-05-16; src/bundle_adjust.rs:155 BundleAdjuster, BundleAdjustConfig:32, adjust:192, BundleAdjustResult:141, 799 lines)
 
 ## New Features
 - [x] Add dense optical flow (Farneback method) to `optical_flow` module
   — `compute_dense_flow(prev: &[f32], curr: &[f32], width: u32, height: u32) -> Vec<(f32,f32)>`
   — Full Farneback implementation in `farneback_flow`; convenience bridge in `optical_flow`
-- [ ] Implement image stitching pipeline: detect features -> match -> estimate homography -> blend
-- [ ] Add automatic lens calibration from checkerboard/ArUco marker detection
-- [ ] Implement depth-from-stereo using `stereo_rectify` + block matching
-- [ ] Add motion-compensated temporal interpolation for frame rate conversion
-- [ ] Implement video stabilization pipeline combining `optical_flow` + `affine` + `warp`
-- [ ] Add network-based time sync (PTP/NTP) for distributed camera systems in `temporal`
-- [ ] Implement scene-based alignment: detect scene changes and align segments independently
+- [x] Implement image stitching pipeline: detect features -> match -> estimate homography -> blend (verified 2026-05-16; src/image_stitch.rs:125 ImageStitcher, StitchConfig:36, chain_homographies:564, bilinear_sample:550, 595 lines)
+- [x] Add automatic lens calibration from checkerboard/ArUco marker detection (verified 2026-05-16; src/lens_calibration.rs:37 CheckerboardDetector, ArUco-style:8, CameraCalibrator:349, 955 lines)
+- [x] Implement depth-from-stereo using `stereo_rectify` + block matching (implemented 2026-05-15: src/stereo_depth.rs — StereoDepthEstimator::compute_depth_map using SAD block matching + depth=f*B/d formula; tests: test_depth_map_uniform_disparity, test_depth_map_zero_disparity_infinite_depth, test_depth_map_known_shift; 650/650 tests pass)
+- [x] Add motion-compensated temporal interpolation for frame rate conversion (verified 2026-05-16; src/motion_interp.rs:36 MotionInterpolator, 202 lines)
+- [x] Implement video stabilization pipeline combining `optical_flow` + `affine` + `warp` (verified 2026-05-16; src/stabilize.rs:286 stabilize_pipeline, StabilizeConfig:36, compute_corrections:202, 799 lines)
+- [x] Add network-based time sync (PTP/NTP) for distributed camera systems in `temporal` (implemented 2026-05-15: NtpConfig/TimeDelta/NtpClient::query_offset added to temporal.rs — SNTP RFC 4330 single-packet UDP exchange; tests: test_ntp_packet_parse_known_bytes, test_ntp_offset_computation_formula, test_ntp_unix_roundtrip; 650/650 tests pass)
+- [ ] Implement scene-based alignment: detect scene changes and align segments independently (verified-open 2026-05-16: no SceneAlign/scene_align/AlignSegment in align sources; scene change detection not integrated into alignment pipeline)
 
 ## Performance
 - [x] Add SIMD-accelerated Hamming distance for BRIEF descriptor matching in `features`

@@ -168,6 +168,12 @@ pub struct OutputSpec {
     pub pass_phase: Option<PassPhase>,
     /// Muxer options (e.g. `movflags`, `fflags`).
     pub muxer_options: Vec<(String, String)>,
+    /// Raw `-map_metadata` specifiers (e.g. `"0"`, `"-1"`, `"0:s:0"`).
+    pub map_metadata: Vec<String>,
+    /// GOP size / keyframe interval (`-g N`).
+    pub gop_size: Option<u32>,
+    /// Minimum keyframe interval (`-keyint_min N`).
+    pub keyint_min: Option<u32>,
     /// Unrecognised option key/value pairs.
     pub extra_args: Vec<(String, String)>,
 }
@@ -244,8 +250,23 @@ impl FfmpegArgs {
                     let val = next_arg!(arg);
                     result.global_options.hwaccel = Some(val.clone());
                 }
-                "-hide_banner" | "-nostdin" | "-nostats" | "-benchmark" => {
+                "-hide_banner" | "-nostdin" | "-nostats" | "-stats" | "-benchmark" => {
                     // Recognised flags that take no value; silently accepted.
+                }
+
+                // ── Stats / progress reporting (consume one arg) ──────────────
+                "-progress" => {
+                    let _url = next_arg!("-progress"); // progress output URL; silently consumed
+                }
+
+                // ── GOP / keyframe interval ───────────────────────────────────
+                "-g" => {
+                    let val = next_arg!("-g");
+                    pending_output.gop_size = val.parse::<u32>().ok();
+                }
+                "-keyint_min" => {
+                    let val = next_arg!("-keyint_min");
+                    pending_output.keyint_min = val.parse::<u32>().ok();
                 }
 
                 // ── Input ─────────────────────────────────────────────────────
@@ -619,6 +640,12 @@ impl FfmpegArgs {
                         let value = kv[eq + 1..].to_string();
                         pending_output.metadata.insert(key, value);
                     }
+                }
+
+                // ── Map metadata ──────────────────────────────────────────────
+                "-map_metadata" => {
+                    let val = next_arg!("-map_metadata").clone();
+                    pending_output.map_metadata.push(val);
                 }
 
                 // ── Non-flag args → output filenames ──────────────────────────

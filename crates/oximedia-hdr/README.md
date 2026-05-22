@@ -3,8 +3,8 @@
 [![Crates.io](https://img.shields.io/crates/v/oximedia-hdr.svg)](https://crates.io/crates/oximedia-hdr)
 [![Documentation](https://docs.rs/oximedia-hdr/badge.svg)](https://docs.rs/oximedia-hdr)
 [![License](https://img.shields.io/crates/l/oximedia-hdr.svg)](LICENSE)
-![Tests: 504](https://img.shields.io/badge/tests-504-brightgreen)
-![Updated: 2026-04-26](https://img.shields.io/badge/updated-2026--04--20-blue)
+![Tests: 506](https://img.shields.io/badge/tests-506-brightgreen)
+![Updated: 2026-05-21](https://img.shields.io/badge/updated-2026--05--21-blue)
 
 HDR (High Dynamic Range) video processing for [OxiMedia](https://github.com/cool-japan/oximedia) -- the Sovereign Media Framework.
 
@@ -14,7 +14,7 @@ Pure Rust implementation of industry-standard HDR transfer functions, tone-mappi
 
 - **Transfer Functions** -- SMPTE ST 2084 (PQ) OETF/EOTF, ARIB STD-B67 (HLG) OETF/EOTF, and configurable SDR gamma with a unified `TransferFunction` enum
 - **Tone Mapping** -- 7 operators (Reinhard, Reinhard Extended, Hable, ACES, Hable Full, Clamp, Reinhard2) with per-pixel RGB mapping, exposure/saturation controls, and whole-frame processing
-- **Gamut Conversion** -- Rec.709, Rec.2020, P3-D65, P3-DCI, and ACES AP0 gamuts with 3x3 RGB-to-RGB matrices computed via CIE XYZ and Bradford chromatic adaptation
+- **Gamut Conversion** -- Rec.709, Rec.2020, P3-D65, P3-DCI, and ACES AP0 gamuts with 3x3 RGB-to-RGB matrices computed via CIE XYZ and Bradford chromatic adaptation; process-wide `OnceLock<RwLock<>>` cache deduplicates matrix computation across frames (two-phase read → write-on-miss locking via `parking_lot`)
 - **HDR10/HDR10+ Metadata** -- SMPTE ST 2086 mastering display colour volume, CTA-861.3 content light level, and ST 2094-40 dynamic metadata with SEI encode/decode
 - **HLG Advanced** -- Complete BT.2100 HLG system model (OETF, EOTF, OOTF with system gamma), HLG-to-SDR conversion with BT.2020-to-BT.709 matrix, and HLG-to-PQ cross-format conversion
 - **Colour Volume** -- MDCV and CLL SEI payload parsing/encoding in HEVC big-endian format, luminance weight computation from primaries

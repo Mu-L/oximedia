@@ -28,7 +28,7 @@ pub trait BitRead {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0b1000_1110];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -44,7 +44,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, LittleEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, LittleEndian};
     ///
     /// let bytes: &[u8] = &[0b1000_1110];
     /// let mut r = BitReader::endian(bytes, LittleEndian);
@@ -73,7 +73,7 @@ pub trait BitRead {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0b0001_1111, 0b1011_11_00];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -90,7 +90,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```rust,compile_fail
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0b0001_1111, 0, 0];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -116,7 +116,7 @@ pub trait BitRead {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     /// let bytes: &[u8] = &[0b0001_1111];
     /// let mut r = BitReader::endian(bytes, BigEndian);
     /// // reading unsigned value is ok
@@ -128,7 +128,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     /// let bytes: &[u8] = &[0, 0, 0, 0, 0];
     /// let mut r = BitReader::endian(bytes, BigEndian);
     /// // reading 9 bits to a u8 is a runtime error
@@ -160,7 +160,7 @@ pub trait BitRead {
     /// # Examples
     ///
     /// ```
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     ///
     /// let bytes: &[u8] = &[0b100_11110];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -171,7 +171,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{BigEndian, BitReader, BitRead, BitCount};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead, BitCount};
     ///
     /// let bytes: &[u8] = &[0b100_11110];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -183,7 +183,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```rust,compile_fail
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     ///
     /// let bytes: &[u8] = &[0b100_11110];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -220,7 +220,7 @@ pub trait BitRead {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian, BitCount};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian, BitCount};
     ///
     /// let bytes: &[u8] = &[0b1111_0000];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -250,7 +250,7 @@ pub trait BitRead {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     /// let data: &[u8] = &[0b1_01_10111];
     /// let mut reader = BitReader::endian(data, BigEndian);
     /// assert_eq!(reader.read_unsigned::<1, u8>().unwrap(), 0b1);
@@ -259,7 +259,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{LittleEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{LittleEndian, BitReader, BitRead};
     /// let data: &[u8] = &[0b10110_11_1];
     /// let mut reader = BitReader::endian(data, LittleEndian);
     /// assert_eq!(reader.read_unsigned::<1, u8>().unwrap(), 0b1);
@@ -268,7 +268,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```rust,compile_fail
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     /// let data: &[u8] = &[0, 0, 0, 0, 0];
     /// let mut reader = BitReader::endian(data, BigEndian);
     /// // doesn't compile at all
@@ -292,7 +292,7 @@ pub trait BitRead {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     /// let data: &[u8] = &[0b1_01_10111];
     /// let mut reader = BitReader::endian(data, BigEndian);
     /// assert_eq!(reader.read_unsigned_var::<u8>(1).unwrap(), 0b1);
@@ -301,7 +301,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{LittleEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{LittleEndian, BitReader, BitRead};
     /// let data: &[u8] = &[0b10110_11_1];
     /// let mut reader = BitReader::endian(data, LittleEndian);
     /// assert_eq!(reader.read_unsigned_var::<u8>(1).unwrap(), 0b1);
@@ -310,7 +310,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     /// let data: &[u8] = &[0, 0, 0, 0, 0];
     /// let mut reader = BitReader::endian(data, BigEndian);
     /// assert!(reader.read_unsigned_var::<u8>(9).is_err());    // can't read  9 bits to u8
@@ -337,7 +337,7 @@ pub trait BitRead {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian, BitCount};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian, BitCount};
     ///
     /// let bytes: &[u8] = &[0b1111_0000];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -365,7 +365,7 @@ pub trait BitRead {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     ///
     /// let data: &[u8] = &[0b1011_0111];
     /// let mut reader = BitReader::endian(data, BigEndian);
@@ -375,7 +375,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{LittleEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{LittleEndian, BitReader, BitRead};
     ///
     /// let data: &[u8] = &[0b1011_0111];
     /// let mut reader = BitReader::endian(data, LittleEndian);
@@ -385,7 +385,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```rust,compile_fail
-    /// use bitstream_io::{LittleEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{LittleEndian, BitReader, BitRead};
     ///
     /// let data: &[u8] = &[0, 0, 0, 0, 0];
     /// let mut reader = BitReader::endian(data, LittleEndian);
@@ -412,7 +412,7 @@ pub trait BitRead {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     /// let data: &[u8] = &[0b1011_0111];
     /// let mut reader = BitReader::endian(data, BigEndian);
     /// assert_eq!(reader.read_signed_var::<i8>(4).unwrap(), -5);
@@ -420,7 +420,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{LittleEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{LittleEndian, BitReader, BitRead};
     /// let data: &[u8] = &[0b1011_0111];
     /// let mut reader = BitReader::endian(data, LittleEndian);
     /// assert_eq!(reader.read_signed_var::<i8>(4).unwrap(), 7);
@@ -429,7 +429,7 @@ pub trait BitRead {
     ///
     /// ```
     /// use std::io::Read;
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     /// let data: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     /// let mut r = BitReader::endian(data, BigEndian);
     /// assert!(r.read_signed_var::<i8>(9).is_err());   // can't read 9 bits to i8
@@ -457,7 +457,7 @@ pub trait BitRead {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian, BitCount};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian, BitCount};
     ///
     /// let bytes: &[u8] = &[0b0001_1111];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -493,7 +493,7 @@ pub trait BitRead {
     /// # Examples
     ///
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// enum Error {
     ///     Mismatch,
@@ -545,7 +545,7 @@ pub trait BitRead {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0x12, 0x34, 0x56, 0x78];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -553,7 +553,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0x12, 0x34, 0x56, 0x78];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -573,7 +573,7 @@ pub trait BitRead {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian, LittleEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian, LittleEndian};
     ///
     /// let bytes: &[u8] = &[0x12, 0x34, 0x56, 0x78];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -599,7 +599,7 @@ pub trait BitRead {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0b1_00000_10];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -624,7 +624,7 @@ pub trait BitRead {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0x00, 0x01, 0x02, 0x03, 0x04];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -666,7 +666,7 @@ pub trait BitRead {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0x00, 0x01, 0x02, 0x03, 0x04];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -694,7 +694,7 @@ pub trait BitRead {
     ///
     /// # Examples
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0b0_10_11111, 0b10_000000];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -705,7 +705,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0b1_01_00000, 0b01_000000];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -716,7 +716,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, LittleEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, LittleEndian};
     ///
     /// let bytes: &[u8] = &[0b11111_01_0, 0b000000_01];
     /// let mut r = BitReader::endian(bytes, LittleEndian);
@@ -727,7 +727,7 @@ pub trait BitRead {
     /// ```
     ///
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, LittleEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, LittleEndian};
     ///
     /// let bytes: &[u8] = &[0b00000_10_1, 0b111111_10];
     /// let mut r = BitReader::endian(bytes, LittleEndian);
@@ -753,7 +753,7 @@ pub trait BitRead {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::{
+    /// use oximedia_bitstream::{
     ///     BitRead, BitReader, BigEndian, Checked, CheckedUnsigned, CheckedSigned,
     ///     BitCount, SignedBitCount, BitWrite, BitWriter,
     /// };
@@ -807,7 +807,7 @@ pub trait BitRead {
     /// # Example
     /// ```
     /// use std::io::Read;
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     /// let data = [0];
     /// let mut reader = BitReader::endian(data.as_slice(), BigEndian);
     /// assert_eq!(reader.byte_aligned(), true);
@@ -823,7 +823,7 @@ pub trait BitRead {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use oximedia_bitstream::{BigEndian, BitReader, BitRead};
     /// let data: &[u8] = &[0x00, 0xFF];
     /// let mut reader = BitReader::endian(data, BigEndian);
     /// assert_eq!(reader.read::<4, u8>().unwrap(), 0);
@@ -842,7 +842,7 @@ pub trait BitRead {
     /// # Example
     ///
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian, define_huffman_tree, huffman::FromBits};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian, define_huffman_tree, huffman::FromBits};
     ///
     /// define_huffman_tree!(TreeName : char = ['a', ['b', ['c', 'd']]]);
     /// // 'a' is 0
@@ -880,7 +880,7 @@ pub trait BitRead {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0b0111_1100, 0b1100_0001];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -888,7 +888,7 @@ pub trait BitRead {
     /// assert_eq!(r.read_unsigned_vbr::<4, u32>().unwrap(), 100);
     /// ```
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0b1111_1111, 0b0011_1000, 0b1000_0100, 0b1000_1000, 0b1000_0000];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -939,7 +939,7 @@ pub trait BitRead {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0b0110_1011, 0b1100_0001];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -965,7 +965,7 @@ pub trait BitRead {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// let bytes: &[u8] = &[0b0110_1011, 0b1100_0001];
     /// let mut r = BitReader::endian(bytes, BigEndian);
@@ -984,7 +984,7 @@ pub trait BitRead {
     ///
     /// # Example
     /// ```
-    /// use bitstream_io::{BitReader, BitRead, BigEndian};
+    /// use oximedia_bitstream::{BitReader, BitRead, BigEndian};
     ///
     /// fn parse<R: BitRead>(r: R) {
     ///     // perform some parsing

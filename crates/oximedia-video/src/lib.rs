@@ -32,6 +32,7 @@ pub mod invariant_fingerprint;
 pub mod lens_correction;
 pub mod mctf;
 pub mod motion_compensation;
+pub mod motion_compensation_ext;
 pub mod motion_search;
 pub mod noise_profile;
 pub mod parallel_motion_search;

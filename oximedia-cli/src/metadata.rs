@@ -310,16 +310,103 @@ fn sidecar_path(media_path: &Path) -> PathBuf {
     p
 }
 
+/// Format a Unix timestamp (seconds since epoch) as an RFC 3339 string.
+///
+/// Returns `"ts:<secs>"` if `chrono` cannot represent the timestamp (overflow).
+fn format_timestamp(secs: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| format!("ts:{secs}"))
+}
+
+/// Recognised media format types for metadata dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormatType {
+    /// MP3 — carries ID3v2 tags at the start of the file.
+    Mp3,
+    /// Ogg/FLAC/Opus — carries Vorbis Comments.
+    OggFamily,
+    /// MP4/M4A/MOV — carries iTunes atoms.
+    Mp4,
+    /// MKV/WebM — carries Matroska tags.
+    Matroska,
+    /// Unknown format — fall back to sidecar.
+    Unknown,
+}
+
+/// Detect the format type from a file extension.
+fn detect_format_type(path: &Path) -> FormatType {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)
+        .as_deref()
+    {
+        Some("mp3") => FormatType::Mp3,
+        Some("flac") | Some("ogg") | Some("opus") | Some("oga") => FormatType::OggFamily,
+        Some("mp4") | Some("m4a") | Some("m4v") | Some("mov") => FormatType::Mp4,
+        Some("mkv") | Some("webm") | Some("mka") => FormatType::Matroska,
+        _ => FormatType::Unknown,
+    }
+}
+
+/// Try to read in-file metadata using the `oximedia-metadata` crate.
+///
+/// Returns `None` if the file format is not supported by this path (the caller
+/// should then fall back to the sidecar).
+fn try_read_infile_metadata(path: &Path, kind: FormatType) -> Option<MediaMetadata> {
+    use oximedia_metadata::{Metadata, MetadataFormat};
+
+    let format = match kind {
+        FormatType::Mp3 => MetadataFormat::Id3v2,
+        FormatType::OggFamily => MetadataFormat::VorbisComments,
+        FormatType::Mp4 => MetadataFormat::iTunes,
+        FormatType::Matroska => MetadataFormat::Matroska,
+        FormatType::Unknown => return None,
+    };
+
+    // Read the file synchronously (metadata blobs are small — typically < 1 MB).
+    let data = std::fs::read(path).ok()?;
+
+    // For ID3v2 the tag must start with the magic bytes "ID3".
+    if format == MetadataFormat::Id3v2 && !data.starts_with(b"ID3") {
+        return None;
+    }
+
+    let parsed = Metadata::parse(&data, format).ok()?;
+    let common = parsed.common();
+
+    // Map CommonFields → MediaMetadata.
+    let mut meta = MediaMetadata::default();
+    meta.title = common.title;
+    meta.artist = common.artist;
+    meta.album = common.album;
+    meta.album_artist = common.album_artist;
+    meta.genre = common.genre;
+    meta.year = common.year;
+    meta.track_number = common.track_number;
+    meta.disc_number = common.disc_number;
+    meta.comment = common.comment;
+    meta.composer = common.composer;
+    meta.publisher = common.publisher;
+    meta.copyright = common.copyright;
+    meta.encoder = common.encoder;
+    // Use the date field if available; otherwise leave creation_time empty.
+    meta.creation_time = common.date;
+
+    Some(meta)
+}
+
 /// Read metadata from a file.
 ///
-/// If a JSON sidecar file (`.oxmeta`) exists alongside the media file it is
-/// deserialised and returned.  Otherwise a default `MediaMetadata` struct is
-/// returned, pre-populated with information that can be derived purely from
-/// the filesystem (filename → title, file modification time → creation_time).
+/// Priority:
+/// 1. JSON sidecar file (`.oxmeta`) — written by a previous `set` operation.
+/// 2. In-file metadata tags (ID3v2, Vorbis Comments, iTunes atoms, Matroska tags).
+/// 3. Filesystem fallback (title from filename, modification time in RFC 3339).
 async fn read_metadata(path: &Path) -> Result<MediaMetadata> {
     debug!("Reading metadata from {}", path.display());
 
-    // Check for a sidecar JSON file written by a previous `set` operation
+    // 1. Check for a sidecar JSON file written by a previous `set` operation.
     let sidecar = sidecar_path(path);
     if sidecar.exists() {
         debug!("Found metadata sidecar: {}", sidecar.display());
@@ -331,27 +418,35 @@ async fn read_metadata(path: &Path) -> Result<MediaMetadata> {
         return Ok(metadata);
     }
 
-    // No sidecar: synthesise basic metadata from filesystem information
+    // 2. Try in-file metadata.
+    let kind = detect_format_type(path);
+    if let Some(in_file) = try_read_infile_metadata(path, kind) {
+        info!(
+            "Read in-file {} metadata from {}",
+            format!("{kind:?}"),
+            path.display()
+        );
+        return Ok(in_file);
+    }
+
+    // 3. Filesystem fallback: synthesise basic metadata.
     let mut metadata = MediaMetadata::default();
 
-    // Use the file stem as a default title
+    // Use the file stem as a default title.
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
         metadata.title = Some(stem.to_string());
     }
 
-    // Record the encoder / tool that produced this metadata
     metadata.encoder = Some("OxiMedia".to_string());
 
-    // Use the file's last-modified time as a creation_time hint
+    // Use the file's last-modified time formatted as RFC 3339.
     if let Ok(fs_meta) = tokio::fs::metadata(path).await {
         if let Ok(modified) = fs_meta.modified() {
-            // Convert SystemTime to a simple RFC-3339-ish string without extra deps
-            let duration_since_epoch = modified
+            let secs = modified
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
-            let secs = duration_since_epoch.as_secs();
-            // Format as seconds-since-epoch (a real implementation would use chrono)
-            metadata.creation_time = Some(format!("{}", secs));
+                .unwrap_or_default()
+                .as_secs();
+            metadata.creation_time = Some(format_timestamp(secs));
         }
     }
 
@@ -458,6 +553,69 @@ fn print_field(label: &str, value: &Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_timestamp_epoch() {
+        assert_eq!(format_timestamp(0), "1970-01-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn format_timestamp_specific() {
+        let result = format_timestamp(1_700_000_000);
+        // 2023-11-14T22:13:20+00:00
+        assert!(
+            result.starts_with("2023-11-14"),
+            "expected 2023-11-14..., got: {result}"
+        );
+    }
+
+    #[test]
+    fn detect_format_mp3() {
+        assert_eq!(
+            detect_format_type(std::path::Path::new("track.mp3")),
+            FormatType::Mp3
+        );
+    }
+
+    #[test]
+    fn detect_format_ogg_family() {
+        assert_eq!(
+            detect_format_type(std::path::Path::new("track.flac")),
+            FormatType::OggFamily
+        );
+        assert_eq!(
+            detect_format_type(std::path::Path::new("track.opus")),
+            FormatType::OggFamily
+        );
+    }
+
+    #[test]
+    fn detect_format_mp4() {
+        assert_eq!(
+            detect_format_type(std::path::Path::new("video.mp4")),
+            FormatType::Mp4
+        );
+        assert_eq!(
+            detect_format_type(std::path::Path::new("audio.m4a")),
+            FormatType::Mp4
+        );
+    }
+
+    #[test]
+    fn detect_format_matroska() {
+        assert_eq!(
+            detect_format_type(std::path::Path::new("video.mkv")),
+            FormatType::Matroska
+        );
+    }
+
+    #[test]
+    fn detect_format_unknown() {
+        assert_eq!(
+            detect_format_type(std::path::Path::new("file.xyz")),
+            FormatType::Unknown
+        );
+    }
 
     #[test]
     fn test_set_field() {

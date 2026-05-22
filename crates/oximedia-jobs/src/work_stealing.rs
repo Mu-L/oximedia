@@ -158,10 +158,7 @@ impl<T> WorkerDeque<T> {
 #[derive(Debug)]
 pub enum StealResult<T> {
     /// Successfully stole items from the given worker.
-    Success {
-        victim_id: usize,
-        items: Vec<T>,
-    },
+    Success { victim_id: usize, items: Vec<T> },
     /// No items could be stolen (all peers too light or empty).
     Empty,
     /// The thief's own queue is not empty — stealing unnecessary.

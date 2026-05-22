@@ -47,15 +47,15 @@ oximedia-distributed = { workspace = true }
 oximedia-net = { workspace = true }
 
 # Additional dependencies
-axum = "0.8"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
 hyper = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
 futures = "0.3"
 futures-util = "0.3"
 tokio-stream = "0.1"
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio-util = { workspace = true }
 blake3 = "1.8"
 sha2 = { workspace = true }
 lz4_flex = { workspace = true }
@@ -65,7 +65,7 @@ notify = "8"
 crossbeam-channel = { workspace = true }
 crossbeam = "0.8"
 num_cpus = "1.17"
-sysinfo = "0.38"
+sysinfo = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

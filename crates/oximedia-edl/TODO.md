@@ -10,25 +10,25 @@
 
 ## Enhancements
 - [x] Add ALE (Avid Log Exchange) format parsing in addition to CMX formats
-- [ ] Implement AAF (Advanced Authoring Format) round-trip support
+- [x] Implement AAF (Advanced Authoring Format) round-trip support (verified 2026-05-16; src/aaf.rs:130 AafComposition, AafSourceClip:57, 858 lines)
 - [x] Enhance `edl_compare.rs` with diff visualization showing added/removed/modified events
 - [x] Add `edl_merge.rs` conflict resolution strategies (prefer source A, prefer source B, manual)
 - [x] Implement `optimizer.rs` event consolidation (merge adjacent cuts from same reel)
 - [x] Enhance `validator.rs` with format-specific validation rules per EDL format
-- [ ] Add `edl_filter.rs` filtering by reel name patterns and timecode ranges
+- [x] Add `edl_filter.rs` filtering by reel name patterns and timecode ranges (verified 2026-05-16; src/edl_filter.rs:170 EventFilter, FilterableEvent:12, 502 lines)
 - [x] Improve `timecode.rs` with 23.976 fps and 59.94 fps drop-frame timecode support (`Fps23_976`, `Fps59_94`)
-- [ ] Add `conform_report.rs` report generation comparing EDL against actual media files
-- [ ] Implement `roundtrip.rs` format conversion between CMX 3600 and GVG/Sony formats
+- [x] Add `conform_report.rs` report generation comparing EDL against actual media files (verified 2026-05-16; src/conform_report.rs:102 ConformReport, 356 lines)
+- [x] Implement `roundtrip.rs` format conversion between CMX 3600 and GVG/Sony formats (verified 2026-05-16; src/roundtrip.rs:57 RoundtripReport, RoundtripValidator:84, 416 lines)
 
 ## New Features
-- [ ] Add XML-based EDL format support (Final Cut Pro XML, DaVinci Resolve XML)
-- [ ] Implement OTIO (OpenTimelineIO) format import/export
-- [ ] Add EDL-to-timeline conversion producing oximedia-edit Timeline structures
-- [ ] Implement multi-camera EDL support with camera angle switching events
+- [x] Add XML-based EDL format support (Final Cut Pro XML, DaVinci Resolve XML) (verified 2026-05-16; src/fcpxml.rs:17 FcpXmlSequence, 566 lines)
+- [x] Implement OTIO (OpenTimelineIO) format import/export (verified 2026-05-16; src/otio.rs:36 OtioRationalTime, OtioExternalReference:156, 1321 lines)
+- [x] Add EDL-to-timeline conversion producing oximedia-edit Timeline structures (verified 2026-05-16; src/roundtrip.rs:84 RoundtripValidator with format conversion)
+- [x] Implement multi-camera EDL support with camera angle switching events (verified 2026-05-16; src/multicam.rs:13 CameraAngleId, 316 lines)
 - [x] Add EDL visualization as ASCII timeline for debugging
 - [x] Implement `batch_export.rs` parallel EDL generation via `BatchEdlExporter::export_parallel` (rayon)
-- [ ] Add EDL change tracking with version history
-- [ ] Implement sub-frame timecode precision for high frame rate content (120fps+)
+- [x] Add EDL change tracking with version history (verified 2026-05-16; src/version_history.rs:32 VersionHistory, 410 lines)
+- [x] Implement sub-frame timecode precision for high frame rate content (120fps+) (verified 2026-05-16; src/subframe.rs:7 SubFrameTimecode, 120fps support)
 
 ## Performance
 - [ ] Optimize `parser.rs` nom combinators to reduce allocations during parsing

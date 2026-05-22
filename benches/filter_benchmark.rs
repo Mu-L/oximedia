@@ -9,8 +9,8 @@
 
 mod helpers;
 
-use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use std::time::Duration;
 
 // ============================================================================
@@ -181,7 +181,7 @@ fn video_scale_lanczos_benchmark(c: &mut Criterion) {
                                 }
                             }
 
-                            let avg = if count > 0 { (sum / count) as u8 } else { 0 };
+                            let avg = sum.checked_div(count).unwrap_or(0) as u8;
                             dst.push(avg);
                         }
                     }
@@ -296,8 +296,10 @@ fn color_rgb_to_yuv_benchmark(c: &mut Criterion) {
                                 let g = i32::from(rgb_frame[idx + 1]);
                                 let b = i32::from(rgb_frame[idx + 2]);
 
-                                let u = (((-43 * r - 85 * g + 128 * b) >> 8) + 128).clamp(0, 255) as u8;
-                                let v = (((128 * r - 107 * g - 21 * b) >> 8) + 128).clamp(0, 255) as u8;
+                                let u =
+                                    (((-43 * r - 85 * g + 128 * b) >> 8) + 128).clamp(0, 255) as u8;
+                                let v =
+                                    (((128 * r - 107 * g - 21 * b) >> 8) + 128).clamp(0, 255) as u8;
 
                                 yuv.push(u);
                                 yuv.push(v);
@@ -319,7 +321,11 @@ fn color_yuv420_to_yuv444_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("color_yuv420_to_yuv444");
     group.measurement_time(Duration::from_secs(10));
 
-    let resolutions = vec![("480p", 854, 480), ("720p", 1280, 720), ("1080p", 1920, 1080)];
+    let resolutions = vec![
+        ("480p", 854, 480),
+        ("720p", 1280, 720),
+        ("1080p", 1920, 1080),
+    ];
 
     for (name, width, height) in resolutions {
         let yuv420 = helpers::generate_yuv420_frame(width, height);
@@ -380,6 +386,8 @@ fn deinterlace_bob_benchmark(c: &mut Criterion) {
             BenchmarkId::from_parameter(name),
             &(interlaced_frame, width, height),
             |b, (interlaced_frame, width, height)| {
+                let width = *width;
+                let height = *height;
                 b.iter(|| {
                     // Simulate bob deinterlacing
                     let mut progressive = Vec::with_capacity(width * height);
@@ -419,6 +427,7 @@ fn deinterlace_weave_benchmark(c: &mut Criterion) {
             BenchmarkId::from_parameter(name),
             &(field1, field2, width),
             |b, (field1, field2, width)| {
+                let width = *width;
                 b.iter(|| {
                     // Simulate weave deinterlacing
                     let mut progressive = Vec::with_capacity(field1.len() + field2.len());
@@ -457,6 +466,7 @@ fn deinterlace_motion_adaptive_benchmark(c: &mut Criterion) {
             BenchmarkId::from_parameter(name),
             &(field1, field2, width),
             |b, (field1, field2, width)| {
+                let width = *width;
                 b.iter(|| {
                     // Simulate motion-adaptive deinterlacing
                     let mut progressive = Vec::with_capacity(field1.len() + field2.len());
@@ -532,7 +542,8 @@ fn audio_resample_linear_benchmark(c: &mut Criterion) {
                         let frac = src_pos - src_idx as f32;
 
                         if src_idx + 1 < samples.len() {
-                            let sample = samples[src_idx] * (1.0 - frac) + samples[src_idx + 1] * frac;
+                            let sample =
+                                samples[src_idx] * (1.0 - frac) + samples[src_idx + 1] * frac;
                             output.push(sample);
                         }
                     }
@@ -596,7 +607,11 @@ fn audio_resample_sinc_benchmark(c: &mut Criterion) {
                             }
                         }
 
-                        output.push(if weight_sum > 0.0 { sum / weight_sum } else { 0.0 });
+                        output.push(if weight_sum > 0.0 {
+                            sum / weight_sum
+                        } else {
+                            0.0
+                        });
                     }
 
                     black_box(output);
@@ -624,8 +639,8 @@ fn audio_eq_parametric_benchmark(c: &mut Criterion) {
 
         // 3-band EQ (low, mid, high)
         let filters = vec![
-            (0.1f32, 0.2f32, 0.1f32, -0.5f32, 0.1f32), // Low
-            (0.2f32, 0.4f32, 0.2f32, -0.6f32, 0.2f32), // Mid
+            (0.1f32, 0.2f32, 0.1f32, -0.5f32, 0.1f32),    // Low
+            (0.2f32, 0.4f32, 0.2f32, -0.6f32, 0.2f32),    // Mid
             (0.15f32, 0.3f32, 0.15f32, -0.4f32, 0.15f32), // High
         ];
 
@@ -738,7 +753,7 @@ fn audio_limiter_lookahead_benchmark(c: &mut Criterion) {
                 let mut buffer = vec![0.0f32; lookahead_samples];
                 let mut write_pos = 0;
 
-                for (i, &sample) in samples.iter().enumerate() {
+                for &sample in samples.iter() {
                     buffer[write_pos] = sample;
                     write_pos = (write_pos + 1) % lookahead_samples;
 

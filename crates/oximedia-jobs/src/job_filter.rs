@@ -73,9 +73,7 @@ impl FilterCriteria {
             Self::MinPriority(p) => job.priority >= *p,
             Self::CreatedAfter(dt) => job.created_at >= *dt,
             Self::CreatedBefore(dt) => job.created_at <= *dt,
-            Self::NameContains(substr) => {
-                job.name.to_lowercase().contains(&substr.to_lowercase())
-            }
+            Self::NameContains(substr) => job.name.to_lowercase().contains(&substr.to_lowercase()),
             Self::HasAllTags(tags) => {
                 let job_tags: HashSet<&String> = job.tags.iter().collect();
                 tags.iter().all(|t| job_tags.contains(t))
@@ -508,7 +506,11 @@ mod tests {
     }
 
     fn make_job(name: &str, priority: Priority) -> Job {
-        Job::new(name.into(), priority, JobPayload::Transcode(make_transcode_params()))
+        Job::new(
+            name.into(),
+            priority,
+            JobPayload::Transcode(make_transcode_params()),
+        )
     }
 
     fn make_tagged_job(name: &str, priority: Priority, tags: Vec<String>) -> Job {
@@ -574,10 +576,8 @@ mod tests {
 
     #[test]
     fn test_tag_filters() {
-        let filter_all = JobFilter::new()
-            .has_all_tags(vec!["video".into(), "hd".into()]);
-        let filter_any = JobFilter::new()
-            .has_any_tag(vec!["video".into(), "audio".into()]);
+        let filter_all = JobFilter::new().has_all_tags(vec!["video".into(), "hd".into()]);
+        let filter_any = JobFilter::new().has_any_tag(vec!["video".into(), "audio".into()]);
 
         let job_both = make_tagged_job("j1", Priority::Normal, vec!["video".into(), "hd".into()]);
         let job_one = make_tagged_job("j2", Priority::Normal, vec!["video".into()]);
@@ -657,8 +657,8 @@ mod tests {
 
     #[test]
     fn test_any_status_filter() {
-        let filter = JobFilter::new()
-            .with_any_status(vec![JobStatus::Failed, JobStatus::Cancelled]);
+        let filter =
+            JobFilter::new().with_any_status(vec![JobStatus::Failed, JobStatus::Cancelled]);
         let pending_job = make_job("p", Priority::Normal);
         assert!(!filter.matches(&pending_job)); // pending is not in the list
 

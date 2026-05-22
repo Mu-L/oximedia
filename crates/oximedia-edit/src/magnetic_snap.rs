@@ -4,8 +4,6 @@
 //! operations. Snap targets include other clip edges, the playhead,
 //! markers, and regular grid intervals (e.g., beat-aligned snapping).
 
-#![allow(dead_code)]
-
 use crate::clip::ClipId;
 use crate::timeline::Timeline;
 
@@ -169,6 +167,7 @@ impl MagneticSnapConfig {
 }
 
 /// Magnetic snap engine that computes snap targets and performs snapping.
+#[derive(Debug)]
 pub struct MagneticSnapEngine {
     /// Snap configuration.
     pub config: MagneticSnapConfig,

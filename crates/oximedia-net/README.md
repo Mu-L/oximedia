@@ -1,6 +1,6 @@
 # oximedia-net
 
-**Status: [Stable]** | Version: 0.1.6 | Tests: 1,600 | Updated: 2026-04-26
+**Status: [Stable]** | Version: 0.1.7 | Tests: 1,600 | Updated: 2026-05-21
 
 Network streaming protocols for the OxiMedia multimedia framework.
 

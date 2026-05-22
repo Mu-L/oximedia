@@ -5,7 +5,10 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+
+use crate::DedupResult;
 
 /// Hash value representing a media segment.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -87,18 +90,21 @@ impl SegmentHash {
 #[derive(Debug, Clone)]
 pub struct SegmentDedupConfig {
     /// Number of frames per dedup window.
-    window_size: usize,
+    pub window_size_frames: usize,
     /// Step between consecutive windows (stride).
-    stride: usize,
+    pub stride_frames: usize,
+    /// Minimum number of consecutive matching frames to report as a shared clip.
+    pub min_match_length_frames: usize,
     /// Maximum Hamming-bit distance to consider two segments identical.
-    max_diff_bits: u32,
+    pub max_diff_bits: u32,
 }
 
 impl Default for SegmentDedupConfig {
     fn default() -> Self {
         Self {
-            window_size: 30,
-            stride: 15,
+            window_size_frames: 30,
+            stride_frames: 15,
+            min_match_length_frames: 15,
             max_diff_bits: 4,
         }
     }
@@ -107,10 +113,11 @@ impl Default for SegmentDedupConfig {
 impl SegmentDedupConfig {
     /// Create a new config with explicit parameters.
     #[must_use]
-    pub fn new(window_size: usize, stride: usize, max_diff_bits: u32) -> Self {
+    pub fn new(window_size_frames: usize, stride_frames: usize, max_diff_bits: u32) -> Self {
         Self {
-            window_size,
-            stride,
+            window_size_frames,
+            stride_frames,
+            min_match_length_frames: window_size_frames / 2,
             max_diff_bits,
         }
     }
@@ -118,13 +125,19 @@ impl SegmentDedupConfig {
     /// Returns the window size in frames.
     #[must_use]
     pub fn window_size_frames(&self) -> usize {
-        self.window_size
+        self.window_size_frames
     }
 
     /// Returns the stride in frames.
     #[must_use]
     pub fn stride_frames(&self) -> usize {
-        self.stride
+        self.stride_frames
+    }
+
+    /// Returns the minimum match length in frames required to emit a result.
+    #[must_use]
+    pub fn min_match_length_frames(&self) -> usize {
+        self.min_match_length_frames
     }
 
     /// Returns the maximum allowed Hamming-bit difference.
@@ -179,7 +192,7 @@ impl SegmentDeduplicator {
     /// Add a segment identified by `source_id` starting at `frame_offset`
     /// with the given raw bytes (representing that segment's content).
     pub fn add_segment(&mut self, source_id: &str, frame_offset: usize, bytes: &[u8]) {
-        let hash = SegmentHash::from_bytes(bytes, self.config.window_size);
+        let hash = SegmentHash::from_bytes(bytes, self.config.window_size_frames);
         let key = *hash.as_bytes();
         let is_new = !self.index.contains_key(&key);
         self.index.entry(key).or_default().push(SegmentRecord {
@@ -219,6 +232,155 @@ impl SegmentDeduplicator {
     pub fn config(&self) -> &SegmentDedupConfig {
         &self.config
     }
+}
+
+// ── Shared-clip detection ─────────────────────────────────────────────────────
+
+/// A match describing a shared clip found between two video files.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedClipMatch {
+    /// First file in the pair.
+    pub file_a: PathBuf,
+    /// Second file in the pair.
+    pub file_b: PathBuf,
+    /// Frame offset in `file_a` where the shared clip begins.
+    pub offset_a_frames: usize,
+    /// Frame offset in `file_b` where the shared clip begins.
+    pub offset_b_frames: usize,
+    /// Length of the shared clip in frames.
+    pub length_frames: usize,
+    /// Similarity confidence in [0.0, 1.0].
+    pub confidence: f32,
+}
+
+/// Compute a compact 64-bit rolling hash over a window of `u64` pHash values.
+///
+/// Uses a Rabin-fingerprint-style polynomial with multiplication + XOR fold so
+/// that the hash changes with every slide.
+fn hash_window(frames: &[u64]) -> u64 {
+    const BASE: u64 = 0x517c_c1b7_2722_0a95;
+    frames
+        .iter()
+        .fold(0u64, |acc, &h| acc.wrapping_mul(BASE).wrapping_add(h))
+}
+
+/// Find shared clips across pairs of pHash frame sequences.
+///
+/// For each `(file_a, file_b)` pair in `file_pairs`, the function receives
+/// the pHash frame sequence for each file via `hash_provider`, then slides a
+/// window of `config.window_size_frames` over both sequences in strides of
+/// `config.stride_frames`.  Matching windows (by hash value) that can be
+/// extended to at least `config.min_match_length_frames` are returned as
+/// [`SharedClipMatch`] entries.
+///
+/// The `hash_provider` closure is called with a file path and must return the
+/// ordered sequence of per-frame pHash values for that file.
+pub fn find_shared_clips_with_hashes(
+    file_pairs: &[(PathBuf, PathBuf)],
+    frame_hashes_a: &[Vec<u64>],
+    frame_hashes_b: &[Vec<u64>],
+    config: &SegmentDedupConfig,
+) -> DedupResult<Vec<SharedClipMatch>> {
+    assert_eq!(
+        file_pairs.len(),
+        frame_hashes_a.len(),
+        "file_pairs and frame_hashes_a must have the same length"
+    );
+    assert_eq!(
+        file_pairs.len(),
+        frame_hashes_b.len(),
+        "file_pairs and frame_hashes_b must have the same length"
+    );
+
+    let win = config.window_size_frames().max(1);
+    let stride = config.stride_frames().max(1);
+    let min_len = config.min_match_length_frames().max(1);
+
+    let mut matches = Vec::new();
+
+    for idx in 0..file_pairs.len() {
+        let (ref path_a, ref path_b) = file_pairs[idx];
+        let hashes_a = &frame_hashes_a[idx];
+        let hashes_b = &frame_hashes_b[idx];
+
+        // Build a BTreeMap<window_hash, Vec<offset_in_b>> from file_b's windows.
+        let mut index_b: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+        let mut off = 0;
+        while off + win <= hashes_b.len() {
+            let wh = hash_window(&hashes_b[off..off + win]);
+            index_b.entry(wh).or_default().push(off);
+            off += stride;
+        }
+
+        // Slide over file_a and look up matching windows.
+        let mut off_a = 0;
+        while off_a + win <= hashes_a.len() {
+            let wh = hash_window(&hashes_a[off_a..off_a + win]);
+            if let Some(b_offsets) = index_b.get(&wh) {
+                for &off_b in b_offsets {
+                    // Verify element-wise equality (guard against hash collisions).
+                    let equal = hashes_a[off_a..off_a + win] == hashes_b[off_b..off_b + win];
+                    if !equal {
+                        off_a += stride;
+                        continue;
+                    }
+
+                    // Extend the match as far as frames are identical.
+                    let mut length = win;
+                    while off_a + length < hashes_a.len()
+                        && off_b + length < hashes_b.len()
+                        && hashes_a[off_a + length] == hashes_b[off_b + length]
+                    {
+                        length += 1;
+                    }
+
+                    if length >= min_len {
+                        // Compute confidence: fraction of matched frames vs pairwise union.
+                        let max_possible = hashes_a.len().max(hashes_b.len());
+                        #[allow(clippy::cast_precision_loss)]
+                        let confidence = (length as f32) / (max_possible as f32).max(1.0);
+                        let confidence = confidence.min(1.0_f32);
+
+                        matches.push(SharedClipMatch {
+                            file_a: path_a.clone(),
+                            file_b: path_b.clone(),
+                            offset_a_frames: off_a,
+                            offset_b_frames: off_b,
+                            length_frames: length,
+                            confidence,
+                        });
+                    }
+                }
+            }
+            off_a += stride;
+        }
+    }
+
+    Ok(matches)
+}
+
+/// Find shared clips across file pairs.
+///
+/// This is a convenience wrapper that uses a caller-supplied closure to obtain
+/// per-frame pHash sequences for each file path, then delegates to
+/// [`find_shared_clips_with_hashes`].
+pub fn find_shared_clips<F>(
+    file_pairs: &[(PathBuf, PathBuf)],
+    config: &SegmentDedupConfig,
+    mut hash_provider: F,
+) -> DedupResult<Vec<SharedClipMatch>>
+where
+    F: FnMut(&Path) -> DedupResult<Vec<u64>>,
+{
+    let mut hashes_a = Vec::with_capacity(file_pairs.len());
+    let mut hashes_b = Vec::with_capacity(file_pairs.len());
+
+    for (path_a, path_b) in file_pairs {
+        hashes_a.push(hash_provider(path_a)?);
+        hashes_b.push(hash_provider(path_b)?);
+    }
+
+    find_shared_clips_with_hashes(file_pairs, &hashes_a, &hashes_b, config)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -350,5 +512,75 @@ mod tests {
         assert_eq!(dedup.unique_count(), 5);
         assert_eq!(dedup.total_count(), 10);
         assert_eq!(dedup.find_duplicates().len(), 5);
+    }
+
+    // ── find_shared_clips tests ───────────────────────────────────────────────
+
+    /// Helper: build a Vec<u64> from a repeating pattern of values.
+    fn phash_seq(values: &[u64], repeat: usize) -> Vec<u64> {
+        values
+            .iter()
+            .cloned()
+            .cycle()
+            .take(values.len() * repeat)
+            .collect()
+    }
+
+    #[test]
+    fn test_segment_dedup_identical_content_detected() {
+        // Both files have the exact same 60-frame pHash sequence.
+        let frames: Vec<u64> = (0u64..60).map(|i| i * 0x1234_5678).collect();
+        let config = SegmentDedupConfig {
+            window_size_frames: 10,
+            stride_frames: 5,
+            min_match_length_frames: 10,
+            max_diff_bits: 0,
+        };
+        let path_a = PathBuf::from("video_a.mp4");
+        let path_b = PathBuf::from("video_b.mp4");
+        let pairs = vec![(path_a.clone(), path_b.clone())];
+
+        let result = find_shared_clips_with_hashes(
+            &pairs,
+            std::slice::from_ref(&frames),
+            std::slice::from_ref(&frames),
+            &config,
+        )
+        .expect("find_shared_clips_with_hashes should succeed");
+
+        assert!(!result.is_empty(), "should detect at least one shared clip");
+        // The best match should have confidence = 1.0 when sequences are identical.
+        let best = result
+            .iter()
+            .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap())
+            .expect("at least one match");
+        assert!(
+            (best.confidence - 1.0).abs() < f32::EPSILON,
+            "confidence should be 1.0 for identical sequences, got {}",
+            best.confidence
+        );
+    }
+
+    #[test]
+    fn test_segment_dedup_no_match_returns_empty() {
+        // File A and File B have completely different pHash sequences.
+        let frames_a: Vec<u64> = (0u64..60).map(|i| i * 0xAAAA_AAAA).collect();
+        let frames_b: Vec<u64> = (0u64..60).map(|i| i * 0x5555_5555 + 1).collect();
+
+        let config = SegmentDedupConfig {
+            window_size_frames: 10,
+            stride_frames: 5,
+            min_match_length_frames: 10,
+            max_diff_bits: 0,
+        };
+        let pairs = vec![(PathBuf::from("unique_a.mp4"), PathBuf::from("unique_b.mp4"))];
+
+        let result = find_shared_clips_with_hashes(&pairs, &[frames_a], &[frames_b], &config)
+            .expect("find_shared_clips_with_hashes should succeed");
+
+        assert!(
+            result.is_empty(),
+            "completely different sequences should produce no matches"
+        );
     }
 }

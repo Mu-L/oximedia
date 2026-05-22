@@ -1,14 +1,61 @@
-//! Common Encryption (CENC) implementation
+//! Common Encryption (CENC) implementation.
 //!
-//! Implements ISO/IEC 23001-7 (Common Encryption in ISO Base Media File Format)
-//! Supporting encryption schemes: cenc, cbc1, cens, cbcs
+//! Implements ISO/IEC 23001-7 (Common Encryption in ISO Base Media File Format).
+//! Supports all four CENC encryption schemes defined in the specification.
+//!
+//! # CENC Encryption Scheme Variants
+//!
+//! | Scheme | Cipher      | Pattern         | Crypt Bytes  | DRM Systems         | Typical Use          |
+//! |--------|-------------|-----------------|--------------|---------------------|----------------------|
+//! | `cenc` | AES-128-CTR | None (full)     | All bytes    | Widevine, PlayReady, ClearKey | OTT VOD (DASH)  |
+//! | `cbcs` | AES-128-CBC | 1:9 (1 encrypt, 9 skip) | First 16 B of each "crypt" block | FairPlay, Widevine | HLS live, CMAF |
+//! | `cens` | AES-128-CTR | Configurable    | Pattern-based encrypted range | Rare / experimental | Low-latency DASH |
+//! | `cbc1` | AES-128-CBC | None (full)     | All bytes    | PlayReady (legacy)  | Legacy DASH/PlayReady |
+//!
+//! ## Scheme Details
+//!
+//! ### `cenc` — AES-128-CTR, no pattern
+//!
+//! The most widely deployed scheme. The entire protected region of each sample
+//! is encrypted using AES Counter mode. The 128-bit counter block is formed by
+//! concatenating the 64-bit IV (nonce) with a 64-bit big-endian block counter
+//! starting at zero for each sample. Required by the W3C Encrypted Media
+//! Extensions specification for cross-platform interoperability.
+//!
+//! ```text
+//! Sample: [clear_header][encrypted_body_CTR]
+//! ```
+//!
+//! ### `cbcs` — AES-128-CBC, 1:9 subsample pattern
+//!
+//! Required by Apple FairPlay Streaming and broadly adopted for HLS content.
+//! In the 1:9 pattern, one 16-byte AES block is encrypted followed by nine
+//! 16-byte blocks left clear, repeating until the encrypted region ends.
+//! Only the first 16 bytes of each "crypt" segment are encrypted; the
+//! trailing partial block is always left clear. Each sample restarts the
+//! CBC IV (per-sample IV in the `senc` box).
+//!
+//! ```text
+//! Sample: [clear_header][ENC_block][9×clear_blocks][ENC_block][9×clear_blocks]...
+//! ```
+//!
+//! ### `cens` — AES-128-CTR, configurable pattern
+//!
+//! Like `cbcs` but with CTR mode. The crypt/skip ratio is configurable via
+//! [`EncryptionPattern`]. Rarely deployed in practice; provided for
+//! completeness with the specification.
+//!
+//! ### `cbc1` — AES-128-CBC, no pattern (legacy)
+//!
+//! Full-sample CBC encryption without subsample patterns. Used by early
+//! PlayReady deployments before `cbcs` was standardised. The entire encrypted
+//! region is CBC-encrypted in a single chain; the IV is carried per-sample.
+//! Largely superseded by `cbcs` in modern workflows.
 
-use crate::aes_ctr::AesCtr;
+use crate::aes_ctr::{encrypt_block_128, AesCtr};
 use crate::{DrmError, DrmSystem, Result};
-use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes128Gcm, Nonce as GcmNonce,
-};
+use aes::cipher::KeyInit;
+use aes::Aes128;
 use bytes::{BufMut, BytesMut};
 use rand::Rng;
 use rayon::prelude::*;
@@ -496,7 +543,9 @@ impl CencEncryptor {
         Ok(result)
     }
 
-    /// Encrypt a single AES block (16 bytes)
+    /// Encrypt a single AES-128 block (16 bytes) using the stored key.
+    ///
+    /// Uses the `aes` crate which auto-selects AES-NI at runtime.
     fn aes_encrypt_block(&self, block: &[u8]) -> Result<Vec<u8>> {
         if block.len() != 16 {
             return Err(DrmError::EncryptionError(format!(
@@ -504,15 +553,18 @@ impl CencEncryptor {
                 block.len()
             )));
         }
-
-        let cipher = Aes128Gcm::new_from_slice(&self.key)
-            .map_err(|e| DrmError::EncryptionError(format!("Failed to create cipher: {e}")))?;
-        let nonce = GcmNonce::from([0u8; 12]);
-        let in_out = block.to_vec();
-        let ciphertext = cipher
-            .encrypt(&nonce, in_out.as_ref())
-            .map_err(|e| DrmError::EncryptionError(format!("Encryption failed: {e}")))?;
-        Ok(ciphertext[..16].to_vec())
+        if self.key.len() != 16 {
+            return Err(DrmError::InvalidKey(format!(
+                "Key must be 16 bytes, got {}",
+                self.key.len()
+            )));
+        }
+        let cipher = Aes128::new_from_slice(&self.key)
+            .expect("key length validated as 16 bytes above; infallible");
+        let mut arr = [0u8; 16];
+        arr.copy_from_slice(block);
+        let out = encrypt_block_128(&cipher, &arr);
+        Ok(out.to_vec())
     }
 }
 

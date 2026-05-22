@@ -74,7 +74,7 @@ pub trait ToBits {
 /// # Example
 ///
 /// ```
-/// use bitstream_io::{define_huffman_tree, huffman::FromBits};
+/// use oximedia_bitstream::{define_huffman_tree, huffman::FromBits};
 /// define_huffman_tree!(TreeName : &'static str = ["bit 0", ["bit 1->0", "bit 1->1"]]);
 /// let mut bits = [true, false].iter().copied();
 /// assert_eq!(TreeName::from_bits(|| bits.next().ok_or(())).unwrap(), "bit 1->0");
@@ -153,7 +153,7 @@ macro_rules! compile_write_tree_nodes {
 ///
 /// # Examples
 /// ```
-/// use bitstream_io::{BitReader, BitRead, BigEndian, huffman::LimitedUnary};
+/// use oximedia_bitstream::{BitReader, BitRead, BigEndian, huffman::LimitedUnary};
 ///
 /// let data: &[u8] = &[0b001_00000, 0b1111_1111];
 /// let mut r = BitReader::endian(data, BigEndian);
@@ -166,7 +166,7 @@ macro_rules! compile_write_tree_nodes {
 /// ```
 ///
 /// ```
-/// use bitstream_io::{BitWriter, BitWrite, BigEndian, huffman::LimitedUnary};
+/// use oximedia_bitstream::{BitWriter, BitWrite, BigEndian, huffman::LimitedUnary};
 ///
 /// let mut w = BitWriter::endian(vec![], BigEndian);
 /// // writes 2 as a regular unary value which stops at the 1 bit

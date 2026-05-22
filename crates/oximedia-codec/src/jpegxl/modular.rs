@@ -405,8 +405,132 @@ impl ModularDecoder {
                         }
                     }
                 }
-                ModularTransform::Squeeze { .. } | ModularTransform::Palette { .. } => {
-                    // Squeeze and Palette transforms not yet implemented
+                ModularTransform::Squeeze {
+                    params:
+                        SqueezeParams {
+                            horizontal,
+                            begin_channel,
+                            num_channels,
+                            ..
+                        },
+                } => {
+                    let begin = *begin_channel as usize;
+                    let nc = *num_channels as usize;
+                    let horiz = *horizontal;
+
+                    for ch_idx in begin..begin + nc {
+                        if ch_idx >= result_channels.len() {
+                            break;
+                        }
+
+                        // The channel data is laid out as avg half followed by
+                        // residual half along the squeezed dimension.
+                        // Horizontal squeeze: first W/2 cols = avg, next W/2 = residual.
+                        // Vertical squeeze:   first H/2 rows = avg, next H/2 = residual.
+                        if horiz {
+                            let half_w = (width / 2) as usize;
+                            if half_w == 0 {
+                                continue;
+                            }
+                            let h = height as usize;
+                            let w = width as usize;
+                            // Build a new buffer of the same size.
+                            let old = result_channels[ch_idx].clone();
+                            let buf = &mut result_channels[ch_idx];
+                            for row in 0..h {
+                                for i in 0..half_w {
+                                    let avg = old[row * w + i];
+                                    let diff = old[row * w + half_w + i];
+                                    // a = avg + ((diff + 1) >> 1)
+                                    // b = avg - (diff >> 1)
+                                    let a = avg + ((diff + 1) >> 1);
+                                    let b = avg - (diff >> 1);
+                                    buf[row * w + 2 * i] = a;
+                                    buf[row * w + 2 * i + 1] = b;
+                                }
+                                // If width is odd, the last column (index w-1) has no
+                                // pair in the residual half; it was stored as-is.
+                                if w % 2 != 0 {
+                                    buf[row * w + w - 1] = old[row * w + w - 1];
+                                }
+                            }
+                        } else {
+                            // Vertical squeeze
+                            let half_h = (height / 2) as usize;
+                            if half_h == 0 {
+                                continue;
+                            }
+                            let h = height as usize;
+                            let w = width as usize;
+                            let old = result_channels[ch_idx].clone();
+                            let buf = &mut result_channels[ch_idx];
+                            for col in 0..w {
+                                for i in 0..half_h {
+                                    let avg = old[i * w + col];
+                                    let diff = old[(half_h + i) * w + col];
+                                    let a = avg + ((diff + 1) >> 1);
+                                    let b = avg - (diff >> 1);
+                                    buf[(2 * i) * w + col] = a;
+                                    buf[(2 * i + 1) * w + col] = b;
+                                }
+                                // If height is odd, the last row has no pair.
+                                if h % 2 != 0 {
+                                    buf[(h - 1) * w + col] = old[(h - 1) * w + col];
+                                }
+                            }
+                        }
+                    }
+                }
+                ModularTransform::Palette {
+                    begin_channel,
+                    num_colors,
+                    palette,
+                } => {
+                    if *num_colors == 0 {
+                        return Err(CodecError::InvalidBitstream(
+                            "Palette: num_colors must be non-zero".into(),
+                        ));
+                    }
+                    let nc = *num_colors as usize;
+                    // Derive number of components from palette size.
+                    if palette.len() % nc != 0 {
+                        return Err(CodecError::InvalidBitstream(format!(
+                            "Palette length {} is not divisible by num_colors {}",
+                            palette.len(),
+                            nc
+                        )));
+                    }
+                    let num_components = palette.len() / nc;
+                    let begin = *begin_channel as usize;
+
+                    if begin >= result_channels.len() {
+                        return Err(CodecError::InvalidBitstream(
+                            "Palette: begin_channel out of bounds".into(),
+                        ));
+                    }
+                    // Indices are stored in the first (begin_channel) channel.
+                    // Read indices into a temporary to avoid borrow conflicts.
+                    let indices = result_channels[begin].clone();
+
+                    // Validate and apply: expand index channel into num_components channels.
+                    for (pixel_pos, &idx_val) in indices.iter().enumerate() {
+                        if idx_val < 0 || idx_val as usize >= nc {
+                            return Err(CodecError::InvalidBitstream(format!(
+                                "Palette index {idx_val} out of range [0, {nc})"
+                            )));
+                        }
+                        let idx = idx_val as usize;
+                        for c in 0..num_components {
+                            let target_ch = begin + c;
+                            if target_ch >= result_channels.len() {
+                                return Err(CodecError::InvalidBitstream(format!(
+                                    "Palette: channel {target_ch} out of bounds"
+                                )));
+                            }
+                            result_channels[target_ch][pixel_pos] =
+                                palette[idx * num_components + c];
+                        }
+                    }
                 }
             }
         }

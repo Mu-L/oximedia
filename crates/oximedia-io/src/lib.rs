@@ -57,11 +57,11 @@
 //! ```
 //! use oximedia_io::bits::BitReader;
 //!
-//! // Parse a tiny AVC-style bitfield: profile_idc (8) | constraint flags (6) | level_idc (8)
+//! // Parse a tiny AVC-style bitfield: profile_idc (8) | constraint byte (6 flags + 2 reserved) | level_idc (8)
 //! let sps_bytes = [0x64u8, 0x00, 0x1f];
 //! let mut r = BitReader::new(&sps_bytes);
 //! let profile_idc = r.read_bits(8).unwrap();   // 100 — High Profile
-//! let _constraint = r.read_bits(6).unwrap();
+//! let _constraint = r.read_bits(8).unwrap();   // constraint_set0..5_flag + reserved_zero_2bits
 //! let level_idc   = r.read_bits(8).unwrap();   // 31 — Level 3.1
 //! assert_eq!(profile_idc, 100);
 //! assert_eq!(level_idc,    31);

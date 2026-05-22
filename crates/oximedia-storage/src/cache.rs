@@ -613,6 +613,14 @@ impl<S: CloudStorage + Send + Sync> CloudStorage for CachedStorage<S> {
             .generate_presigned_upload_url(key, expiration_secs)
             .await
     }
+
+    async fn update_metadata(
+        &self,
+        key: &str,
+        tags: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        self.storage.update_metadata(key, tags).await
+    }
 }
 
 /// Cache statistics

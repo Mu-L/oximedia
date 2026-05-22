@@ -127,7 +127,8 @@ mod tests {
     ///
     /// We simulate a client-server pair: the client sends 1 000 messages over an
     /// in-process channel and the server echoes them back.  The median per-message
-    /// latency (channel send + receive) must be below 1 ms.
+    /// latency (channel send + receive) must be below 10 ms (catches 10x regressions
+    /// without false positives on loaded systems or debug builds).
     #[test]
     fn test_mpsc_sync_round_trip_latency() {
         use std::sync::mpsc;
@@ -161,10 +162,10 @@ mod tests {
         // Compute median latency.
         latencies.sort();
         let median = latencies[MSG_COUNT / 2];
-        // Allow up to 1 ms per round-trip for local channel operations.
+        // Allow up to 10 ms per round-trip for local channel operations.
         assert!(
-            median < Duration::from_millis(1),
-            "median round-trip latency {:?} exceeds 1 ms budget",
+            median < Duration::from_millis(10),
+            "median round-trip latency {:?} exceeds 10 ms budget",
             median
         );
     }

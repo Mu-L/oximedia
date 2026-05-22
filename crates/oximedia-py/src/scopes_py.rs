@@ -96,6 +96,7 @@ impl PyScopeConfig {
             vectorscope_gain: 1.0,
             highlight_gamut: false,
             gamut_colorspace: GamutColorspace::Rec709,
+            resolution: None,
         }
     }
 }

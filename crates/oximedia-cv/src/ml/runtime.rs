@@ -27,6 +27,8 @@ pub enum DeviceType {
     DirectMl,
     /// Apple CoreML.
     CoreMl,
+    /// WebGPU (wgpu-based cross-platform GPU).
+    WebGpu,
 }
 
 /// ONNX Runtime wrapper.
@@ -210,12 +212,12 @@ impl OnnxRuntime {
             DeviceType::TensorRt => Err(CvError::onnx_runtime(
                 "TensorRT support requires the 'tensorrt' feature".to_owned(),
             )),
-            // DirectML: Windows-only (no current Pure Rust backend).
-            #[cfg(target_os = "windows")]
+            // DirectML: Windows-only execution via oxionnx/directml feature.
+            #[cfg(feature = "directml")]
             DeviceType::DirectMl => Ok(()),
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(feature = "directml"))]
             DeviceType::DirectMl => Err(CvError::onnx_runtime(
-                "DirectML is only available on Windows".to_owned(),
+                "DirectML support requires the 'directml' feature".to_owned(),
             )),
             // CoreML: macOS-only (no current Pure Rust backend).
             #[cfg(target_os = "macos")]
@@ -223,6 +225,13 @@ impl OnnxRuntime {
             #[cfg(not(target_os = "macos"))]
             DeviceType::CoreMl => Err(CvError::onnx_runtime(
                 "CoreML is only available on macOS".to_owned(),
+            )),
+            // WebGPU: Cross-platform GPU via wgpu (oxionnx/gpu feature).
+            #[cfg(feature = "webgpu")]
+            DeviceType::WebGpu => Ok(()),
+            #[cfg(not(feature = "webgpu"))]
+            DeviceType::WebGpu => Err(CvError::onnx_runtime(
+                "WebGPU support requires the 'webgpu' feature".to_owned(),
             )),
         }
     }
@@ -408,6 +417,21 @@ mod tests {
             runtime.expect("value should be valid").device(),
             DeviceType::Cuda
         );
+        // WebGPU — without the feature enabled this should Err
+        #[cfg(not(feature = "webgpu"))]
+        {
+            let result = OnnxRuntime::with_device(DeviceType::WebGpu);
+            assert!(result.is_err(), "WebGPU should require 'webgpu' feature");
+        }
+        // DirectML — without the feature enabled should Err
+        #[cfg(not(feature = "directml"))]
+        {
+            let result = OnnxRuntime::with_device(DeviceType::DirectMl);
+            assert!(
+                result.is_err(),
+                "DirectML should require 'directml' feature"
+            );
+        }
     }
 
     #[test]

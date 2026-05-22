@@ -29,6 +29,9 @@
 use crate::error::{ImageError, ImageResult};
 use crate::{ColorSpace, ImageData, ImageFrame, PixelType};
 
+/// Pure-Rust VP8 (lossy) key-frame decoder, per RFC 6386.
+mod vp8;
+
 // ---------------------------------------------------------------------------
 // RIFF / WebP constants
 // ---------------------------------------------------------------------------
@@ -427,6 +430,12 @@ pub fn read_webp(path: &std::path::Path, frame_number: u32) -> ImageResult<Image
 
 /// Decodes WebP bytes from an in-memory buffer and returns an [`ImageFrame`].
 ///
+/// Supports three container layouts:
+/// - simple lossless (`VP8L`),
+/// - simple lossy (`VP8 `) — a full RFC 6386 VP8 key-frame decoder,
+/// - extended (`VP8X`) — the primary still frame is dispatched to the VP8 or
+///   VP8L decoder and an optional `ALPH` chunk supplies the alpha plane.
+///
 /// # Errors
 ///
 /// Returns an error for invalid data or unsupported VP8 encoding.
@@ -436,25 +445,229 @@ pub fn decode_webp_bytes(data: &[u8], frame_number: u32) -> ImageResult<ImageFra
     match &chunk_tag {
         t if t == VP8L_MAGIC => {
             let (width, height, argb) = decode_vp8l(payload)?;
-            let frame = ImageFrame::new(
-                frame_number,
-                width,
-                height,
-                PixelType::U8,
-                4,
-                ColorSpace::Srgb,
-                ImageData::interleaved(argb),
-            );
-            Ok(frame)
+            Ok(argb_frame(frame_number, width, height, argb))
         }
-        t if t == VP8_MAGIC => Err(ImageError::unsupported(
-            "WebP: VP8 lossy decode is not yet implemented",
-        )),
-        t if t == VP8X_MAGIC => Err(ImageError::unsupported(
-            "WebP: VP8X extended format requires additional parsing",
-        )),
+        t if t == VP8_MAGIC => {
+            // Simple lossy WebP: a single VP8 key frame producing RGBA.
+            let image = vp8::decode_vp8_keyframe(payload)?;
+            Ok(rgba_frame(
+                frame_number,
+                image.width,
+                image.height,
+                image.rgba,
+            ))
+        }
+        t if t == VP8X_MAGIC => decode_vp8x(data, frame_number),
         _ => Err(ImageError::invalid_format("WebP: unknown chunk type")),
     }
+}
+
+/// Builds an `ImageFrame` from a tightly-packed RGBA buffer.
+fn rgba_frame(frame_number: u32, width: u32, height: u32, rgba: Vec<u8>) -> ImageFrame {
+    ImageFrame::new(
+        frame_number,
+        width,
+        height,
+        PixelType::U8,
+        4,
+        ColorSpace::Srgb,
+        ImageData::interleaved(rgba),
+    )
+}
+
+/// Builds an `ImageFrame` from an ARGB buffer (VP8L native layout).
+fn argb_frame(frame_number: u32, width: u32, height: u32, argb: Vec<u8>) -> ImageFrame {
+    ImageFrame::new(
+        frame_number,
+        width,
+        height,
+        PixelType::U8,
+        4,
+        ColorSpace::Srgb,
+        ImageData::interleaved(argb),
+    )
+}
+
+/// A single parsed RIFF sub-chunk: `(fourcc, payload-slice)`.
+struct SubChunk<'a> {
+    /// Four-character chunk identifier.
+    fourcc: [u8; 4],
+    /// Chunk payload (excluding header and any odd-byte padding).
+    payload: &'a [u8],
+}
+
+/// Iterates the RIFF sub-chunks contained in `body`.
+///
+/// `body` must be the bytes following the 12-byte `RIFF....WEBP` header. Each
+/// sub-chunk has an 8-byte header (4-byte fourcc + 4-byte little-endian size)
+/// and is padded to an even length.
+fn iter_subchunks(body: &[u8]) -> ImageResult<Vec<SubChunk<'_>>> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos + 8 <= body.len() {
+        let fourcc: [u8; 4] = body[pos..pos + 4]
+            .try_into()
+            .map_err(|_| ImageError::invalid_format("WebP: bad sub-chunk fourcc"))?;
+        let size = read_u32_le(body, pos + 4) as usize;
+        let data_start = pos + 8;
+        let data_end = data_start
+            .checked_add(size)
+            .ok_or_else(|| ImageError::invalid_format("WebP: sub-chunk size overflow"))?;
+        if data_end > body.len() {
+            return Err(ImageError::invalid_format(
+                "WebP: sub-chunk exceeds container",
+            ));
+        }
+        out.push(SubChunk {
+            fourcc,
+            payload: &body[data_start..data_end],
+        });
+        // Advance past the chunk, honouring even-byte padding.
+        pos = data_end + (size & 1);
+    }
+    Ok(out)
+}
+
+/// Decodes an extended-format (`VP8X`) WebP container.
+///
+/// The leading `VP8X` chunk records feature flags and the canvas size; the
+/// primary still frame (`VP8 ` or `VP8L`, possibly the first `ANMF` sub-frame)
+/// follows. An optional `ALPH` chunk carries the alpha plane for a lossy still
+/// frame. Multi-frame animation beyond the first displayed frame is not
+/// rendered (documented limitation).
+///
+/// # Errors
+/// Fails if the container is malformed or contains no decodable image chunk.
+fn decode_vp8x(data: &[u8], frame_number: u32) -> ImageResult<ImageFrame> {
+    if data.len() < 12 {
+        return Err(ImageError::invalid_format("WebP: VP8X file too small"));
+    }
+    let chunks = iter_subchunks(&data[12..])?;
+
+    // The first chunk must be VP8X and is exactly 10 bytes.
+    let Some(first) = chunks.first() else {
+        return Err(ImageError::invalid_format("WebP: empty VP8X container"));
+    };
+    if &first.fourcc != VP8X_MAGIC || first.payload.len() < 10 {
+        return Err(ImageError::invalid_format("WebP: malformed VP8X header"));
+    }
+    let flags = first.payload[0];
+    let has_alpha_flag = (flags & 0x10) != 0;
+    let _has_anim = (flags & 0x02) != 0;
+
+    // Locate the primary image chunk and any alpha chunk.
+    let mut alph: Option<&[u8]> = None;
+    let mut image_chunk: Option<&SubChunk<'_>> = None;
+    for ch in &chunks[1..] {
+        match &ch.fourcc {
+            b"ALPH" => alph = Some(ch.payload),
+            b"VP8 " | b"VP8L" => {
+                if image_chunk.is_none() {
+                    image_chunk = Some(ch);
+                }
+            }
+            b"ANMF" => {
+                // The first animation frame holds a nested VP8/VP8L chunk;
+                // its bitstream starts after a 16-byte ANMF sub-header.
+                if image_chunk.is_none() && ch.payload.len() > 16 {
+                    if let Ok(sub) = iter_subchunks(&ch.payload[16..]) {
+                        for inner in &sub {
+                            match &inner.fourcc {
+                                b"ALPH" if alph.is_none() => alph = Some(inner.payload),
+                                b"VP8 " | b"VP8L" => {
+                                    return decode_vp8x_frame(
+                                        &inner.fourcc,
+                                        inner.payload,
+                                        alph,
+                                        frame_number,
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            // ICCP / EXIF / XMP are metadata-only and ignored for pixel decode.
+            _ => {}
+        }
+    }
+
+    let Some(image) = image_chunk else {
+        return Err(ImageError::invalid_format(
+            "WebP: VP8X container has no image chunk",
+        ));
+    };
+    let _ = has_alpha_flag;
+    decode_vp8x_frame(&image.fourcc, image.payload, alph, frame_number)
+}
+
+/// Decodes a single VP8X primary frame, applying an optional alpha plane.
+fn decode_vp8x_frame(
+    fourcc: &[u8; 4],
+    payload: &[u8],
+    alph: Option<&[u8]>,
+    frame_number: u32,
+) -> ImageResult<ImageFrame> {
+    let mut frame = match fourcc {
+        b"VP8L" => {
+            let (width, height, argb) = decode_vp8l(payload)?;
+            argb_frame(frame_number, width, height, argb)
+        }
+        b"VP8 " => {
+            let image = vp8::decode_vp8_keyframe(payload)?;
+            rgba_frame(frame_number, image.width, image.height, image.rgba)
+        }
+        _ => {
+            return Err(ImageError::invalid_format(
+                "WebP: unexpected VP8X image chunk",
+            ))
+        }
+    };
+
+    // Apply the alpha plane if one was supplied (lossy still frames only — a
+    // VP8L frame already carries its own alpha channel).
+    if fourcc == b"VP8 " {
+        if let Some(alpha_data) = alph {
+            apply_alpha_chunk(&mut frame, alpha_data)?;
+        }
+    }
+    Ok(frame)
+}
+
+/// Applies a WebP `ALPH` chunk to the alpha channel of an RGBA frame.
+///
+/// The `ALPH` chunk header byte encodes the compression method (bits 0-1) and
+/// filtering/preprocessing fields. Only the uncompressed method (0) is decoded
+/// directly; lossless-compressed alpha (method 1) is left as a documented
+/// limitation and the frame stays fully opaque.
+fn apply_alpha_chunk(frame: &mut ImageFrame, alph: &[u8]) -> ImageResult<()> {
+    if alph.is_empty() {
+        return Ok(());
+    }
+    let method = alph[0] & 0x03;
+    let n = (frame.width as usize) * (frame.height as usize);
+    let alpha_bytes = &alph[1..];
+
+    let Some(raw) = frame.data.as_slice() else {
+        return Ok(());
+    };
+    let mut rgba = raw.to_vec();
+
+    match method {
+        0 => {
+            // Uncompressed: one alpha byte per pixel, row-major.
+            for (i, dst) in rgba.chunks_exact_mut(4).take(n).enumerate() {
+                dst[3] = alpha_bytes.get(i).copied().unwrap_or(255);
+            }
+        }
+        _ => {
+            // Compressed alpha is not decoded; leave the frame fully opaque.
+            // (Documented limitation — see module docs.)
+        }
+    }
+    frame.data = ImageData::interleaved(rgba);
+    Ok(())
 }
 
 /// Encodes an [`ImageFrame`] as a lossless WebP and writes to `path`.

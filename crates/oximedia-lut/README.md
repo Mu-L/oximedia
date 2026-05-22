@@ -1,9 +1,9 @@
 # oximedia-lut
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.6](https://img.shields.io/badge/version-0.1.6-blue)
+![Version: 0.1.7](https://img.shields.io/badge/version-0.1.7-blue)
 ![Tests: 550](https://img.shields.io/badge/tests-550-brightgreen)
-![Updated: 2026-04-26](https://img.shields.io/badge/updated-2026--04--20-blue)
+![Updated: 2026-05-21](https://img.shields.io/badge/updated-2026--05--21-blue)
 
 Professional LUT (Look-Up Table) and color science library for OxiMedia, providing 1D/3D LUT operations, ACES workflow, gamut mapping, and tone mapping.
 
@@ -44,7 +44,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-lut = "0.1.6"
+oximedia-lut = "0.1.7"
 ```
 
 ```rust

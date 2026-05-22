@@ -78,7 +78,6 @@ pub struct MetadataValidation {
 pub fn analyze_file(path: &Path) -> Result<Vec<Issue>> {
     let mut issues = Vec::new();
 
-    // Check if file exists and is readable
     if !path.exists() {
         return Ok(issues);
     }
@@ -86,7 +85,6 @@ pub fn analyze_file(path: &Path) -> Result<Vec<Issue>> {
     let metadata = std::fs::metadata(path)?;
     let file_size = metadata.len();
 
-    // Check for suspiciously small files
     if file_size < 1024 {
         issues.push(Issue {
             issue_type: IssueType::Truncated,
@@ -98,17 +96,24 @@ pub fn analyze_file(path: &Path) -> Result<Vec<Issue>> {
         });
     }
 
-    // Analyze container structure
-    issues.extend(analyze_container_structure(path)?);
+    // Run the four independent analysis passes in parallel.
+    // Each pass opens the file independently (read-only) and operates on disjoint
+    // data regions; there is no shared mutable state.
+    let ((r_container, r_timestamps), (r_indices, r_metadata)) = rayon::join(
+        || {
+            rayon::join(
+                || analyze_container_structure(path),
+                || analyze_timestamps(path),
+            )
+        },
+        || rayon::join(|| analyze_indices(path), || analyze_metadata(path)),
+    );
 
-    // Analyze timestamps
-    issues.extend(analyze_timestamps(path)?);
-
-    // Analyze indices
-    issues.extend(analyze_indices(path)?);
-
-    // Analyze metadata
-    issues.extend(analyze_metadata(path)?);
+    // Collect in deterministic order regardless of rayon completion order.
+    issues.extend(r_container?);
+    issues.extend(r_timestamps?);
+    issues.extend(r_indices?);
+    issues.extend(r_metadata?);
 
     Ok(issues)
 }
@@ -1313,12 +1318,36 @@ pub fn calculate_entropy(data: &[u8]) -> f64 {
 }
 
 /// Detect repeated patterns that might indicate corruption.
+///
+/// Returns `(start_offset, pattern_len, count)` tuples where `count >= MIN_PATTERN_COUNT`.
+///
+/// Strategy: scan using the rarest byte position in the pattern as the anchor.
+/// - Build a byte-frequency table over the whole `data` slice once (O(n)).
+/// - For each candidate pattern, find the byte position `anchor_off` with minimum frequency.
+/// - Use `memchr` on that anchor byte; adjust the candidate start back by `anchor_off`.
+///
+/// This prevents the O(n²) regression that arises when the first byte is very common
+/// (e.g. 0x00 in mostly-zero data that also contains rare sync bytes deeper in the pattern).
+/// For sparse-sync data the anchor is typically 0x47 or 0xDE — `memchr` returns None quickly.
+/// `count` is capped at `MAX_PATTERN_COUNT`; the sole caller (`scan_chunk`) filters at
+/// `count > 10`, so 32 is more than sufficient evidence.
 pub fn detect_patterns(data: &[u8]) -> Vec<(usize, usize, usize)> {
-    let mut patterns = Vec::new();
-
-    // Look for repeated sequences of at least 16 bytes
     const MIN_PATTERN_LEN: usize = 16;
     const MIN_PATTERN_COUNT: usize = 3;
+    /// Cap count here; caller filters at > 10 so 32 is more than enough evidence.
+    const MAX_PATTERN_COUNT: usize = 32;
+
+    if data.len() < MIN_PATTERN_LEN * MIN_PATTERN_COUNT {
+        return Vec::new();
+    }
+
+    // Build a byte-frequency table over the entire slice once — O(n), amortised over all loops.
+    let mut freq = [0u32; 256];
+    for &b in data {
+        freq[b as usize] += 1;
+    }
+
+    let mut patterns = Vec::new();
 
     for pattern_len in MIN_PATTERN_LEN..=256 {
         if pattern_len > data.len() / MIN_PATTERN_COUNT {
@@ -1328,15 +1357,53 @@ pub fn detect_patterns(data: &[u8]) -> Vec<(usize, usize, usize)> {
         let mut i = 0;
         while i + pattern_len <= data.len() {
             let pattern = &data[i..i + pattern_len];
-            let mut count = 1;
-            let mut j = i + pattern_len;
 
-            while j + pattern_len <= data.len() {
-                if &data[j..j + pattern_len] == pattern {
-                    count += 1;
-                    j += pattern_len;
-                } else {
-                    j += 1;
+            // Find the rarest byte in this pattern (lowest global frequency).
+            // Plain loop: iterator chains with closures are not inlined in debug mode
+            // and add significant overhead when called millions of times.
+            let mut anchor_off = 0usize;
+            let mut min_freq = u32::MAX;
+            for (off, &b) in pattern.iter().enumerate() {
+                let f = freq[b as usize];
+                if f < min_freq {
+                    min_freq = f;
+                    anchor_off = off;
+                }
+            }
+            let anchor_byte = pattern[anchor_off];
+
+            let mut count = 1usize;
+            // j tracks the anchor position (not the pattern start), so we scan
+            // anchor positions in data[j..search_ceiling + anchor_off].
+            let j_start = i + pattern_len + anchor_off;
+            // The anchor can appear at most at data.len() - (pattern_len - anchor_off),
+            // because after the anchor we still need (pattern_len - anchor_off) bytes.
+            let search_ceiling = data
+                .len()
+                .saturating_sub(pattern_len - anchor_off)
+                .saturating_add(1);
+            let mut j = j_start;
+
+            'scan: while j < search_ceiling {
+                match memchr::memchr(anchor_byte, &data[j..search_ceiling]) {
+                    None => break 'scan,
+                    Some(offset) => {
+                        let anchor_pos = j + offset;
+                        // Candidate pattern start = anchor_pos - anchor_off.
+                        // Guard against underflow (anchor_off > anchor_pos can't happen here
+                        // since j >= j_start >= anchor_off + pattern_len > anchor_off).
+                        let candidate = anchor_pos - anchor_off;
+                        if data[candidate..candidate + pattern_len] == *pattern {
+                            count += 1;
+                            if count >= MAX_PATTERN_COUNT {
+                                break 'scan;
+                            }
+                            // Advance anchor position past this full pattern match.
+                            j = candidate + pattern_len + anchor_off;
+                        } else {
+                            j = anchor_pos + 1;
+                        }
+                    }
                 }
             }
 
@@ -1394,6 +1461,91 @@ mod tests {
         let data: Vec<u8> = (0..=255).collect();
         let patterns = detect_patterns(&data);
         assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn test_detect_patterns_all_zeros_fast_path() {
+        // 64 KiB of zeros — the all-zero pattern must be detected quickly
+        // and returned with count >= MIN_PATTERN_COUNT.
+        let data = vec![0u8; 64 * 1024];
+        let patterns = detect_patterns(&data);
+        assert!(
+            !patterns.is_empty(),
+            "all-zero buffer must produce at least one detected pattern"
+        );
+        let (_, _, count) = patterns[0];
+        assert!(
+            count >= 3,
+            "count must be >= MIN_PATTERN_COUNT, got {count}"
+        );
+    }
+
+    #[test]
+    fn test_detect_patterns_count_bounded() {
+        // Pattern repeated 10 000 times — count must be capped at MAX_PATTERN_COUNT (32).
+        let unit = b"ABCDEFGHIJKLMNOP"; // 16 bytes
+        let data: Vec<u8> = unit.iter().cloned().cycle().take(10_000 * 16).collect();
+        let patterns = detect_patterns(&data);
+        for &(_, _, count) in &patterns {
+            assert!(
+                count <= 32,
+                "count {count} exceeds MAX_PATTERN_COUNT cap of 32"
+            );
+        }
+        assert!(!patterns.is_empty(), "must detect the repeating pattern");
+    }
+
+    #[test]
+    fn test_detect_patterns_sparse_sync_bytes() {
+        // Replicate the synthetic broken-data layout from the slow integration test:
+        // mostly zeros + 0x47 sync bytes every 500 bytes.  Must not blow up.
+        let size = 512 * 1024; // 512 KiB (enough to exercise the algorithm without test suite lag)
+        let mut data = vec![0u8; size];
+        data[0] = 0xDE;
+        data[1] = 0xAD;
+        data[2] = 0xBE;
+        data[3] = 0xEF;
+        for k in (1000..size - 1000).step_by(500) {
+            if k + 188 < size {
+                data[k] = 0x47;
+            }
+        }
+        let start = std::time::Instant::now();
+        let patterns = detect_patterns(&data);
+        let elapsed = start.elapsed();
+        // Debug builds are ~10-15x slower than release; give them 90 s headroom.
+        // Release builds should always finish well under 10 s.
+        let budget_ms: u128 = if cfg!(debug_assertions) {
+            90_000
+        } else {
+            10_000
+        };
+        assert!(
+            elapsed.as_millis() < budget_ms,
+            "detect_patterns took {elapsed:?} on 512 KiB sparse-sync data (budget {budget_ms} ms) — O(n²) regression?"
+        );
+        let _ = patterns; // result is valid; content not checked here
+    }
+
+    #[test]
+    fn test_detect_patterns_rare_first_byte() {
+        // A pattern whose first byte appears only once in the entire buffer.
+        // The j-loop must exit almost immediately (memchr returns None).
+        let mut data = vec![0u8; 32 * 1024];
+        // Put a rare sequence at offset 0 only.
+        data[0] = 0xFF;
+        data[1] = 0xFE;
+        data[2] = 0xFD;
+        data[3] = 0xFC;
+        let start = std::time::Instant::now();
+        let _ = detect_patterns(&data);
+        let elapsed = start.elapsed();
+        // Debug builds are slower; allow 3 s. Release should finish in < 500 ms.
+        let budget_ms: u128 = if cfg!(debug_assertions) { 3_000 } else { 500 };
+        assert!(
+            elapsed.as_millis() < budget_ms,
+            "rare-first-byte scan took {elapsed:?} (budget {budget_ms} ms) — memchr optimization not working?"
+        );
     }
 
     #[test]
@@ -1497,5 +1649,55 @@ mod tests {
         let bytes = [0u8; 5];
         let ts = parse_pes_timestamp(&bytes);
         assert_eq!(ts, 0);
+    }
+
+    #[test]
+    fn test_analyze_file_parallel_deterministic_order() {
+        use std::io::Write;
+
+        // Write a 2 KiB file that looks like a broken AVI so the AVI branch is taken
+        // (analyze_avi_index, validate_avi_metadata are exercised).
+        let path = std::env::temp_dir().join(format!(
+            "oximedia_analyze_parallel_order_test_{}.bin",
+            std::process::id()
+        ));
+        {
+            let mut f = std::fs::File::create(&path).expect("create test file");
+            f.write_all(b"RIFF").expect("write RIFF");
+            f.write_all(&(2048u32 - 8).to_le_bytes())
+                .expect("write size");
+            f.write_all(b"AVI ").expect("write AVI ");
+            // Pad to 2 KiB
+            f.write_all(&vec![0u8; 2048 - 12]).expect("pad");
+        }
+
+        // Parallel analyze_file
+        let parallel_issues = analyze_file(&path).expect("parallel analyze_file failed");
+
+        // Sequential reference
+        let mut seq_issues = Vec::new();
+        seq_issues.extend(analyze_container_structure(&path).expect("container struct"));
+        seq_issues.extend(analyze_timestamps(&path).expect("timestamps"));
+        seq_issues.extend(analyze_indices(&path).expect("indices"));
+        seq_issues.extend(analyze_metadata(&path).expect("metadata"));
+
+        // Compare issue type + description sets (sorted for stability)
+        let mut par_keys: Vec<_> = parallel_issues
+            .iter()
+            .map(|i| format!("{:?}|{}", i.issue_type, i.description))
+            .collect();
+        let mut seq_keys: Vec<_> = seq_issues
+            .iter()
+            .map(|i| format!("{:?}|{}", i.issue_type, i.description))
+            .collect();
+        par_keys.sort();
+        seq_keys.sort();
+
+        assert_eq!(
+            par_keys, seq_keys,
+            "parallel analyze_file must return the same issues as sequential sub-passes"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }

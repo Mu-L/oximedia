@@ -12,28 +12,28 @@
 - [x] Implement RPU data validation for all metadata levels in `validation.rs` (currently only checks header)
 - [x] Add round-trip fidelity verification in `parser.rs` / `writer.rs` (parse -> write -> parse should be identical)
 - [x] Enhance `profile_convert.rs` with Profile 8 -> Profile 8.4 (HDR10 to HLG) conversion
-- [ ] Add automatic profile detection from RPU header fields
-- [ ] Improve `scene_trim.rs` with scene-change detection heuristics from L1 metadata
-- [ ] Add `cm_analysis.rs` content mapping analysis with histogram-based scene statistics
-- [ ] Implement RPU merging for combining metadata from multiple sources in `shot_metadata_ext.rs`
-- [ ] Add streaming RPU parser that processes NAL units incrementally without buffering full stream
+- [x] Add automatic profile detection from RPU header fields (verified 2026-05-16; src/auto_profile_detect.rs:137 fn detect)
+- [x] Improve `scene_trim.rs` with scene-change detection heuristics from L1 metadata (verified 2026-05-16; src/scene_trim.rs:293 fn detect_scene_changes)
+- [x] Add `cm_analysis.rs` content mapping analysis with histogram-based scene statistics (verified 2026-05-16; src/cm_analysis.rs:104 struct CmAnalyzer, histogram bins)
+- [x] Implement RPU merging for combining metadata from multiple sources in `shot_metadata_ext.rs` (verified 2026-05-16; src/rpu_merge.rs:87 fn merge_rpus)
+- [x] Add streaming RPU parser that processes NAL units incrementally without buffering full stream (verified 2026-05-16; src/streaming_parser.rs:53 StreamingRpuParser)
 
 ## New Features
-- [ ] Implement Dolby Vision to HDR10+ metadata conversion bridge
-- [ ] Add RPU metadata visualization/plotting utilities for debugging
-- [ ] Implement `ambient_metadata.rs` ambient light adaptation metadata generation
-- [ ] Add batch RPU extraction from HEVC/AVC bitstreams
-- [ ] Implement RPU metadata timeline editing (insert, delete, retime RPU entries)
-- [ ] Add Profile 10 (AV1-based Dolby Vision) metadata structure support
-- [ ] Implement `dv_xml_metadata.rs` full Dolby Vision XML round-trip (parse + generate)
-- [ ] Add RPU statistics reporting (min/max/avg luminance per scene)
+- [x] Implement Dolby Vision to HDR10+ metadata conversion bridge (verified 2026-05-16; src/dv_hdr10plus_bridge.rs:113 struct DvToHdr10PlusBridge)
+- [x] Add RPU metadata visualization/plotting utilities for debugging (verified 2026-05-16; src/rpu_visualize.rs:82 struct RpuPlotter)
+- [x] Implement `ambient_metadata.rs` ambient light adaptation metadata generation (verified 2026-05-16; src/ambient_metadata.rs:17 struct AmbientLight)
+- [x] Add batch RPU extraction from HEVC/AVC bitstreams (verified 2026-05-16; src/batch_rpu.rs:209 struct BatchRpuProcessor)
+- [x] Implement RPU metadata timeline editing (insert, delete, retime RPU entries) (verified 2026-05-16; src/rpu_timeline.rs:137 struct RpuTimeline)
+- [x] Add Profile 10 (AV1-based Dolby Vision) metadata structure support (verified 2026-05-16; src/profile10.rs:34 struct Av1MetadataObuHeader)
+- [x] Implement `dv_xml_metadata.rs` full Dolby Vision XML round-trip (parse + generate) (verified 2026-05-16; src/dv_xml_metadata.rs:849 lines)
+- [x] Add RPU statistics reporting (min/max/avg luminance per scene) (verified 2026-05-16; src/rpu_stats.rs:118 struct SequenceLuminanceReport)
 
 ## Performance
-- [ ] Optimize `tonemap.rs` PQ/HLG transfer functions with lookup tables
-- [ ] Add SIMD-accelerated `ipt_pq.rs` color space conversion
-- [ ] Cache parsed RPU structures in `parser.rs` to avoid re-parsing identical NAL units
+- [x] Optimize `tonemap.rs` PQ/HLG transfer functions with lookup tables (verified 2026-05-16; src/tonemap.rs:41 pq_to_linear, ReshapingLut:236, ColorVolumeLut:299 3D-LUT trilinear)
+- [ ] Add SIMD-accelerated `ipt_pq.rs` color space conversion (verified-open 2026-05-16: ipt_pq.rs has 439 lines but no SIMD intrinsics)
+- [ ] Cache parsed RPU structures in `parser.rs` to avoid re-parsing identical NAL units (verified-open 2026-05-16: not yet implemented)
 - [x] Optimize `mapping_curve.rs` polynomial evaluation with Horner's method
-- [ ] Pre-compute `BilateralGrid` and `ColorVolumeLut` for repeated tone mapping operations
+- [x] Pre-compute `BilateralGrid` and `ColorVolumeLut` for repeated tone mapping operations (verified 2026-05-16; src/tonemap.rs:667 struct BilateralGrid, :299 ColorVolumeLut with precomputed 3D LUT)
 
 ## Testing
 - [ ] Add conformance tests with known-good RPU bitstreams from reference tools

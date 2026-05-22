@@ -76,7 +76,7 @@ rand.workspace = true
 # System information
 num_cpus = "1.17"
 hostname = "0.4"
-sysinfo = "0.38"
+sysinfo = { workspace = true }
 
 # Metrics and monitoring
 prometheus = { workspace = true }
@@ -90,7 +90,7 @@ rustls = { workspace = true }
 rustls-pemfile = "2.2.0"
 
 # Logging subscriber (uses env-filter, file sinks — not wasm-compatible)
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-subscriber = { workspace = true }
 
 [build-dependencies]
 tonic-build = "0.14"

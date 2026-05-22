@@ -57,7 +57,10 @@ fn print_decoder_status_matrix() {
     println!("    AV1      Bitstream-parsing");
     println!("    VP9      Bitstream-parsing");
     println!("    VP8      Bitstream-parsing");
-    println!("    Theora   Bitstream-parsing (known pixel-copy bug, see docs/codec_status.md)");
+    println!(
+        "    Theora   Bitstream-parsing (decode hand-off fixed in 0.1.7; \
+         encoder↔decoder bitstream alignment outstanding — see docs/codec_status.md)"
+    );
     println!("    AVIF     Bitstream-parsing (depends on AV1)");
     println!("    MJPEG    Functional");
     println!("    FFV1     Functional");

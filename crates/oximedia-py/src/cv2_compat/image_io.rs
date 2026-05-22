@@ -14,25 +14,26 @@ use std::io::Cursor;
 #[pyfunction]
 #[pyo3(name = "imread", signature = (filename, flags=1))]
 pub fn imread(py: Python<'_>, filename: &str, flags: i32) -> PyResult<Py<PyAny>> {
-    let img = image::open(filename)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("imread: {}", e)))?;
-
-    match flags {
-        0 => {
-            // IMREAD_GRAYSCALE
-            let gray = img.to_luma8();
-            let (w, h) = gray.dimensions();
-            let data = gray.into_raw();
-            make_image_output(py, data, h as usize, w as usize, 1)
+    let filename_owned = filename.to_string();
+    // Release GIL for the JPEG/PNG/BMP decode (CPU-intensive codec work)
+    let result: Result<(Vec<u8>, usize, usize, usize), String> = py.detach(move || {
+        let img = image::open(&filename_owned).map_err(|e| format!("imread: {}", e))?;
+        match flags {
+            0 => {
+                let gray = img.to_luma8();
+                let (w, h) = gray.dimensions();
+                Ok((gray.into_raw(), h as usize, w as usize, 1))
+            }
+            _ => {
+                let rgb = img.to_rgb8();
+                let (w, h) = rgb.dimensions();
+                let data = rgb_to_bgr(rgb.into_raw(), w as usize, h as usize);
+                Ok((data, h as usize, w as usize, 3))
+            }
         }
-        _ => {
-            // IMREAD_COLOR (default) — BGR
-            let rgb = img.to_rgb8();
-            let (w, h) = rgb.dimensions();
-            let data = rgb_to_bgr(rgb.into_raw(), w as usize, h as usize);
-            make_image_output(py, data, h as usize, w as usize, 3)
-        }
-    }
+    });
+    let (data, h, w, ch) = result.map_err(|e| pyo3::exceptions::PyIOError::new_err(e))?;
+    make_image_output(py, data, h, w, ch)
 }
 
 /// Write an image to a file.

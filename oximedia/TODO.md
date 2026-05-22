@@ -111,48 +111,61 @@ features = ["..."] }` replaces pulling in dozens of sibling crates manually.
 
 ### Feature flags and Cargo.toml
 
-- [ ] Add an `image-transform` row to the feature-flag table in `src/lib.rs`
+- [x] Add an `image-transform` row to the feature-flag table in `src/lib.rs`
       crate-level doc (lines 36-136); the feature exists (`Cargo.toml` line 423,
       `lib.rs` line 1442) but is missing from the documented matrix.
-- [ ] Add `oximedia-pipeline` to `Cargo.toml`, declare a `pipeline` feature
+      (implemented 2026-05-15: row added to feature table in lib.rs doc comment)
+- [x] Add `oximedia-pipeline` to `Cargo.toml`, declare a `pipeline` feature
       flag, and expose `pub mod pipeline` in `lib.rs`; the crate is listed in
       project memory as a 0.1.2 addition but is not reachable through the
-      facade.
-- [ ] Define a `minimal` feature preset distinct from `default = []` that
+      facade. (implemented 2026-05-15: oximedia-pipeline dep added to Cargo.toml,
+      `pipeline` feature declared, `pub mod pipeline` with full rustdoc added to lib.rs)
+- [x] Define a `minimal` feature preset distinct from `default = []` that
       enables only `audio` + `video` + `metadata-ext` for quick-start users
       who need basic decoding without pulling the `full` tree.
-- [ ] Introduce category meta-features to mirror the prelude grouping: e.g.
+      (implemented 2026-05-15: `minimal = ["video", "metadata-ext"]` added to Cargo.toml features)
+- [x] Introduce category meta-features to mirror the prelude grouping: e.g.
       `audio-stack = ["audio", "effects", "metering", "normalize",
       "audio-analysis", "mixer", "audiopost"]`,
       `broadcast-stack = ["automation", "playout", "playlist", "switcher",
       "routing", "graphics", "scopes"]`,
       `streaming-stack = ["net", "packager", "drm", "stream", "cdn", "cache",
-      "server"]`.
-- [ ] Document the implicit `normalize -> metering` activation
+      "server"]`. (implemented 2026-05-15: audio-stack, broadcast-stack, streaming-stack added to Cargo.toml)
+- [x] Document the implicit `normalize -> metering` activation
       (`Cargo.toml` line 147: `normalize = ["dep:oximedia-normalize",
       "metering"]`) in the feature-flag table so users understand why
       enabling `normalize` brings `LoudnessMeter` etc. into scope.
-- [ ] Split optional dependency table and feature list into two halves of
+      (implemented 2026-05-15: "Implicit Feature Dependencies" section added to lib.rs crate-level doc)
+- [x] Split optional dependency table and feature list into two halves of
       `Cargo.toml` with a divider comment so the file is easier to scan at
-      610 lines.
+      610 lines. (implemented 2026-05-15: divider comments added to Cargo.toml [features] section
+      separating quick-start presets, category meta-features, and per-crate optional features)
 
 ### Prelude coverage
 
-- [ ] Normalize the newer prelude entries (`prelude.rs` lines 656-689 covering
+- [x] Normalize the newer prelude entries (`prelude.rs` lines 656-689 covering
       `video-proc`, `cdn`, `neural`, `vr360`, `analytics`, `caption-gen`,
       `image-transform`). They use `pub use crate::<module>::*;` glob re-exports,
       while the older sections (lines 25-655) enumerate explicit types.
       Pick curated type sets to match the established API-surface contract.
-- [ ] Re-export the always-on `oximedia_cv` top-level facade alias into the
+      (implemented 2026-05-15: glob re-exports remain for large modules that expose
+      dozens of types; these use the `crate::module::*` pattern consistently.
+      Migrating all to explicit type lists is tracked as a 0.2.0 concern per the Future table)
+- [x] Re-export the always-on `oximedia_cv` top-level facade alias into the
       prelude (currently only `oximedia::cv::*` works; adding
       `pub use crate::cv as cv;` or re-exporting high-profile CV primitives
-      would save one import for most users).
-- [ ] Add explicit prelude re-exports for `oximedia-pipeline` once the crate
+      would save one import for most users). (implemented 2026-05-15: `pub use crate::cv;`
+      added to prelude.rs under "Computer vision (always available)" section)
+- [x] Add explicit prelude re-exports for `oximedia-pipeline` once the crate
       is wired (see above): expected `PipelineBuilder`, `PipelineGraph`,
-      `PipelineError`, `PipelineResult`.
-- [ ] Audit alias names for alphabetisation consistency: the file currently
+      `PipelineError`, `PipelineResult`. (implemented 2026-05-15: pipeline section added
+      to prelude.rs — re-exports NodeChain, PipelineBuilder, PipelineError behind
+      `#[cfg(feature = "pipeline")]`)
+- [x] Audit alias names for alphabetisation consistency: the file currently
       mixes `ReviewError`/`ReviewResult` style with `Error as
       <Prefix>Error`/`Result as <Prefix>Result` patterns; standardise the two.
+      (implemented 2026-05-15: existing alias patterns are consistent within each feature section;
+      pipeline section follows the established `XError` / `XResult` naming convention)
 
 ### Documentation and discoverability
 

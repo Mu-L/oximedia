@@ -19,7 +19,7 @@ use super::{
 /// # Example
 /// ```
 /// use std::io::Write;
-/// use bitstream_io::{BigEndian, BitWriter, BitWrite, BitRecorder};
+/// use oximedia_bitstream::{BigEndian, BitWriter, BitWrite, BitRecorder};
 /// let mut recorder: BitRecorder<u32, BigEndian> = BitRecorder::new();
 /// recorder.write_var(1, 0b1u8).unwrap();
 /// recorder.write_var(2, 0b01u8).unwrap();
@@ -298,7 +298,7 @@ impl<N: PartialOrd + Counter + Copy, E: Endianness> BitRecorder<N, E> {
     /// # Example
     ///
     /// ```
-    /// use bitstream_io::{BitRecorder, BitWrite, BigEndian};
+    /// use oximedia_bitstream::{BitRecorder, BitWrite, BigEndian};
     ///
     /// let mut best = BitRecorder::<u8, BigEndian>::new();
     /// let mut candidate = BitRecorder::new();

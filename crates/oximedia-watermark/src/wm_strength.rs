@@ -1,11 +1,157 @@
-#![allow(dead_code)]
 //! Watermark strength analysis and adaptive strength control.
 //!
 //! This module provides tools for analysing the optimal embedding strength of a
 //! watermark given a host signal, as well as adaptive algorithms that adjust
 //! strength on a per-frame basis to balance imperceptibility and robustness.
+//!
+//! The [`WatermarkStrengthTuner`] uses binary search to find the maximum
+//! embedding strength that keeps the perceptual PSNR above a caller-supplied
+//! threshold.
+
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// WatermarkEmbedder trait (local definition for strength tuning)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Minimal embedding interface required by [`WatermarkStrengthTuner`].
+///
+/// Implementors take a signal and a payload and return the watermarked signal.
+pub trait WatermarkEmbedder {
+    /// Embed `payload` into `original` at the given `strength`, returning the
+    /// watermarked signal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a boxed error if embedding fails (e.g. signal too short).
+    fn embed_with_strength(
+        &self,
+        original: &[f32],
+        payload: &[u8],
+        strength: f32,
+    ) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// PSNR helper
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Compute PSNR between `original` and `watermarked` f32 signals normalised
+/// to `[−1, 1]`.
+///
+/// PSNR is defined as `20 × log₁₀(1 / RMSE)` where RMSE is the root-mean-
+/// square error between the two signals.  Returns `f64::INFINITY` when the
+/// signals are identical (RMSE = 0).  Returns `f64::NEG_INFINITY` when the
+/// slice is empty.
+#[must_use]
+pub fn compute_psnr_f32(original: &[f32], watermarked: &[f32]) -> f64 {
+    let n = original.len().min(watermarked.len());
+    if n == 0 {
+        return f64::NEG_INFINITY;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let mse: f64 = original
+        .iter()
+        .zip(watermarked.iter())
+        .map(|(&o, &w)| {
+            let d = f64::from(o) - f64::from(w);
+            d * d
+        })
+        .sum::<f64>()
+        / n as f64;
+
+    if mse == 0.0 {
+        return f64::INFINITY;
+    }
+    20.0 * mse.sqrt().recip().log10()
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Strength tuner
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Finds the maximum watermark embedding strength that keeps the signal PSNR
+/// above a caller-specified threshold via binary search.
+///
+/// # Algorithm
+///
+/// Binary search over `[lo, hi]` where `lo = 0.01` and `hi = 1.0`.  At each
+/// iteration the midpoint strength is tried; if the resulting PSNR is still
+/// above `target_psnr_db` the midpoint becomes the new lower bound, otherwise
+/// it becomes the new upper bound.  The search runs for at most
+/// [`WatermarkStrengthTuner::MAX_ITERATIONS`] iterations.
+pub struct WatermarkStrengthTuner;
+
+impl WatermarkStrengthTuner {
+    /// Maximum number of binary-search iterations.
+    pub const MAX_ITERATIONS: usize = 30;
+
+    /// Find the maximum strength in `[0.01, 1.0]` such that embedding
+    /// `payload` into `original` produces PSNR ≥ `target_psnr_db`.
+    ///
+    /// Returns the best strength found, or an error if even the minimum
+    /// strength `0.01` fails to produce a valid watermarked signal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a boxed error if:
+    /// * The embedder returns an error for the minimum strength.
+    /// * `target_psnr_db` is non-finite.
+    pub fn find_optimal_strength(
+        embedder: &dyn WatermarkEmbedder,
+        original: &[f32],
+        payload: &[u8],
+        target_psnr_db: f64,
+    ) -> Result<f32, Box<dyn std::error::Error + Send + Sync>> {
+        if !target_psnr_db.is_finite() {
+            return Err("target_psnr_db must be finite".into());
+        }
+
+        let mut lo: f32 = 0.01;
+        let mut hi: f32 = 1.0;
+
+        // Check that the minimum strength is at least feasible.
+        let wm_lo = embedder.embed_with_strength(original, payload, lo)?;
+        let psnr_lo = compute_psnr_f32(original, &wm_lo);
+        if psnr_lo < target_psnr_db {
+            // Even the minimum is too strong (very tight threshold). Return lo.
+            return Ok(lo);
+        }
+
+        // `lo` passed the PSNR check — use it as the starting best.
+        let mut best = lo;
+
+        for _ in 0..Self::MAX_ITERATIONS {
+            let mid = lo + (hi - lo) * 0.5;
+            if (hi - lo) < 1e-6 {
+                break;
+            }
+
+            let wm_mid = match embedder.embed_with_strength(original, payload, mid) {
+                Ok(wm) => wm,
+                Err(_) => {
+                    // Embedder rejected mid — strength is too high.
+                    hi = mid;
+                    continue;
+                }
+            };
+
+            let psnr = compute_psnr_f32(original, &wm_mid);
+            if psnr >= target_psnr_db {
+                // Strength `mid` is acceptable — try higher.
+                best = mid;
+                lo = mid;
+            } else {
+                // PSNR too low — reduce strength.
+                hi = mid;
+            }
+        }
+
+        Ok(best)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Strength profile
@@ -524,5 +670,88 @@ mod tests {
         let analyser = StrengthAnalyser::new(StrengthAnalyserConfig::default());
         let profile = analyser.analyse(&[]);
         assert!(profile.is_empty());
+    }
+
+    // ── Item 3: WatermarkStrengthTuner ───────────────────────────────────────
+
+    /// Trivial embedder that adds `strength * 0.1` to every sample.
+    struct TrivialEmbedder;
+
+    impl WatermarkEmbedder for TrivialEmbedder {
+        fn embed_with_strength(
+            &self,
+            original: &[f32],
+            _payload: &[u8],
+            strength: f32,
+        ) -> Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+            // Add a constant offset proportional to strength.
+            let wm: Vec<f32> = original.iter().map(|&s| s + strength * 0.1).collect();
+            Ok(wm)
+        }
+    }
+
+    #[test]
+    fn test_strength_tuner_converges() {
+        // Signal: constant 0.5, embedder adds noise proportional to strength.
+        let original = vec![0.5f32; 1024];
+        let payload = b"test";
+        // Target PSNR of 20 dB; tuner should converge to some valid strength.
+        let strength = WatermarkStrengthTuner::find_optimal_strength(
+            &TrivialEmbedder,
+            &original,
+            payload,
+            20.0,
+        )
+        .expect("tuner should converge in test");
+        assert!(
+            strength >= 0.01,
+            "strength should be at least minimum, got {strength}"
+        );
+        assert!(
+            strength <= 1.0,
+            "strength should be at most maximum, got {strength}"
+        );
+
+        // Verify that the returned strength actually achieves the target.
+        let wm = TrivialEmbedder
+            .embed_with_strength(&original, payload, strength)
+            .expect("embed should succeed in test");
+        let psnr = compute_psnr_f32(&original, &wm);
+        assert!(
+            psnr >= 20.0,
+            "PSNR {psnr:.2} dB should be >= target 20.0 dB"
+        );
+    }
+
+    #[test]
+    fn test_strength_tuner_high_psnr_low_strength() {
+        // With a very high PSNR requirement (60 dB), the tuner should return a
+        // small strength value because any large modification lowers PSNR.
+        let original = vec![0.5f32; 1024];
+        let payload = b"x";
+        let strength = WatermarkStrengthTuner::find_optimal_strength(
+            &TrivialEmbedder,
+            &original,
+            payload,
+            60.0,
+        )
+        .expect("tuner should succeed in test");
+        assert!(
+            strength < 0.5,
+            "high PSNR requirement should force low strength, got {strength}"
+        );
+    }
+
+    #[test]
+    fn test_compute_psnr_f32_identical() {
+        let signal = vec![0.5f32; 256];
+        let psnr = compute_psnr_f32(&signal, &signal);
+        assert!(psnr.is_infinite() && psnr.is_sign_positive());
+    }
+
+    #[test]
+    fn test_compute_psnr_f32_empty() {
+        let psnr = compute_psnr_f32(&[], &[]);
+        assert!(psnr.is_infinite() && psnr.is_sign_negative());
     }
 }

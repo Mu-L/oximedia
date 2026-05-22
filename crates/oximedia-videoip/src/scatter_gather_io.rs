@@ -418,10 +418,7 @@ impl ReceiveCoalescer {
 
     /// Forces a flush of whatever is pending.
     pub fn flush(&mut self) -> PacketBatch {
-        let flushed = std::mem::replace(
-            &mut self.pending,
-            PacketBatch::new(self.flush_threshold),
-        );
+        let flushed = std::mem::replace(&mut self.pending, PacketBatch::new(self.flush_threshold));
         self.total_flushed += 1;
         flushed
     }
@@ -515,7 +512,10 @@ mod tests {
         ];
         let result = reassemble_frame_payload(&frags, 1024);
         assert!(result.is_ok());
-        assert_eq!(result.expect("reassemble"), Bytes::from_static(b"hello world"));
+        assert_eq!(
+            result.expect("reassemble"),
+            Bytes::from_static(b"hello world")
+        );
     }
 
     #[test]
@@ -566,9 +566,7 @@ mod tests {
         let sender = PacedBatchSender::new(100, 3);
         let mut batch = PacketBatch::new(8);
         for i in 0..7 {
-            batch
-                .push(Bytes::from(vec![i; 10]), test_addr())
-                .ok();
+            batch.push(Bytes::from(vec![i; 10]), test_addr()).ok();
         }
         let sub_batches = sender.partition(&batch);
         assert_eq!(sub_batches.len(), 3); // 3+3+1

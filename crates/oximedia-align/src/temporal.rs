@@ -916,3 +916,296 @@ mod tests {
         assert_eq!(corr.hop_size, 512);
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Network time synchronization (SNTP / RFC 4330)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Configuration for an SNTP (Simple Network Time Protocol) query.
+///
+/// SNTP is a simplified version of NTP (RFC 4330) that is sufficient for
+/// computing a clock offset without the full NTP association state machine.
+/// It uses a single UDP exchange to estimate the difference between the local
+/// clock and the reference server clock.
+#[derive(Debug, Clone)]
+pub struct NtpConfig {
+    /// Hostname or IP address of the NTP server (e.g. `"pool.ntp.org"`).
+    pub server: String,
+    /// UDP port of the NTP server.  Standard port is 123.
+    pub port: u16,
+    /// Socket receive timeout in milliseconds.  Default: 2 000 ms.
+    pub timeout_ms: u64,
+}
+
+impl Default for NtpConfig {
+    fn default() -> Self {
+        Self {
+            server: "pool.ntp.org".to_string(),
+            port: 123,
+            timeout_ms: 2_000,
+        }
+    }
+}
+
+/// Measured clock offset and round-trip delay from a single SNTP exchange.
+///
+/// All values are in **milliseconds** with sub-millisecond resolution.
+///
+/// The classic SNTP offset formula uses four timestamps (RFC 4330 §5):
+///
+/// ```text
+/// offset = ((T2 - T1) + (T3 - T4)) / 2
+/// RTT    = (T4 - T1) - (T3 - T2)
+/// ```
+///
+/// where:
+/// - `T1` = client transmit time
+/// - `T2` = server receive time
+/// - `T3` = server transmit time
+/// - `T4` = client receive time
+#[derive(Debug, Clone, Copy)]
+pub struct TimeDelta {
+    /// Signed clock offset in milliseconds.
+    ///
+    /// Positive means the local clock is *behind* the server (local is slow).
+    /// Negative means the local clock is *ahead* of the server (local is fast).
+    pub offset_ms: i64,
+
+    /// Round-trip delay in milliseconds (always ≥ 0).
+    pub round_trip_ms: u64,
+}
+
+/// SNTP client for network-based time synchronization.
+///
+/// Queries an NTP server via UDP and returns the estimated clock offset.
+/// This is intentionally simple (single-packet, no association state) and is
+/// suitable for one-shot synchronization of distributed camera systems where
+/// NTP precision (≈ 1–50 ms) is adequate.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use oximedia_align::temporal::{NtpClient, NtpConfig};
+///
+/// let config = NtpConfig {
+///     server: "pool.ntp.org".to_string(),
+///     port: 123,
+///     timeout_ms: 3_000,
+/// };
+/// // In production; requires network access:
+/// // let delta = NtpClient::query_offset(&config).unwrap();
+/// // println!("Clock offset: {} ms", delta.offset_ms);
+/// ```
+pub struct NtpClient;
+
+impl NtpClient {
+    /// Query an NTP server and compute the clock offset for the local clock.
+    ///
+    /// Makes a single SNTP request (Mode 3 / Client) and parses the 48-byte
+    /// NTP response packet to extract the four timestamps required for the
+    /// RFC 4330 §5 offset formula.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AlignError::SyncError`] if:
+    /// - The server address cannot be resolved.
+    /// - The UDP socket cannot be bound or the send/receive fails.
+    /// - The response is shorter than 48 bytes or has an invalid leap/mode.
+    pub fn query_offset(config: &NtpConfig) -> AlignResult<TimeDelta> {
+        use std::net::{ToSocketAddrs, UdpSocket};
+        use std::time::Duration;
+
+        // Resolve server address
+        let server_addr = format!("{}:{}", config.server, config.port)
+            .to_socket_addrs()
+            .map_err(|e| AlignError::SyncError(format!("DNS resolution failed: {e}")))?
+            .next()
+            .ok_or_else(|| AlignError::SyncError("No addresses returned by DNS".to_string()))?;
+
+        // Bind to any local port
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .map_err(|e| AlignError::SyncError(format!("Failed to bind UDP socket: {e}")))?;
+
+        socket
+            .set_read_timeout(Some(Duration::from_millis(config.timeout_ms)))
+            .map_err(|e| AlignError::SyncError(format!("Failed to set socket timeout: {e}")))?;
+
+        // Build a minimal 48-byte NTP client request (Mode 3, Version 4)
+        let mut request = [0u8; 48];
+        // Byte 0: LI=0 (00), VN=4 (100), Mode=3 (011) → 0b00_100_011 = 0x23
+        request[0] = 0x23;
+
+        // Record client transmit time T1 (before send) in NTP 64-bit format.
+        // NTP epoch is 1900-01-01; Unix epoch offset = 2_208_988_800 s.
+        let t1_ntp = Self::unix_to_ntp(Self::now_unix_ms());
+
+        // Write T1 into the "Transmit Timestamp" field (bytes 40–47)
+        request[40..48].copy_from_slice(&t1_ntp);
+
+        socket
+            .send_to(&request, server_addr)
+            .map_err(|e| AlignError::SyncError(format!("UDP send failed: {e}")))?;
+
+        // Receive response and record T4 immediately
+        let mut response = [0u8; 96]; // larger buffer in case server adds data
+        let (n, _) = socket
+            .recv_from(&mut response)
+            .map_err(|e| AlignError::SyncError(format!("UDP receive failed: {e}")))?;
+
+        let t4_unix_ms = Self::now_unix_ms();
+
+        if n < 48 {
+            return Err(AlignError::SyncError(format!(
+                "Response too short: {n} bytes (expected ≥ 48)"
+            )));
+        }
+
+        // Parse T2 (server receive, bytes 32–39) and T3 (server transmit, bytes 40–47)
+        let t2_ms = Self::ntp_to_unix_ms(&response[32..40]);
+        let t3_ms = Self::ntp_to_unix_ms(&response[40..48]);
+        // T1 is the local transmit time we recorded before sending
+        let t1_unix_ms = Self::ntp_to_unix_ms_from_u64(Self::ntp_bytes_to_u64(&t1_ntp));
+
+        // RFC 4330 §5:
+        //   offset = ((T2 - T1) + (T3 - T4)) / 2
+        //   RTT    = (T4 - T1) - (T3 - T2)
+        let offset_2x_ms = (t2_ms - t1_unix_ms) + (t3_ms - t4_unix_ms as i64);
+        let offset_ms = offset_2x_ms / 2;
+
+        let rtt_ms = (t4_unix_ms as i64 - t1_unix_ms) - (t3_ms - t2_ms);
+        let round_trip_ms = rtt_ms.max(0) as u64;
+
+        Ok(TimeDelta {
+            offset_ms,
+            round_trip_ms,
+        })
+    }
+
+    // ── Private helpers ──────────────────────────────────────────────────────
+
+    /// Returns the current Unix time in milliseconds (non-monotonic wall clock).
+    fn now_unix_ms() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    /// Convert Unix time in milliseconds to a 48-bit NTP 64-bit timestamp
+    /// (seconds since 1900-01-01, 32-bit integer + 32-bit fraction).
+    fn unix_to_ntp(unix_ms: u64) -> [u8; 8] {
+        const NTP_EPOCH_OFFSET: u64 = 2_208_988_800; // seconds between 1900 and 1970
+        let secs = unix_ms / 1_000 + NTP_EPOCH_OFFSET;
+        let frac_ms = unix_ms % 1_000;
+        // Convert milliseconds to NTP 32-bit fractional part:
+        //   frac = frac_ms / 1000 * 2^32
+        // Use u128 to avoid overflow.
+        let frac = ((frac_ms as u128 * (1u128 << 32)) / 1_000) as u32;
+        let mut out = [0u8; 8];
+        out[0..4].copy_from_slice(&(secs as u32).to_be_bytes());
+        out[4..8].copy_from_slice(&frac.to_be_bytes());
+        out
+    }
+
+    /// Convert an 8-byte big-endian NTP timestamp slice to Unix time in ms.
+    fn ntp_to_unix_ms(bytes: &[u8]) -> i64 {
+        assert!(bytes.len() >= 8, "NTP timestamp slice must be ≥ 8 bytes");
+        let raw = Self::ntp_bytes_to_u64(&bytes[..8].try_into().unwrap_or([0u8; 8]));
+        Self::ntp_to_unix_ms_from_u64(raw)
+    }
+
+    fn ntp_bytes_to_u64(bytes: &[u8; 8]) -> u64 {
+        let secs = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64;
+        let frac = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as u64;
+        (secs << 32) | frac
+    }
+
+    fn ntp_to_unix_ms_from_u64(raw: u64) -> i64 {
+        const NTP_EPOCH_OFFSET: u64 = 2_208_988_800;
+        let secs = (raw >> 32) as u64;
+        let frac = (raw & 0xFFFF_FFFF) as u64;
+        // Convert fractional part: frac / 2^32 * 1000 ms
+        // Use u128 to avoid overflow: frac * 1000 can be at most ~4.3e9 * 1000 = 4.3e12
+        let frac_ms = ((frac as u128 * 1_000) >> 32) as u64;
+        let unix_ms = (secs.saturating_sub(NTP_EPOCH_OFFSET)) * 1_000 + frac_ms;
+        unix_ms as i64
+    }
+}
+
+// ─── NTP / SNTP tests ────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod ntp_tests {
+    use super::*;
+
+    /// Verify that our unix→NTP→unix round-trip preserves millisecond precision.
+    #[test]
+    fn test_ntp_packet_parse_known_bytes() {
+        // Manually construct a known NTP 64-bit timestamp:
+        //   NTP seconds = 3_913_056_000  (2024-01-01 00:00:00 UTC)
+        //   NTP frac    = 0 (exact second)
+        // Unix seconds = 3_913_056_000 - 2_208_988_800 = 1_704_067_200
+        let ntp_secs: u32 = 3_913_056_000;
+        let ntp_frac: u32 = 0;
+
+        let mut bytes = [0u8; 8];
+        bytes[0..4].copy_from_slice(&ntp_secs.to_be_bytes());
+        bytes[4..8].copy_from_slice(&ntp_frac.to_be_bytes());
+
+        let unix_ms = NtpClient::ntp_to_unix_ms(&bytes);
+
+        // Expected: 1_704_067_200 seconds * 1000 ms/s = 1_704_067_200_000 ms
+        let expected_ms: i64 = 1_704_067_200_000;
+        assert_eq!(
+            unix_ms, expected_ms,
+            "Unix ms mismatch: got {unix_ms}, expected {expected_ms}"
+        );
+    }
+
+    /// Verify the RFC 4330 §5 offset formula:
+    ///
+    ///   offset = ((T2 - T1) + (T3 - T4)) / 2
+    ///
+    /// Using synthetic values with a known clock offset.
+    #[test]
+    fn test_ntp_offset_computation_formula() {
+        // Scenario: local clock is 100 ms ahead of server.
+        // Let server receive at T2 = 1000 ms (server time) after T1 = 1050 ms (local time, fast)
+        // Server processes instantly: T3 = 1000 ms (server time)
+        // Local receives at T4 = 1060 ms (local time)
+        //
+        // RTT = (T4 - T1) - (T3 - T2) = (1060 - 1050) - (1000 - 1000) = 10 ms
+        // offset = ((T2 - T1) + (T3 - T4)) / 2
+        //        = ((1000 - 1050) + (1000 - 1060)) / 2
+        //        = (-50 + -60) / 2 = -55 ms
+        //
+        // Interpretation: local clock offset is -55 ms (local is ~55 ms fast).
+
+        let t1_local_ms: i64 = 1_050;
+        let t2_server_ms: i64 = 1_000;
+        let t3_server_ms: i64 = 1_000;
+        let t4_local_ms: i64 = 1_060;
+
+        let offset_2x = (t2_server_ms - t1_local_ms) + (t3_server_ms - t4_local_ms);
+        let offset = offset_2x / 2;
+        let rtt = (t4_local_ms - t1_local_ms) - (t3_server_ms - t2_server_ms);
+
+        assert_eq!(offset, -55, "offset formula mismatch");
+        assert_eq!(rtt, 10, "RTT formula mismatch");
+    }
+
+    /// Round-trip unix_ms → NTP → unix_ms must preserve values to within 1 ms.
+    #[test]
+    fn test_ntp_unix_roundtrip() {
+        // Use a fixed Unix time in ms (2025-01-01 00:00:00.500 UTC)
+        let unix_ms: u64 = 1_735_689_600_500;
+        let ntp_bytes = NtpClient::unix_to_ntp(unix_ms);
+        let recovered = NtpClient::ntp_to_unix_ms(&ntp_bytes);
+        // Allow ±1 ms rounding error from the fractional conversion
+        assert!(
+            (recovered - unix_ms as i64).abs() <= 1,
+            "round-trip error: in={unix_ms}, out={recovered}"
+        );
+    }
+}

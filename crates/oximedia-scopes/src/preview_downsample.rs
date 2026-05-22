@@ -137,7 +137,9 @@ pub fn downsample_frame(
     factor: DownsampleFactor,
 ) -> OxiResult<DownsampledFrame> {
     if width == 0 || height == 0 {
-        return Err(OxiError::InvalidData("Frame dimensions must be non-zero".into()));
+        return Err(OxiError::InvalidData(
+            "Frame dimensions must be non-zero".into(),
+        ));
     }
     let expected = (width as usize) * (height as usize) * 3;
     if frame.len() < expected {
@@ -384,10 +386,8 @@ mod tests {
     fn test_downsample_for_preview_matches_direct() {
         let frame = solid_frame(77, 88, 99, 4, 4);
         let cfg = PreviewConfig::with_factor(DownsampleFactor::Half);
-        let via_config =
-            downsample_for_preview(&frame, 4, 4, &cfg).expect("ok");
-        let direct =
-            downsample_frame(&frame, 4, 4, DownsampleFactor::Half).expect("ok");
+        let via_config = downsample_for_preview(&frame, 4, 4, &cfg).expect("ok");
+        let direct = downsample_frame(&frame, 4, 4, DownsampleFactor::Half).expect("ok");
         assert_eq!(via_config.pixels, direct.pixels);
     }
 

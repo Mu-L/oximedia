@@ -1,30 +1,206 @@
-//! OxiMedia CLI - Patent-free multimedia processing
+//! OxiMedia CLI — Patent-free multimedia processing framework.
 //!
-//! A command-line tool for working with media files using only
-//! royalty-free codecs.
+//! `oximedia` is a command-line tool for working with media files using only
+//! royalty-free codecs. It is part of the [OxiMedia](https://github.com/cool-japan/oximedia)
+//! sovereign media framework — a pure-Rust reconstruction of both FFmpeg and OpenCV.
 //!
-//! # Usage
+//! # Quick Start
 //!
-//! ```bash
+//! ```notrust
 //! # Probe a media file
 //! oximedia probe -i input.mkv
 //!
-//! # Transcode video
-//! oximedia transcode -i input.mkv -o output.webm --codec vp9 --bitrate 2M
+//! # Transcode video (alias: convert)
+//! oximedia transcode -i input.mkv -o output.webm --video-codec vp9 --video-bitrate 2M
 //!
 //! # Extract frames
-//! oximedia extract input.mkv frames_%04d.png
+//! oximedia extract -i input.mkv -o frames_%04d.png
 //!
-//! # Batch process
+//! # Batch process a directory
 //! oximedia batch input_dir/ output_dir/ config.toml
+//!
+//! # FFmpeg compatibility layer
+//! oximedia ff -i input.mp4 -c:v libvpx-vp9 output.webm
 //! ```
 //!
 //! # Supported Formats
 //!
-//! OxiMedia only supports patent-free codecs:
-//! - Video: AV1, VP9, VP8, Theora
-//! - Audio: Opus, Vorbis, FLAC, PCM
-//! - Containers: Matroska, WebM, Ogg, FLAC, WAV
+//! OxiMedia uses only patent-free codecs:
+//! - **Video:** AV1, VP9, VP8, Theora, FFV1
+//! - **Audio:** Opus, Vorbis, FLAC, PCM, WAV
+//! - **Containers:** Matroska (.mkv), WebM, Ogg, FLAC, WAV
+//!
+//! ## Subcommand Families
+//!
+//! ### Inspection
+//!
+//! | Subcommand | Description |
+//! |---|---|
+//! | `probe` | Inspect media file metadata: codec, resolution, duration, tracks, chapters |
+//! | `info` | Show supported formats, codecs, and feature flags |
+//! | `version` | Print OxiMedia version and build info |
+//! | `doctor` | Diagnose the runtime environment: GPU adapters, temp dir writability |
+//! | `analyze` | Video/audio quality metrics analysis |
+//!
+//! ### Transcode and Convert
+//!
+//! | Subcommand | Description |
+//! |---|---|
+//! | `transcode` | Re-encode video/audio with codec and quality control (alias: `convert`) |
+//! | `extract` | Extract individual frames to PNG, JPEG, or PPM |
+//! | `thumbnail` | Generate single thumbnails from a video file |
+//! | `sprite` | Generate thumbnail sprite sheets for video scrubbing |
+//! | `concat` | Concatenate multiple video/audio files |
+//! | `batch` | Batch-process multiple files in a directory |
+//! | `batch-engine` | SQLite-backed job queue: submit, status, list, cancel, report |
+//! | `scaling` | Upscale, downscale, analyze, compare, batch scale operations |
+//! | `optimize` | Codec complexity analysis, CRF sweep, quality ladder, benchmark |
+//!
+//! ### Audio Processing
+//!
+//! | Subcommand | Description |
+//! |---|---|
+//! | `audio` | Loudness metering, normalization, spectrum, and beat detection |
+//! | `loudness` | EBU R128 / ITU-R BS.1770 loudness analysis and validation |
+//! | `normalize` | Normalize audio to a target loudness standard |
+//! | `mixer` | Mix multiple audio tracks with a declarative routing bus |
+//! | `audiopost` | ADR, stem mixing, delivery, and audio restoration |
+//! | `filter` | Standalone filter graph processing |
+//!
+//! ### Video Analysis and Enhancement
+//!
+//! | Subcommand | Description |
+//! |---|---|
+//! | `scopes` | Waveform, vectorscope, histogram, parade, false-colour scopes |
+//! | `quality` | Perceptual quality metrics: VMAF, SSIM, PSNR comparison |
+//! | `dedup` | Detect near-duplicate clips via perceptual hashing |
+//! | `restore` | Audio/video restoration: de-noise, de-click, upscale, deinterlace |
+//! | `denoise` | Video noise reduction with spatial and temporal modes |
+//! | `stabilize` | Remove camera shake (translation, affine, perspective, 3D models) |
+//! | `scene` | Shot detection, classification, and storyboard generation |
+//! | `lut` | Apply, inspect, convert, or generate LUT files (.cube, Hald) |
+//! | `graphics` | 2D broadcast graphics: lower-thirds, tickers, overlays, templates |
+//! | `image` | Professional image operations (DPX, EXR, TIFF, sequences) |
+//! | `color` | Color management: convert, inspect matrix, compute Delta E |
+//! | `forensics` | Tamper detection, integrity analysis, media provenance |
+//! | `mir` | Music Information Retrieval: tempo, key, chords, segmentation |
+//! | `ml` | Sovereign ML pipelines via Pure-Rust ONNX (oximedia-ml) |
+//!
+//! ### Broadcast and Live Production
+//!
+//! | Subcommand | Description |
+//! |---|---|
+//! | `playout` | Schedule and play out media files on an output timeline |
+//! | `switcher` | Software vision mixer with keying, transitions, and macro recording |
+//! | `ndi` | NDI source discovery, streaming, and monitoring |
+//! | `videoip` | Video-over-IP: send, receive, discover (RTP/SRT/RIST) |
+//! | `multicam` | Multi-camera sync, switch, composite, color-match, export |
+//! | `monitor` | Real-time system and pipeline health monitoring with alerting |
+//! | `stream` | HLS/DASH adaptive streaming: serve, ingest, record |
+//! | `timesync` | Time synchronisation: analyze, align, offset, drift, report |
+//! | `gaming` | Gaming: capture, clip, overlay |
+//!
+//! ### MAM and Archive
+//!
+//! | Subcommand | Description |
+//! |---|---|
+//! | `mam` | Media asset management: ingest, tag, search, export, catalogue |
+//! | `search` | Full-text and visual similarity search over the MAM catalogue |
+//! | `archive` | IMF/archive packaging and extraction |
+//! | `archive-pro` | Archive Pro: ingest, verify, migrate, report, policy |
+//! | `clips` | Clip management: create, list, export, trim, merge, tag |
+//! | `playlist` | Playlist generation, validation, and playout automation |
+//! | `cloud` | Cloud storage: upload, download, transcode (S3/GCS/Azure/R2/B2) |
+//! | `storage` | Inspect and manage local storage backends |
+//!
+//! ### Post Production
+//!
+//! | Subcommand | Description |
+//! |---|---|
+//! | `timeline` | Timeline editing: inspect, edit, export (OTIO, EDL, FCP XML) |
+//! | `edl` | EDL parse, validate, export, and conform |
+//! | `conform` | QC/conformance checking and automated fixing |
+//! | `qc` | Quality Control: check, validate, report, rules, fix |
+//! | `imf` | IMF: validate, package, info, extract, create |
+//! | `aaf` | AAF: info, extract, convert, validate, merge |
+//! | `vfx` | Visual effects and compositing |
+//! | `subtitle` | Subtitle conversion, extraction, burn-in, and synchronization |
+//! | `captions` | Generate and synchronise closed captions |
+//! | `dolby-vision` | Dolby Vision: analyze, convert, metadata, validate, info |
+//! | `review` | Review: create, annotate, approve, reject, export, status |
+//! | `collab` | Collaboration: create, join, share, comment, export, status |
+//! | `align` | Audio/video alignment: sync, offset detection |
+//! | `calibrate` | Display, audio, color calibration and pattern generation |
+//!
+//! ### Rights and Security
+//!
+//! | Subcommand | Description |
+//! |---|---|
+//! | `drm` | DRM: encrypt, decrypt, manage keys, validate |
+//! | `watermark` | Digital audio/video watermarking |
+//! | `access` | Access control: grant, revoke, list, policy, audit |
+//! | `rights` | Digital rights: register, check, transfer, license, search |
+//!
+//! ### Infrastructure
+//!
+//! | Subcommand | Description |
+//! |---|---|
+//! | `distributed` | Distributed encoding: coordinator, workers, job submission |
+//! | `farm` | Render farm: start, submit, status, cancel, nodes |
+//! | `renderfarm` | Render farm cluster: init, add-node, submit, status, dashboard |
+//! | `routing` | Signal routing: create, connect, validate, list |
+//! | `virtual` | Virtual production: LED volume, camera tracking, configure |
+//! | `profiler` | Profiler: run, report, compare, export, bottleneck analysis |
+//! | `package` | HLS/DASH adaptive-bitrate packaging with optional encryption |
+//!
+//! ### Analysis and Recommendations
+//!
+//! | Subcommand | Description |
+//! |---|---|
+//! | `recommend` | Codec, settings, and workflow recommendations |
+//! | `workflow` | Workflow orchestration: create, run, status, list, template |
+//! | `auto` | Auto editing: run, schedule, create, delete, log |
+//! | `benchmark` | Run encoding benchmarks |
+//! | `validate` | Validate media file integrity |
+//! | `metadata` | Edit media metadata and tags |
+//!
+//! ### Compatibility
+//!
+//! | Subcommand | Description |
+//! |---|---|
+//! | `ff` / `ffcompat` | FFmpeg argument compatibility layer — translates FFmpeg CLI flags to OxiMedia |
+//!
+//! ### Tooling
+//!
+//! | Subcommand | Description |
+//! |---|---|
+//! | `completions` | Print shell completion script (bash, zsh, fish, powershell, elvish) |
+//! | `man-page` | Print roff man page to stdout |
+//! | `tui` | Launch the interactive terminal UI |
+//! | `plugin` | Manage OxiMedia plugins: list, info, codecs, validate, paths |
+//! | `preset` | List and manage encoding and processing presets |
+//! | `timecode` | Timecode convert, calculate, validate, burn-in |
+//! | `proxy` | Proxy media: generate, list, link, info, clean |
+//! | `concat` | Concatenate multiple media files |
+//! | `repair` | Media file repair and recovery |
+//!
+//! ## Global Flags
+//!
+//! | Flag | Default | Description |
+//! |---|---|---|
+//! | `--json` | off | Output pure JSON on stdout; suppress coloured text |
+//! | `--ndjson` | off | Emit one NDJSON record per item (conflicts with `--json`) |
+//! | `--no-color` | off | Disable colour output |
+//! | `--log-format json` | plain | Structured JSON log output via `tracing-subscriber` |
+//! | `--progress <plain\|json>` | plain | Progress reporting format |
+//! | `-v` / `--verbose` | off | Enable debug/trace log output (repeatable: `-vv`, `-vvv`) |
+//! | `-q` / `--quiet` | off | Suppress all non-error output |
+//!
+//! ## See Also
+//!
+//! - Plugin system: `plugin_cmd` — see `$OXIMEDIA_PLUGIN_PATH` for search paths.
+//! - Preset system: `presets` — see built-in categories (Web, Device, Streaming, Archival, Custom).
+//! - FFmpeg compatibility: `ffcompat_cmd` and the `ff` alias.
 
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::unused_async)]
@@ -55,6 +231,11 @@ mod align_cmd;
 mod analyze;
 mod archive_cmd;
 mod archivepro_cmd;
+mod completions_cmd;
+mod doctor_cmd;
+mod exit_codes;
+mod man_cmd;
+mod output;
 
 mod audio_cmd;
 mod audiopost_cmd;
@@ -71,6 +252,7 @@ mod color_cmd;
 mod commands;
 mod concat;
 mod conform_cmd;
+mod decode_helper;
 mod dedup_cmd;
 mod denoise_cmd;
 mod distributed_cmd;
@@ -147,8 +329,9 @@ use colored::Colorize;
 use commands::Commands;
 use handlers::{
     handle_captions_command, handle_monitor_command, handle_preset_command, handle_restore_command,
-    init_logging, probe_file, show_info, show_version,
+    init_color, init_logging, probe_file, show_info, show_version, LogFormat,
 };
+use progress::ProgressFormat;
 
 /// Patent-free multimedia framework CLI
 #[derive(Parser)]
@@ -174,22 +357,25 @@ struct Cli {
     /// Output results in JSON format
     #[arg(long, global = true)]
     json: bool,
+
+    /// Output as NDJSON (one record per line); conflicts with --json
+    #[arg(long, global = true, conflicts_with = "json")]
+    ndjson: bool,
+
+    /// Log output format
+    #[arg(long, global = true, default_value = "plain", value_enum)]
+    log_format: LogFormat,
+
+    /// Progress output format (plain bar or streaming JSON to stderr)
+    #[arg(long, global = true, default_value = "plain", value_enum)]
+    progress: ProgressFormat,
 }
 
-/// Main entry point for the OxiMedia CLI.
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
+/// Dispatch CLI subcommands and return a `Result`.
+async fn run(cli: Cli) -> Result<()> {
+    // Resolve the output format once so individual handlers can query it.
+    let _output_fmt = output::resolve_format(cli.json, cli.ndjson);
 
-    // Initialize logging
-    init_logging(cli.verbose, cli.quiet)?;
-
-    // Disable colors if requested
-    if cli.no_color {
-        colored::control::set_override(false);
-    }
-
-    // Execute command
     let result = match cli.command {
         Commands::Probe {
             input,
@@ -200,7 +386,12 @@ async fn main() -> Result<()> {
             format,
             chapters,
             metadata,
-        } => probe_file(&input, detail, streams, &format, chapters, metadata).await,
+        } => {
+            probe_file(
+                &input, detail, streams, &format, chapters, metadata, cli.ndjson,
+            )
+            .await
+        }
 
         Commands::Info => {
             show_info();
@@ -255,6 +446,7 @@ async fn main() -> Result<()> {
                 threads,
                 overwrite,
                 resume,
+                progress_format: cli.progress,
             };
             transcode::transcode(options).await
         }
@@ -295,6 +487,7 @@ async fn main() -> Result<()> {
                 jobs,
                 continue_on_error,
                 dry_run,
+                progress_format: cli.progress,
             };
             batch::batch_process(options).await
         }
@@ -758,21 +951,47 @@ async fn main() -> Result<()> {
         Commands::Access { command } => access_cmd::handle_access_command(command, cli.json).await,
         Commands::Rights { command } => rights_cmd::handle_rights_command(command, cli.json).await,
         Commands::Auto { command } => auto_cmd::handle_auto_command(command, cli.json).await,
-        Commands::Loudness { command } => loudness_cmd::run_loudness(command, cli.json).await,
-        Commands::Quality { command } => quality_cmd::run_quality(command, cli.json).await,
+        Commands::Loudness { command } => {
+            loudness_cmd::run_loudness(command, cli.json, cli.ndjson).await
+        }
+        Commands::Quality { command } => {
+            quality_cmd::run_quality(command, cli.json, cli.ndjson).await
+        }
         Commands::Normalize { command } => normalize_cmd::run_normalize(command, cli.json).await,
         Commands::BatchEngine { command } => batch_cmd::run_batch_engine(command, cli.json).await,
         Commands::Ml { command } => ml_cmd::run_ml(command, cli.json).await,
+        Commands::Completions { shell } => completions_cmd::run(shell),
+        Commands::ManPage => man_cmd::run(),
+        Commands::Doctor { json, full } => doctor_cmd::run(json, full),
     };
 
-    // Handle errors with colored output
-    if let Err(e) = result {
-        eprintln!("{} {}", "Error:".red().bold(), e);
-        if let Some(source) = e.source() {
-            eprintln!("{} {}", "Caused by:".yellow(), source);
-        }
-        std::process::exit(1);
+    result
+}
+
+/// Main entry point for the OxiMedia CLI.
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    let cli = Cli::parse();
+
+    // Disable colours before anything else — must run before any Colorize use.
+    // JSON / NDJSON output also forces no-colour for clean machine-readable output.
+    init_color(cli.no_color || cli.json || cli.ndjson);
+
+    // Initialize logging before dispatching subcommands
+    if let Err(e) = init_logging(cli.verbose, cli.quiet, cli.log_format) {
+        eprintln!("error: failed to initialise logging: {:#}", e);
+        return exit_codes::OxiExitCode::GenericError.into();
     }
 
-    Ok(())
+    // Dispatch and map errors to exit codes
+    match run(cli).await {
+        Ok(()) => exit_codes::OxiExitCode::Ok.into(),
+        Err(ref e) => {
+            eprintln!("{} {:#}", "Error:".red().bold(), e);
+            if let Some(source) = e.source() {
+                eprintln!("{} {}", "Caused by:".yellow(), source);
+            }
+            exit_codes::classify_error(e).into()
+        }
+    }
 }

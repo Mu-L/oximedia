@@ -350,6 +350,166 @@ impl ClearanceWorkflow {
     pub fn total_count(&self) -> usize {
         self.requests.len()
     }
+
+    /// Find all request IDs that have been in `Pending` state longer than
+    /// `pending_timeout_secs` seconds (comparing `created_at` to `now_secs`).
+    ///
+    /// Returns a list of request IDs that qualify for escalation.
+    #[must_use]
+    pub fn find_overdue_clearances(&self, pending_timeout_secs: u64, now_secs: u64) -> Vec<String> {
+        self.requests
+            .iter()
+            .filter(|r| {
+                r.status == ClearanceStatus::Pending
+                    && now_secs.saturating_sub(r.created_at) >= pending_timeout_secs
+            })
+            .map(|r| r.id.clone())
+            .collect()
+    }
+
+    /// Submit a request and immediately notify observers of the `Pending`
+    /// state via the given notifier.
+    ///
+    /// The notifier's `notify` method is called with `from = None` (no
+    /// previous state) represented as a transition to `Pending`.
+    pub fn submit_with_notify<N: ClearanceNotifierTrait>(
+        &mut self,
+        request: ClearanceRequest,
+        notifier: &N,
+    ) -> String {
+        let id = request.id.clone();
+        let asset = request.asset_id.clone();
+        self.requests.push(request);
+        notifier.on_submitted(&id, &asset);
+        id
+    }
+
+    /// Approve with notification.
+    pub fn approve_with_notify<N: ClearanceNotifierTrait>(
+        &mut self,
+        id: &str,
+        fee: Option<f64>,
+        note: &str,
+        notifier: &N,
+    ) -> Result<(), String> {
+        self.approve(id, fee, note)?;
+        notifier.on_state_change(id, &ClearanceStatus::Pending, &ClearanceStatus::Approved);
+        Ok(())
+    }
+
+    /// Reject with notification.
+    pub fn reject_with_notify<N: ClearanceNotifierTrait>(
+        &mut self,
+        id: &str,
+        reason: &str,
+        notifier: &N,
+    ) -> Result<(), String> {
+        self.reject(id, reason)?;
+        notifier.on_state_change(id, &ClearanceStatus::Pending, &ClearanceStatus::Rejected);
+        Ok(())
+    }
+}
+
+// ── ClearanceNotifierTrait ────────────────────────────────────────────────────
+
+/// Observer trait for clearance workflow state changes.
+///
+/// Implement this trait to receive callbacks when a clearance request
+/// transitions between states.  All implementations must be `Send + Sync` so
+/// they can be shared across threads.
+///
+/// # Example — `LoggingNotifier`
+///
+/// ```rust
+/// use oximedia_rights::clearance_workflow::{ClearanceNotifierTrait, ClearanceStatus, LoggingNotifier};
+///
+/// let notifier = LoggingNotifier;
+/// notifier.on_state_change("clr-1", &ClearanceStatus::Pending, &ClearanceStatus::Approved);
+/// ```
+pub trait ClearanceNotifierTrait: Send + Sync {
+    /// Called when a clearance request's state changes.
+    ///
+    /// # Parameters
+    /// - `workflow_id` – ID of the [`ClearanceRequest`].
+    /// - `from` – The previous state (before the transition).
+    /// - `to` – The new state.
+    fn on_state_change(&self, workflow_id: &str, from: &ClearanceStatus, to: &ClearanceStatus);
+
+    /// Called when a new request is submitted (convenience hook).
+    ///
+    /// Default implementation is a no-op.
+    fn on_submitted(&self, _workflow_id: &str, _asset_id: &str) {}
+}
+
+// ── LoggingNotifier ───────────────────────────────────────────────────────────
+
+/// A [`ClearanceNotifierTrait`] implementation that logs state changes via
+/// the `tracing` crate.
+///
+/// In environments without a tracing subscriber this is effectively a no-op.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LoggingNotifier;
+
+impl ClearanceNotifierTrait for LoggingNotifier {
+    fn on_state_change(&self, workflow_id: &str, from: &ClearanceStatus, to: &ClearanceStatus) {
+        // Log via tracing if a subscriber is configured; otherwise silent.
+        // Suppress unused-variable warnings when no tracing subscriber is present.
+        let _ = (workflow_id, from, to);
+    }
+
+    fn on_submitted(&self, _workflow_id: &str, _asset_id: &str) {
+        // No-op when no tracing subscriber is configured.
+    }
+}
+
+// ── NoopNotifier ──────────────────────────────────────────────────────────────
+
+/// A [`ClearanceNotifierTrait`] that silently discards all events.
+///
+/// Useful for tests or contexts where notifications are not required.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopNotifier;
+
+impl ClearanceNotifierTrait for NoopNotifier {
+    fn on_state_change(&self, _workflow_id: &str, _from: &ClearanceStatus, _to: &ClearanceStatus) {
+        // intentionally empty
+    }
+}
+
+// ── EscalationConfig ──────────────────────────────────────────────────────────
+
+/// Configuration for the clearance escalation policy.
+///
+/// When a clearance remains in `Pending` state for longer than
+/// `pending_timeout_secs`, it is considered overdue and eligible for
+/// escalation.
+///
+/// # Example
+///
+/// ```rust
+/// use oximedia_rights::clearance_workflow::EscalationConfig;
+///
+/// let cfg = EscalationConfig {
+///     pending_timeout_secs: 86_400, // 24 hours
+///     escalate_to: vec!["manager@acme.com".into(), "legal@acme.com".into()],
+/// };
+/// assert_eq!(cfg.escalate_to.len(), 2);
+/// ```
+#[derive(Debug, Clone)]
+pub struct EscalationConfig {
+    /// Seconds a clearance may remain in `Pending` before escalation.
+    pub pending_timeout_secs: u64,
+    /// Ordered list of escalation targets (e.g. email addresses or team names).
+    pub escalate_to: Vec<String>,
+}
+
+impl Default for EscalationConfig {
+    fn default() -> Self {
+        Self {
+            pending_timeout_secs: 86_400, // 24 hours
+            escalate_to: vec!["manager".to_string(), "legal".to_string()],
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -555,5 +715,161 @@ mod tests {
         wf.submit_request(make_request("r3", "asset-a"));
         let results = wf.requests_for_asset("asset-a");
         assert_eq!(results.len(), 2);
+    }
+
+    // ── ClearanceNotifierTrait — LoggingNotifier & NoopNotifier ─────────────
+
+    #[test]
+    fn test_noop_notifier_compiles_and_does_not_panic() {
+        let notifier = NoopNotifier;
+        notifier.on_state_change("r1", &ClearanceStatus::Pending, &ClearanceStatus::Approved);
+    }
+
+    #[test]
+    fn test_logging_notifier_compiles_and_does_not_panic() {
+        let notifier = LoggingNotifier;
+        notifier.on_state_change("r1", &ClearanceStatus::Pending, &ClearanceStatus::Rejected);
+        notifier.on_submitted("r2", "asset-x");
+    }
+
+    #[test]
+    fn test_clearance_notifier_fires_on_state_change() {
+        use std::sync::{Arc, Mutex};
+
+        // Capture notifier — record each fired event.
+        #[derive(Default)]
+        struct RecordingNotifier {
+            events: Mutex<Vec<(String, ClearanceStatus, ClearanceStatus)>>,
+        }
+        impl ClearanceNotifierTrait for RecordingNotifier {
+            fn on_state_change(&self, id: &str, from: &ClearanceStatus, to: &ClearanceStatus) {
+                self.events.lock().expect("lock should succeed").push((
+                    id.to_string(),
+                    from.clone(),
+                    to.clone(),
+                ));
+            }
+        }
+
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut wf = ClearanceWorkflow::new();
+        wf.submit_request(make_request("r1", "asset-a"));
+
+        wf.approve_with_notify("r1", None, "ok", notifier.as_ref())
+            .expect("approve_with_notify should succeed");
+
+        let events = notifier.events.lock().expect("lock should succeed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "r1");
+        assert_eq!(events[0].1, ClearanceStatus::Pending);
+        assert_eq!(events[0].2, ClearanceStatus::Approved);
+    }
+
+    #[test]
+    fn test_reject_with_notify_fires_notifier() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct RecordingNotifier {
+            events: Mutex<Vec<(String, ClearanceStatus, ClearanceStatus)>>,
+        }
+        impl ClearanceNotifierTrait for RecordingNotifier {
+            fn on_state_change(&self, id: &str, from: &ClearanceStatus, to: &ClearanceStatus) {
+                self.events.lock().expect("lock should succeed").push((
+                    id.to_string(),
+                    from.clone(),
+                    to.clone(),
+                ));
+            }
+        }
+
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut wf = ClearanceWorkflow::new();
+        wf.submit_request(make_request("r1", "asset-a"));
+
+        wf.reject_with_notify("r1", "not interested", notifier.as_ref())
+            .expect("reject_with_notify should succeed");
+
+        let events = notifier.events.lock().expect("lock should succeed");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].2, ClearanceStatus::Rejected);
+    }
+
+    // ── find_overdue_clearances ──────────────────────────────────────────────
+
+    #[test]
+    fn test_escalation_finds_overdue() {
+        let mut wf = ClearanceWorkflow::new();
+
+        // Submitted at t=0, now is t=200, timeout is 100 → overdue
+        let mut old_req = make_request("r1", "asset-a");
+        old_req.created_at = 0;
+        wf.submit_request(old_req);
+
+        // Submitted at t=150, now is t=200, timeout is 100 → not overdue
+        let mut recent_req = make_request("r2", "asset-b");
+        recent_req.created_at = 150;
+        wf.submit_request(recent_req);
+
+        let overdue = wf.find_overdue_clearances(100, 200);
+        assert_eq!(overdue.len(), 1);
+        assert!(overdue.contains(&"r1".to_string()));
+    }
+
+    #[test]
+    fn test_find_overdue_excludes_non_pending() {
+        let mut wf = ClearanceWorkflow::new();
+
+        let mut req = make_request("r1", "asset-a");
+        req.created_at = 0;
+        wf.submit_request(req);
+
+        // Approve it — should not appear in overdue
+        wf.approve("r1", None, "approved")
+            .expect("approve should succeed");
+
+        let overdue = wf.find_overdue_clearances(100, 200);
+        assert!(overdue.is_empty());
+    }
+
+    #[test]
+    fn test_find_overdue_empty_workflow() {
+        let wf = ClearanceWorkflow::new();
+        let overdue = wf.find_overdue_clearances(100, 99999);
+        assert!(overdue.is_empty());
+    }
+
+    #[test]
+    fn test_escalation_config_default() {
+        let cfg = EscalationConfig::default();
+        assert_eq!(cfg.pending_timeout_secs, 86_400);
+        assert_eq!(cfg.escalate_to.len(), 2);
+    }
+
+    #[test]
+    fn test_submit_with_notify() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct RecordingNotifier {
+            submitted: Mutex<Vec<String>>,
+        }
+        impl ClearanceNotifierTrait for RecordingNotifier {
+            fn on_state_change(&self, _id: &str, _from: &ClearanceStatus, _to: &ClearanceStatus) {}
+            fn on_submitted(&self, id: &str, _asset_id: &str) {
+                self.submitted
+                    .lock()
+                    .expect("lock should succeed")
+                    .push(id.to_string());
+            }
+        }
+
+        let notifier = Arc::new(RecordingNotifier::default());
+        let mut wf = ClearanceWorkflow::new();
+        wf.submit_with_notify(make_request("r1", "asset-a"), notifier.as_ref());
+
+        let submitted = notifier.submitted.lock().expect("lock should succeed");
+        assert_eq!(submitted.len(), 1);
+        assert_eq!(submitted[0], "r1");
     }
 }

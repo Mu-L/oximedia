@@ -42,6 +42,6 @@
 - [x] Test `snapshot_manager.rs` branch creation and fast-forward merge detection
 
 ## Documentation
-- [ ] Document collaboration protocol and message format
-- [ ] Add sequence diagrams for join/leave/sync flows
-- [ ] Document CRDT data model and conflict resolution strategy
+- [ ] Document collaboration protocol and message format (verified-open 2026-05-16: no protocol doc or doc-comment coverage found in src/)
+- [ ] Add sequence diagrams for join/leave/sync flows (verified-open 2026-05-16: no diagrams or structured doc found in src/)
+- [ ] Document CRDT data model and conflict resolution strategy (verified-open 2026-05-16: no dedicated CRDT model doc found in src/)

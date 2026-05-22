@@ -589,6 +589,68 @@ impl WidevineCdm {
     pub fn session_count(&self) -> usize {
         self.sessions.len()
     }
+
+    /// Return a clone of the keys stored for a particular session, or an
+    /// empty map if the session does not exist.
+    pub fn session_keys(&self, session_id: &[u8]) -> HashMap<Vec<u8>, Vec<u8>> {
+        self.sessions.get(session_id).cloned().unwrap_or_default()
+    }
+
+    /// Drive a complete license acquisition round-trip against a remote
+    /// Widevine license server.
+    ///
+    /// The flow is:
+    ///
+    /// 1. Build a [`WidevineLicenseRequest`] via
+    ///    [`Self::generate_request`].
+    /// 2. Set the session id on the request so the server can correlate the
+    ///    response.
+    /// 3. Serialise the request to bytes.
+    /// 4. POST those bytes to `server_url` via the supplied
+    ///    [`crate::widevine_rpc::LicenseClient`].
+    /// 5. Parse the response and register the returned keys against the
+    ///    given `session_id` via [`Self::process_response`].
+    /// 6. Return the resulting key map (`key_id → key`) for the session.
+    ///
+    /// The caller chooses the [`LicenseType`] explicitly because streaming,
+    /// offline, renewal, and release flows differ in policy: callers should
+    /// not silently default this.
+    ///
+    /// # Errors
+    ///
+    /// * [`crate::DrmError::NetworkError`] if the transport fails (DNS, TCP,
+    ///   TLS, HTTP parsing).
+    /// * [`crate::DrmError::LicenseDenied`] if the server returns a non-2xx
+    ///   HTTP status.
+    /// * [`crate::DrmError::LicenseError`] / [`crate::DrmError::JsonError`]
+    ///   if the response body is structurally valid HTTP but contains a
+    ///   negative license status or malformed license payload.
+    pub async fn acquire_license<C>(
+        &mut self,
+        session_id: Vec<u8>,
+        license_type: LicenseType,
+        content_id: Vec<u8>,
+        key_ids: Vec<Vec<u8>>,
+        server_url: &str,
+        client: &C,
+        extra_headers: &[(String, String)],
+    ) -> Result<HashMap<Vec<u8>, Vec<u8>>>
+    where
+        C: crate::widevine_rpc::LicenseClient + ?Sized,
+    {
+        let mut request = self.generate_request(license_type, content_id, key_ids)?;
+        request.session_id = Some(session_id.clone());
+
+        let body = request.to_bytes()?;
+        let response_bytes = client
+            .fetch_license(server_url, &body, extra_headers)
+            .await?;
+
+        let response = WidevineLicenseResponse::from_bytes(&response_bytes)?;
+        self.process_response(session_id.clone(), &response)?;
+
+        Ok(self.session_keys(&session_id))
+    }
 }
 
 /// Widevine license server (for testing/mocking)

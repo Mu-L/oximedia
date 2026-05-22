@@ -132,6 +132,8 @@ mod filters;
 pub mod forensics_py;
 /// Media format information, container capabilities, and codec queries.
 pub mod format_info;
+/// Memory pool for frame allocation to reduce Python GC pressure.
+pub mod frame_pool;
 /// Gaming capture, highlight detection, and clip creation bindings.
 pub mod gaming_py;
 /// GPU device management and acceleration bindings.
@@ -260,7 +262,8 @@ use pyo3::prelude::*;
 /// Provides video/audio encoding, decoding, and container muxing/demuxing
 /// for patent-free codecs like AV1, VP9, VP8, Opus, and Vorbis.
 #[pymodule]
-fn oximedia(m: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pyo3(name = "oximedia")]
+fn oximedia_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Error types
     m.add("OxiMediaError", m.py().get_type::<error::OxiMediaError>())?;
 
@@ -270,6 +273,7 @@ fn oximedia(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::ChannelLayout>()?;
     m.add_class::<types::VideoFrame>()?;
     m.add_class::<types::AudioFrame>()?;
+    m.add_class::<types::PyVideoPlaneBuffer>()?;
     m.add_class::<types::EncoderConfig>()?;
     m.add_class::<types::EncoderPreset>()?;
     m.add_class::<types::Rational>()?;
@@ -369,6 +373,9 @@ fn oximedia(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Async pipeline (async_pipeline.rs)
     async_pipeline::register(m)?;
+
+    // Frame pool for reduced GC pressure (frame_pool.rs)
+    frame_pool::register(m)?;
 
     // Jupyter / notebook display (jupyter.rs)
     jupyter::register(m)?;

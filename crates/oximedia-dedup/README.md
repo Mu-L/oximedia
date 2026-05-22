@@ -1,13 +1,13 @@
 # oximedia-dedup
 
 ![Status: Stable](https://img.shields.io/badge/status-stable-green)
-![Version: 0.1.6](https://img.shields.io/badge/version-0.1.6-blue)
+![Version: 0.1.7](https://img.shields.io/badge/version-0.1.7-blue)
 
 Media deduplication and duplicate detection for OxiMedia, providing cryptographic, visual, audio, and metadata-based duplicate finding with SQLite-backed indexing.
 
 Part of the [oximedia](https://github.com/cool-japan/oximedia) workspace — a comprehensive pure-Rust media processing framework.
 
-Version: 0.1.6 — 2026-04-26 — 638 tests
+Version: 0.1.7 — 2026-05-16 — 647 tests
 
 ## Features
 
@@ -25,7 +25,7 @@ Version: 0.1.6 — 2026-04-26 — 638 tests
 - **Content Signatures** — Robust perceptual signatures
 - **Dedup Policy** — Configurable dedup policies
 - **Fuzzy Matching** — Fuzzy metadata and filename matching
-- **Merge Strategy** — Strategy for resolving duplicates
+- **Merge Strategy** — `MergeExecutor::apply()` / `dry_run()` with `AppliedAction { Symlinked, Hardlinked, Deleted, Kept, Skipped }` and `MergeReport`; Unix symlink + hardlink; Windows symlink_file with fallback
 - **Segment Dedup** — Segment-level partial matching
 - **Similarity Index** — Fast similarity index
 - **Video Dedup** — Video-specific deduplication
@@ -36,7 +36,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-oximedia-dedup = "0.1.6"
+oximedia-dedup = "0.1.7"
 ```
 
 ```rust
@@ -79,7 +79,7 @@ async fn example() -> Result<(), Box<dyn std::error::Error>> {
 - `dedup_cache`, `dedup_policy` — Caching and policy
 - `dedup_stats` — Statistics
 - `fuzzy_match` — Fuzzy matching
-- `merge_strategy` — Duplicate resolution
+- `merge_strategy` — `MergeExecutor`, `AppliedAction`, `MergeReport` — real FS duplicate resolution
 - `segment_dedup` — Segment dedup
 - `similarity_index` — Similarity index
 - `video_dedup` — Video-specific dedup

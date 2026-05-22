@@ -5,6 +5,12 @@
 //! Provides [`SegmentIndexEntry`], [`SegmentIndex`], and [`SapType`] for
 //! building, querying, and serializing the `sidx` box used by DASH and
 //! fragmented MP4.
+//!
+//! Re-exports [`build_sidx`] from `mux::mp4::writer` so downstream packagers
+//! (e.g. `oximedia-stream::fmp4`) can emit DASH-compatible `sidx` blocks
+//! without depending on internal MP4 writer paths.
+
+pub use crate::mux::mp4::build_sidx;
 
 use std::fmt;
 

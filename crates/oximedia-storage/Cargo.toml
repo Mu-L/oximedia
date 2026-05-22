@@ -27,24 +27,24 @@ url = "2.5"
 chrono = { workspace = true }
 sha2 = { workspace = true }
 hex = "0.4"
-lru = "0.16"
+lru = { workspace = true }
 oxiarc-lz4 = { workspace = true }
 oxiarc-zstd = { workspace = true }
 memmap2 = { workspace = true, optional = true }
 
 # AWS S3
-aws-sdk-s3 = { version = "1.131", optional = true, default-features = false, features = ["rustls", "rt-tokio"] }
-aws-config = { version = "1.8", optional = true, default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-config = { workspace = true, optional = true }
 
 # Azure Blob Storage
-azure_storage = { version = "0.21", optional = true }
-azure_storage_blobs = { version = "0.21", optional = true }
-azure_core = { version = "0.34", optional = true }
+azure_storage = { workspace = true, optional = true }
+azure_storage_blobs = { workspace = true, optional = true }
+azure_core = { workspace = true, optional = true }
 
 # Google Cloud Storage
-google-cloud-storage = { version = "1.11", optional = true }
-google-cloud-wkt = { version = "1", optional = true }
-google-cloud-auth = { version = "1.9", default-features = false, optional = true }
+google-cloud-storage = { workspace = true, optional = true }
+google-cloud-wkt = { workspace = true, optional = true }
+google-cloud-auth = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

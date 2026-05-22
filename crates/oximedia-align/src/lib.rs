@@ -143,6 +143,7 @@ pub mod rigid_transform;
 pub mod rolling_shutter;
 pub mod spatial;
 pub mod stabilize;
+pub mod stereo_depth;
 pub mod stereo_rectify;
 pub mod subframe_interp;
 pub mod sync_score;

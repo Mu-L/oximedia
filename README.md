@@ -4,10 +4,10 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-v0.1.6-green.svg)](https://github.com/cool-japan/oximedia)
-[![Released](https://img.shields.io/badge/released-2026--04--26-brightgreen.svg)](https://github.com/cool-japan/oximedia)
-[![Crates](https://img.shields.io/badge/crates-108-blue.svg)](https://github.com/cool-japan/oximedia)
-[![SLOC](https://img.shields.io/badge/SLOC-~2.69M-blueviolet.svg)](https://github.com/cool-japan/oximedia)
+[![Version](https://img.shields.io/badge/version-v0.1.7-green.svg)](https://github.com/cool-japan/oximedia)
+[![Released](https://img.shields.io/badge/released-2026--05--16-brightgreen.svg)](https://github.com/cool-japan/oximedia)
+[![Crates](https://img.shields.io/badge/crates-109-blue.svg)](https://github.com/cool-japan/oximedia)
+[![SLOC](https://img.shields.io/badge/SLOC-~2.75M-blueviolet.svg)](https://github.com/cool-japan/oximedia)
 
 ## Vision
 
@@ -55,22 +55,22 @@ Computer vision (object detection, motion tracking, video enhancement, quality a
 
 ## Project Scale
 
-OxiMedia is a **production-grade** framework at **v0.1.6** (active cycle, 2026-04-26):
+OxiMedia is a **production-grade** framework at **v0.1.7** (active cycle, 2026-05-12):
 
 | Metric | Value |
 |--------|-------|
-| Total crates | 108 |
-| Total SLOC (Rust) | ~2,687,000 |
-| Tests passing | 81,582 (0 failures, 245 skipped — `cargo nextest run --workspace --all-features`) |
-| Stable crates | 108 |
+| Total crates | 109 |
+| Total SLOC (Rust) | ~2,752,000 |
+| Tests passing | 84,064 (0 failures, 245 skipped — `cargo nextest run --workspace --all-features`) |
+| Stable crates | 109 |
 | Alpha crates | 0 |
 | Partial crates | 0 |
 | License | Apache 2.0 |
 | MSRV | Rust 1.85+ |
 
-## Sovereign ML Pipelines (v0.1.6)
+## Sovereign ML Pipelines (v0.1.7)
 
-OxiMedia 0.1.6 adds the [`oximedia-ml`](crates/oximedia-ml/) crate — a typed
+OxiMedia 0.1.7 adds the [`oximedia-ml`](crates/oximedia-ml/) crate — a typed
 ML pipeline layer built atop the Pure-Rust [OxiONNX](https://crates.io/crates/oxionnx)
 runtime. Inference is entirely opt-in; the default `oximedia` build still
 pulls in **zero** ONNX symbols and stays C/Fortran-free.
@@ -89,7 +89,7 @@ pulls in **zero** ONNX symbols and stays C/Fortran-free.
 
 ```toml
 [dependencies]
-oximedia = { version = "0.1.6", features = ["ml", "ml-scene-classifier", "ml-onnx"] }
+oximedia = { version = "0.1.7", features = ["ml", "ml-scene-classifier", "ml-onnx"] }
 ```
 
 ```rust,ignore
@@ -139,14 +139,17 @@ See [`docs/ml_guide.md`](docs/ml_guide.md) for the full feature matrix,
 per-pipeline I/O contracts, device selection details, WASM support
 matrix, and roadmap.
 
-## What's New in v0.1.6
+## What's New in v0.1.7
 
-Active cycle starting 2026-04-26. Theme: **Stub resolution, codec completeness, and internal refactoring**.
+Active cycle starting 2026-05-12. Theme: **Performance caching, zero-copy streaming, and ML runtime upgrades**.
 
-- **13 stubs resolved**: `oximedia-accel` color-conversion stubs filled in (RGB↔YUV, RGBA↔BGRA, NV12 paths); Vorbis codebook decode re-wired to active path; ACES ODT variants (D60, D65, P3-D65) now produce real output; DASH HTTP segment fetch replaced from placeholder; system font loading implemented for `oximedia-graphics`.
-- **`exr.rs` refactored into 9 modules** via splitrs: `header.rs`, `compression.rs`, `tiles.rs`, `channels.rs`, `attributes.rs`, `read.rs`, `write.rs`, `deep.rs`, `multipart.rs` — keeps all files under the 2,000-line policy.
-- **`oxifft` upgraded to 0.3.0**: All FFT usage across the workspace migrated to the new OxiFFT 0.3 API (breaking plan/execute split); zero performance regressions on spectral-flux and MIR benchmarks.
-- **81,582 tests passing** (0 failures, 245 skipped — `cargo nextest run --workspace --all-features`).
+- **`GamutConversionMatrix` OnceLock cache** (`oximedia-hdr`): Gamut conversion matrices are now computed once and memoized via `OnceLock`, eliminating repeated matrix allocation on every frame in HDR tone-mapping paths.
+- **SCTE-35 section roundtrip tests** (`oximedia-stream`): Full encode/decode roundtrip test coverage for SCTE-35 splice sections, ensuring compliance with ANSI/SCTE 35 2022 for ad-insertion signaling in CMAF streams.
+- **`bytes::Bytes` zero-copy `CmafChunk`** (`oximedia-stream`): `CmafChunk` now carries `bytes::Bytes` instead of `Vec<u8>`, enabling reference-counted zero-copy handoff between the packager, CDN edge cache, and HTTP response layers.
+- **`ToneCurve` enum** (`oximedia-colormgmt`): New `ToneCurve` enum with `Reinhard`, `Filmic`, and `ACES` variants, each implemented as a full parametric curve with configurable shoulder/toe and direct LUT bake-out support.
+- **`MergeExecutor` with symlink/hardlink/delete resolution** (`oximedia-dedup`): New executor that resolves detected duplicates via configurable strategies (symlink, hardlink, or delete), with dry-run mode and a summary report of reclaimed bytes.
+- **oxionnx 0.1.2 → 0.1.3**: Updated to OxiONNX 0.1.3 across the workspace — picks up `SessionBuilder::with_provider_kinds` for fine-grained EP selection and the new DirectML execution provider for GPU inference on Windows without CUDA.
+- **84,064 tests passing** (0 failures, 245 skipped — `cargo nextest run --workspace --all-features`).
 - **Zero clippy warnings** workspace-wide; WASM check clean.
 
 ## What's New in v0.1.5
@@ -377,7 +380,7 @@ breakdown, what is missing, and the effort required to close each gap.
 | Video | AV1 | Functional | **Bitstream-parsing** | Alliance for Open Media, royalty-free. OBU parsing complete; pixel reconstruction pipeline is stubbed (see issue #9). |
 | Video | VP9 | Functional | **Bitstream-parsing** | Google, royalty-free. Frame/tile parsing complete; reconstruction pipeline stages are no-ops. |
 | Video | VP8 | Functional | **Bitstream-parsing** | Google, royalty-free. Y-plane emitted as constant gray; no intra/inter decode. |
-| Video | Theora | Functional | **Bitstream-parsing** | Xiph.org, royalty-free. Real DCT/motion exist but decoded pixels are dropped before reaching `VideoFrame` (known copy bug). |
+| Video | Theora | Functional | **Bitstream-parsing** | Xiph.org, royalty-free. DCT, motion compensation, and per-frame pixel hand-off into `VideoFrame` (decode hand-off bug fixed in 0.1.7, issue #9); encoder↔decoder bitstream alignment for full round-trip remains outstanding. |
 | Video | MJPEG | Functional | Functional | Motion JPEG via `oximedia-image` JPEG baseline; ≥28 dB PSNR at Q85. |
 | Video | APV | Functional | Functional | ISO/IEC 23009-13 royalty-free intra-frame; real DCT + entropy decode. |
 | Video | FFV1 | Functional | Functional | RFC 9043 lossless; CRC-32 verified. |
@@ -494,14 +497,14 @@ cargo install oximedia-cli
 
 | Status | Count | Description |
 |--------|-------|-------------|
-| Stable | 108 | Feature-complete, tested, production-ready |
+| Stable | 109 | Feature-complete, tested, production-ready |
 | Alpha | 0 | Core functionality implemented, API may change |
 | Partial | 0 | Under active development, incomplete |
-| **Total** | **108** | Library crates under `crates/` (top-level `oximedia`, `oximedia-cli`, `oximedia-wasm` counted separately) |
+| **Total** | **109** | Library crates under `crates/` (top-level `oximedia`, `oximedia-cli`, `oximedia-wasm` counted separately) |
 
 ### Detailed Status Breakdown
 
-**Stable (108 crates):**
+**Stable (109 crates):**
 `oximedia-aaf`, `oximedia-accel`, `oximedia-access`, `oximedia-align`, `oximedia-analysis`,
 `oximedia-archive`, `oximedia-archive-pro`, `oximedia-audio`, `oximedia-audio-analysis`,
 `oximedia-audiopost`, `oximedia-auto`, `oximedia-automation`, `oximedia-batch`, `oximedia-bench`,
@@ -525,11 +528,131 @@ cargo install oximedia-cli
 
 ## Building
 
+### Build prerequisites
+
+OxiMedia is **Pure Rust by default**, so most crates build with nothing more
+than a working Rust toolchain:
+
 ```bash
-# Prerequisites
 rustup update stable
 rustup component add clippy
+```
 
+A small number of workspace members rely on native build-time tools. If you
+build the **entire workspace** (`cargo build --workspace` / `cargo build --all`)
+or pull in one of the affected crates explicitly, you will need them on `PATH`
+before invoking `cargo`. The end-user crates published to crates.io
+(`oximedia`, `oximedia-cli`, `oximedia-py`, `@cooljapan/oximedia`) do **not**
+require any of these tools at install time.
+
+#### `protoc` — Protocol Buffers compiler
+
+Required when building:
+
+| Crate | Why |
+|-------|-----|
+| `oximedia-farm` | Distributed encoding farm — gRPC schema in `crates/oximedia-farm/proto/farm.proto` compiled via `tonic-prost-build` |
+| `oximedia-distributed` | Cluster coordinator — gRPC schema in `crates/oximedia-distributed/proto/coordinator.proto` compiled via `tonic-prost-build` |
+
+Anything that depends on the two crates above transitively (notably
+`oximedia-batch`, `oximedia-renderfarm`, and `oximedia-cli`) inherits the
+requirement.
+
+Install:
+
+```bash
+# macOS (Homebrew)
+brew install protobuf
+
+# Debian / Ubuntu
+sudo apt-get install -y protobuf-compiler
+
+# Fedora / RHEL
+sudo dnf install -y protobuf-compiler
+
+# Arch
+sudo pacman -S protobuf
+
+# Windows (choose one)
+choco install protoc                    # Chocolatey
+winget install Google.Protobuf          # winget
+vcpkg install protobuf protobuf:x64-windows
+# or download a release zip from
+#   https://github.com/protocolbuffers/protobuf/releases
+# and add the extracted bin/ directory to PATH
+```
+
+Verify with `protoc --version`. If `protoc` is installed in a non-standard
+location, set the `PROTOC` environment variable to its absolute path before
+running `cargo build`.
+
+To skip protoc entirely, exclude the affected crates:
+
+```bash
+cargo build --workspace --exclude oximedia-farm --exclude oximedia-distributed
+```
+
+#### `cmake` + `shaderc` toolchain — Vulkan compute shaders
+
+Required when building:
+
+| Crate | Why |
+|-------|-----|
+| `oximedia-accel` | GPU acceleration layer — uses the `vulkano_shaders::shader!` proc-macro to compile GLSL compute shaders to SPIR-V at build time, which pulls in `shaderc-sys` |
+
+Anything that depends on `oximedia-accel` transitively inherits the
+requirement. The dependency on `vulkano-shaders` is **not** feature-gated, so
+these tools are needed for *every* build of `oximedia-accel`.
+
+When no pre-built `shaderc` library is found on the host (the typical case on a
+fresh developer machine), `shaderc-sys` builds `shaderc` from source, which
+needs the following on `PATH`:
+
+| Tool | Notes |
+|------|-------|
+| **cmake** (>= 3.17) | Drives the C++ build of `shaderc` / `glslang` / `SPIRV-Tools` |
+| **Python 3** | Used by `glslang`'s build scripts |
+| **C++ compiler** | clang++ / g++ / MSVC `cl.exe` |
+| **git** | `shaderc-sys` clones `shaderc` sources |
+
+Install:
+
+```bash
+# macOS (Homebrew)
+brew install cmake python git
+xcode-select --install            # supplies clang++
+
+# Debian / Ubuntu
+sudo apt-get install -y cmake python3 git build-essential
+
+# Fedora / RHEL
+sudo dnf install -y cmake python3 git gcc-c++
+
+# Arch
+sudo pacman -S cmake python git base-devel
+
+# Windows (PowerShell, choose one toolchain manager)
+winget install Kitware.CMake Python.Python.3 Git.Git
+# plus MSVC Build Tools (or the Visual Studio "Desktop C++" workload)
+```
+
+Verify with `cmake --version` and `python3 --version`. The error
+`couldn't find required command: "cmake"` during `cargo build` is the
+canonical symptom of this dependency being missing.
+
+To skip cmake/shaderc entirely (the rest of the workspace is Pure Rust),
+exclude the crate:
+
+```bash
+cargo build --workspace --exclude oximedia-accel
+```
+
+The runtime `CpuFallback` backend still works at run time without a Vulkan
+driver, but the GLSL → SPIR-V compilation step at build time is unconditional.
+
+### Common build commands
+
+```bash
 # Build all crates
 cargo build --all
 
@@ -592,7 +715,7 @@ If you find OxiMedia useful, please consider sponsoring the project to support c
 **[https://github.com/sponsors/cool-japan](https://github.com/sponsors/cool-japan)**
 
 Your sponsorship helps us:
-- Maintain and improve 108 crates (~2.69M SLOC)
+- Maintain and improve 109 crates (~2.75M SLOC)
 - Implement new royalty-free codecs and CV algorithms
 - Keep the entire COOLJAPAN ecosystem (OxiBLAS, OxiFFT, SciRS2, etc.) 100% Pure Rust
 - Provide long-term support and security updates

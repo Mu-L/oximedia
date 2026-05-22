@@ -6,8 +6,8 @@
 //!
 //! # Box layout
 //!
-//! Each call to [`CmafMuxer::write_cmaf_segment`] produces a byte vector with
-//! the following structure:
+//! Each call to [`CmafMuxer::write_cmaf_segment`] produces a list of
+//! [`bytes::Bytes`] slices with the following logical structure:
 //!
 //! ```text
 //! ┌──────────────────────────────────────────────────────────────┐
@@ -37,21 +37,31 @@
 //! └──────────────────────────────────────────────────────────────┘
 //! ```
 //!
+//! The scatter-gather output (`Vec<Bytes>`) lets callers perform
+//! zero-copy writev-style I/O: the payload [`Bytes`] inside each chunk
+//! is just a reference-count bump on the original buffer — no copy occurs.
+//!
 //! # Example
 //!
 //! ```
+//! use bytes::Bytes;
 //! use oximedia_stream::cmaf::{CmafChunk, CmafMuxer};
 //!
 //! let chunks = vec![
-//!     CmafChunk { sequence_number: 1, base_media_decode_time: 0,    data: vec![0x00; 100] },
-//!     CmafChunk { sequence_number: 2, base_media_decode_time: 3000, data: vec![0xFF; 200] },
+//!     CmafChunk::new(1, 0,    vec![0x00u8; 100]),
+//!     CmafChunk::new(2, 3000, vec![0xFFu8; 200]),
 //! ];
 //! let muxer = CmafMuxer::new();
-//! let bytes = muxer.write_cmaf_segment(&chunks);
-//! assert!(!bytes.is_empty());
+//! let pieces: Vec<Bytes> = muxer.write_cmaf_segment(&chunks);
+//! assert!(!pieces.is_empty());
+//! // Callers that need one flat buffer:
+//! let flat: Vec<u8> = pieces.into_iter().flat_map(|b| b.to_vec()).collect();
+//! assert!(!flat.is_empty());
 //! ```
 
 #![allow(dead_code)]
+
+use bytes::Bytes;
 
 use crate::StreamError;
 
@@ -63,6 +73,9 @@ use crate::StreamError;
 ///
 /// A *chunk* carries one or more *samples* (encoded access units).  In this
 /// simplified muxer each chunk is treated as a single-sample track run.
+///
+/// The `data` field is [`Bytes`], which enables zero-copy scatter-gather I/O:
+/// cloning a `Bytes` value only bumps a reference count — no heap allocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CmafChunk {
     /// Monotonically increasing sequence number (1-based, per the ISO spec).
@@ -74,18 +87,31 @@ pub struct CmafChunk {
     pub base_media_decode_time: u64,
 
     /// Encoded sample payload (e.g. one H.264 access unit or one AAC frame).
-    pub data: Vec<u8>,
+    ///
+    /// Stored as [`Bytes`] for zero-copy handoff to the segment writer.
+    pub data: Bytes,
 }
 
 impl CmafChunk {
     /// Create a new chunk with the given sequence number, BMDT, and payload.
+    ///
+    /// `data` accepts any type that implements `Into<Bytes>`, including
+    /// `Vec<u8>` (converted without copying via `Bytes::from`).
     #[must_use]
-    pub fn new(sequence_number: u32, base_media_decode_time: u64, data: Vec<u8>) -> Self {
+    pub fn new(sequence_number: u32, base_media_decode_time: u64, data: impl Into<Bytes>) -> Self {
         Self {
             sequence_number,
             base_media_decode_time,
-            data,
+            data: data.into(),
         }
+    }
+
+    /// Convenience constructor that explicitly converts a `Vec<u8>` payload.
+    ///
+    /// Equivalent to `CmafChunk::new(seq, bmdt, vec)`.
+    #[must_use]
+    pub fn from_vec(sequence_number: u32, base_media_decode_time: u64, data: Vec<u8>) -> Self {
+        Self::new(sequence_number, base_media_decode_time, data)
     }
 }
 
@@ -225,8 +251,14 @@ fn write_trun(buf: &mut Vec<u8>, sample_size: u32, data_offset: i32) {
 
 /// Write a complete `moof` + `mdat` pair for a single chunk.
 ///
-/// Returns the bytes of the moof+mdat unit.
-fn write_moof_mdat(chunk: &CmafChunk) -> Vec<u8> {
+/// Returns two [`Bytes`] slices:
+///
+/// 1. The `moof` box and the `mdat` box header (size + fourcc, 8 bytes).
+/// 2. A clone of `chunk.data` — this is a reference-count bump, **not a copy**.
+///
+/// Callers can feed both slices directly to scatter-gather I/O (e.g. `writev`)
+/// without allocating a merged buffer.
+fn write_moof_mdat(chunk: &CmafChunk) -> [Bytes; 2] {
     let mut buf: Vec<u8> = Vec::new();
 
     // ── moof ───────────────────────────────────────────────────────────────
@@ -266,13 +298,15 @@ fn write_moof_mdat(chunk: &CmafChunk) -> Vec<u8> {
     let data_offset = moof_size + 8; // 8 = mdat 4-byte size + 4-byte fourcc
     buf[data_offset_pos..data_offset_pos + 4].copy_from_slice(&data_offset.to_be_bytes());
 
-    // ── mdat ───────────────────────────────────────────────────────────────
+    // ── mdat header ────────────────────────────────────────────────────────
+    // Encode mdat size and fourcc into the same header buffer so the
+    // payload (chunk.data) remains a separate Bytes slice — zero-copy.
     let mdat_size = 8u32 + chunk.data.len() as u32;
     write_u32(&mut buf, mdat_size);
     write_fourcc(&mut buf, b"mdat");
-    buf.extend_from_slice(&chunk.data);
+    // The payload goes into the second Bytes element (refcount bump only).
 
-    buf
+    [Bytes::from(buf), chunk.data.clone()]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -302,25 +336,55 @@ impl CmafMuxer {
         self
     }
 
-    /// Produce a CMAF-compliant segment from a slice of chunks.
+    /// Produce a CMAF-compliant segment from a slice of chunks as scatter-gather
+    /// [`Bytes`] slices.
     ///
-    /// The output byte vector has the layout described in the module doc:
-    /// one `ftyp` followed by one `moof`+`mdat` pair per chunk.
+    /// The logical byte layout is described in the module doc:
+    /// one `ftyp` followed by one `moof`+`mdat` pair per chunk.  The returned
+    /// `Vec<Bytes>` contains:
     ///
-    /// An empty `chunks` slice yields only the `ftyp` box.
+    /// * One `Bytes` for the `ftyp` box.
+    /// * For each chunk: one `Bytes` for the `moof` + `mdat` header, plus one
+    ///   `Bytes` that is a **reference-count clone** of `chunk.data` — no copy.
+    ///
+    /// An empty `chunks` slice yields a single-element vec containing only the
+    /// `ftyp` box.
+    ///
+    /// Use [`collect_bytes`](CmafMuxer::collect_bytes) if you need the output
+    /// as one contiguous `Vec<u8>`.
     #[must_use]
-    pub fn write_cmaf_segment(&self, chunks: &[CmafChunk]) -> Vec<u8> {
-        let mut out: Vec<u8> = Vec::new();
+    pub fn write_cmaf_segment(&self, chunks: &[CmafChunk]) -> Vec<Bytes> {
+        // Capacity: 1 (ftyp) + 2 per chunk (header + payload).
+        let mut out: Vec<Bytes> = Vec::with_capacity(1 + chunks.len() * 2);
 
         // ftyp
-        write_ftyp(&mut out);
+        let mut ftyp_buf: Vec<u8> = Vec::new();
+        write_ftyp(&mut ftyp_buf);
+        out.push(Bytes::from(ftyp_buf));
 
-        // moof + mdat per chunk
+        // moof + mdat per chunk (scatter-gather)
         for chunk in chunks {
-            let pair = write_moof_mdat(chunk);
-            out.extend_from_slice(&pair);
+            let [header, payload] = write_moof_mdat(chunk);
+            out.push(header);
+            out.push(payload);
         }
 
+        out
+    }
+
+    /// Flatten [`write_cmaf_segment`](CmafMuxer::write_cmaf_segment) output into
+    /// a single contiguous `Vec<u8>`.
+    ///
+    /// This is a convenience wrapper for callers that cannot use scatter-gather
+    /// I/O.  For performance-sensitive paths prefer the scatter-gather form.
+    #[must_use]
+    pub fn collect_bytes(&self, chunks: &[CmafChunk]) -> Vec<u8> {
+        let pieces = self.write_cmaf_segment(chunks);
+        let total: usize = pieces.iter().map(|b| b.len()).sum();
+        let mut out = Vec::with_capacity(total);
+        for piece in pieces {
+            out.extend_from_slice(&piece);
+        }
         out
     }
 
@@ -388,6 +452,16 @@ mod tests {
         CmafChunk::new(seq, bmdt, vec![0xAB; size])
     }
 
+    /// Flatten a `Vec<Bytes>` into a single `Vec<u8>` for byte-level assertions.
+    fn flatten(pieces: Vec<Bytes>) -> Vec<u8> {
+        let total: usize = pieces.iter().map(|b| b.len()).sum();
+        let mut out = Vec::with_capacity(total);
+        for piece in pieces {
+            out.extend_from_slice(&piece);
+        }
+        out
+    }
+
     // ── CmafChunk ─────────────────────────────────────────────────────────────
 
     #[test]
@@ -395,7 +469,15 @@ mod tests {
         let c = CmafChunk::new(3, 9000, vec![1, 2, 3]);
         assert_eq!(c.sequence_number, 3);
         assert_eq!(c.base_media_decode_time, 9000);
-        assert_eq!(c.data, vec![1, 2, 3]);
+        assert_eq!(c.data.as_ref(), &[1u8, 2, 3]);
+    }
+
+    #[test]
+    fn test_chunk_from_vec_equivalent_to_new() {
+        let v = vec![0xAAu8; 32];
+        let c1 = CmafChunk::new(1, 0, v.clone());
+        let c2 = CmafChunk::from_vec(1, 0, v.clone());
+        assert_eq!(c1, c2);
     }
 
     // ── ftyp ──────────────────────────────────────────────────────────────────
@@ -444,7 +526,7 @@ mod tests {
     #[test]
     fn test_empty_chunk_slice_produces_ftyp_only() {
         let muxer = CmafMuxer::new();
-        let out = muxer.write_cmaf_segment(&[]);
+        let out = flatten(muxer.write_cmaf_segment(&[]));
         // Should only contain ftyp
         assert!(!out.is_empty());
         assert_eq!(&out[4..8], b"ftyp");
@@ -457,7 +539,7 @@ mod tests {
     fn test_single_chunk_segment_structure() {
         let muxer = CmafMuxer::new();
         let chunks = vec![make_chunk(1, 0, 100)];
-        let out = muxer.write_cmaf_segment(&chunks);
+        let out = flatten(muxer.write_cmaf_segment(&chunks));
 
         // First box must be ftyp
         let (ftyp_size, ftyp_fourcc, _) =
@@ -486,7 +568,7 @@ mod tests {
             make_chunk(2, 3000, 75),
             make_chunk(3, 6000, 90),
         ];
-        let out = muxer.write_cmaf_segment(&chunks);
+        let out = flatten(muxer.write_cmaf_segment(&chunks));
 
         // Skip ftyp
         let ftyp_size = u32::from_be_bytes([out[0], out[1], out[2], out[3]]) as usize;
@@ -513,7 +595,7 @@ mod tests {
     fn test_sequence_number_in_mfhd() {
         let muxer = CmafMuxer::new();
         let chunks = vec![make_chunk(42, 0, 10)];
-        let out = muxer.write_cmaf_segment(&chunks);
+        let out = flatten(muxer.write_cmaf_segment(&chunks));
 
         // Navigate: ftyp → moof → mfhd
         let ftyp_size = u32::from_be_bytes([out[0], out[1], out[2], out[3]]) as usize;
@@ -537,7 +619,7 @@ mod tests {
         let payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
         let muxer = CmafMuxer::new();
         let chunks = vec![CmafChunk::new(1, 0, payload.clone())];
-        let out = muxer.write_cmaf_segment(&chunks);
+        let out = flatten(muxer.write_cmaf_segment(&chunks));
 
         // Locate mdat content (after ftyp + moof + mdat header)
         let ftyp_size = u32::from_be_bytes([out[0], out[1], out[2], out[3]]) as usize;
@@ -588,7 +670,7 @@ mod tests {
         let bmdt: u64 = u64::from(u32::MAX) + 1_000;
         let muxer = CmafMuxer::new();
         let chunks = vec![CmafChunk::new(1, bmdt, vec![0x00; 10])];
-        let out = muxer.write_cmaf_segment(&chunks);
+        let out = flatten(muxer.write_cmaf_segment(&chunks));
         // The segment must still produce valid output with a non-trivial size
         assert!(out.len() > 40);
     }
@@ -602,7 +684,7 @@ mod tests {
             .map(|seq| CmafChunk::new(seq, u64::from(seq - 1) * 1000, vec![seq as u8; 64]))
             .collect();
 
-        let out = muxer.write_cmaf_segment(&chunks);
+        let out = flatten(muxer.write_cmaf_segment(&chunks));
 
         // Walk the segment and collect mdat payloads
         let ftyp_size = u32::from_be_bytes([out[0], out[1], out[2], out[3]]) as usize;
@@ -639,6 +721,96 @@ mod tests {
                 "payload {} should be all {:#04x}",
                 i,
                 expected_byte
+            );
+        }
+    }
+
+    // ── collect_bytes convenience wrapper ─────────────────────────────────────
+
+    #[test]
+    fn test_collect_bytes_matches_flatten() {
+        let muxer = CmafMuxer::new();
+        let chunks = vec![make_chunk(1, 0, 64), make_chunk(2, 1000, 128)];
+        let via_flatten = flatten(muxer.write_cmaf_segment(&chunks));
+        let via_collect = muxer.collect_bytes(&chunks);
+        assert_eq!(via_flatten, via_collect);
+    }
+
+    // ── Zero-copy assertions ──────────────────────────────────────────────────
+
+    /// Verify that the payload `Bytes` in the scatter-gather output shares the
+    /// same underlying allocation as the original `CmafChunk.data`.
+    ///
+    /// `Bytes::as_ptr()` identity is the canonical way to confirm no copy
+    /// occurred: two `Bytes` values sharing the same `as_ptr()` result are
+    /// views into the same heap allocation.
+    #[test]
+    fn test_cmaf_chunk_bytes_zero_copy() {
+        // 4 MiB payload — large enough that a copy would be measurable; the
+        // ptr-identity check is conclusive regardless of size.
+        const PAYLOAD_LEN: usize = 4 * 1024 * 1024;
+        let payload_vec = vec![0xCAu8; PAYLOAD_LEN];
+        let chunk = CmafChunk::new(1, 0, payload_vec);
+
+        // Record the pointer of the original data buffer.
+        let original_ptr = chunk.data.as_ptr();
+
+        let muxer = CmafMuxer::new();
+        let pieces = muxer.write_cmaf_segment(&[chunk]);
+
+        // pieces layout: [ftyp, moof+mdat_header, payload]
+        // The third element (index 2) is the payload Bytes.
+        assert!(
+            pieces.len() >= 3,
+            "expected at least 3 pieces for one chunk, got {}",
+            pieces.len()
+        );
+        let payload_piece = &pieces[2];
+
+        // Confirm the pointer is identical — no copy was made.
+        assert_eq!(
+            payload_piece.as_ptr(),
+            original_ptr,
+            "payload Bytes must reference the original allocation (zero-copy)"
+        );
+        assert_eq!(payload_piece.len(), PAYLOAD_LEN);
+    }
+
+    /// Property-style test: for a range of payload sizes, verify that the
+    /// segment write path produces output whose concatenated bytes equal the
+    /// original payload when extracted from the mdat box.
+    #[test]
+    fn test_cmaf_chunk_content_roundtrip() {
+        let muxer = CmafMuxer::new();
+
+        // Test a spread of sizes: 1 byte, 1 KiB, 256 KiB, 1 MiB, 16 MiB.
+        let sizes: &[usize] = &[1, 1024, 256 * 1024, 1024 * 1024, 16 * 1024 * 1024];
+
+        for &sz in sizes {
+            // Fill with a deterministic pattern based on size so mismatches
+            // are immediately identifiable.
+            let fill = ((sz & 0xFF) as u8).wrapping_add(1);
+            let original = vec![fill; sz];
+
+            let chunk = CmafChunk::new(1, 0, original.clone());
+            let out = flatten(muxer.write_cmaf_segment(&[chunk]));
+
+            // Navigate to the mdat payload inside the flattened output.
+            let ftyp_size = u32::from_be_bytes([out[0], out[1], out[2], out[3]]) as usize;
+            let moof_size = u32::from_be_bytes([
+                out[ftyp_size],
+                out[ftyp_size + 1],
+                out[ftyp_size + 2],
+                out[ftyp_size + 3],
+            ]) as usize;
+            let mdat_start = ftyp_size + moof_size;
+            let mdat_payload_start = mdat_start + 8; // skip mdat size+fourcc
+            let mdat_payload_end = mdat_payload_start + sz;
+
+            assert_eq!(
+                &out[mdat_payload_start..mdat_payload_end],
+                original.as_slice(),
+                "round-trip failed for payload size {sz}"
             );
         }
     }

@@ -240,6 +240,35 @@ impl JobQueue {
         Ok(job_id)
     }
 
+    /// Submit a batch of jobs in a single atomic transaction.
+    ///
+    /// All jobs are validated against the shutdown/drain flags before any
+    /// persistence occurs. The entire batch is written in one SQLite transaction
+    /// via [`crate::persistence::JobPersistence::save_jobs_batch`], reducing
+    /// per-job overhead compared to repeated individual `submit` calls.
+    ///
+    /// Returns the list of assigned job IDs in the same order as `jobs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueueError::Shutdown`] if the queue is shutting down or
+    /// draining. Returns a persistence error if the batch write fails.
+    pub async fn submit_batch(&self, jobs: Vec<Job>) -> Result<Vec<Uuid>> {
+        if *self.shutdown.read().await {
+            return Err(QueueError::Shutdown);
+        }
+        if *self.draining.read().await {
+            return Err(QueueError::Shutdown);
+        }
+
+        let ids: Vec<Uuid> = jobs.iter().map(|j| j.id).collect();
+        info!("Submitting batch of {} jobs", jobs.len());
+
+        self.persistence.save_jobs_batch(&jobs)?;
+
+        Ok(ids)
+    }
+
     /// Enter drain mode: stop accepting new job submissions and wait for all
     /// currently in-flight jobs to complete before returning.
     ///

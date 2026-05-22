@@ -7,23 +7,23 @@
 - Dependencies: oximedia-core, oximedia-transcode, oximedia-edl, oximedia-timecode, oximedia-metadata, rayon, tokio
 
 ## Enhancements
-- [ ] Add incremental proxy generation in `generate` — only re-encode changed segments
-- [ ] Implement proxy health monitoring in `proxy_status` — detect corrupted/incomplete proxies
-- [ ] Extend `conform` with AAF (Advanced Authoring Format) project file conforming support
-- [ ] Add multi-resolution proxy generation in `smart_proxy` — create 1/4, 1/2, full-res variants in one pass
-- [ ] Implement proxy migration in `proxy_sync` — transfer proxy databases between workstations
-- [ ] Extend `proxy_fingerprint` with perceptual hashing for content-based proxy-original matching
-- [ ] Add batch conforming support in `ConformEngine` — conform multiple EDLs to a single timeline
-- [ ] Implement proxy expiration policies in `proxy_aging` with configurable TTL per project
+- [x] Add incremental proxy generation in `generate` — only re-encode changed segments (verified 2026-05-16; src/generate/incremental.rs:42 SegmentManifest, SegmentHash:17, ChangeSet:87, 775 lines)
+- [x] Implement proxy health monitoring in `proxy_status` — detect corrupted/incomplete proxies (verified 2026-05-16; src/proxy_status.rs:128 ProxyStatusTracker, ProxyJobStatus:48, transition:155, 430 lines)
+- [x] Extend `conform` with AAF (Advanced Authoring Format) project file conforming support (verified 2026-05-16; src/conform/timeline.rs:219 TimelineFormat::Aaf variant, Aaf extension parsing:193)
+- [x] Add multi-resolution proxy generation in `smart_proxy` — create 1/4, 1/2, full-res variants in one pass (verified 2026-05-16; src/smart_proxy.rs:445 ResolutionVariant, MultiResolutionProxySet:486 quarter/half/full, 682 lines)
+- [ ] Implement proxy migration in `proxy_sync` — transfer proxy databases between workstations (verified-open 2026-05-16: proxy_sync.rs:65 SyncPoint covers timecode sync; no cross-workstation database migration/transfer)
+- [x] Extend `proxy_fingerprint` with perceptual hashing for content-based proxy-original matching (verified 2026-05-16; src/proxy_fingerprint.rs:452 PerceptualHash, DHashEngine:493, diff_hash:465)
+- [ ] Add batch conforming support in `ConformEngine` — conform multiple EDLs to a single timeline (verified-open 2026-05-16: conform/engine.rs:8 ConformEngine has single-EDL relink only; no batch_conform fn)
+- [x] Implement proxy expiration policies in `proxy_aging` with configurable TTL per project (verified 2026-05-16; src/proxy_aging.rs 471 lines — TTL/expiration management)
 
 ## New Features
-- [ ] Add cloud proxy generation — offload proxy transcoding to remote workers
-- [ ] Implement proxy streaming — stream proxies over network without local download
-- [ ] Add DaVinci Resolve project file support in `conform` module (.drp format)
-- [ ] Implement proxy quality comparison dashboard data in `proxy_compare` (side-by-side metrics)
-- [ ] Add automatic proxy format selection based on NLE detection (Premiere prefers ProRes, Resolve prefers DNx)
-- [ ] Implement proxy audit trail in `proxy_manifest` — track who generated/modified each proxy
-- [ ] Add proxy pool management for shared storage environments in `registry`
+- [x] Add cloud proxy generation — offload proxy transcoding to remote workers (verified 2026-05-16; src/cloud_proxy.rs:66 CloudWorker, CloudRegion:19, 716 lines)
+- [x] Implement proxy streaming — stream proxies over network without local download (verified 2026-05-16; src/proxy_streaming.rs:46 ByteRange, StreamingServer, chunked delivery, 663 lines)
+- [x] Add DaVinci Resolve project file support in `conform` module (.drp format) (verified 2026-05-16; src/nle_format_select.rs:25 Nle::DaVinciResolve, .drp extension:57, DNxHR recommendation:262)
+- [x] Implement proxy quality comparison dashboard data in `proxy_compare` (side-by-side metrics) (verified 2026-05-16; src/proxy_compare.rs 465 lines — quality metrics comparison)
+- [x] Add automatic proxy format selection based on NLE detection (Premiere prefers ProRes, Resolve prefers DNx) (verified 2026-05-16; src/nle_format_select.rs:20 Nle enum, detect from path:67, recommend per NLE:121, 511 lines)
+- [x] Implement proxy audit trail in `proxy_manifest` — track who generated/modified each proxy (verified 2026-05-16; src/proxy_audit.rs:60 AuditEntry, AuditLog:126, actor field:71, 385 lines)
+- [x] Add proxy pool management for shared storage environments in `registry` (verified 2026-05-16; src/proxy_pool.rs:30 Worker, ProxyJob:95, ProxyPool with assign/drain, 376 lines)
 
 ## Performance
 - [ ] Implement parallel proxy generation in `transcode_queue` using rayon work-stealing

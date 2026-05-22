@@ -112,6 +112,7 @@ fn parse_standard(s: &str) -> PyResult<Standard> {
 #[pyfunction]
 #[pyo3(signature = (samples, sample_rate, channels=2, standard="ebu-r128"))]
 pub fn measure_loudness(
+    py: Python<'_>,
     samples: Vec<f32>,
     sample_rate: f64,
     channels: usize,
@@ -119,10 +120,14 @@ pub fn measure_loudness(
 ) -> PyResult<PyLoudnessResult> {
     let std = parse_standard(standard)?;
     let config = MeterConfig::new(std, sample_rate, channels);
-    let mut meter = LoudnessMeter::new(config)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e}")))?;
-    meter.process_f32(&samples);
-    let metrics = meter.metrics();
+
+    // K-weighted loudness measurement is CPU-bound — release the GIL.
+    let result: Result<oximedia_metering::LoudnessMetrics, String> = py.detach(move || {
+        let mut meter = LoudnessMeter::new(config).map_err(|e| format!("{e}"))?;
+        meter.process_f32(&samples);
+        Ok(meter.metrics())
+    });
+    let metrics = result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
     Ok(PyLoudnessResult {
         integrated_lufs: metrics.integrated_lufs,
         momentary_lufs: metrics.momentary_lufs,
@@ -136,7 +141,7 @@ pub fn measure_loudness(
 ///
 /// Uses onset detection + tempo estimation from `oximedia-audio-analysis`.
 #[pyfunction]
-pub fn detect_beats(samples: Vec<f32>, sample_rate: f32) -> PyResult<Vec<f64>> {
+pub fn detect_beats(py: Python<'_>, samples: Vec<f32>, sample_rate: f32) -> PyResult<Vec<f64>> {
     use oximedia_audio_analysis::beat::{estimate_tempo_from_onsets, BeatTracker};
     use oximedia_audio_analysis::onset::{OnsetDetector, OnsetMethod};
 
@@ -144,36 +149,49 @@ pub fn detect_beats(samples: Vec<f32>, sample_rate: f32) -> PyResult<Vec<f64>> {
         return Ok(Vec::new());
     }
 
-    // Detect onsets using energy-based method
-    let detector = OnsetDetector::new(OnsetMethod::EnergyBased, 0.5, sample_rate as u32);
-    let onsets = detector.detect(&samples);
+    // Onset detection, tempo estimation, and beat tracking are all heavy DSP
+    // — release the GIL for the whole pipeline.
+    Ok(py.detach(move || {
+        // Detect onsets using energy-based method
+        let detector = OnsetDetector::new(OnsetMethod::EnergyBased, 0.5, sample_rate as u32);
+        let onsets = detector.detect(&samples);
 
-    // Onset events already have time_ms
-    let onset_ms: Vec<u64> = onsets.iter().map(|o| o.time_ms).collect();
+        // Onset events already have time_ms
+        let onset_ms: Vec<u64> = onsets.iter().map(|o| o.time_ms).collect();
 
-    if onset_ms.is_empty() {
-        return Ok(Vec::new());
-    }
+        if onset_ms.is_empty() {
+            return Vec::new();
+        }
 
-    // Estimate tempo, then track beats
-    let tempo = estimate_tempo_from_onsets(&onset_ms);
-    let tracker = BeatTracker {
-        tempo_estimate: tempo,
-    };
-    let beats = tracker.track(&onset_ms);
+        // Estimate tempo, then track beats
+        let tempo = estimate_tempo_from_onsets(&onset_ms);
+        let tracker = BeatTracker {
+            tempo_estimate: tempo,
+        };
+        let beats = tracker.track(&onset_ms);
 
-    // Convert beat events to seconds
-    Ok(beats.iter().map(|b| b.time_ms as f64 / 1000.0).collect())
+        // Convert beat events to seconds
+        beats.iter().map(|b| b.time_ms as f64 / 1000.0).collect()
+    }))
 }
 
 /// Compute spectral features of a mono audio buffer.
 #[pyfunction]
-pub fn spectral_features(samples: Vec<f32>, sample_rate: f32) -> PyResult<PySpectralFeatures> {
+pub fn spectral_features(
+    py: Python<'_>,
+    samples: Vec<f32>,
+    sample_rate: f32,
+) -> PyResult<PySpectralFeatures> {
     let config = AnalysisConfig::default();
-    let analyzer = AudioAnalyzer::new(config);
-    let result = analyzer
-        .analyze(&samples, sample_rate)
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e}")))?;
+
+    // Spectral analysis (FFT + statistics) is CPU-bound; release the GIL.
+    let result: Result<oximedia_audio_analysis::AnalysisResult, String> = py.detach(move || {
+        let analyzer = AudioAnalyzer::new(config);
+        analyzer
+            .analyze(&samples, sample_rate)
+            .map_err(|e| format!("{e}"))
+    });
+    let result = result.map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
     Ok(PySpectralFeatures {
         centroid: result.spectral.centroid,
@@ -200,6 +218,7 @@ pub fn spectral_features(samples: Vec<f32>, sample_rate: f32) -> PyResult<PySpec
 #[pyfunction]
 #[pyo3(signature = (samples, sample_rate, threshold_db=-40.0, min_duration_ms=100.0))]
 pub fn detect_silence(
+    py: Python<'_>,
     samples: Vec<f32>,
     sample_rate: f32,
     threshold_db: f32,
@@ -210,13 +229,17 @@ pub fn detect_silence(
         min_silence_duration_s: f64::from(min_duration_ms) / 1000.0,
         ..SilenceDetectConfig::default()
     };
-    let detector = SilenceDetector::new(config);
-    let result = detector.detect(&samples, f64::from(sample_rate));
 
-    Ok(result
-        .regions
-        .iter()
-        .filter(|r| r.is_silent)
-        .map(|r| (r.start_s, r.end_s))
-        .collect())
+    // Sample-by-sample envelope detection is CPU-bound; release the GIL.
+    Ok(py.detach(move || {
+        let detector = SilenceDetector::new(config);
+        let result = detector.detect(&samples, f64::from(sample_rate));
+
+        result
+            .regions
+            .iter()
+            .filter(|r| r.is_silent)
+            .map(|r| (r.start_s, r.end_s))
+            .collect()
+    }))
 }

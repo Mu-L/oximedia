@@ -83,6 +83,7 @@ pub mod mix_session;
 pub mod mixing;
 pub mod music_licensing;
 pub mod noise_profile;
+pub mod noise_reduction_gate;
 pub mod phase_alignment;
 pub mod pipeline;
 pub mod restoration;

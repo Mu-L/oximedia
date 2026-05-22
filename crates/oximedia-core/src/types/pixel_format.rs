@@ -74,6 +74,42 @@ pub enum PixelFormat {
     /// P016 semi-planar: Y plane + interleaved UV plane, 16-bit little-endian.
     /// Full 16-bit precision semi-planar format for hardware interop.
     P016,
+
+    /// YUV 4:2:2 planar, 10-bit little-endian per component.
+    /// Native input format for ProRes 422 encoding. Each sample occupies a 16-bit
+    /// word (little-endian), with the 10 significant bits in the low 10 bits.
+    /// Plane layout: Y (w×h), Cb (w/2×h), Cr (w/2×h).
+    Yuv422p10le,
+
+    /// YUV 4:2:2 planar, 12-bit little-endian per component.
+    /// Each sample occupies a 16-bit word (little-endian), with the 12 significant
+    /// bits in the low 12 bits. Plane layout: Y (w×h), Cb (w/2×h), Cr (w/2×h).
+    Yuv422p12le,
+
+    /// YUV 4:4:4 planar, 10-bit little-endian per component.
+    /// Full chroma resolution, each sample in a 16-bit word (10 significant bits).
+    /// Plane layout: Y (w×h), Cb (w×h), Cr (w×h).
+    Yuv444p10le,
+
+    /// YUV 4:4:4 planar, 12-bit little-endian per component.
+    /// Full chroma resolution, each sample in a 16-bit word (12 significant bits).
+    /// Plane layout: Y (w×h), Cb (w×h), Cr (w×h).
+    Yuv444p12le,
+
+    /// YUV 4:2:0 planar, 16-bit little-endian per component.
+    /// Each sample occupies a 16-bit word (little-endian), full 16-bit precision.
+    /// Plane layout: Y (w×h), Cb (w/2×h/2), Cr (w/2×h/2).
+    Yuv420p16le,
+
+    /// YUV 4:2:2 planar, 16-bit little-endian per component.
+    /// Each sample occupies a 16-bit word (little-endian), full 16-bit precision.
+    /// Plane layout: Y (w×h), Cb (w/2×h), Cr (w/2×h).
+    Yuv422p16le,
+
+    /// YUV 4:4:4 planar, 16-bit little-endian per component.
+    /// Full chroma resolution, each sample in a 16-bit word.
+    /// Plane layout: Y (w×h), Cb (w×h), Cr (w×h).
+    Yuv444p16le,
 }
 
 impl PixelFormat {
@@ -97,10 +133,26 @@ impl PixelFormat {
             Self::Gray8 => 8,
             Self::Yuv420p | Self::Nv12 | Self::Nv21 => 12,
             Self::Yuv420p10le => 15,
+            // Yuv422p10le: 10-bit samples in 16-bit words, 4:2:2 chroma
+            // Average bpp = (w*h*2 + w/2*h*2 + w/2*h*2) / (w*h) * 8 / 2 = 20 bpp
             Self::Yuv422p | Self::Gray16 => 16,
+            Self::Yuv422p10le => 20,
             Self::Yuv420p12le => 18,
+            // Yuv422p12le: 12-bit samples in 16-bit words, 4:2:2 chroma
+            // Average bpp = (w*h + w/2*h + w/2*h) * 2 bytes * 8 bits / (w*h) = 36 / ... = 24 avg but report 36 raw
+            Self::Yuv422p12le => 36,
+            // Yuv444p10le: 10-bit in 16-bit words, full 4:4:4 => 3 planes * 2 bytes * 8 / 2 = 30
+            Self::Yuv444p10le => 30,
+            // Yuv444p12le: 12-bit in 16-bit words, full 4:4:4 => 3 planes * 2 bytes = 36
+            Self::Yuv444p12le => 36,
             Self::P010 => 24, // 10-bit in 16-bit words: Y(16) + UV(16) at 4:2:0 = 24
             Self::Yuv444p | Self::Rgb24 => 24,
+            // 16-bit planar: (Y + Cb/4 + Cr/4) * 16 / pixel = 24 bpp for 4:2:0
+            Self::Yuv420p16le => 24,
+            // 16-bit planar: (Y + Cb/2 + Cr/2) * 16 / pixel = 32 bpp for 4:2:2
+            Self::Yuv422p16le => 32,
+            // 16-bit planar: Y + Cb + Cr, each 16-bit = 48 bpp for 4:4:4
+            Self::Yuv444p16le => 48,
             Self::Rgba32 => 32,
             Self::P016 => 24, // 16-bit words: Y(16) + UV(16) at 4:2:0 = 24
         }
@@ -127,7 +179,14 @@ impl PixelFormat {
             | Self::Yuv422p
             | Self::Yuv444p
             | Self::Yuv420p10le
-            | Self::Yuv420p12le => 3,
+            | Self::Yuv420p12le
+            | Self::Yuv422p10le
+            | Self::Yuv422p12le
+            | Self::Yuv444p10le
+            | Self::Yuv444p12le
+            | Self::Yuv420p16le
+            | Self::Yuv422p16le
+            | Self::Yuv444p16le => 3,
             Self::Nv12 | Self::Nv21 | Self::P010 | Self::P016 => 2,
             Self::Rgb24 | Self::Rgba32 | Self::Gray8 | Self::Gray16 => 1,
         }
@@ -153,7 +212,14 @@ impl PixelFormat {
             | Self::Yuv422p
             | Self::Yuv444p
             | Self::Yuv420p10le
-            | Self::Yuv420p12le => true,
+            | Self::Yuv420p12le
+            | Self::Yuv422p10le
+            | Self::Yuv422p12le
+            | Self::Yuv444p10le
+            | Self::Yuv444p12le
+            | Self::Yuv420p16le
+            | Self::Yuv422p16le
+            | Self::Yuv444p16le => true,
             Self::Rgb24 | Self::Rgba32 | Self::Gray8 | Self::Gray16 => false,
             // Semi-planar formats are considered non-planar (UV is interleaved)
             Self::Nv12 | Self::Nv21 | Self::P010 | Self::P016 => false,
@@ -201,9 +267,13 @@ impl PixelFormat {
             | Self::Gray8
             | Self::Nv12
             | Self::Nv21 => 8,
-            Self::Yuv420p10le | Self::P010 => 10,
-            Self::Yuv420p12le => 12,
-            Self::Gray16 | Self::P016 => 16,
+            Self::Yuv420p10le | Self::Yuv422p10le | Self::Yuv444p10le | Self::P010 => 10,
+            Self::Yuv420p12le | Self::Yuv422p12le | Self::Yuv444p12le => 12,
+            Self::Gray16
+            | Self::P016
+            | Self::Yuv420p16le
+            | Self::Yuv422p16le
+            | Self::Yuv444p16le => 16,
         }
     }
 
@@ -226,6 +296,13 @@ impl PixelFormat {
                 | Self::Yuv444p
                 | Self::Yuv420p10le
                 | Self::Yuv420p12le
+                | Self::Yuv422p10le
+                | Self::Yuv422p12le
+                | Self::Yuv444p10le
+                | Self::Yuv444p12le
+                | Self::Yuv420p16le
+                | Self::Yuv422p16le
+                | Self::Yuv444p16le
                 | Self::Nv12
                 | Self::Nv21
                 | Self::P010
@@ -283,12 +360,20 @@ impl PixelFormat {
             Self::Yuv420p
             | Self::Yuv420p10le
             | Self::Yuv420p12le
+            | Self::Yuv420p16le
             | Self::Nv12
             | Self::Nv21
             | Self::P010
             | Self::P016 => (2, 2),
-            Self::Yuv422p => (2, 1),
-            Self::Yuv444p | Self::Rgb24 | Self::Rgba32 | Self::Gray8 | Self::Gray16 => (1, 1),
+            Self::Yuv422p | Self::Yuv422p10le | Self::Yuv422p12le | Self::Yuv422p16le => (2, 1),
+            Self::Yuv444p
+            | Self::Yuv444p10le
+            | Self::Yuv444p12le
+            | Self::Yuv444p16le
+            | Self::Rgb24
+            | Self::Rgba32
+            | Self::Gray8
+            | Self::Gray16 => (1, 1),
         }
     }
 }
@@ -321,6 +406,14 @@ impl PixelFormat {
             Self::Yuv444p => w * h * 3,                     // Y + U + V
             // Planar YUV high bit-depth (stored in 16-bit words)
             Self::Yuv420p10le | Self::Yuv420p12le => (w * h + 2 * (w / 2) * (h / 2)) * 2,
+            // Planar YUV 4:2:2 10/12-bit (16-bit words): Y(w*h) + Cb(w/2*h) + Cr(w/2*h), each 2 bytes
+            Self::Yuv422p10le | Self::Yuv422p12le => (w * h + 2 * (w / 2) * h) * 2,
+            // Planar YUV 4:4:4 10/12-bit (16-bit words): Y(w*h) + Cb(w*h) + Cr(w*h), each 2 bytes
+            Self::Yuv444p10le | Self::Yuv444p12le => w * h * 3 * 2,
+            // Planar YUV 16-bit: same layout as 10/12-bit (2 bytes per sample)
+            Self::Yuv420p16le => (w * h + 2 * (w / 2) * (h / 2)) * 2,
+            Self::Yuv422p16le => (w * h + 2 * (w / 2) * h) * 2,
+            Self::Yuv444p16le => w * h * 3 * 2,
             // Semi-planar 8-bit: Y plane + interleaved UV plane
             Self::Nv12 | Self::Nv21 => w * h + (w / 2) * 2 * (h / 2),
             // Semi-planar high bit-depth (16-bit words)
@@ -397,6 +490,29 @@ impl PixelFormat {
                 1 | 2 => Some((w / 2) * 2),
                 _ => None,
             },
+            Self::Yuv422p10le | Self::Yuv422p12le => match plane {
+                0 => Some(w * 2),
+                1 | 2 => Some((w / 2) * 2),
+                _ => None,
+            },
+            Self::Yuv444p10le | Self::Yuv444p12le => match plane {
+                0..=2 => Some(w * 2),
+                _ => None,
+            },
+            Self::Yuv420p16le => match plane {
+                0 => Some(w * 2),
+                1 | 2 => Some((w / 2) * 2),
+                _ => None,
+            },
+            Self::Yuv422p16le => match plane {
+                0 => Some(w * 2),
+                1 | 2 => Some((w / 2) * 2),
+                _ => None,
+            },
+            Self::Yuv444p16le => match plane {
+                0..=2 => Some(w * 2),
+                _ => None,
+            },
             Self::Nv12 | Self::Nv21 => match plane {
                 0 => Some(w),
                 1 => Some(w), // interleaved UV: 2 components * (w/2) = w bytes
@@ -431,6 +547,13 @@ impl std::str::FromStr for PixelFormat {
             "yuv444p" => Ok(Self::Yuv444p),
             "yuv420p10le" | "yuv420p10" => Ok(Self::Yuv420p10le),
             "yuv420p12le" | "yuv420p12" => Ok(Self::Yuv420p12le),
+            "yuv422p10le" | "yuv422p10" => Ok(Self::Yuv422p10le),
+            "yuv422p12le" | "yuv422p12" => Ok(Self::Yuv422p12le),
+            "yuv444p10le" | "yuv444p10" => Ok(Self::Yuv444p10le),
+            "yuv444p12le" | "yuv444p12" => Ok(Self::Yuv444p12le),
+            "yuv420p16le" | "yuv420p16" => Ok(Self::Yuv420p16le),
+            "yuv422p16le" | "yuv422p16" => Ok(Self::Yuv422p16le),
+            "yuv444p16le" | "yuv444p16" => Ok(Self::Yuv444p16le),
             "rgb24" | "rgb" => Ok(Self::Rgb24),
             "rgba32" | "rgba" => Ok(Self::Rgba32),
             "gray8" | "gray" | "grey8" | "grey" => Ok(Self::Gray8),
@@ -454,6 +577,13 @@ impl std::fmt::Display for PixelFormat {
             Self::Yuv444p => "yuv444p",
             Self::Yuv420p10le => "yuv420p10le",
             Self::Yuv420p12le => "yuv420p12le",
+            Self::Yuv422p10le => "yuv422p10le",
+            Self::Yuv422p12le => "yuv422p12le",
+            Self::Yuv444p10le => "yuv444p10le",
+            Self::Yuv444p12le => "yuv444p12le",
+            Self::Yuv420p16le => "yuv420p16le",
+            Self::Yuv422p16le => "yuv422p16le",
+            Self::Yuv444p16le => "yuv444p16le",
             Self::Rgb24 => "rgb24",
             Self::Rgba32 => "rgba32",
             Self::Gray8 => "gray8",
